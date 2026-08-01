@@ -154,6 +154,16 @@ struct UpdateSettings {
     default_model: String,
 }
 
+#[derive(Serialize)]
+struct ToolsetsResponse {
+    filesystem_enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateToolsets {
+    filesystem_enabled: bool,
+}
+
 #[derive(Deserialize)]
 struct SetupInput {
     auth_url: String,
@@ -220,6 +230,7 @@ fn app(state: AppState) -> Router {
         .route("/api/setup", post(setup))
         .route("/api/status", get(status))
         .route("/api/settings", get(settings).put(update_settings))
+        .route("/api/toolsets", get(toolsets).put(update_toolsets))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(download_update))
         .route("/api/update/restart", post(restart_update))
@@ -272,6 +283,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [DEFAULT_MODEL_ID],
     )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('toolset_filesystem_enabled', 'true')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
     Ok(())
 }
 
@@ -286,6 +302,7 @@ struct Config {
     openai_base_url: String,
     openai_api_key: String,
     default_model: String,
+    filesystem_tools_enabled: bool,
     machine_id: String,
 }
 
@@ -307,6 +324,7 @@ fn load_config(path: &Path) -> Result<Config> {
         openai_base_url: required("openai_base_url")?,
         openai_api_key: required("openai_api_key")?,
         default_model: required("default_model")?,
+        filesystem_tools_enabled: required("toolset_filesystem_enabled")?.parse()?,
         machine_id: required("machine_id")?,
     })
 }
@@ -630,6 +648,47 @@ async fn update_settings(
     }))
 }
 
+async fn toolsets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<ToolsetsResponse> {
+    identity(&state, &headers).await?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    Ok(Json(ToolsetsResponse {
+        filesystem_enabled: config.filesystem_tools_enabled,
+    }))
+}
+
+async fn update_toolsets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateToolsets>,
+) -> ApiResult<ToolsetsResponse> {
+    identity(&state, &headers).await?;
+    let connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('toolset_filesystem_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.filesystem_enabled.to_string()],
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save toolset configuration",
+            )
+        })?;
+    Ok(Json(ToolsetsResponse {
+        filesystem_enabled: input.filesystem_enabled,
+    }))
+}
+
 async fn system_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -925,7 +984,11 @@ async fn run_agent(
         let request = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
-            .json(&responses_request_body(&config.default_model, &items));
+            .json(&responses_request_body(
+                &config.default_model,
+                &items,
+                config.filesystem_tools_enabled,
+            ));
         let response = tokio::select! {
             response = request.send() => response?,
             _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
@@ -997,15 +1060,18 @@ async fn run_agent(
     }
 }
 
-fn responses_request_body(model: &str, input: &[Value]) -> Value {
-    json!({
+fn responses_request_body(model: &str, input: &[Value], filesystem_tools_enabled: bool) -> Value {
+    let mut body = json!({
         "model": model,
         "input": input,
-        "tools": tool_definitions(),
-        "tool_choice": "auto",
         "store": false,
         "stream": true,
-    })
+    });
+    if filesystem_tools_enabled {
+        body["tools"] = tool_definitions();
+        body["tool_choice"] = Value::String("auto".to_owned());
+    }
+    body
 }
 
 fn completed_response_from_sse(body: &str) -> Result<Value> {
@@ -1127,8 +1193,11 @@ mod tests {
 
     #[test]
     fn responses_body_uses_input_and_responses_function_schema() {
-        let body =
-            responses_request_body("gpt-5", &[json!({"role":"user","content":"list files"})]);
+        let body = responses_request_body(
+            "gpt-5",
+            &[json!({"role":"user","content":"list files"})],
+            true,
+        );
         assert_eq!(
             body.get("input").and_then(Value::as_array).unwrap().len(),
             1
@@ -1140,6 +1209,13 @@ mod tests {
         assert!(body.pointer("/tools/0/function").is_none());
         assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
         assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn disabled_filesystem_toolset_omits_tools_from_responses_request() {
+        let body = responses_request_body("gpt-5", &[], false);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
     }
 
     #[test]
@@ -1192,6 +1268,7 @@ mod tests {
             openai_base_url: format!("http://{address}"),
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
+            filesystem_tools_enabled: true,
             machine_id: "machine".to_owned(),
         };
         let (events, mut received_events) = mpsc::channel(4);
