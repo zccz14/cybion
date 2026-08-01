@@ -49,6 +49,15 @@ browser refresh tokens.
 The embedded console includes English/Chinese UI text and persistent light/dark
 theme controls; its initial theme follows the operating-system preference.
 
+## Resources and updates
+
+The Resources page samples CPU/load, memory, network throughput, disk space, and
+SQLite main/WAL/SHM use every five seconds. It also checks GitHub Releases at
+startup and every six hours. When a newer matching Linux or macOS archive is
+available, Mobius downloads it, verifies the published SHA-256 checksum, and holds
+it ready. Installation happens only after the root operator clicks **Restart and
+update**; Mobius atomically replaces its executable and starts the new release.
+
 ## Development
 
 ```bash
