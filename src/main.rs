@@ -745,71 +745,95 @@ async fn run_agent(
     config: &Config,
     input: AgentTurn,
 ) -> Result<ChatMessage> {
-    let mut messages = input.messages;
+    let mut items = input
+        .messages
+        .into_iter()
+        .map(|message| json!({ "role": message.role, "content": message.content }))
+        .collect::<Vec<_>>();
     for _ in 0..8 {
         let response = client
-            .post(format!("{}/chat/completions", config.openai_base_url))
+            .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
-            .json(&json!({
-                "model": input.model,
-                "messages": messages,
-                "tools": tool_definitions(),
-                "tool_choice": "auto"
-            }))
+            .json(&responses_request_body(&input.model, &items))
             .send()
             .await?
             .error_for_status()?
             .json::<Value>()
             .await?;
-        let message = response
-            .pointer("/choices/0/message")
+        let output = response
+            .get("output")
+            .and_then(Value::as_array)
             .cloned()
-            .ok_or_else(|| anyhow!("upstream returned no assistant message"))?;
-        let assistant = ChatMessage {
-            role: "assistant".to_owned(),
-            content: message.get("content").cloned().unwrap_or(Value::Null),
-            tool_call_id: None,
-            tool_calls: message.get("tool_calls").cloned(),
-        };
-        let Some(calls) = assistant
-            .tool_calls
-            .clone()
-            .and_then(|value| value.as_array().cloned())
-        else {
-            return Ok(assistant);
-        };
-        messages.push(assistant);
+            .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
+        let calls = output
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if calls.is_empty() {
+            return Ok(ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String(output_text(&output)),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        items.extend(output);
         for call in calls {
-            let id = call
-                .get("id")
+            let call_id = call
+                .get("call_id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("tool call has no id"))?;
+                .ok_or_else(|| anyhow!("function call has no call_id"))?;
             let name = call
-                .pointer("/function/name")
+                .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("tool call has no name"))?;
+                .ok_or_else(|| anyhow!("function call has no name"))?;
             let args: Value = serde_json::from_str(
-                call.pointer("/function/arguments")
+                call.get("arguments")
                     .and_then(Value::as_str)
                     .unwrap_or("{}"),
             )?;
             let result = execute_tool(name, args).await;
-            messages.push(ChatMessage {
-                role: "tool".to_owned(),
-                content: Value::String(result),
-                tool_call_id: Some(id.to_owned()),
-                tool_calls: None,
-            });
+            items.push(json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result,
+            }));
         }
     }
     Err(anyhow!("agent exceeded the eight tool-call rounds limit"))
 }
 
+fn responses_request_body(model: &str, input: &[Value]) -> Value {
+    json!({
+        "model": model,
+        "input": input,
+        "tools": tool_definitions(),
+        "tool_choice": "auto",
+        "store": false,
+    })
+}
+
+fn output_text(output: &[Value]) -> String {
+    output
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|content| content.get("type").and_then(Value::as_str) == Some("output_text"))
+        .filter_map(|content| content.get("text").and_then(Value::as_str))
+        .collect::<String>()
+}
+
 fn tool_definitions() -> Value {
     json!([
-      {"type":"function","function":{"name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}},
-      {"type":"function","function":{"name":"read_file","description":"Read a UTF-8 text file from any path on this machine.","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}},
-      {"type":"function","function":{"name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}}
+      {"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}},
+      {"type":"function","name":"read_file","description":"Read a file from any path on this machine. Binary files are returned as base64 JSON.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}},
+      {"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}
     ])
 }
 
@@ -871,5 +895,102 @@ mod tests {
             )
             .unwrap();
         assert!(!machine_id.is_empty());
+    }
+
+    #[test]
+    fn responses_body_uses_input_and_responses_function_schema() {
+        let body =
+            responses_request_body("gpt-5", &[json!({"role":"user","content":"list files"})]);
+        assert_eq!(
+            body.get("input").and_then(Value::as_array).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            body.pointer("/tools/0/type").and_then(Value::as_str),
+            Some("function")
+        );
+        assert!(body.pointer("/tools/0/function").is_none());
+        assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn responses_text_uses_output_message_items() {
+        let text = output_text(&[
+            json!({"type":"reasoning","summary":[]}),
+            json!({"type":"message","content":[{"type":"output_text","text":"done"}]}),
+        ]);
+        assert_eq!(text, "done");
+    }
+
+    #[tokio::test]
+    async fn agent_uses_responses_endpoint_and_returns_function_outputs() {
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        async fn responses(
+            State(requests): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Json<Value> {
+            let mut requests = requests.lock().await;
+            let response = if requests.is_empty() {
+                json!({"output":[{"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}]})
+            } else {
+                json!({"output":[{"type":"message","content":[{"type":"output_text","text":"complete"}]}]})
+            };
+            requests.push(request);
+            Json(response)
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            openai_api_key: "test".to_owned(),
+            machine_id: "machine".to_owned(),
+        };
+        let reply = run_agent(
+            &reqwest::Client::new(),
+            &config,
+            AgentTurn {
+                model: "gpt-5".to_owned(),
+                messages: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: Value::String("list root".to_owned()),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(reply.content, Value::String("complete".to_owned()));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].pointer("/input/0/role").and_then(Value::as_str),
+            Some("user")
+        );
+        assert!(
+            requests[1]
+                .get("input")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .any(
+                    |item| item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                )
+        );
     }
 }
