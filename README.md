@@ -1,7 +1,7 @@
 # mobius
 
 Mobius is an experimental, unrestricted AI harness for a cluster of machines. It
-uses OpenAI-compatible upstream APIs, has no project scope or sandbox, and lets
+uses the OpenAI-compatible Responses API upstream, has no project scope or sandbox, and lets
 one authenticated operator work with every reachable machine from a web console.
 
 ## Quick start
@@ -20,6 +20,10 @@ open the Web GUI, enter the Auth Mini issuer, authenticate, and enter the OpenAI
 key. Mobius stores the verified Auth Mini `sub` as `app_meta.root_user_id`, then
 closes the bootstrap endpoint permanently. Thereafter every API request needs that
 root user's valid JWT.
+
+Agent turns are sent to `<openai_base_url>/responses` (for example,
+`https://openai.ntnl.io/v1/responses`). Mobius carries typed Responses output
+items and `function_call_output` items through its local filesystem tool loop.
 
 For local setup, use `http://localhost:1858`. For a remote machine, put Mobius
 behind an HTTPS reverse proxy before opening its GUI: Auth Mini only permits plain
