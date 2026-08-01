@@ -880,8 +880,9 @@ async fn run_agent(
             .send()
             .await?
             .error_for_status()?
-            .json::<Value>()
+            .text()
             .await?;
+        let response = completed_response_from_sse(&response)?;
         let output = response
             .get("output")
             .and_then(Value::as_array)
@@ -933,7 +934,34 @@ fn responses_request_body(model: &str, input: &[Value]) -> Value {
         "tools": tool_definitions(),
         "tool_choice": "auto",
         "store": false,
+        "stream": true,
     })
+}
+
+fn completed_response_from_sse(body: &str) -> Result<Value> {
+    let mut output = Vec::new();
+    for data in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
+        let event: Value = serde_json::from_str(data)?;
+        if event.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
+            output.push(
+                event
+                    .get("item")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("completed output item event has no item"))?,
+            );
+        }
+        if event.get("type").and_then(Value::as_str) == Some("response.completed") {
+            let mut response = event
+                .get("response")
+                .cloned()
+                .ok_or_else(|| anyhow!("completed response event has no response"))?;
+            response["output"] = Value::Array(output);
+            return Ok(response);
+        }
+    }
+    Err(anyhow!(
+        "upstream stream ended without a completed response"
+    ))
 }
 
 fn output_text(output: &[Value]) -> String {
@@ -1041,6 +1069,7 @@ mod tests {
         );
         assert!(body.pointer("/tools/0/function").is_none());
         assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
+        assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
@@ -1058,15 +1087,20 @@ mod tests {
         async fn responses(
             State(requests): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
-        ) -> Json<Value> {
+        ) -> String {
             let mut requests = requests.lock().await;
             let response = if requests.is_empty() {
                 json!({"output":[{"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}]})
             } else {
                 json!({"output":[{"type":"message","content":[{"type":"output_text","text":"complete"}]}]})
             };
+            let output = response.get("output").and_then(Value::as_array).unwrap();
             requests.push(request);
-            Json(response)
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":output[0]}),
+                json!({"type":"response.completed","response":response})
+            )
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1115,6 +1149,10 @@ mod tests {
         assert_eq!(
             requests[0].pointer("/input/0/role").and_then(Value::as_str),
             Some("user")
+        );
+        assert_eq!(
+            requests[0].get("stream").and_then(Value::as_bool),
+            Some(true)
         );
         assert!(
             requests[1]
