@@ -30,6 +30,7 @@ use url::Url;
 use uuid::Uuid;
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_MODEL_ID: &str = "gpt-5.6-terra";
 const JWKS_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
@@ -133,8 +134,17 @@ struct ChatMessage {
 
 #[derive(Deserialize)]
 struct AgentTurn {
-    model: String,
     messages: Vec<ChatMessage>,
+}
+
+#[derive(Serialize)]
+struct SettingsResponse {
+    default_model: String,
+}
+
+#[derive(Deserialize)]
+struct UpdateSettings {
+    default_model: String,
 }
 
 #[derive(Deserialize)]
@@ -196,6 +206,7 @@ fn app(state: AppState) -> Router {
         .route("/assets/app.css", get(app_css))
         .route("/api/setup", post(setup))
         .route("/api/status", get(status))
+        .route("/api/settings", get(settings).put(update_settings))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(download_update))
         .route("/api/update/restart", post(restart_update))
@@ -242,6 +253,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [Uuid::new_v4().to_string()],
     )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
+         ON CONFLICT(key) DO NOTHING",
+        [DEFAULT_MODEL_ID],
+    )?;
     Ok(())
 }
 
@@ -255,6 +271,7 @@ struct Config {
     auth_url: String,
     openai_base_url: String,
     openai_api_key: String,
+    default_model: String,
     machine_id: String,
 }
 
@@ -275,6 +292,7 @@ fn load_config(path: &Path) -> Result<Config> {
         auth_url: required("auth_url")?,
         openai_base_url: required("openai_base_url")?,
         openai_api_key: required("openai_api_key")?,
+        default_model: required("default_model")?,
         machine_id: required("machine_id")?,
     })
 }
@@ -550,6 +568,54 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
     }))
 }
 
+async fn settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<SettingsResponse> {
+    identity(&state, &headers).await?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    Ok(Json(SettingsResponse {
+        default_model: config.default_model,
+    }))
+}
+
+async fn update_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateSettings>,
+) -> ApiResult<SettingsResponse> {
+    identity(&state, &headers).await?;
+    let default_model = input.default_model.trim();
+    if default_model.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "default_model cannot be empty",
+        ));
+    }
+    let connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [default_model],
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save default model",
+            )
+        })?;
+    Ok(Json(SettingsResponse {
+        default_model: default_model.to_owned(),
+    }))
+}
+
 async fn system_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -810,7 +876,7 @@ async fn run_agent(
         let response = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
-            .json(&responses_request_body(&input.model, &items))
+            .json(&responses_request_body(&config.default_model, &items))
             .send()
             .await?
             .error_for_status()?
@@ -951,6 +1017,14 @@ mod tests {
             )
             .unwrap();
         assert!(!machine_id.is_empty());
+        let default_model: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'default_model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default_model, DEFAULT_MODEL_ID);
     }
 
     #[test]
@@ -1013,13 +1087,13 @@ mod tests {
             auth_url: "https://auth.example.com".to_owned(),
             openai_base_url: format!("http://{address}"),
             openai_api_key: "test".to_owned(),
+            default_model: DEFAULT_MODEL_ID.to_owned(),
             machine_id: "machine".to_owned(),
         };
         let reply = run_agent(
             &reqwest::Client::new(),
             &config,
             AgentTurn {
-                model: "gpt-5".to_owned(),
                 messages: vec![ChatMessage {
                     role: "user".to_owned(),
                     content: Value::String("list root".to_owned()),
@@ -1034,6 +1108,10 @@ mod tests {
         assert_eq!(reply.content, Value::String("complete".to_owned()));
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].get("model").and_then(Value::as_str),
+            Some(DEFAULT_MODEL_ID)
+        );
         assert_eq!(
             requests[0].pointer("/input/0/role").and_then(Value::as_str),
             Some("user")

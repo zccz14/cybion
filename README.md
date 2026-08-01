@@ -24,6 +24,8 @@ root user's valid JWT.
 Agent turns are sent to `<openai_base_url>/responses` (for example,
 `https://openai.ntnl.io/v1/responses`). Mobius carries typed Responses output
 items and `function_call_output` items through its local filesystem tool loop.
+The Settings page stores this machine's default model ID in its local SQLite
+database; the value applies to the next agent turn immediately.
 
 For local setup, use `http://localhost:1858`. For a remote machine, put Mobius
 behind an HTTPS reverse proxy before opening its GUI: Auth Mini only permits plain
