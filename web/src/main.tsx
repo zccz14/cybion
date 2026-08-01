@@ -86,7 +86,7 @@ async function api<T>(path: string, token: string, init?: RequestInit): Promise<
 }
 
 function App() {
-  const configuredAuthUrl = window.__MOBIUS_AUTH_URL ?? acceptRedirectSession();
+  const configuredAuthUrl = acceptRedirectSession() ?? window.__MOBIUS_AUTH_URL;
   const [sdk] = useState<AuthMiniApi | null>(() => configuredAuthUrl ? createBrowserSdk(configuredAuthUrl) : null);
   const session = useBrowserSession(sdk);
 
