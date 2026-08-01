@@ -27,7 +27,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
@@ -44,6 +44,7 @@ struct AppState {
     client: reqwest::Client,
     jwks: Arc<RwLock<Option<CachedJwks>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
+    active_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
 }
 
 struct CachedJwks {
@@ -139,6 +140,7 @@ struct ChatMessage {
 
 #[derive(Deserialize)]
 struct AgentTurn {
+    run_id: String,
     messages: Vec<ChatMessage>,
 }
 
@@ -165,6 +167,7 @@ struct SetupInput {
 enum AgentEvent {
     ToolCall { call_id: String, name: String },
     ToolResult { call_id: String, name: String },
+    Context { input_tokens: u64 },
     Complete { message: ChatMessage },
     Error { error: String },
 }
@@ -186,6 +189,7 @@ async fn main() -> Result<()> {
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(
             default_db_path(),
         ))),
+        active_runs: Arc::new(Mutex::new(HashMap::new())),
     };
     schedule_auto_update(state.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
@@ -226,6 +230,7 @@ fn app(state: AppState) -> Router {
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
         .route("/api/agent/turn", post(agent_turn))
+        .route("/api/agent/turn/{id}", delete(cancel_agent_turn))
         .with_state(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -866,15 +871,20 @@ async fn agent_turn(
         )
     })?;
     let client = state.client.clone();
+    let active_runs = state.active_runs.clone();
+    let run_id = input.run_id.clone();
+    let (cancel, cancellation) = watch::channel(false);
+    active_runs.lock().await.insert(run_id.clone(), cancel);
     let (events, receiver) = mpsc::channel(32);
     tokio::spawn(async move {
-        let event = match run_agent(&client, &config, input, &events).await {
+        let event = match run_agent(&client, &config, input, &events, cancellation).await {
             Ok(message) => AgentEvent::Complete { message },
             Err(cause) => AgentEvent::Error {
                 error: cause.to_string(),
             },
         };
         let _ = events.send(event).await;
+        active_runs.lock().await.remove(&run_id);
     });
     let stream = ReceiverStream::new(receiver).map(|event| {
         Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&event).unwrap()))
@@ -884,11 +894,24 @@ async fn agent_turn(
         .into_response())
 }
 
+async fn cancel_agent_turn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    if let Some(cancel) = state.active_runs.lock().await.get(&id) {
+        let _ = cancel.send(true);
+    }
+    Ok(Json(json!({"cancelled": true})))
+}
+
 async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
     input: AgentTurn,
     events: &mpsc::Sender<AgentEvent>,
+    mut cancellation: watch::Receiver<bool>,
 ) -> Result<ChatMessage> {
     let mut items = input
         .messages
@@ -896,16 +919,29 @@ async fn run_agent(
         .map(|message| json!({ "role": message.role, "content": message.content }))
         .collect::<Vec<_>>();
     loop {
-        let response = client
+        if *cancellation.borrow() {
+            return Err(anyhow!("agent stopped"));
+        }
+        let request = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
-            .json(&responses_request_body(&config.default_model, &items))
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+            .json(&responses_request_body(&config.default_model, &items));
+        let response = tokio::select! {
+            response = request.send() => response?,
+            _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+        }
+        .error_for_status()?;
+        let response = tokio::select! {
+            body = response.text() => body?,
+            _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+        };
         let response = completed_response_from_sse(&response)?;
+        if let Some(input_tokens) = response
+            .pointer("/usage/input_tokens")
+            .and_then(Value::as_u64)
+        {
+            let _ = events.send(AgentEvent::Context { input_tokens }).await;
+        }
         let output = response
             .get("output")
             .and_then(Value::as_array)
@@ -1163,6 +1199,7 @@ mod tests {
             &reqwest::Client::new(),
             &config,
             AgentTurn {
+                run_id: "test-run".to_owned(),
                 messages: vec![ChatMessage {
                     role: "user".to_owned(),
                     content: Value::String("list root".to_owned()),
@@ -1171,6 +1208,7 @@ mod tests {
                 }],
             },
             &events,
+            watch::channel(false).1,
         )
         .await
         .unwrap();
