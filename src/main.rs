@@ -1,3 +1,6 @@
+mod resources;
+mod update;
+
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -20,7 +23,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use url::Url;
@@ -34,6 +37,7 @@ struct AppState {
     db_path: PathBuf,
     client: reqwest::Client,
     jwks: Arc<RwLock<Option<CachedJwks>>>,
+    resources: Arc<Mutex<resources::ResourceMonitor>>,
 }
 
 struct CachedJwks {
@@ -156,14 +160,31 @@ async fn main() -> Result<()> {
     bootstrap_database(&db_path)?;
     let state = AppState {
         db_path,
-        client: reqwest::Client::new(),
+        client: reqwest::Client::builder()
+            .user_agent(format!("mobius/{}", env!("CARGO_PKG_VERSION")))
+            .build()?,
         jwks: Arc::new(RwLock::new(None)),
+        resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(
+            default_db_path(),
+        ))),
     };
+    schedule_auto_update(state.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     info!(%addr, "mobius server listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(state)).await?;
     Ok(())
+}
+
+fn schedule_auto_update(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(cause) = update::download_latest(&state.client, &state.db_path).await {
+                tracing::warn!(%cause, "Mobius automatic update check failed");
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+        }
+    });
 }
 
 fn app(state: AppState) -> Router {
@@ -175,6 +196,9 @@ fn app(state: AppState) -> Router {
         .route("/assets/app.css", get(app_css))
         .route("/api/setup", post(setup))
         .route("/api/status", get(status))
+        .route("/api/system/resources", get(system_resources))
+        .route("/api/update", get(download_update))
+        .route("/api/update/restart", post(restart_update))
         .route("/api/files", get(list_files))
         .route("/api/files/read", get(read_file))
         .route("/api/files/write", put(write_file))
@@ -524,6 +548,38 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         auth_url: config.auth_url,
         openai_base_url: config.openai_base_url,
     }))
+}
+
+async fn system_resources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<resources::SystemResourcesSnapshot> {
+    identity(&state, &headers).await?;
+    let snapshot = state
+        .resources
+        .lock()
+        .await
+        .sample()
+        .map_err(|cause| error(StatusCode::INTERNAL_SERVER_ERROR, cause.to_string()))?;
+    Ok(Json(snapshot))
+}
+
+async fn download_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<update::UpdateStatus> {
+    identity(&state, &headers).await?;
+    let status = update::download_latest(&state.client, &state.db_path)
+        .await
+        .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))?;
+    Ok(Json(status))
+}
+
+async fn restart_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    update::restart(&state.db_path)
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    Ok(Json(json!({ "restarting": true })))
 }
 
 async fn list_files(
