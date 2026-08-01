@@ -18,6 +18,8 @@ type Settings = { default_model: string };
 type Peer = { id: string; name: string; base_url: string; created_at: string };
 type FileEntry = { name: string; path: string; kind: 'file' | 'directory'; size: number };
 type ChatMessage = { role: string; content: string | null };
+type AgentEvent = { type: 'tool_call'; call_id: string; name: string } | { type: 'tool_result'; call_id: string; name: string } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string };
+type ConversationItem = { kind: 'message'; message: ChatMessage } | { kind: 'tool'; call_id: string; name: string; complete: boolean };
 type Session = SessionSnapshot;
 type Resources = { sampled_at: number; cpu: { usage_percent: number; load_1m: number; logical_cpus: number }; memory: { used_bytes: number; total_bytes: number; available_bytes: number; process_used_bytes: number; other_used_bytes: number; usage_percent: number; swap_used_bytes: number; swap_total_bytes: number }; network: { receive_bytes_per_second: number; transmit_bytes_per_second: number; interfaces: number }; disk: { mount_point: string; used_bytes: number; total_bytes: number; available_bytes: number; usage_percent: number } | null; sqlite: { main_bytes: number; wal_bytes: number; shm_bytes: number; total_bytes: number; freelist_bytes: number; freelist_percent: number } };
 type UpdateStatus = { current_version: string; latest_version: string | null; state: 'current' | 'ready'; detail: string };
@@ -83,6 +85,29 @@ async function api<T>(path: string, token: string, init?: RequestInit): Promise<
     throw new Error(body.error ?? response.statusText);
   }
   return response.json() as Promise<T>;
+}
+
+async function streamAgentTurn(token: string, messages: ChatMessage[], onEvent: (event: AgentEvent) => void) {
+  const response = await fetch('/api/agent/turn', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ messages }) });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(body.error ?? response.statusText);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('The agent did not start an event stream.');
+  const decoder = new TextDecoder(); let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n'); buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const event = JSON.parse(line.slice(6)) as AgentEvent;
+      onEvent(event);
+      if (event.type === 'error') throw new Error(event.error);
+    }
+  }
 }
 
 function App() {
@@ -163,10 +188,21 @@ function NavItem({ to, icon, label }: { to: string; icon: ReactNode; label: stri
 
 function Console({ token }: { token: string }) {
   const { t } = useUi();
-  const [messages, setMessages] = useState<ChatMessage[]>([{ role: 'assistant', content: 'I am connected to this machine. Tell me the outcome you want to reach.' }]);
+  const [conversation, setConversation] = useState<ConversationItem[]>([{ kind: 'message', message: { role: 'assistant', content: 'I am connected to this machine. Tell me the outcome you want to reach.' } }]);
   const [draft, setDraft] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const send = async (event: FormEvent) => { event.preventDefault(); if (!draft.trim() || busy) return; const next = [...messages, { role: 'user', content: draft.trim() }]; setMessages(next); setDraft(''); setBusy(true); setError(''); try { const reply = await api<{ message: ChatMessage }>('/api/agent/turn', token, { method: 'POST', body: JSON.stringify({ messages: next }) }); setMessages([...next, reply.message]); } catch (cause) { setError(message(cause)); } finally { setBusy(false); } };
-  return <main className="console"><div className="console-intro"><span>{t('session')}</span><h1>{t('whatShouldHappen')}</h1><p>{t('unrestrictedHint')}</p></div><div className="conversation">{messages.map((item, index) => <article key={index} className={`message ${item.role}`}><div className="message-role">{item.role === 'assistant' ? <Bot size={16} /> : 'You'}</div><div>{typeof item.content === 'string' ? item.content : 'Working with machine tools…'}</div></article>)}{busy && <article className="message assistant"><div className="message-role"><Bot size={16} /></div><LoaderCircle className="spin" size={17} /></article>}</div>{error && <p className="form-error">{error}</p>}<form className="composer" onSubmit={send}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={t('outcomePlaceholder')} rows={2} /><button className="primary" aria-label="Send request" disabled={busy}><Send size={17} /></button></form></main>;
+  const send = async (event: FormEvent) => {
+    event.preventDefault(); if (!draft.trim() || busy) return;
+    const next = [...conversation.filter((item): item is { kind: 'message'; message: ChatMessage } => item.kind === 'message').map((item) => item.message), { role: 'user', content: draft.trim() }];
+    setConversation([...conversation, { kind: 'message', message: next[next.length - 1] }]); setDraft(''); setBusy(true); setError('');
+    try {
+      await streamAgentTurn(token, next, (event) => {
+        if (event.type === 'tool_call') setConversation((items) => [...items, { kind: 'tool', call_id: event.call_id, name: event.name, complete: false }]);
+        if (event.type === 'tool_result') setConversation((items) => items.map((item) => item.kind === 'tool' && item.call_id === event.call_id ? { ...item, complete: true } : item));
+        if (event.type === 'complete') setConversation((items) => [...items, { kind: 'message', message: event.message }]);
+      });
+    } catch (cause) { setError(message(cause)); } finally { setBusy(false); }
+  };
+  return <main className="console"><div className="console-intro"><span>{t('session')}</span><h1>{t('whatShouldHappen')}</h1><p>{t('unrestrictedHint')}</p></div><div className="conversation">{conversation.map((item, index) => item.kind === 'message' ? <article key={index} className={`message ${item.message.role}`}><div className="message-role">{item.message.role === 'assistant' ? <Bot size={16} /> : 'You'}</div><div>{item.message.content ?? 'Working with machine tools…'}</div></article> : <article className={`tool-activity ${item.complete ? 'complete' : ''}`} key={item.call_id}><div><TerminalSquare size={15} /> {item.complete ? 'Completed' : 'Calling'} {item.name}</div></article>)}{busy && <article className="message assistant"><div className="message-role"><Bot size={16} /> Agent</div><LoaderCircle className="spin" size={17} /></article>}</div>{error && <p className="form-error">{error}</p>}<form className="composer" onSubmit={send}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={t('outcomePlaceholder')} rows={2} /><button className="primary" aria-label="Send request" disabled={busy}><Send size={17} /></button></form></main>;
 }
 
 function Machines({ token }: { token: string }) {

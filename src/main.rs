@@ -3,6 +3,7 @@ mod update;
 
 use std::{
     collections::HashMap,
+    convert::Infallible,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -15,7 +16,10 @@ use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{delete, get, post, put},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -23,7 +27,8 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use url::Url;
@@ -156,8 +161,12 @@ struct SetupInput {
 }
 
 #[derive(Serialize)]
-struct AgentReply {
-    message: ChatMessage,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AgentEvent {
+    ToolCall { call_id: String, name: String },
+    ToolResult { call_id: String, name: String },
+    Complete { message: ChatMessage },
+    Error { error: String },
 }
 
 #[tokio::main]
@@ -848,7 +857,7 @@ async fn agent_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<AgentTurn>,
-) -> ApiResult<AgentReply> {
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
     identity(&state, &headers).await?;
     let config = load_config(&state.db_path).map_err(|_| {
         error(
@@ -856,23 +865,37 @@ async fn agent_turn(
             "cannot read configuration",
         )
     })?;
-    let message = run_agent(&state.client, &config, input)
-        .await
-        .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))?;
-    Ok(Json(AgentReply { message }))
+    let client = state.client.clone();
+    let (events, receiver) = mpsc::channel(32);
+    tokio::spawn(async move {
+        let event = match run_agent(&client, &config, input, &events).await {
+            Ok(message) => AgentEvent::Complete { message },
+            Err(cause) => AgentEvent::Error {
+                error: cause.to_string(),
+            },
+        };
+        let _ = events.send(event).await;
+    });
+    let stream = ReceiverStream::new(receiver).map(|event| {
+        Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&event).unwrap()))
+    });
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
     input: AgentTurn,
+    events: &mpsc::Sender<AgentEvent>,
 ) -> Result<ChatMessage> {
     let mut items = input
         .messages
         .into_iter()
         .map(|message| json!({ "role": message.role, "content": message.content }))
         .collect::<Vec<_>>();
-    for _ in 0..8 {
+    loop {
         let response = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
@@ -916,7 +939,19 @@ async fn run_agent(
                     .and_then(Value::as_str)
                     .unwrap_or("{}"),
             )?;
+            let _ = events
+                .send(AgentEvent::ToolCall {
+                    call_id: call_id.to_owned(),
+                    name: name.to_owned(),
+                })
+                .await;
             let result = execute_tool(name, args).await;
+            let _ = events
+                .send(AgentEvent::ToolResult {
+                    call_id: call_id.to_owned(),
+                    name: name.to_owned(),
+                })
+                .await;
             items.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
@@ -924,7 +959,6 @@ async fn run_agent(
             }));
         }
     }
-    Err(anyhow!("agent exceeded the eight tool-call rounds limit"))
 }
 
 fn responses_request_body(model: &str, input: &[Value]) -> Value {
@@ -1124,6 +1158,7 @@ mod tests {
             default_model: DEFAULT_MODEL_ID.to_owned(),
             machine_id: "machine".to_owned(),
         };
+        let (events, mut received_events) = mpsc::channel(4);
         let reply = run_agent(
             &reqwest::Client::new(),
             &config,
@@ -1135,11 +1170,20 @@ mod tests {
                     tool_calls: None,
                 }],
             },
+            &events,
         )
         .await
         .unwrap();
         server.abort();
         assert_eq!(reply.content, Value::String("complete".to_owned()));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolCall { name, .. }) if name == "list_files"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolResult { name, .. }) if name == "list_files"
+        ));
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 2);
         assert_eq!(
