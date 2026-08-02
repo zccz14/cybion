@@ -1914,7 +1914,7 @@ async fn run_agent(
                 output_tokens,
             });
         }
-        items.extend(output);
+        items.extend(response_output_for_input(output));
         for call in calls {
             let call_id = call
                 .get("call_id")
@@ -1952,6 +1952,23 @@ async fn run_agent(
             }));
         }
     }
+}
+
+fn response_output_for_input(output: Vec<Value>) -> Vec<Value> {
+    output
+        .into_iter()
+        .map(|mut item| {
+            if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
+                // COMPATIBILITY: Some OpenAI-compatible upstreams reject the output-only
+                // `action` field when a web-search item is replayed through `input`.
+                // Remove this once their Responses input schema accepts this fixture.
+                item.as_object_mut()
+                    .expect("a JSON value with type is an object")
+                    .remove("action");
+            }
+            item
+        })
+        .collect()
 }
 
 fn responses_request_body(
@@ -2572,6 +2589,23 @@ mod tests {
     }
 
     #[test]
+    fn responses_input_omits_web_search_actions() {
+        let input = response_output_for_input(vec![
+            json!({
+                "type": "web_search_call",
+                "id": "web_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "Mobius"},
+            }),
+            json!({"type": "function_call", "call_id": "call_1"}),
+        ]);
+        assert!(input[0].get("action").is_none());
+        assert_eq!(input[0]["id"], "web_1");
+        assert_eq!(input[0]["status"], "completed");
+        assert_eq!(input[1]["call_id"], "call_1");
+    }
+
+    #[test]
     fn image_generation_toolset_uses_the_native_responses_tool() {
         let body = responses_request_body(
             "gpt-5",
@@ -2713,7 +2747,10 @@ mod tests {
             let mut requests = requests.lock().await;
             let first_request = requests.is_empty();
             let response = if first_request {
-                json!({"output":[{"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}]})
+                json!({"output":[
+                    {"type":"web_search_call","id":"web_1","status":"completed","action":{"type":"search","query":"Mobius"}},
+                    {"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}
+                ]})
             } else {
                 json!({"output":[{"type":"message","content":[{"type":"output_text","text":"complete"}]}]})
             };
@@ -2728,9 +2765,17 @@ mod tests {
                     }],
                 };
             }
+            let items = output
+                .iter()
+                .map(|item| {
+                    format!(
+                        "event: response.output_item.done\ndata: {}\n\n",
+                        json!({"type":"response.output_item.done","item":item})
+                    )
+                })
+                .collect::<String>();
             format!(
-                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
-                json!({"type":"response.output_item.done","item":output[0]}),
+                "{items}event: response.completed\ndata: {}\n\n",
                 json!({"type":"response.completed","response":response})
             )
         }
@@ -2782,6 +2827,14 @@ mod tests {
         assert_eq!(reply.message.content, Value::String("complete".to_owned()));
         assert!(matches!(
             received_events.recv().await,
+            Some(AgentEvent::ToolCall { name, arguments, .. }) if name == "web_search" && arguments["query"] == "Mobius"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolResult { name, added_lines: None, deleted_lines: None, .. }) if name == "web_search"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
             Some(AgentEvent::ToolCall { name, arguments, .. }) if name == "list_files" && arguments["path"] == "/"
         ));
         assert!(matches!(
@@ -2812,6 +2865,18 @@ mod tests {
                     |item| item.get("type").and_then(Value::as_str) == Some("function_call_output")
                 )
         );
+        let web_search_call = requests[1]
+            .get("input")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("web_search_call"))
+            .unwrap();
+        assert_eq!(
+            web_search_call.get("id").and_then(Value::as_str),
+            Some("web_1")
+        );
+        assert!(web_search_call.get("action").is_none());
         assert!(
             requests[1]
                 .get("instructions")
