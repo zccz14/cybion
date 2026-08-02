@@ -138,8 +138,9 @@ cargo run --release
 无论使用 Release 还是源码构建，首次启动后：
 
 1. 打开 `http://localhost:1858`。
-2. 输入 Auth Mini issuer，并完成登录。
-3. 输入模型上游的 Base URL、API key 和默认模型。
+2. 确认 Auth Mini issuer：默认是 `https://auth.ntnl.io`，然后完成登录。
+3. 输入 API key 和默认模型；模型上游 Base URL 默认是
+   `https://openai.ntnl.io/v1`。
 
 首次初始化会将已验证的 Auth Mini `sub` 写为 `app_meta.root_user_id`，并永久关闭初始化
 接口。之后，只有该 root user 的有效 JWT 可以访问 API。
