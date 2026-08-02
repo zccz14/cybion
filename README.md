@@ -102,8 +102,32 @@ flowchart TB
 
 ## 快速开始
 
-前置条件：Rust、Node.js，以及一个可用的 Auth Mini 服务和 OpenAI-compatible
-Responses API 上游。
+前置条件：一个可用的 Auth Mini 服务和 OpenAI-compatible Responses API 上游。
+
+### 优先：安装 Release
+
+从 [GitHub Releases](https://github.com/zccz14/mobius/releases/latest) 下载与你的设备
+匹配的归档和同名 `.sha256` 文件：
+
+| 平台 | 归档 |
+| --- | --- |
+| macOS Apple Silicon | `mobius-macos-aarch64.tar.gz` |
+| Linux x86_64 | `mobius-linux-x86_64.tar.gz` |
+| Linux arm64 | `mobius-linux-aarch64.tar.gz` |
+
+校验下载后解压并运行二进制。例如，在 macOS Apple Silicon 上：
+
+```bash
+shasum -a 256 -c mobius-macos-aarch64.tar.gz.sha256
+tar -xzf mobius-macos-aarch64.tar.gz
+./mobius-macos-aarch64/mobius
+```
+
+Mobius 默认监听 `0.0.0.0:1858`，数据存储在 `~/.mobius/default.sqlite3`。
+
+### 后备：从源码构建
+
+当你的平台没有对应 Release 时，安装 Rust 和 Node.js 后运行：
 
 ```bash
 npm --prefix web install
@@ -111,7 +135,7 @@ npm --prefix web run build
 cargo run --release
 ```
 
-Mobius 默认监听 `0.0.0.0:1858`，数据存储在 `~/.mobius/default.sqlite3`。首次启动后：
+无论使用 Release 还是源码构建，首次启动后：
 
 1. 打开 `http://localhost:1858`。
 2. 输入 Auth Mini issuer，并完成登录。
