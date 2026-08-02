@@ -6,7 +6,7 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock, mpsc as std_mpsc},
     time::{Duration, Instant},
 };
 
@@ -24,6 +24,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use notify::{RecursiveMode, Watcher};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,6 +44,8 @@ const JWKS_TTL: Duration = Duration::from_secs(300);
 #[derive(Clone)]
 struct AppState {
     db_path: PathBuf,
+    skills_directory: PathBuf,
+    skills: Arc<StdRwLock<SkillCatalog>>,
     client: reqwest::Client,
     jwks: Arc<RwLock<Option<CachedJwks>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
@@ -112,6 +115,24 @@ struct FileContent {
 #[derive(Serialize)]
 struct TranscriptionResponse {
     text: String,
+}
+
+#[derive(Clone, Default)]
+struct SkillCatalog {
+    skills: Vec<SkillMetadata>,
+}
+
+#[derive(Clone, Serialize)]
+struct SkillMetadata {
+    name: String,
+    description: String,
+    directory: String,
+}
+
+#[derive(Serialize)]
+struct SkillsResponse {
+    directory: String,
+    skills: Vec<SkillMetadata>,
 }
 
 #[derive(Deserialize)]
@@ -240,8 +261,13 @@ async fn main() -> Result<()> {
         .init();
     let db_path = default_db_path();
     bootstrap_database(&db_path)?;
+    let skills_directory = default_skills_directory();
+    let skills = Arc::new(StdRwLock::new(load_skills(&skills_directory)));
+    watch_skills(skills_directory.clone(), skills.clone())?;
     let state = AppState {
         db_path,
+        skills_directory,
+        skills,
         client: reqwest::Client::builder()
             .user_agent(format!("mobius/{}", env!("CARGO_PKG_VERSION")))
             .build()?,
@@ -281,6 +307,7 @@ fn app(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/settings", get(settings).put(update_settings))
         .route("/api/toolsets", get(toolsets).put(update_toolsets))
+        .route("/api/skills", get(skills))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(download_update))
         .route("/api/update/restart", post(restart_update))
@@ -307,6 +334,87 @@ fn default_db_path() -> PathBuf {
         .expect("home directory is required")
         .home_dir()
         .join(".mobius/default.sqlite3")
+}
+
+fn default_skills_directory() -> PathBuf {
+    directories::BaseDirs::new()
+        .expect("home directory is required")
+        .home_dir()
+        .join(".agents/skills")
+}
+
+fn skill_frontmatter_value(content: &str, key: &str) -> Option<String> {
+    let mut lines = content.lines();
+    (lines.next()? == "---").then_some(())?;
+    lines.take_while(|line| *line != "---").find_map(|line| {
+        let (field, value) = line.split_once(':')?;
+        (field.trim() == key).then(|| value.trim().trim_matches(['\'', '"']).to_owned())
+    })
+}
+
+fn load_skills(directory: &Path) -> SkillCatalog {
+    let mut skills = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_dir())
+                .map(|_| entry.path())
+        })
+        .filter_map(|directory| {
+            let skill_file = directory.join("SKILL.md");
+            skill_file.is_file().then(|| {
+                let content = std::fs::read_to_string(skill_file).unwrap_or_default();
+                SkillMetadata {
+                    name: skill_frontmatter_value(&content, "name").unwrap_or_else(|| {
+                        directory
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    description: skill_frontmatter_value(&content, "description")
+                        .unwrap_or_default(),
+                    directory: directory.to_string_lossy().into_owned(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    SkillCatalog { skills }
+}
+
+fn watch_skills(directory: PathBuf, skills: Arc<StdRwLock<SkillCatalog>>) -> Result<()> {
+    std::fs::create_dir_all(&directory)?;
+    std::thread::spawn(move || {
+        let (sender, receiver) = std_mpsc::channel();
+        let mut watcher = match notify::recommended_watcher(move |_| {
+            let _ = sender.send(());
+        }) {
+            Ok(watcher) => watcher,
+            Err(cause) => {
+                tracing::warn!(%cause, "Mobius skill watcher could not start");
+                return;
+            }
+        };
+        if let Err(cause) = watcher.watch(&directory, RecursiveMode::Recursive) {
+            tracing::warn!(%cause, "Mobius skill directory could not be watched");
+            return;
+        }
+        while receiver.recv().is_ok() {
+            while receiver.try_recv().is_ok() {}
+            let catalog = load_skills(&directory);
+            let count = catalog.skills.len();
+            if let Ok(mut current) = skills.write() {
+                *current = catalog;
+                info!(%count, "Mobius skills reloaded");
+            }
+        }
+    });
+    Ok(())
 }
 
 fn open_db(path: &Path) -> Result<Connection> {
@@ -822,6 +930,20 @@ async fn toolsets(
     }))
 }
 
+async fn skills(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<SkillsResponse> {
+    identity(&state, &headers).await?;
+    let skills = state
+        .skills
+        .read()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read skills"))?
+        .skills
+        .clone();
+    Ok(Json(SkillsResponse {
+        directory: state.skills_directory.to_string_lossy().into_owned(),
+        skills,
+    }))
+}
+
 async fn update_toolsets(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1186,6 +1308,7 @@ async fn agent_turn(
     })?);
     let client = state.client.clone();
     let db_path = state.db_path.clone();
+    let skills = state.skills.clone();
     let active_runs = state.active_runs.clone();
     let run_id = input.run_id.clone();
     let (cancel, cancellation) = watch::channel(false);
@@ -1193,24 +1316,25 @@ async fn agent_turn(
     let (events, receiver) = mpsc::channel(32);
     let started_at = Instant::now();
     tokio::spawn(async move {
-        let event = match run_agent(&client, &config, messages, &events, cancellation).await {
-            Ok(result) => {
-                let usage = AgentUsage {
-                    duration_ms: started_at.elapsed().as_millis() as u64,
-                    input_tokens: result.input_tokens,
-                    output_tokens: result.output_tokens,
-                };
-                match append_conversation(&db_path, &result.message, Some(usage)) {
-                    Ok(message) => AgentEvent::Complete { message },
-                    Err(cause) => AgentEvent::Error {
-                        error: format!("cannot save assistant message: {cause}"),
-                    },
+        let event =
+            match run_agent(&client, &config, messages, &skills, &events, cancellation).await {
+                Ok(result) => {
+                    let usage = AgentUsage {
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        input_tokens: result.input_tokens,
+                        output_tokens: result.output_tokens,
+                    };
+                    match append_conversation(&db_path, &result.message, Some(usage)) {
+                        Ok(message) => AgentEvent::Complete { message },
+                        Err(cause) => AgentEvent::Error {
+                            error: format!("cannot save assistant message: {cause}"),
+                        },
+                    }
                 }
-            }
-            Err(cause) => AgentEvent::Error {
-                error: cause.to_string(),
-            },
-        };
+                Err(cause) => AgentEvent::Error {
+                    error: cause.to_string(),
+                },
+            };
         let _ = events.send(event).await;
         active_runs.lock().await.remove(&run_id);
     });
@@ -1238,6 +1362,7 @@ async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
     messages: Vec<ChatMessage>,
+    skills: &Arc<StdRwLock<SkillCatalog>>,
     events: &mpsc::Sender<AgentEvent>,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<AgentResult> {
@@ -1259,6 +1384,10 @@ async fn run_agent(
                 &items,
                 config.filesystem_tools_enabled,
                 config.bash_tools_enabled,
+                &skills
+                    .read()
+                    .map_err(|_| anyhow!("cannot read skills"))?
+                    .clone(),
             ));
         let response = tokio::select! {
             response = request.send() => response?,
@@ -1352,12 +1481,14 @@ fn responses_request_body(
     input: &[Value],
     filesystem_tools_enabled: bool,
     bash_tools_enabled: bool,
+    skills: &SkillCatalog,
 ) -> Value {
     let mut body = json!({
         "model": model,
         "input": input,
         "store": false,
         "stream": true,
+        "instructions": skill_instructions(skills),
     });
     let tools = tool_definitions(filesystem_tools_enabled, bash_tools_enabled);
     if filesystem_tools_enabled || bash_tools_enabled {
@@ -1365,6 +1496,13 @@ fn responses_request_body(
         body["tool_choice"] = Value::String("auto".to_owned());
     }
     body
+}
+
+fn skill_instructions(skills: &SkillCatalog) -> String {
+    let metadata = serde_json::to_string(&skills.skills).expect("skill metadata is serializable");
+    format!(
+        "Installed SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
+    )
 }
 
 fn completed_response_from_sse(body: &str) -> Result<Value> {
@@ -1679,11 +1817,13 @@ mod tests {
 
     #[test]
     fn responses_body_uses_input_and_responses_function_schema() {
+        let skills = SkillCatalog::default();
         let body = responses_request_body(
             "gpt-5",
             &[json!({"role":"user","content":"list files"})],
             true,
             false,
+            &skills,
         );
         assert_eq!(
             body.get("input").and_then(Value::as_array).unwrap().len(),
@@ -1700,9 +1840,41 @@ mod tests {
 
     #[test]
     fn disabled_toolsets_omit_tools_from_responses_request() {
-        let body = responses_request_body("gpt-5", &[], false, false);
+        let body = responses_request_body("gpt-5", &[], false, false, &SkillCatalog::default());
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn skill_metadata_is_injected_with_its_installation_directory() {
+        let skills = SkillCatalog {
+            skills: vec![SkillMetadata {
+                name: "release".to_owned(),
+                description: "Release the application.".to_owned(),
+                directory: "/skills/release".to_owned(),
+            }],
+        };
+        let body = responses_request_body("gpt-5", &[], false, false, &skills);
+        let instructions = body.get("instructions").and_then(Value::as_str).unwrap();
+        assert!(instructions.contains("release"));
+        assert!(instructions.contains("/skills/release"));
+    }
+
+    #[test]
+    fn skill_loader_reads_frontmatter_from_skill_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("release");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: release\ndescription: Release the application.\n---\n",
+        )
+        .unwrap();
+        let skills = load_skills(temp.path());
+        assert_eq!(skills.skills.len(), 1);
+        assert_eq!(skills.skills[0].name, "release");
+        assert_eq!(skills.skills[0].description, "Release the application.");
+        assert_eq!(skills.skills[0].directory, directory.to_string_lossy());
     }
 
     #[test]
@@ -1778,19 +1950,34 @@ mod tests {
 
     #[tokio::test]
     async fn agent_uses_responses_endpoint_and_returns_function_outputs() {
+        type TestState = (
+            Arc<tokio::sync::Mutex<Vec<Value>>>,
+            Arc<StdRwLock<SkillCatalog>>,
+        );
         let requests = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let skills = Arc::new(StdRwLock::new(SkillCatalog::default()));
         async fn responses(
-            State(requests): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+            State((requests, skills)): State<TestState>,
             Json(request): Json<Value>,
         ) -> String {
             let mut requests = requests.lock().await;
-            let response = if requests.is_empty() {
+            let first_request = requests.is_empty();
+            let response = if first_request {
                 json!({"output":[{"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}]})
             } else {
                 json!({"output":[{"type":"message","content":[{"type":"output_text","text":"complete"}]}]})
             };
             let output = response.get("output").and_then(Value::as_array).unwrap();
             requests.push(request);
+            if first_request {
+                *skills.write().unwrap() = SkillCatalog {
+                    skills: vec![SkillMetadata {
+                        name: "updated".to_owned(),
+                        description: "Reloaded between requests.".to_owned(),
+                        directory: "/skills/updated".to_owned(),
+                    }],
+                };
+            }
             format!(
                 "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
                 json!({"type":"response.output_item.done","item":output[0]}),
@@ -1801,12 +1988,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server_requests = requests.clone();
+        let server_skills = skills.clone();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 Router::new()
                     .route("/responses", post(responses))
-                    .with_state(server_requests),
+                    .with_state((server_requests, server_skills)),
             )
             .await
             .unwrap();
@@ -1831,6 +2019,7 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
             }],
+            &skills,
             &events,
             watch::channel(false).1,
         )
@@ -1869,6 +2058,13 @@ mod tests {
                 .any(
                     |item| item.get("type").and_then(Value::as_str) == Some("function_call_output")
                 )
+        );
+        assert!(
+            requests[1]
+                .get("instructions")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("/skills/updated")
         );
     }
 }
