@@ -3,9 +3,10 @@ mod update;
 
 use std::{
     collections::HashMap,
+    convert::Infallible,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock, mpsc as std_mpsc},
     time::{Duration, Instant},
 };
 
@@ -13,17 +14,24 @@ use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{delete, get, post, put},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use notify::{RecursiveMode, Watcher};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, RwLock};
+use similar::{ChangeTag, TextDiff};
+use tokio::process::Command;
+use tokio::sync::{Mutex, RwLock, mpsc, watch};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use url::Url;
@@ -36,9 +44,12 @@ const JWKS_TTL: Duration = Duration::from_secs(300);
 #[derive(Clone)]
 struct AppState {
     db_path: PathBuf,
+    skills_directory: PathBuf,
+    skills: Arc<StdRwLock<SkillCatalog>>,
     client: reqwest::Client,
     jwks: Arc<RwLock<Option<CachedJwks>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
+    active_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
 }
 
 struct CachedJwks {
@@ -101,6 +112,29 @@ struct FileContent {
     encoding: String,
 }
 
+#[derive(Serialize)]
+struct TranscriptionResponse {
+    text: String,
+}
+
+#[derive(Clone, Default)]
+struct SkillCatalog {
+    skills: Vec<SkillMetadata>,
+}
+
+#[derive(Clone, Serialize)]
+struct SkillMetadata {
+    name: String,
+    description: String,
+    directory: String,
+}
+
+#[derive(Serialize)]
+struct SkillsResponse {
+    directory: String,
+    skills: Vec<SkillMetadata>,
+}
+
 #[derive(Deserialize)]
 struct WriteFile {
     path: String,
@@ -132,19 +166,64 @@ struct ChatMessage {
     tool_calls: Option<Value>,
 }
 
+#[derive(Serialize)]
+struct ConversationMessage {
+    role: String,
+    content: String,
+    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentUsage {
+    duration_ms: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+struct AgentResult {
+    message: ChatMessage,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
 #[derive(Deserialize)]
 struct AgentTurn {
-    messages: Vec<ChatMessage>,
+    run_id: String,
+    message: ChatMessage,
 }
 
 #[derive(Serialize)]
 struct SettingsResponse {
     default_model: String,
+    openai_base_url: String,
+    openai_api_key: String,
 }
 
 #[derive(Deserialize)]
 struct UpdateSettings {
     default_model: String,
+    openai_base_url: String,
+    openai_api_key: String,
+}
+
+#[derive(Serialize)]
+struct ToolsetsResponse {
+    filesystem_enabled: bool,
+    bash_enabled: bool,
+    web_search_enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateToolsets {
+    filesystem_enabled: bool,
+    bash_enabled: bool,
+    web_search_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -156,8 +235,28 @@ struct SetupInput {
 }
 
 #[derive(Serialize)]
-struct AgentReply {
-    message: ChatMessage,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AgentEvent {
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments: Value,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        added_lines: Option<usize>,
+        deleted_lines: Option<usize>,
+    },
+    Context {
+        input_tokens: u64,
+    },
+    Complete {
+        message: ConversationMessage,
+    },
+    Error {
+        error: String,
+    },
 }
 
 #[tokio::main]
@@ -168,8 +267,13 @@ async fn main() -> Result<()> {
         .init();
     let db_path = default_db_path();
     bootstrap_database(&db_path)?;
+    let skills_directory = default_skills_directory();
+    let skills = Arc::new(StdRwLock::new(load_skills(&skills_directory)));
+    watch_skills(skills_directory.clone(), skills.clone())?;
     let state = AppState {
         db_path,
+        skills_directory,
+        skills,
         client: reqwest::Client::builder()
             .user_agent(format!("mobius/{}", env!("CARGO_PKG_VERSION")))
             .build()?,
@@ -177,6 +281,7 @@ async fn main() -> Result<()> {
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(
             default_db_path(),
         ))),
+        active_runs: Arc::new(Mutex::new(HashMap::new())),
     };
     schedule_auto_update(state.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
@@ -207,16 +312,24 @@ fn app(state: AppState) -> Router {
         .route("/api/setup", post(setup))
         .route("/api/status", get(status))
         .route("/api/settings", get(settings).put(update_settings))
+        .route("/api/toolsets", get(toolsets).put(update_toolsets))
+        .route("/api/skills", get(skills))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(download_update))
         .route("/api/update/restart", post(restart_update))
         .route("/api/files", get(list_files))
         .route("/api/files/read", get(read_file))
         .route("/api/files/write", put(write_file))
+        .route(
+            "/api/audio/transcriptions",
+            post(transcribe_audio).layer(DefaultBodyLimit::max(26 * 1024 * 1024)),
+        )
         .route("/api/peers", get(list_peers).post(create_peer))
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
+        .route("/api/conversation", get(conversation))
         .route("/api/agent/turn", post(agent_turn))
+        .route("/api/agent/turn/{id}", delete(cancel_agent_turn))
         .with_state(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -229,10 +342,176 @@ fn default_db_path() -> PathBuf {
         .join(".mobius/default.sqlite3")
 }
 
+fn default_skills_directory() -> PathBuf {
+    directories::BaseDirs::new()
+        .expect("home directory is required")
+        .home_dir()
+        .join(".agents/skills")
+}
+
+fn skill_frontmatter_value(content: &str, key: &str) -> Option<String> {
+    let mut lines = content.lines();
+    (lines.next()? == "---").then_some(())?;
+    lines.take_while(|line| *line != "---").find_map(|line| {
+        let (field, value) = line.split_once(':')?;
+        (field.trim() == key).then(|| value.trim().trim_matches(['\'', '"']).to_owned())
+    })
+}
+
+fn load_skills(directory: &Path) -> SkillCatalog {
+    let mut skills = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_dir())
+                .map(|_| entry.path())
+        })
+        .filter_map(|directory| {
+            let skill_file = directory.join("SKILL.md");
+            skill_file.is_file().then(|| {
+                let content = std::fs::read_to_string(skill_file).unwrap_or_default();
+                SkillMetadata {
+                    name: skill_frontmatter_value(&content, "name").unwrap_or_else(|| {
+                        directory
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    description: skill_frontmatter_value(&content, "description")
+                        .unwrap_or_default(),
+                    directory: directory.to_string_lossy().into_owned(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    SkillCatalog { skills }
+}
+
+fn watch_skills(directory: PathBuf, skills: Arc<StdRwLock<SkillCatalog>>) -> Result<()> {
+    std::fs::create_dir_all(&directory)?;
+    std::thread::spawn(move || {
+        let (sender, receiver) = std_mpsc::channel();
+        let mut watcher = match notify::recommended_watcher(move |_| {
+            let _ = sender.send(());
+        }) {
+            Ok(watcher) => watcher,
+            Err(cause) => {
+                tracing::warn!(%cause, "Mobius skill watcher could not start");
+                return;
+            }
+        };
+        if let Err(cause) = watcher.watch(&directory, RecursiveMode::Recursive) {
+            tracing::warn!(%cause, "Mobius skill directory could not be watched");
+            return;
+        }
+        while receiver.recv().is_ok() {
+            while receiver.try_recv().is_ok() {}
+            let catalog = load_skills(&directory);
+            let count = catalog.skills.len();
+            if let Ok(mut current) = skills.write() {
+                *current = catalog;
+                info!(%count, "Mobius skills reloaded");
+            }
+        }
+    });
+    Ok(())
+}
+
 fn open_db(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     Ok(connection)
+}
+
+fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
+    let connection = open_db(path)?;
+    connection
+        .prepare(
+            "SELECT role, content, created_at, duration_ms, input_tokens, output_tokens
+             FROM conversation_messages ORDER BY id",
+        )?
+        .query_map([], |row| {
+            Ok(ConversationMessage {
+                role: row.get(0)?,
+                content: row.get(1)?,
+                created_at: row.get(2)?,
+                duration_ms: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(Into::into)
+}
+
+fn conversation_context(messages: Vec<ConversationMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .map(|message| ChatMessage {
+            role: message.role,
+            content: Value::String(message.content),
+            tool_call_id: None,
+            tool_calls: None,
+        })
+        .collect()
+}
+
+fn append_conversation(
+    path: &Path,
+    message: &ChatMessage,
+    usage: Option<AgentUsage>,
+) -> Result<ConversationMessage> {
+    let content = message
+        .content
+        .as_str()
+        .ok_or_else(|| anyhow!("conversation content must be text"))?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let connection = open_db(path)?;
+    connection.execute(
+        "INSERT INTO conversation_messages (role, content, created_at, duration_ms, input_tokens, output_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            message.role,
+            content,
+            created_at,
+            usage.map(|value| value.duration_ms),
+            usage.map(|value| value.input_tokens),
+            usage.map(|value| value.output_tokens),
+        ],
+    )?;
+    Ok(ConversationMessage {
+        role: message.role.clone(),
+        content: content.to_owned(),
+        created_at,
+        duration_ms: usage.map(|value| value.duration_ms),
+        input_tokens: usage.map(|value| value.input_tokens),
+        output_tokens: usage.map(|value| value.output_tokens),
+    })
+}
+
+fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(conversation_messages)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (name, definition) in [
+        ("duration_ms", "INTEGER"),
+        ("input_tokens", "INTEGER"),
+        ("output_tokens", "INTEGER"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection.execute_batch(&format!(
+                "ALTER TABLE conversation_messages ADD COLUMN {name} {definition}"
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 fn bootstrap_database(db: &Path) -> Result<()> {
@@ -246,8 +525,18 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            name TEXT NOT NULL,
            base_url TEXT NOT NULL UNIQUE,
            created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS conversation_messages (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+           content TEXT NOT NULL,
+           created_at TEXT NOT NULL,
+           duration_ms INTEGER,
+           input_tokens INTEGER,
+           output_tokens INTEGER
          );",
     )?;
+    ensure_conversation_metadata_columns(&connection)?;
     connection.execute(
         "INSERT INTO app_meta (key, value) VALUES ('machine_id', ?1)
          ON CONFLICT(key) DO NOTHING",
@@ -257,6 +546,21 @@ fn bootstrap_database(db: &Path) -> Result<()> {
         "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
          ON CONFLICT(key) DO NOTHING",
         [DEFAULT_MODEL_ID],
+    )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('toolset_filesystem_enabled', 'true')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('toolset_bash_enabled', 'true')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('toolset_web_search_enabled', 'true')
+         ON CONFLICT(key) DO NOTHING",
+        [],
     )?;
     Ok(())
 }
@@ -272,6 +576,9 @@ struct Config {
     openai_base_url: String,
     openai_api_key: String,
     default_model: String,
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+    web_search_enabled: bool,
     machine_id: String,
 }
 
@@ -293,6 +600,9 @@ fn load_config(path: &Path) -> Result<Config> {
         openai_base_url: required("openai_base_url")?,
         openai_api_key: required("openai_api_key")?,
         default_model: required("default_model")?,
+        filesystem_tools_enabled: required("toolset_filesystem_enabled")?.parse()?,
+        bash_tools_enabled: required("toolset_bash_enabled")?.parse()?,
+        web_search_enabled: required("toolset_web_search_enabled")?.parse()?,
         machine_id: required("machine_id")?,
     })
 }
@@ -581,6 +891,8 @@ async fn settings(
     })?;
     Ok(Json(SettingsResponse {
         default_model: config.default_model,
+        openai_base_url: config.openai_base_url,
+        openai_api_key: config.openai_api_key,
     }))
 }
 
@@ -597,22 +909,136 @@ async fn update_settings(
             "default_model cannot be empty",
         ));
     }
-    let connection = open_db(&state.db_path)
+    let openai_base_url = input.openai_base_url.trim().trim_end_matches('/');
+    Url::parse(openai_base_url).map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "openai_base_url must be an absolute URL",
+        )
+    })?;
+    let openai_api_key = input.openai_api_key.trim();
+    if openai_api_key.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "openai_api_key cannot be empty",
+        ));
+    }
+    let mut connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    connection
+    let transaction = connection
+        .transaction()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
         .execute(
             "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [default_model],
         )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('openai_base_url', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [openai_base_url],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('openai_api_key', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [openai_api_key],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .commit()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    Ok(Json(SettingsResponse {
+        default_model: default_model.to_owned(),
+        openai_base_url: openai_base_url.to_owned(),
+        openai_api_key: openai_api_key.to_owned(),
+    }))
+}
+
+async fn toolsets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<ToolsetsResponse> {
+    identity(&state, &headers).await?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    Ok(Json(ToolsetsResponse {
+        filesystem_enabled: config.filesystem_tools_enabled,
+        bash_enabled: config.bash_tools_enabled,
+        web_search_enabled: config.web_search_enabled,
+    }))
+}
+
+async fn skills(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<SkillsResponse> {
+    identity(&state, &headers).await?;
+    let skills = state
+        .skills
+        .read()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read skills"))?
+        .skills
+        .clone();
+    Ok(Json(SkillsResponse {
+        directory: state.skills_directory.to_string_lossy().into_owned(),
+        skills,
+    }))
+}
+
+async fn update_toolsets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateToolsets>,
+) -> ApiResult<ToolsetsResponse> {
+    identity(&state, &headers).await?;
+    let connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('toolset_filesystem_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.filesystem_enabled.to_string()],
+        )
         .map_err(|_| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot save default model",
+                "cannot save toolset configuration",
             )
         })?;
-    Ok(Json(SettingsResponse {
-        default_model: default_model.to_owned(),
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('toolset_bash_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.bash_enabled.to_string()],
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save toolset configuration",
+            )
+        })?;
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('toolset_web_search_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.web_search_enabled.to_string()],
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save toolset configuration",
+            )
+        })?;
+    Ok(Json(ToolsetsResponse {
+        filesystem_enabled: input.filesystem_enabled,
+        bash_enabled: input.bash_enabled,
+        web_search_enabled: input.web_search_enabled,
     }))
 }
 
@@ -844,11 +1270,25 @@ async fn peer_status(
     Ok(Json(response))
 }
 
-async fn agent_turn(
+async fn conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<AgentTurn>,
-) -> ApiResult<AgentReply> {
+) -> ApiResult<Vec<ConversationMessage>> {
+    identity(&state, &headers).await?;
+    let messages = load_conversation(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read conversation",
+        )
+    })?;
+    Ok(Json(messages))
+}
+
+async fn transcribe_audio(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> ApiResult<TranscriptionResponse> {
     identity(&state, &headers).await?;
     let config = load_config(&state.db_path).map_err(|_| {
         error(
@@ -856,48 +1296,229 @@ async fn agent_turn(
             "cannot read configuration",
         )
     })?;
-    let message = run_agent(&state.client, &config, input)
+    let field = multipart
+        .next_field()
         .await
-        .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))?;
-    Ok(Json(AgentReply { message }))
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "cannot read audio"))?
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "audio is required"))?;
+    if field.name() != Some("file") {
+        return Err(error(StatusCode::BAD_REQUEST, "audio is required"));
+    }
+    let file_name = field.file_name().unwrap_or("recording.webm").to_owned();
+    let content_type = field.content_type().unwrap_or("audio/webm").to_owned();
+    let bytes = field
+        .bytes()
+        .await
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "cannot read audio"))?;
+    let file = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name(file_name)
+        .mime_str(&content_type)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "cannot read audio"))?;
+    let form = reqwest::multipart::Form::new()
+        .text("model", "gpt-transcribe")
+        .part("file", file);
+    let response = state
+        .client
+        .post(format!("{}/audio/transcriptions", config.openai_base_url))
+        .bearer_auth(config.openai_api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot transcribe audio"))?
+        .error_for_status()
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot transcribe audio"))?
+        .json::<Value>()
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "invalid transcription response"))?;
+    Ok(Json(TranscriptionResponse {
+        text: transcription_text(&response)
+            .map_err(|_| error(StatusCode::BAD_GATEWAY, "invalid transcription response"))?,
+    }))
+}
+
+async fn agent_turn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AgentTurn>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    identity(&state, &headers).await?;
+    if input.message.role != "user" || input.message.content.as_str().is_none_or(str::is_empty) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "agent turns require a non-empty user message",
+        ));
+    }
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    append_conversation(&state.db_path, &input.message, None).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot save conversation message",
+        )
+    })?;
+    let messages = conversation_context(load_conversation(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read conversation",
+        )
+    })?);
+    let client = state.client.clone();
+    let db_path = state.db_path.clone();
+    let skills = state.skills.clone();
+    let active_runs = state.active_runs.clone();
+    let run_id = input.run_id.clone();
+    let (cancel, cancellation) = watch::channel(false);
+    active_runs.lock().await.insert(run_id.clone(), cancel);
+    let (events, receiver) = mpsc::channel(32);
+    let started_at = Instant::now();
+    tokio::spawn(async move {
+        let event =
+            match run_agent(&client, &config, messages, &skills, &events, cancellation).await {
+                Ok(result) => {
+                    let usage = AgentUsage {
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        input_tokens: result.input_tokens,
+                        output_tokens: result.output_tokens,
+                    };
+                    match append_conversation(&db_path, &result.message, Some(usage)) {
+                        Ok(message) => AgentEvent::Complete { message },
+                        Err(cause) => AgentEvent::Error {
+                            error: format!("cannot save assistant message: {cause}"),
+                        },
+                    }
+                }
+                Err(cause) => AgentEvent::Error {
+                    error: cause.to_string(),
+                },
+            };
+        let _ = events.send(event).await;
+        active_runs.lock().await.remove(&run_id);
+    });
+    let stream = ReceiverStream::new(receiver).map(|event| {
+        Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&event).unwrap()))
+    });
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+async fn cancel_agent_turn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    if let Some(cancel) = state.active_runs.lock().await.get(&id) {
+        let _ = cancel.send(true);
+    }
+    Ok(Json(json!({"cancelled": true})))
 }
 
 async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
-    input: AgentTurn,
-) -> Result<ChatMessage> {
-    let mut items = input
-        .messages
+    messages: Vec<ChatMessage>,
+    skills: &Arc<StdRwLock<SkillCatalog>>,
+    events: &mpsc::Sender<AgentEvent>,
+    mut cancellation: watch::Receiver<bool>,
+) -> Result<AgentResult> {
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut items = messages
         .into_iter()
         .map(|message| json!({ "role": message.role, "content": message.content }))
         .collect::<Vec<_>>();
-    for _ in 0..8 {
-        let response = client
+    loop {
+        if *cancellation.borrow() {
+            return Err(anyhow!("agent stopped"));
+        }
+        let request = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
-            .json(&responses_request_body(&config.default_model, &items))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?;
+            .json(&responses_request_body(
+                &config.default_model,
+                &items,
+                config.filesystem_tools_enabled,
+                config.bash_tools_enabled,
+                config.web_search_enabled,
+                &skills
+                    .read()
+                    .map_err(|_| anyhow!("cannot read skills"))?
+                    .clone(),
+            ));
+        let response = tokio::select! {
+            response = request.send() => response?,
+            _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+        }
+        .error_for_status()?;
+        let response = tokio::select! {
+            body = response.text() => body?,
+            _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+        };
+        let response = completed_response_from_sse(&response)?;
+        if let Some(response_input_tokens) = response
+            .pointer("/usage/input_tokens")
+            .and_then(Value::as_u64)
+        {
+            input_tokens += response_input_tokens;
+            let _ = events
+                .send(AgentEvent::Context {
+                    input_tokens: response_input_tokens,
+                })
+                .await;
+        }
+        output_tokens += response
+            .pointer("/usage/output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
         let output = response
             .get("output")
             .and_then(Value::as_array)
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
+        for item in output
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("web_search_call"))
+        {
+            let call_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("web search call has no id"))?;
+            let _ = events
+                .send(AgentEvent::ToolCall {
+                    call_id: call_id.to_owned(),
+                    name: "web_search".to_owned(),
+                    arguments: Value::Object(Default::default()),
+                })
+                .await;
+            let _ = events
+                .send(AgentEvent::ToolResult {
+                    call_id: call_id.to_owned(),
+                    name: "web_search".to_owned(),
+                    added_lines: None,
+                    deleted_lines: None,
+                })
+                .await;
+        }
         let calls = output
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
             .cloned()
             .collect::<Vec<_>>();
         if calls.is_empty() {
-            return Ok(ChatMessage {
-                role: "assistant".to_owned(),
-                content: Value::String(output_text(&output)),
-                tool_call_id: None,
-                tool_calls: None,
+            return Ok(AgentResult {
+                message: ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: Value::String(output_text(&output)),
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                input_tokens,
+                output_tokens,
             });
         }
         items.extend(output);
@@ -915,25 +1536,93 @@ async fn run_agent(
                     .and_then(Value::as_str)
                     .unwrap_or("{}"),
             )?;
-            let result = execute_tool(name, args).await;
+            let _ = events
+                .send(AgentEvent::ToolCall {
+                    call_id: call_id.to_owned(),
+                    name: name.to_owned(),
+                    arguments: args.clone(),
+                })
+                .await;
+            let execution = execute_tool(name, args, cancellation.clone()).await;
+            let _ = events
+                .send(AgentEvent::ToolResult {
+                    call_id: call_id.to_owned(),
+                    name: name.to_owned(),
+                    added_lines: execution.added_lines,
+                    deleted_lines: execution.deleted_lines,
+                })
+                .await;
             items.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": result,
+                "output": execution.output,
             }));
         }
     }
-    Err(anyhow!("agent exceeded the eight tool-call rounds limit"))
 }
 
-fn responses_request_body(model: &str, input: &[Value]) -> Value {
-    json!({
+fn responses_request_body(
+    model: &str,
+    input: &[Value],
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+    web_search_enabled: bool,
+    skills: &SkillCatalog,
+) -> Value {
+    let mut body = json!({
         "model": model,
         "input": input,
-        "tools": tool_definitions(),
-        "tool_choice": "auto",
         "store": false,
-    })
+        "stream": true,
+        "instructions": skill_instructions(skills),
+    });
+    let tools = tool_definitions(
+        filesystem_tools_enabled,
+        bash_tools_enabled,
+        web_search_enabled,
+    );
+    if !tools
+        .as_array()
+        .expect("tool definitions are an array")
+        .is_empty()
+    {
+        body["tools"] = tools;
+        body["tool_choice"] = Value::String("auto".to_owned());
+    }
+    body
+}
+
+fn skill_instructions(skills: &SkillCatalog) -> String {
+    let metadata = serde_json::to_string(&skills.skills).expect("skill metadata is serializable");
+    format!(
+        "Installed SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
+    )
+}
+
+fn completed_response_from_sse(body: &str) -> Result<Value> {
+    let mut output = Vec::new();
+    for data in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
+        let event: Value = serde_json::from_str(data)?;
+        if event.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
+            output.push(
+                event
+                    .get("item")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("completed output item event has no item"))?,
+            );
+        }
+        if event.get("type").and_then(Value::as_str) == Some("response.completed") {
+            let mut response = event
+                .get("response")
+                .cloned()
+                .ok_or_else(|| anyhow!("completed response event has no response"))?;
+            response["output"] = Value::Array(output);
+            return Ok(response);
+        }
+    }
+    Err(anyhow!(
+        "upstream stream ended without a completed response"
+    ))
 }
 
 fn output_text(output: &[Value]) -> String {
@@ -951,43 +1640,173 @@ fn output_text(output: &[Value]) -> String {
         .collect::<String>()
 }
 
-fn tool_definitions() -> Value {
-    json!([
-      {"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}},
-      {"type":"function","name":"read_file","description":"Read a file from any path on this machine. Binary files are returned as base64 JSON.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}},
-      {"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}
-    ])
+fn transcription_text(response: &Value) -> Result<String> {
+    response
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("transcription response has no text"))
 }
 
-async fn execute_tool(name: &str, args: Value) -> String {
+fn tool_definitions(
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+    web_search_enabled: bool,
+) -> Value {
+    let mut tools = Vec::new();
+    if filesystem_tools_enabled {
+        tools.extend([
+            json!({"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
+            json!({"type":"function","name":"read_file","description":"Read a file from any path on this machine. Binary files are returned as base64 JSON.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
+            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}),
+            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}}}),
+        ]);
+    }
+    if bash_tools_enabled {
+        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command on this Mobius machine. Return stdout, stderr, and the exit status.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"}}}}));
+    }
+    if web_search_enabled {
+        tools.push(json!({"type":"web_search"}));
+    }
+    Value::Array(tools)
+}
+
+struct ToolExecution {
+    output: String,
+    added_lines: Option<usize>,
+    deleted_lines: Option<usize>,
+}
+
+fn tool_execution(output: impl Into<String>) -> ToolExecution {
+    ToolExecution {
+        output: output.into(),
+        added_lines: None,
+        deleted_lines: None,
+    }
+}
+
+fn line_change_counts(previous: &str, next: &str) -> (usize, usize) {
+    let previous = previous.lines().collect::<Vec<_>>();
+    let next = next.lines().collect::<Vec<_>>();
+    TextDiff::from_slices(&previous, &next)
+        .iter_all_changes()
+        .fold((0, 0), |(added, deleted), change| match change.tag() {
+            ChangeTag::Insert => (added + 1, deleted),
+            ChangeTag::Delete => (added, deleted + 1),
+            ChangeTag::Equal => (added, deleted),
+        })
+}
+
+async fn execute_tool(
+    name: &str,
+    args: Value,
+    cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     match name {
         "list_files" => match std::fs::read_dir(path) {
-            Ok(entries) => serde_json::to_string(
-                &entries
-                    .filter_map(std::result::Result::ok)
-                    .map(|entry| entry.path().display().to_string())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap(),
-            Err(error) => format!("error: {error}"),
+            Ok(entries) => tool_execution(
+                serde_json::to_string(
+                    &entries
+                        .filter_map(std::result::Result::ok)
+                        .map(|entry| entry.path().display().to_string())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            ),
+            Err(error) => tool_execution(format!("error: {error}")),
         },
-        "read_file" => std::fs::read(path)
-            .map(|bytes| match String::from_utf8(bytes) {
-                Ok(content) => content,
-                Err(error) => {
-                    json!({"encoding":"base64","content":BASE64.encode(error.into_bytes())})
-                        .to_string()
-                }
-            })
-            .unwrap_or_else(|error| format!("error: {error}")),
-        "write_file" => std::fs::write(
+        "read_file" => tool_execution(
+            std::fs::read(path)
+                .map(|bytes| match String::from_utf8(bytes) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        json!({"encoding":"base64","content":BASE64.encode(error.into_bytes())})
+                            .to_string()
+                    }
+                })
+                .unwrap_or_else(|error| format!("error: {error}")),
+        ),
+        "write_file" => execute_write_file(
             path,
             args.get("content").and_then(Value::as_str).unwrap_or(""),
-        )
-        .map(|_| "written".to_owned())
-        .unwrap_or_else(|error| format!("error: {error}")),
-        _ => "error: unknown tool".to_owned(),
+        ),
+        "edit_file" => execute_edit_file(
+            path,
+            args.get("old_text").and_then(Value::as_str).unwrap_or(""),
+            args.get("new_text").and_then(Value::as_str).unwrap_or(""),
+        ),
+        "run_bash" => tool_execution(run_bash(args, cancellation).await),
+        _ => tool_execution("error: unknown tool"),
+    }
+}
+
+fn execute_write_file(path: &str, content: &str) -> ToolExecution {
+    let previous = std::fs::read_to_string(path).ok();
+    save_file(path, previous.as_deref(), content, "written")
+}
+
+fn execute_edit_file(path: &str, old_text: &str, new_text: &str) -> ToolExecution {
+    if old_text.is_empty() {
+        return tool_execution("error: old_text must not be empty");
+    }
+    let previous = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => return tool_execution(format!("error: {error}")),
+    };
+    match previous.match_indices(old_text).count() {
+        0 => tool_execution("error: old_text was not found"),
+        1 => save_file(
+            path,
+            Some(&previous),
+            &previous.replacen(old_text, new_text, 1),
+            "edited",
+        ),
+        count => tool_execution(format!(
+            "error: old_text occurs {count} times; provide a unique match"
+        )),
+    }
+}
+
+fn save_file(path: &str, previous: Option<&str>, content: &str, output: &str) -> ToolExecution {
+    match std::fs::write(path, content) {
+        Ok(()) => {
+            let (added_lines, deleted_lines) = previous
+                .map(|previous| line_change_counts(previous, content))
+                .unwrap_or((content.lines().count(), 0));
+            ToolExecution {
+                output: output.to_owned(),
+                added_lines: Some(added_lines),
+                deleted_lines: Some(deleted_lines),
+            }
+        }
+        Err(error) => tool_execution(format!("error: {error}")),
+    }
+}
+
+async fn run_bash(args: Value, mut cancellation: watch::Receiver<bool>) -> String {
+    let Some(command) = args.get("command").and_then(Value::as_str) else {
+        return "error: missing bash command".to_owned();
+    };
+    if *cancellation.borrow() {
+        return "error: command cancelled".to_owned();
+    }
+    let output = Command::new("bash")
+        .args(["-lc", command])
+        .kill_on_drop(true)
+        .output();
+    tokio::select! {
+        result = output => match result {
+            Ok(output) => json!({
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+                "exit_code": output.status.code(),
+            }).to_string(),
+            Err(error) => format!("error: cannot run bash: {error}"),
+        },
+        _ = cancellation.changed() => "error: command cancelled".to_owned(),
+        _ = tokio::time::sleep(Duration::from_secs(60)) => "error: command timed out after 60 seconds".to_owned(),
     }
 }
 
@@ -1017,6 +1836,22 @@ mod tests {
             )
             .unwrap();
         assert!(!machine_id.is_empty());
+        let bash_enabled: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'toolset_bash_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bash_enabled, "true");
+        let web_search_enabled: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'toolset_web_search_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(web_search_enabled, "true");
         let default_model: String = connection
             .query_row(
                 "SELECT value FROM app_meta WHERE key = 'default_model'",
@@ -1028,9 +1863,78 @@ mod tests {
     }
 
     #[test]
+    fn conversation_messages_are_stored_in_one_ordered_sequence() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        for (role, content) in [("user", "hello"), ("assistant", "hi")] {
+            append_conversation(
+                &db,
+                &ChatMessage {
+                    role: role.to_owned(),
+                    content: Value::String(content.to_owned()),
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                None,
+            )
+            .unwrap();
+        }
+        let messages = load_conversation(&db).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].content, "hi");
+    }
+
+    #[test]
+    fn conversation_metadata_is_added_to_existing_message_tables() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        let connection = open_db(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE conversation_messages (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   role TEXT NOT NULL,
+                   content TEXT NOT NULL,
+                   created_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+        bootstrap_database(&db).unwrap();
+        append_conversation(
+            &db,
+            &ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String("done".to_owned()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Some(AgentUsage {
+                duration_ms: 1_250,
+                input_tokens: 800,
+                output_tokens: 200,
+            }),
+        )
+        .unwrap();
+        let message = load_conversation(&db).unwrap().pop().unwrap();
+        assert_eq!(message.duration_ms, Some(1_250));
+        assert_eq!(message.input_tokens, Some(800));
+        assert_eq!(message.output_tokens, Some(200));
+    }
+
+    #[test]
     fn responses_body_uses_input_and_responses_function_schema() {
-        let body =
-            responses_request_body("gpt-5", &[json!({"role":"user","content":"list files"})]);
+        let skills = SkillCatalog::default();
+        let body = responses_request_body(
+            "gpt-5",
+            &[json!({"role":"user","content":"list files"})],
+            true,
+            false,
+            false,
+            &skills,
+        );
         assert_eq!(
             body.get("input").and_then(Value::as_array).unwrap().len(),
             1
@@ -1041,6 +1945,114 @@ mod tests {
         );
         assert!(body.pointer("/tools/0/function").is_none());
         assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
+        assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn disabled_toolsets_omit_tools_from_responses_request() {
+        let body =
+            responses_request_body("gpt-5", &[], false, false, false, &SkillCatalog::default());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn skill_metadata_is_injected_with_its_installation_directory() {
+        let skills = SkillCatalog {
+            skills: vec![SkillMetadata {
+                name: "release".to_owned(),
+                description: "Release the application.".to_owned(),
+                directory: "/skills/release".to_owned(),
+            }],
+        };
+        let body = responses_request_body("gpt-5", &[], false, false, false, &skills);
+        let instructions = body.get("instructions").and_then(Value::as_str).unwrap();
+        assert!(instructions.contains("release"));
+        assert!(instructions.contains("/skills/release"));
+    }
+
+    #[test]
+    fn skill_loader_reads_frontmatter_from_skill_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("release");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: release\ndescription: Release the application.\n---\n",
+        )
+        .unwrap();
+        let skills = load_skills(temp.path());
+        assert_eq!(skills.skills.len(), 1);
+        assert_eq!(skills.skills[0].name, "release");
+        assert_eq!(skills.skills[0].description, "Release the application.");
+        assert_eq!(skills.skills[0].directory, directory.to_string_lossy());
+    }
+
+    #[test]
+    fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
+        let tools = tool_definitions(false, true, false);
+        let tools = tools.as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].get("name").and_then(Value::as_str),
+            Some("run_bash")
+        );
+    }
+
+    #[test]
+    fn web_search_toolset_uses_the_native_responses_tool() {
+        let body =
+            responses_request_body("gpt-5", &[], false, false, true, &SkillCatalog::default());
+        assert_eq!(
+            body.pointer("/tools/0/type").and_then(Value::as_str),
+            Some("web_search")
+        );
+        assert_eq!(
+            body.get("tool_choice").and_then(Value::as_str),
+            Some("auto")
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_tool_returns_stdout_and_exit_status() {
+        let result = run_bash(json!({"command":"printf hello"}), watch::channel(false).1).await;
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result.get("stdout").and_then(Value::as_str), Some("hello"));
+        assert_eq!(result.get("exit_code").and_then(Value::as_i64), Some(0));
+    }
+
+    #[test]
+    fn line_changes_report_the_replaced_middle_section() {
+        assert_eq!(
+            line_change_counts("first\nsecond\nthird", "first\nupdated\nthird\nfourth"),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn edit_file_replaces_one_unique_text_section() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), "first\nsecond\nthird\n").unwrap();
+        let result = execute_edit_file(temp.path().to_str().unwrap(), "second", "updated");
+        assert_eq!(result.output, "edited");
+        assert_eq!(result.added_lines, Some(1));
+        assert_eq!(result.deleted_lines, Some(1));
+        assert_eq!(
+            std::fs::read_to_string(temp.path()).unwrap(),
+            "first\nupdated\nthird\n"
+        );
+    }
+
+    #[test]
+    fn edit_file_rejects_ambiguous_text_without_writing() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), "duplicate\nduplicate\n").unwrap();
+        let result = execute_edit_file(temp.path().to_str().unwrap(), "duplicate", "updated");
+        assert!(result.output.contains("occurs 2 times"));
+        assert_eq!(
+            std::fs::read_to_string(temp.path()).unwrap(),
+            "duplicate\nduplicate\n"
+        );
     }
 
     #[test]
@@ -1052,32 +2064,62 @@ mod tests {
         assert_eq!(text, "done");
     }
 
+    #[test]
+    fn transcription_response_uses_text() {
+        assert_eq!(
+            transcription_text(&json!({"text":"transcribed"})).unwrap(),
+            "transcribed"
+        );
+        assert!(transcription_text(&json!({})).is_err());
+    }
+
     #[tokio::test]
     async fn agent_uses_responses_endpoint_and_returns_function_outputs() {
+        type TestState = (
+            Arc<tokio::sync::Mutex<Vec<Value>>>,
+            Arc<StdRwLock<SkillCatalog>>,
+        );
         let requests = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let skills = Arc::new(StdRwLock::new(SkillCatalog::default()));
         async fn responses(
-            State(requests): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+            State((requests, skills)): State<TestState>,
             Json(request): Json<Value>,
-        ) -> Json<Value> {
+        ) -> String {
             let mut requests = requests.lock().await;
-            let response = if requests.is_empty() {
+            let first_request = requests.is_empty();
+            let response = if first_request {
                 json!({"output":[{"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}]})
             } else {
                 json!({"output":[{"type":"message","content":[{"type":"output_text","text":"complete"}]}]})
             };
+            let output = response.get("output").and_then(Value::as_array).unwrap();
             requests.push(request);
-            Json(response)
+            if first_request {
+                *skills.write().unwrap() = SkillCatalog {
+                    skills: vec![SkillMetadata {
+                        name: "updated".to_owned(),
+                        description: "Reloaded between requests.".to_owned(),
+                        directory: "/skills/updated".to_owned(),
+                    }],
+                };
+            }
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":output[0]}),
+                json!({"type":"response.completed","response":response})
+            )
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server_requests = requests.clone();
+        let server_skills = skills.clone();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 Router::new()
                     .route("/responses", post(responses))
-                    .with_state(server_requests),
+                    .with_state((server_requests, server_skills)),
             )
             .await
             .unwrap();
@@ -1088,24 +2130,37 @@ mod tests {
             openai_base_url: format!("http://{address}"),
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
+            filesystem_tools_enabled: true,
+            bash_tools_enabled: false,
+            web_search_enabled: false,
             machine_id: "machine".to_owned(),
         };
+        let (events, mut received_events) = mpsc::channel(4);
         let reply = run_agent(
             &reqwest::Client::new(),
             &config,
-            AgentTurn {
-                messages: vec![ChatMessage {
-                    role: "user".to_owned(),
-                    content: Value::String("list root".to_owned()),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }],
-            },
+            vec![ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("list root".to_owned()),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            &skills,
+            &events,
+            watch::channel(false).1,
         )
         .await
         .unwrap();
         server.abort();
-        assert_eq!(reply.content, Value::String("complete".to_owned()));
+        assert_eq!(reply.message.content, Value::String("complete".to_owned()));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolCall { name, arguments, .. }) if name == "list_files" && arguments["path"] == "/"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolResult { name, added_lines: None, deleted_lines: None, .. }) if name == "list_files"
+        ));
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 2);
         assert_eq!(
@@ -1116,6 +2171,10 @@ mod tests {
             requests[0].pointer("/input/0/role").and_then(Value::as_str),
             Some("user")
         );
+        assert_eq!(
+            requests[0].get("stream").and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(
             requests[1]
                 .get("input")
@@ -1125,6 +2184,13 @@ mod tests {
                 .any(
                     |item| item.get("type").and_then(Value::as_str) == Some("function_call_output")
                 )
+        );
+        assert!(
+            requests[1]
+                .get("instructions")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("/skills/updated")
         );
     }
 }
