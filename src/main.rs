@@ -14,7 +14,7 @@ use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{
         IntoResponse, Response,
@@ -105,6 +105,11 @@ struct FileContent {
     path: String,
     content: String,
     encoding: String,
+}
+
+#[derive(Serialize)]
+struct TranscriptionResponse {
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -263,6 +268,10 @@ fn app(state: AppState) -> Router {
         .route("/api/files", get(list_files))
         .route("/api/files/read", get(read_file))
         .route("/api/files/write", put(write_file))
+        .route(
+            "/api/audio/transcriptions",
+            post(transcribe_audio).layer(DefaultBodyLimit::max(26 * 1024 * 1024)),
+        )
         .route("/api/peers", get(list_peers).post(create_peer))
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
@@ -1053,6 +1062,58 @@ async fn conversation(
     Ok(Json(messages))
 }
 
+async fn transcribe_audio(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> ApiResult<TranscriptionResponse> {
+    identity(&state, &headers).await?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "cannot read audio"))?
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "audio is required"))?;
+    if field.name() != Some("file") {
+        return Err(error(StatusCode::BAD_REQUEST, "audio is required"));
+    }
+    let file_name = field.file_name().unwrap_or("recording.webm").to_owned();
+    let content_type = field.content_type().unwrap_or("audio/webm").to_owned();
+    let bytes = field
+        .bytes()
+        .await
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "cannot read audio"))?;
+    let file = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name(file_name)
+        .mime_str(&content_type)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "cannot read audio"))?;
+    let form = reqwest::multipart::Form::new()
+        .text("model", "gpt-transcribe")
+        .part("file", file);
+    let response = state
+        .client
+        .post(format!("{}/audio/transcriptions", config.openai_base_url))
+        .bearer_auth(config.openai_api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot transcribe audio"))?
+        .error_for_status()
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot transcribe audio"))?
+        .json::<Value>()
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "invalid transcription response"))?;
+    Ok(Json(TranscriptionResponse {
+        text: transcription_text(&response)
+            .map_err(|_| error(StatusCode::BAD_GATEWAY, "invalid transcription response"))?,
+    }))
+}
+
 async fn agent_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1297,6 +1358,15 @@ fn output_text(output: &[Value]) -> String {
         .collect::<String>()
 }
 
+fn transcription_text(response: &Value) -> Result<String> {
+    response
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("transcription response has no text"))
+}
+
 fn tool_definitions() -> Value {
     json!([
       {"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}},
@@ -1469,6 +1539,15 @@ mod tests {
             json!({"type":"message","content":[{"type":"output_text","text":"done"}]}),
         ]);
         assert_eq!(text, "done");
+    }
+
+    #[test]
+    fn transcription_response_uses_text() {
+        assert_eq!(
+            transcription_text(&json!({"text":"transcribed"})).unwrap(),
+            "transcribed"
+        );
+        assert!(transcription_text(&json!({})).is_err());
     }
 
     #[tokio::test]
