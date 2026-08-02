@@ -161,15 +161,25 @@ struct ChatMessage {
     role: String,
     content: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<GeneratedImage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Value>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct GeneratedImage {
+    id: String,
+    data: String,
 }
 
 #[derive(Serialize)]
 struct ConversationMessage {
     role: String,
     content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<GeneratedImage>,
     created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
@@ -217,6 +227,7 @@ struct ToolsetsResponse {
     filesystem_enabled: bool,
     bash_enabled: bool,
     web_search_enabled: bool,
+    image_generation_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +235,7 @@ struct UpdateToolsets {
     filesystem_enabled: bool,
     bash_enabled: bool,
     web_search_enabled: bool,
+    image_generation_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -433,7 +445,7 @@ fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
     let connection = open_db(path)?;
     connection
         .prepare(
-            "SELECT role, content, created_at, duration_ms, input_tokens, output_tokens
+            "SELECT role, content, created_at, duration_ms, input_tokens, output_tokens, images
              FROM conversation_messages ORDER BY id",
         )?
         .query_map([], |row| {
@@ -444,6 +456,8 @@ fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
                 duration_ms: row.get(3)?,
                 input_tokens: row.get(4)?,
                 output_tokens: row.get(5)?,
+                images: serde_json::from_str(&row.get::<_, Option<String>>(6)?.unwrap_or_default())
+                    .unwrap_or_default(),
             })
         })?
         .collect::<std::result::Result<_, _>>()
@@ -456,6 +470,7 @@ fn conversation_context(messages: Vec<ConversationMessage>) -> Vec<ChatMessage> 
         .map(|message| ChatMessage {
             role: message.role,
             content: Value::String(message.content),
+            images: None,
             tool_call_id: None,
             tool_calls: None,
         })
@@ -472,10 +487,12 @@ fn append_conversation(
         .as_str()
         .ok_or_else(|| anyhow!("conversation content must be text"))?;
     let created_at = chrono::Utc::now().to_rfc3339();
+    let images = message.images.clone().unwrap_or_default();
+    let images = serde_json::to_string(&images)?;
     let connection = open_db(path)?;
     connection.execute(
-        "INSERT INTO conversation_messages (role, content, created_at, duration_ms, input_tokens, output_tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO conversation_messages (role, content, created_at, duration_ms, input_tokens, output_tokens, images)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             message.role,
             content,
@@ -483,11 +500,13 @@ fn append_conversation(
             usage.map(|value| value.duration_ms),
             usage.map(|value| value.input_tokens),
             usage.map(|value| value.output_tokens),
+            images,
         ],
     )?;
     Ok(ConversationMessage {
         role: message.role.clone(),
         content: content.to_owned(),
+        images: message.images.clone().unwrap_or_default(),
         created_at,
         duration_ms: usage.map(|value| value.duration_ms),
         input_tokens: usage.map(|value| value.input_tokens),
@@ -504,6 +523,7 @@ fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
         ("duration_ms", "INTEGER"),
         ("input_tokens", "INTEGER"),
         ("output_tokens", "INTEGER"),
+        ("images", "TEXT"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute_batch(&format!(
@@ -533,7 +553,8 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            created_at TEXT NOT NULL,
            duration_ms INTEGER,
            input_tokens INTEGER,
-           output_tokens INTEGER
+           output_tokens INTEGER,
+           images TEXT
          );",
     )?;
     ensure_conversation_metadata_columns(&connection)?;
@@ -562,6 +583,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [],
     )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('toolset_image_generation_enabled', 'true')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
     Ok(())
 }
 
@@ -579,6 +605,7 @@ struct Config {
     filesystem_tools_enabled: bool,
     bash_tools_enabled: bool,
     web_search_enabled: bool,
+    image_generation_enabled: bool,
     machine_id: String,
 }
 
@@ -603,6 +630,7 @@ fn load_config(path: &Path) -> Result<Config> {
         filesystem_tools_enabled: required("toolset_filesystem_enabled")?.parse()?,
         bash_tools_enabled: required("toolset_bash_enabled")?.parse()?,
         web_search_enabled: required("toolset_web_search_enabled")?.parse()?,
+        image_generation_enabled: required("toolset_image_generation_enabled")?.parse()?,
         machine_id: required("machine_id")?,
     })
 }
@@ -974,6 +1002,7 @@ async fn toolsets(
         filesystem_enabled: config.filesystem_tools_enabled,
         bash_enabled: config.bash_tools_enabled,
         web_search_enabled: config.web_search_enabled,
+        image_generation_enabled: config.image_generation_enabled,
     }))
 }
 
@@ -1035,10 +1064,23 @@ async fn update_toolsets(
                 "cannot save toolset configuration",
             )
         })?;
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('toolset_image_generation_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.image_generation_enabled.to_string()],
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save toolset configuration",
+            )
+        })?;
     Ok(Json(ToolsetsResponse {
         filesystem_enabled: input.filesystem_enabled,
         bash_enabled: input.bash_enabled,
         web_search_enabled: input.web_search_enabled,
+        image_generation_enabled: input.image_generation_enabled,
     }))
 }
 
@@ -1445,6 +1487,7 @@ async fn run_agent(
                 config.filesystem_tools_enabled,
                 config.bash_tools_enabled,
                 config.web_search_enabled,
+                config.image_generation_enabled,
                 &skills
                     .read()
                     .map_err(|_| anyhow!("cannot read skills"))?
@@ -1480,29 +1523,35 @@ async fn run_agent(
             .and_then(Value::as_array)
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
-        for item in output
-            .iter()
-            .filter(|item| item.get("type").and_then(Value::as_str) == Some("web_search_call"))
-        {
-            let call_id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("web search call has no id"))?;
-            let _ = events
-                .send(AgentEvent::ToolCall {
-                    call_id: call_id.to_owned(),
-                    name: "web_search".to_owned(),
-                    arguments: Value::Object(Default::default()),
-                })
-                .await;
-            let _ = events
-                .send(AgentEvent::ToolResult {
-                    call_id: call_id.to_owned(),
-                    name: "web_search".to_owned(),
-                    added_lines: None,
-                    deleted_lines: None,
-                })
-                .await;
+        let images = generated_images(&output);
+        for (response_type, name) in [
+            ("web_search_call", "web_search"),
+            ("image_generation_call", "image_generation"),
+        ] {
+            for item in output
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some(response_type))
+            {
+                let call_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("{name} call has no id"))?;
+                let _ = events
+                    .send(AgentEvent::ToolCall {
+                        call_id: call_id.to_owned(),
+                        name: name.to_owned(),
+                        arguments: Value::Object(Default::default()),
+                    })
+                    .await;
+                let _ = events
+                    .send(AgentEvent::ToolResult {
+                        call_id: call_id.to_owned(),
+                        name: name.to_owned(),
+                        added_lines: None,
+                        deleted_lines: None,
+                    })
+                    .await;
+            }
         }
         let calls = output
             .iter()
@@ -1514,6 +1563,7 @@ async fn run_agent(
                 message: ChatMessage {
                     role: "assistant".to_owned(),
                     content: Value::String(output_text(&output)),
+                    images: (!images.is_empty()).then_some(images),
                     tool_call_id: None,
                     tool_calls: None,
                 },
@@ -1567,6 +1617,7 @@ fn responses_request_body(
     filesystem_tools_enabled: bool,
     bash_tools_enabled: bool,
     web_search_enabled: bool,
+    image_generation_enabled: bool,
     skills: &SkillCatalog,
 ) -> Value {
     let mut body = json!({
@@ -1580,6 +1631,7 @@ fn responses_request_body(
         filesystem_tools_enabled,
         bash_tools_enabled,
         web_search_enabled,
+        image_generation_enabled,
     );
     if !tools
         .as_array()
@@ -1640,6 +1692,19 @@ fn output_text(output: &[Value]) -> String {
         .collect::<String>()
 }
 
+fn generated_images(output: &[Value]) -> Vec<GeneratedImage> {
+    output
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
+        .filter_map(|item| {
+            Some(GeneratedImage {
+                id: item.get("id")?.as_str()?.to_owned(),
+                data: item.get("result")?.as_str()?.to_owned(),
+            })
+        })
+        .collect()
+}
+
 fn transcription_text(response: &Value) -> Result<String> {
     response
         .get("text")
@@ -1653,6 +1718,7 @@ fn tool_definitions(
     filesystem_tools_enabled: bool,
     bash_tools_enabled: bool,
     web_search_enabled: bool,
+    image_generation_enabled: bool,
 ) -> Value {
     let mut tools = Vec::new();
     if filesystem_tools_enabled {
@@ -1668,6 +1734,9 @@ fn tool_definitions(
     }
     if web_search_enabled {
         tools.push(json!({"type":"web_search"}));
+    }
+    if image_generation_enabled {
+        tools.push(json!({"type":"image_generation"}));
     }
     Value::Array(tools)
 }
@@ -1852,6 +1921,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(web_search_enabled, "true");
+        let image_generation_enabled: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'toolset_image_generation_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(image_generation_enabled, "true");
         let default_model: String = connection
             .query_row(
                 "SELECT value FROM app_meta WHERE key = 'default_model'",
@@ -1873,6 +1950,7 @@ mod tests {
                 &ChatMessage {
                     role: role.to_owned(),
                     content: Value::String(content.to_owned()),
+                    images: None,
                     tool_call_id: None,
                     tool_calls: None,
                 },
@@ -1908,6 +1986,7 @@ mod tests {
             &ChatMessage {
                 role: "assistant".to_owned(),
                 content: Value::String("done".to_owned()),
+                images: None,
                 tool_call_id: None,
                 tool_calls: None,
             },
@@ -1933,6 +2012,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             &skills,
         );
         assert_eq!(
@@ -1950,8 +2030,15 @@ mod tests {
 
     #[test]
     fn disabled_toolsets_omit_tools_from_responses_request() {
-        let body =
-            responses_request_body("gpt-5", &[], false, false, false, &SkillCatalog::default());
+        let body = responses_request_body(
+            "gpt-5",
+            &[],
+            false,
+            false,
+            false,
+            false,
+            &SkillCatalog::default(),
+        );
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
     }
@@ -1965,7 +2052,7 @@ mod tests {
                 directory: "/skills/release".to_owned(),
             }],
         };
-        let body = responses_request_body("gpt-5", &[], false, false, false, &skills);
+        let body = responses_request_body("gpt-5", &[], false, false, false, false, &skills);
         let instructions = body.get("instructions").and_then(Value::as_str).unwrap();
         assert!(instructions.contains("release"));
         assert!(instructions.contains("/skills/release"));
@@ -1990,7 +2077,7 @@ mod tests {
 
     #[test]
     fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
-        let tools = tool_definitions(false, true, false);
+        let tools = tool_definitions(false, true, false, false);
         let tools = tools.as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(
@@ -2001,8 +2088,15 @@ mod tests {
 
     #[test]
     fn web_search_toolset_uses_the_native_responses_tool() {
-        let body =
-            responses_request_body("gpt-5", &[], false, false, true, &SkillCatalog::default());
+        let body = responses_request_body(
+            "gpt-5",
+            &[],
+            false,
+            false,
+            true,
+            false,
+            &SkillCatalog::default(),
+        );
         assert_eq!(
             body.pointer("/tools/0/type").and_then(Value::as_str),
             Some("web_search")
@@ -2011,6 +2105,35 @@ mod tests {
             body.get("tool_choice").and_then(Value::as_str),
             Some("auto")
         );
+    }
+
+    #[test]
+    fn image_generation_toolset_uses_the_native_responses_tool() {
+        let body = responses_request_body(
+            "gpt-5",
+            &[],
+            false,
+            false,
+            false,
+            true,
+            &SkillCatalog::default(),
+        );
+        assert_eq!(
+            body.pointer("/tools/0/type").and_then(Value::as_str),
+            Some("image_generation")
+        );
+    }
+
+    #[test]
+    fn image_generation_output_is_preserved_for_the_console() {
+        let images = generated_images(&[json!({
+            "type": "image_generation_call",
+            "id": "image_1",
+            "result": "aW1hZ2U=",
+        })]);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id, "image_1");
+        assert_eq!(images[0].data, "aW1hZ2U=");
     }
 
     #[tokio::test]
@@ -2133,6 +2256,7 @@ mod tests {
             filesystem_tools_enabled: true,
             bash_tools_enabled: false,
             web_search_enabled: false,
+            image_generation_enabled: false,
             machine_id: "machine".to_owned(),
         };
         let (events, mut received_events) = mpsc::channel(4);
@@ -2142,6 +2266,7 @@ mod tests {
             vec![ChatMessage {
                 role: "user".to_owned(),
                 content: Value::String("list root".to_owned()),
+                images: None,
                 tool_call_id: None,
                 tool_calls: None,
             }],
