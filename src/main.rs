@@ -27,6 +27,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -209,11 +210,26 @@ struct SetupInput {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentEvent {
-    ToolCall { call_id: String, name: String },
-    ToolResult { call_id: String, name: String },
-    Context { input_tokens: u64 },
-    Complete { message: ConversationMessage },
-    Error { error: String },
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments: Value,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        added_lines: Option<usize>,
+        deleted_lines: Option<usize>,
+    },
+    Context {
+        input_tokens: u64,
+    },
+    Complete {
+        message: ConversationMessage,
+    },
+    Error {
+        error: String,
+    },
 }
 
 #[tokio::main]
@@ -1310,19 +1326,22 @@ async fn run_agent(
                 .send(AgentEvent::ToolCall {
                     call_id: call_id.to_owned(),
                     name: name.to_owned(),
+                    arguments: args.clone(),
                 })
                 .await;
-            let result = execute_tool(name, args, cancellation.clone()).await;
+            let execution = execute_tool(name, args, cancellation.clone()).await;
             let _ = events
                 .send(AgentEvent::ToolResult {
                     call_id: call_id.to_owned(),
                     name: name.to_owned(),
+                    added_lines: execution.added_lines,
+                    deleted_lines: execution.deleted_lines,
                 })
                 .await;
             items.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": result,
+                "output": execution.output,
             }));
         }
     }
@@ -1413,36 +1432,86 @@ fn tool_definitions(filesystem_tools_enabled: bool, bash_tools_enabled: bool) ->
     Value::Array(tools)
 }
 
-async fn execute_tool(name: &str, args: Value, cancellation: watch::Receiver<bool>) -> String {
+struct ToolExecution {
+    output: String,
+    added_lines: Option<usize>,
+    deleted_lines: Option<usize>,
+}
+
+fn tool_execution(output: impl Into<String>) -> ToolExecution {
+    ToolExecution {
+        output: output.into(),
+        added_lines: None,
+        deleted_lines: None,
+    }
+}
+
+fn line_change_counts(previous: &str, next: &str) -> (usize, usize) {
+    let previous = previous.lines().collect::<Vec<_>>();
+    let next = next.lines().collect::<Vec<_>>();
+    TextDiff::from_slices(&previous, &next)
+        .iter_all_changes()
+        .fold((0, 0), |(added, deleted), change| match change.tag() {
+            ChangeTag::Insert => (added + 1, deleted),
+            ChangeTag::Delete => (added, deleted + 1),
+            ChangeTag::Equal => (added, deleted),
+        })
+}
+
+async fn execute_tool(
+    name: &str,
+    args: Value,
+    cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     match name {
         "list_files" => match std::fs::read_dir(path) {
-            Ok(entries) => serde_json::to_string(
-                &entries
-                    .filter_map(std::result::Result::ok)
-                    .map(|entry| entry.path().display().to_string())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap(),
-            Err(error) => format!("error: {error}"),
+            Ok(entries) => tool_execution(
+                serde_json::to_string(
+                    &entries
+                        .filter_map(std::result::Result::ok)
+                        .map(|entry| entry.path().display().to_string())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            ),
+            Err(error) => tool_execution(format!("error: {error}")),
         },
-        "read_file" => std::fs::read(path)
-            .map(|bytes| match String::from_utf8(bytes) {
-                Ok(content) => content,
-                Err(error) => {
-                    json!({"encoding":"base64","content":BASE64.encode(error.into_bytes())})
-                        .to_string()
-                }
-            })
-            .unwrap_or_else(|error| format!("error: {error}")),
-        "write_file" => std::fs::write(
+        "read_file" => tool_execution(
+            std::fs::read(path)
+                .map(|bytes| match String::from_utf8(bytes) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        json!({"encoding":"base64","content":BASE64.encode(error.into_bytes())})
+                            .to_string()
+                    }
+                })
+                .unwrap_or_else(|error| format!("error: {error}")),
+        ),
+        "write_file" => execute_write_file(
             path,
             args.get("content").and_then(Value::as_str).unwrap_or(""),
-        )
-        .map(|_| "written".to_owned())
-        .unwrap_or_else(|error| format!("error: {error}")),
-        "run_bash" => run_bash(args, cancellation).await,
-        _ => "error: unknown tool".to_owned(),
+        ),
+        "run_bash" => tool_execution(run_bash(args, cancellation).await),
+        _ => tool_execution("error: unknown tool"),
+    }
+}
+
+fn execute_write_file(path: &str, content: &str) -> ToolExecution {
+    let previous = std::fs::read_to_string(path).ok();
+    match std::fs::write(path, content) {
+        Ok(()) => {
+            let (added_lines, deleted_lines) = previous
+                .as_deref()
+                .map(|previous| line_change_counts(previous, content))
+                .unwrap_or((content.lines().count(), 0));
+            ToolExecution {
+                output: "written".to_owned(),
+                added_lines: Some(added_lines),
+                deleted_lines: Some(deleted_lines),
+            }
+        }
+        Err(error) => tool_execution(format!("error: {error}")),
     }
 }
 
@@ -1625,6 +1694,14 @@ mod tests {
     }
 
     #[test]
+    fn line_changes_report_the_replaced_middle_section() {
+        assert_eq!(
+            line_change_counts("first\nsecond\nthird", "first\nupdated\nthird\nfourth"),
+            (2, 1)
+        );
+    }
+
+    #[test]
     fn responses_text_uses_output_message_items() {
         let text = output_text(&[
             json!({"type":"reasoning","summary":[]}),
@@ -1706,11 +1783,11 @@ mod tests {
         assert_eq!(reply.message.content, Value::String("complete".to_owned()));
         assert!(matches!(
             received_events.recv().await,
-            Some(AgentEvent::ToolCall { name, .. }) if name == "list_files"
+            Some(AgentEvent::ToolCall { name, arguments, .. }) if name == "list_files" && arguments["path"] == "/"
         ));
         assert!(matches!(
             received_events.recv().await,
-            Some(AgentEvent::ToolResult { name, .. }) if name == "list_files"
+            Some(AgentEvent::ToolResult { name, added_lines: None, deleted_lines: None, .. }) if name == "list_files"
         ));
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 2);
