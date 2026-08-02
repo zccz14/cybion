@@ -1895,35 +1895,7 @@ async fn run_agent(
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
         let images = generated_images(&output);
-        for (response_type, name) in [
-            ("web_search_call", "web_search"),
-            ("image_generation_call", "image_generation"),
-        ] {
-            for item in output
-                .iter()
-                .filter(|item| item.get("type").and_then(Value::as_str) == Some(response_type))
-            {
-                let call_id = item
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("{name} call has no id"))?;
-                let _ = events
-                    .send(AgentEvent::ToolCall {
-                        call_id: call_id.to_owned(),
-                        name: name.to_owned(),
-                        arguments: Value::Object(Default::default()),
-                    })
-                    .await;
-                let _ = events
-                    .send(AgentEvent::ToolResult {
-                        call_id: call_id.to_owned(),
-                        name: name.to_owned(),
-                        added_lines: None,
-                        deleted_lines: None,
-                    })
-                    .await;
-            }
-        }
+        emit_response_process_events(&output, events).await?;
         let calls = output
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
@@ -1996,6 +1968,7 @@ fn responses_request_body(
         "input": input,
         "store": false,
         "stream": true,
+        "reasoning": { "summary": "auto" },
         "instructions": skill_instructions(skills),
     });
     let tools = tool_definitions(
@@ -2074,6 +2047,48 @@ fn generated_images(output: &[Value]) -> Vec<GeneratedImage> {
             })
         })
         .collect()
+}
+
+fn reasoning_parameters(item: &Value) -> Value {
+    json!({ "summary": item.get("summary").cloned().unwrap_or_default() })
+}
+
+async fn emit_response_process_events(
+    output: &[Value],
+    events: &mpsc::Sender<AgentEvent>,
+) -> Result<()> {
+    for item in output {
+        let response_type = item.get("type").and_then(Value::as_str);
+        let (name, arguments) = match response_type {
+            Some("reasoning") => ("reasoning", reasoning_parameters(item)),
+            Some("web_search_call") => (
+                "web_search",
+                item.get("action").cloned().unwrap_or_else(|| json!({})),
+            ),
+            Some("image_generation_call") => ("image_generation", json!({})),
+            _ => continue,
+        };
+        let call_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("{name} output item has no id"))?;
+        let _ = events
+            .send(AgentEvent::ToolCall {
+                call_id: call_id.to_owned(),
+                name: name.to_owned(),
+                arguments,
+            })
+            .await;
+        let _ = events
+            .send(AgentEvent::ToolResult {
+                call_id: call_id.to_owned(),
+                name: name.to_owned(),
+                added_lines: None,
+                deleted_lines: None,
+            })
+            .await;
+    }
+    Ok(())
 }
 
 fn transcription_text(response: &Value) -> Result<String> {
@@ -2471,6 +2486,10 @@ mod tests {
         assert!(body.pointer("/tools/0/function").is_none());
         assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
         assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            body.pointer("/reasoning/summary").and_then(Value::as_str),
+            Some("auto")
+        );
     }
 
     #[test]
@@ -2579,6 +2598,44 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].id, "image_1");
         assert_eq!(images[0].data, "aW1hZ2U=");
+    }
+
+    #[tokio::test]
+    async fn response_process_events_include_web_search_and_reasoning_parameters() {
+        let output = vec![
+            json!({
+                "type": "reasoning",
+                "id": "reasoning_1",
+                "summary": [{"type": "summary_text", "text": "Plan the search."}],
+            }),
+            json!({
+                "type": "web_search_call",
+                "id": "web_1",
+                "action": {"type": "search", "query": "Mobius work graph"},
+            }),
+        ];
+        let (events, mut received) = mpsc::channel(4);
+        emit_response_process_events(&output, &events)
+            .await
+            .unwrap();
+        assert!(matches!(
+            received.recv().await,
+            Some(AgentEvent::ToolCall { name, arguments, .. })
+                if name == "reasoning" && arguments["summary"][0]["text"] == "Plan the search."
+        ));
+        assert!(matches!(
+            received.recv().await,
+            Some(AgentEvent::ToolResult { name, .. }) if name == "reasoning"
+        ));
+        assert!(matches!(
+            received.recv().await,
+            Some(AgentEvent::ToolCall { name, arguments, .. })
+                if name == "web_search" && arguments["query"] == "Mobius work graph"
+        ));
+        assert!(matches!(
+            received.recv().await,
+            Some(AgentEvent::ToolResult { name, .. }) if name == "web_search"
+        ));
     }
 
     #[tokio::test]
