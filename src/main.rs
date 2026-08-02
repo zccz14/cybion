@@ -1424,6 +1424,7 @@ fn tool_definitions(filesystem_tools_enabled: bool, bash_tools_enabled: bool) ->
             json!({"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
             json!({"type":"function","name":"read_file","description":"Read a file from any path on this machine. Binary files are returned as base64 JSON.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
             json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}),
+            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}}}),
         ]);
     }
     if bash_tools_enabled {
@@ -1492,6 +1493,11 @@ async fn execute_tool(
             path,
             args.get("content").and_then(Value::as_str).unwrap_or(""),
         ),
+        "edit_file" => execute_edit_file(
+            path,
+            args.get("old_text").and_then(Value::as_str).unwrap_or(""),
+            args.get("new_text").and_then(Value::as_str).unwrap_or(""),
+        ),
         "run_bash" => tool_execution(run_bash(args, cancellation).await),
         _ => tool_execution("error: unknown tool"),
     }
@@ -1499,14 +1505,39 @@ async fn execute_tool(
 
 fn execute_write_file(path: &str, content: &str) -> ToolExecution {
     let previous = std::fs::read_to_string(path).ok();
+    save_file(path, previous.as_deref(), content, "written")
+}
+
+fn execute_edit_file(path: &str, old_text: &str, new_text: &str) -> ToolExecution {
+    if old_text.is_empty() {
+        return tool_execution("error: old_text must not be empty");
+    }
+    let previous = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => return tool_execution(format!("error: {error}")),
+    };
+    match previous.match_indices(old_text).count() {
+        0 => tool_execution("error: old_text was not found"),
+        1 => save_file(
+            path,
+            Some(&previous),
+            &previous.replacen(old_text, new_text, 1),
+            "edited",
+        ),
+        count => tool_execution(format!(
+            "error: old_text occurs {count} times; provide a unique match"
+        )),
+    }
+}
+
+fn save_file(path: &str, previous: Option<&str>, content: &str, output: &str) -> ToolExecution {
     match std::fs::write(path, content) {
         Ok(()) => {
             let (added_lines, deleted_lines) = previous
-                .as_deref()
                 .map(|previous| line_change_counts(previous, content))
                 .unwrap_or((content.lines().count(), 0));
             ToolExecution {
-                output: "written".to_owned(),
+                output: output.to_owned(),
                 added_lines: Some(added_lines),
                 deleted_lines: Some(deleted_lines),
             }
@@ -1698,6 +1729,32 @@ mod tests {
         assert_eq!(
             line_change_counts("first\nsecond\nthird", "first\nupdated\nthird\nfourth"),
             (2, 1)
+        );
+    }
+
+    #[test]
+    fn edit_file_replaces_one_unique_text_section() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), "first\nsecond\nthird\n").unwrap();
+        let result = execute_edit_file(temp.path().to_str().unwrap(), "second", "updated");
+        assert_eq!(result.output, "edited");
+        assert_eq!(result.added_lines, Some(1));
+        assert_eq!(result.deleted_lines, Some(1));
+        assert_eq!(
+            std::fs::read_to_string(temp.path()).unwrap(),
+            "first\nupdated\nthird\n"
+        );
+    }
+
+    #[test]
+    fn edit_file_rejects_ambiguous_text_without_writing() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), "duplicate\nduplicate\n").unwrap();
+        let result = execute_edit_file(temp.path().to_str().unwrap(), "duplicate", "updated");
+        assert!(result.output.contains("occurs 2 times"));
+        assert_eq!(
+            std::fs::read_to_string(temp.path()).unwrap(),
+            "duplicate\nduplicate\n"
         );
     }
 

@@ -167,12 +167,12 @@ function ConversationEntry({ item }: { item: ConversationItem }) {
     const path = typeof item.arguments.path === 'string' ? item.arguments.path : ''
     const command = typeof item.arguments.command === 'string' ? item.arguments.command : ''
     const action = item.complete ? {
-      list_files: t('listedFiles'), read_file: t('readFile'), write_file: t('wroteFile'), run_bash: t('ranCommand'),
+      list_files: t('listedFiles'), read_file: t('readFile'), write_file: t('wroteFile'), edit_file: t('wroteFile'), run_bash: t('ranCommand'),
     }[item.name] : {
-      list_files: t('listingFiles'), read_file: t('readingFile'), write_file: t('writingFile'), run_bash: t('runningCommand'),
+      list_files: t('listingFiles'), read_file: t('readingFile'), write_file: t('writingFile'), edit_file: t('writingFile'), run_bash: t('runningCommand'),
     }[item.name]
     const target = command || path || item.name
-    const changes = item.complete && item.name === 'write_file' && item.added_lines !== undefined && item.deleted_lines !== undefined ? ` · ${t('addedLines')} ${item.added_lines ?? 0} ${t('lines')} · ${t('deletedLines')} ${item.deleted_lines ?? 0} ${t('lines')}` : ''
+    const changes = item.complete && (item.name === 'write_file' || item.name === 'edit_file') && item.added_lines !== undefined && item.deleted_lines !== undefined ? ` · ${t('addedLines')} ${item.added_lines ?? 0} ${t('lines')} · ${t('deletedLines')} ${item.deleted_lines ?? 0} ${t('lines')}` : ''
     return <div className="flex items-start gap-2 text-sm text-muted-foreground">{item.complete ? <CheckIcon className="mt-0.5 size-4 text-foreground" /> : <Spinner className="mt-0.5" />}<span className="break-all">{action ?? item.name} <code className="font-mono text-foreground">{target}</code>{changes}</span></div>
   }
   if (item.message.role !== 'assistant') return <Message align="end"><MessageContent><Card size="sm"><CardContent className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.message.content ?? ''}</ReactMarkdown></CardContent></Card></MessageContent></Message>
@@ -229,7 +229,7 @@ function ToolsetsPage({ token }: { token: string }) {
   const filesystemEnabled = toolsetsQuery.data?.filesystem_enabled ?? false
   const bashEnabled = toolsetsQuery.data?.bash_enabled ?? false
   const toolsets: ToolsetPreview[] = [
-    { id: 'filesystem', name: t('filesystemToolset'), description: t('filesystemToolsetDescription'), tools: ['list_files', 'read_file', 'write_file'], enabled: filesystemEnabled },
+    { id: 'filesystem', name: t('filesystemToolset'), description: t('filesystemToolsetDescription'), tools: ['list_files', 'read_file', 'write_file', 'edit_file'], enabled: filesystemEnabled },
     { id: 'bash', name: t('shellToolset'), description: t('shellToolsetDescription'), tools: ['run_bash'], enabled: bashEnabled },
   ]
   const selected = toolsets.find((toolset) => toolset.enabled) ?? toolsets[0]
