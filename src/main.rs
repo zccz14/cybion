@@ -138,6 +138,32 @@ struct ChatMessage {
     tool_calls: Option<Value>,
 }
 
+#[derive(Serialize)]
+struct ConversationMessage {
+    role: String,
+    content: String,
+    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentUsage {
+    duration_ms: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+struct AgentResult {
+    message: ChatMessage,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
 #[derive(Deserialize)]
 struct AgentTurn {
     run_id: String,
@@ -178,7 +204,7 @@ enum AgentEvent {
     ToolCall { call_id: String, name: String },
     ToolResult { call_id: String, name: String },
     Context { input_tokens: u64 },
-    Complete { message: ChatMessage },
+    Complete { message: ConversationMessage },
     Error { error: String },
 }
 
@@ -261,32 +287,88 @@ fn open_db(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>> {
+fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
     let connection = open_db(path)?;
     connection
-        .prepare("SELECT role, content FROM conversation_messages ORDER BY id")?
+        .prepare(
+            "SELECT role, content, created_at, duration_ms, input_tokens, output_tokens
+             FROM conversation_messages ORDER BY id",
+        )?
         .query_map([], |row| {
-            Ok(ChatMessage {
+            Ok(ConversationMessage {
                 role: row.get(0)?,
-                content: Value::String(row.get(1)?),
-                tool_call_id: None,
-                tool_calls: None,
+                content: row.get(1)?,
+                created_at: row.get(2)?,
+                duration_ms: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
             })
         })?
         .collect::<std::result::Result<_, _>>()
         .map_err(Into::into)
 }
 
-fn append_conversation(path: &Path, message: &ChatMessage) -> Result<()> {
+fn conversation_context(messages: Vec<ConversationMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .map(|message| ChatMessage {
+            role: message.role,
+            content: Value::String(message.content),
+            tool_call_id: None,
+            tool_calls: None,
+        })
+        .collect()
+}
+
+fn append_conversation(
+    path: &Path,
+    message: &ChatMessage,
+    usage: Option<AgentUsage>,
+) -> Result<ConversationMessage> {
     let content = message
         .content
         .as_str()
         .ok_or_else(|| anyhow!("conversation content must be text"))?;
+    let created_at = chrono::Utc::now().to_rfc3339();
     let connection = open_db(path)?;
     connection.execute(
-        "INSERT INTO conversation_messages (role, content, created_at) VALUES (?1, ?2, ?3)",
-        params![message.role, content, chrono::Utc::now().to_rfc3339()],
+        "INSERT INTO conversation_messages (role, content, created_at, duration_ms, input_tokens, output_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            message.role,
+            content,
+            created_at,
+            usage.map(|value| value.duration_ms),
+            usage.map(|value| value.input_tokens),
+            usage.map(|value| value.output_tokens),
+        ],
     )?;
+    Ok(ConversationMessage {
+        role: message.role.clone(),
+        content: content.to_owned(),
+        created_at,
+        duration_ms: usage.map(|value| value.duration_ms),
+        input_tokens: usage.map(|value| value.input_tokens),
+        output_tokens: usage.map(|value| value.output_tokens),
+    })
+}
+
+fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(conversation_messages)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (name, definition) in [
+        ("duration_ms", "INTEGER"),
+        ("input_tokens", "INTEGER"),
+        ("output_tokens", "INTEGER"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection.execute_batch(&format!(
+                "ALTER TABLE conversation_messages ADD COLUMN {name} {definition}"
+            ))?;
+        }
+    }
     Ok(())
 }
 
@@ -306,9 +388,13 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
            content TEXT NOT NULL,
-           created_at TEXT NOT NULL
+           created_at TEXT NOT NULL,
+           duration_ms INTEGER,
+           input_tokens INTEGER,
+           output_tokens INTEGER
          );",
     )?;
+    ensure_conversation_metadata_columns(&connection)?;
     connection.execute(
         "INSERT INTO app_meta (key, value) VALUES ('machine_id', ?1)
          ON CONFLICT(key) DO NOTHING",
@@ -956,7 +1042,7 @@ async fn peer_status(
 async fn conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> ApiResult<Vec<ChatMessage>> {
+) -> ApiResult<Vec<ConversationMessage>> {
     identity(&state, &headers).await?;
     let messages = load_conversation(&state.db_path).map_err(|_| {
         error(
@@ -985,18 +1071,18 @@ async fn agent_turn(
             "cannot read configuration",
         )
     })?;
-    append_conversation(&state.db_path, &input.message).map_err(|_| {
+    append_conversation(&state.db_path, &input.message, None).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot save conversation message",
         )
     })?;
-    let messages = load_conversation(&state.db_path).map_err(|_| {
+    let messages = conversation_context(load_conversation(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot read conversation",
         )
-    })?;
+    })?);
     let client = state.client.clone();
     let db_path = state.db_path.clone();
     let active_runs = state.active_runs.clone();
@@ -1004,14 +1090,22 @@ async fn agent_turn(
     let (cancel, cancellation) = watch::channel(false);
     active_runs.lock().await.insert(run_id.clone(), cancel);
     let (events, receiver) = mpsc::channel(32);
+    let started_at = Instant::now();
     tokio::spawn(async move {
         let event = match run_agent(&client, &config, messages, &events, cancellation).await {
-            Ok(message) => match append_conversation(&db_path, &message) {
-                Ok(()) => AgentEvent::Complete { message },
-                Err(cause) => AgentEvent::Error {
-                    error: format!("cannot save assistant message: {cause}"),
-                },
-            },
+            Ok(result) => {
+                let usage = AgentUsage {
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                    input_tokens: result.input_tokens,
+                    output_tokens: result.output_tokens,
+                };
+                match append_conversation(&db_path, &result.message, Some(usage)) {
+                    Ok(message) => AgentEvent::Complete { message },
+                    Err(cause) => AgentEvent::Error {
+                        error: format!("cannot save assistant message: {cause}"),
+                    },
+                }
+            }
             Err(cause) => AgentEvent::Error {
                 error: cause.to_string(),
             },
@@ -1045,7 +1139,9 @@ async fn run_agent(
     messages: Vec<ChatMessage>,
     events: &mpsc::Sender<AgentEvent>,
     mut cancellation: watch::Receiver<bool>,
-) -> Result<ChatMessage> {
+) -> Result<AgentResult> {
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
     let mut items = messages
         .into_iter()
         .map(|message| json!({ "role": message.role, "content": message.content }))
@@ -1072,12 +1168,21 @@ async fn run_agent(
             _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
         };
         let response = completed_response_from_sse(&response)?;
-        if let Some(input_tokens) = response
+        if let Some(response_input_tokens) = response
             .pointer("/usage/input_tokens")
             .and_then(Value::as_u64)
         {
-            let _ = events.send(AgentEvent::Context { input_tokens }).await;
+            input_tokens += response_input_tokens;
+            let _ = events
+                .send(AgentEvent::Context {
+                    input_tokens: response_input_tokens,
+                })
+                .await;
         }
+        output_tokens += response
+            .pointer("/usage/output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
         let output = response
             .get("output")
             .and_then(Value::as_array)
@@ -1089,11 +1194,15 @@ async fn run_agent(
             .cloned()
             .collect::<Vec<_>>();
         if calls.is_empty() {
-            return Ok(ChatMessage {
-                role: "assistant".to_owned(),
-                content: Value::String(output_text(&output)),
-                tool_call_id: None,
-                tool_calls: None,
+            return Ok(AgentResult {
+                message: ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: Value::String(output_text(&output)),
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                input_tokens,
+                output_tokens,
             });
         }
         items.extend(output);
@@ -1278,13 +1387,52 @@ mod tests {
                     tool_call_id: None,
                     tool_calls: None,
                 },
+                None,
             )
             .unwrap();
         }
         let messages = load_conversation(&db).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].content, Value::String("hi".to_owned()));
+        assert_eq!(messages[1].content, "hi");
+    }
+
+    #[test]
+    fn conversation_metadata_is_added_to_existing_message_tables() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        let connection = open_db(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE conversation_messages (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   role TEXT NOT NULL,
+                   content TEXT NOT NULL,
+                   created_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+        bootstrap_database(&db).unwrap();
+        append_conversation(
+            &db,
+            &ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String("done".to_owned()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Some(AgentUsage {
+                duration_ms: 1_250,
+                input_tokens: 800,
+                output_tokens: 200,
+            }),
+        )
+        .unwrap();
+        let message = load_conversation(&db).unwrap().pop().unwrap();
+        assert_eq!(message.duration_ms, Some(1_250));
+        assert_eq!(message.input_tokens, Some(800));
+        assert_eq!(message.output_tokens, Some(200));
     }
 
     #[test]
@@ -1383,7 +1531,7 @@ mod tests {
         .await
         .unwrap();
         server.abort();
-        assert_eq!(reply.content, Value::String("complete".to_owned()));
+        assert_eq!(reply.message.content, Value::String("complete".to_owned()));
         assert!(matches!(
             received_events.recv().await,
             Some(AgentEvent::ToolCall { name, .. }) if name == "list_files"
