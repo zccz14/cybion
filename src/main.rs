@@ -27,6 +27,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -188,11 +189,13 @@ struct UpdateSettings {
 #[derive(Serialize)]
 struct ToolsetsResponse {
     filesystem_enabled: bool,
+    bash_enabled: bool,
 }
 
 #[derive(Deserialize)]
 struct UpdateToolsets {
     filesystem_enabled: bool,
+    bash_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -419,6 +422,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [],
     )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('toolset_bash_enabled', 'true')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
     Ok(())
 }
 
@@ -434,6 +442,7 @@ struct Config {
     openai_api_key: String,
     default_model: String,
     filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
     machine_id: String,
 }
 
@@ -456,6 +465,7 @@ fn load_config(path: &Path) -> Result<Config> {
         openai_api_key: required("openai_api_key")?,
         default_model: required("default_model")?,
         filesystem_tools_enabled: required("toolset_filesystem_enabled")?.parse()?,
+        bash_tools_enabled: required("toolset_bash_enabled")?.parse()?,
         machine_id: required("machine_id")?,
     })
 }
@@ -792,6 +802,7 @@ async fn toolsets(
     })?;
     Ok(Json(ToolsetsResponse {
         filesystem_enabled: config.filesystem_tools_enabled,
+        bash_enabled: config.bash_tools_enabled,
     }))
 }
 
@@ -815,8 +826,21 @@ async fn update_toolsets(
                 "cannot save toolset configuration",
             )
         })?;
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('toolset_bash_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.bash_enabled.to_string()],
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save toolset configuration",
+            )
+        })?;
     Ok(Json(ToolsetsResponse {
         filesystem_enabled: input.filesystem_enabled,
+        bash_enabled: input.bash_enabled,
     }))
 }
 
@@ -1218,6 +1242,7 @@ async fn run_agent(
                 &config.default_model,
                 &items,
                 config.filesystem_tools_enabled,
+                config.bash_tools_enabled,
             ));
         let response = tokio::select! {
             response = request.send() => response?,
@@ -1287,7 +1312,7 @@ async fn run_agent(
                     name: name.to_owned(),
                 })
                 .await;
-            let result = execute_tool(name, args).await;
+            let result = execute_tool(name, args, cancellation.clone()).await;
             let _ = events
                 .send(AgentEvent::ToolResult {
                     call_id: call_id.to_owned(),
@@ -1303,15 +1328,21 @@ async fn run_agent(
     }
 }
 
-fn responses_request_body(model: &str, input: &[Value], filesystem_tools_enabled: bool) -> Value {
+fn responses_request_body(
+    model: &str,
+    input: &[Value],
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+) -> Value {
     let mut body = json!({
         "model": model,
         "input": input,
         "store": false,
         "stream": true,
     });
-    if filesystem_tools_enabled {
-        body["tools"] = tool_definitions();
+    let tools = tool_definitions(filesystem_tools_enabled, bash_tools_enabled);
+    if filesystem_tools_enabled || bash_tools_enabled {
+        body["tools"] = tools;
         body["tool_choice"] = Value::String("auto".to_owned());
     }
     body
@@ -1367,15 +1398,22 @@ fn transcription_text(response: &Value) -> Result<String> {
         .ok_or_else(|| anyhow!("transcription response has no text"))
 }
 
-fn tool_definitions() -> Value {
-    json!([
-      {"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}},
-      {"type":"function","name":"read_file","description":"Read a file from any path on this machine. Binary files are returned as base64 JSON.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}},
-      {"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}
-    ])
+fn tool_definitions(filesystem_tools_enabled: bool, bash_tools_enabled: bool) -> Value {
+    let mut tools = Vec::new();
+    if filesystem_tools_enabled {
+        tools.extend([
+            json!({"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
+            json!({"type":"function","name":"read_file","description":"Read a file from any path on this machine. Binary files are returned as base64 JSON.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
+            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}),
+        ]);
+    }
+    if bash_tools_enabled {
+        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command on this Mobius machine. Return stdout, stderr, and the exit status.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"}}}}));
+    }
+    Value::Array(tools)
 }
 
-async fn execute_tool(name: &str, args: Value) -> String {
+async fn execute_tool(name: &str, args: Value, cancellation: watch::Receiver<bool>) -> String {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     match name {
         "list_files" => match std::fs::read_dir(path) {
@@ -1403,7 +1441,33 @@ async fn execute_tool(name: &str, args: Value) -> String {
         )
         .map(|_| "written".to_owned())
         .unwrap_or_else(|error| format!("error: {error}")),
+        "run_bash" => run_bash(args, cancellation).await,
         _ => "error: unknown tool".to_owned(),
+    }
+}
+
+async fn run_bash(args: Value, mut cancellation: watch::Receiver<bool>) -> String {
+    let Some(command) = args.get("command").and_then(Value::as_str) else {
+        return "error: missing bash command".to_owned();
+    };
+    if *cancellation.borrow() {
+        return "error: command cancelled".to_owned();
+    }
+    let output = Command::new("bash")
+        .args(["-lc", command])
+        .kill_on_drop(true)
+        .output();
+    tokio::select! {
+        result = output => match result {
+            Ok(output) => json!({
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+                "exit_code": output.status.code(),
+            }).to_string(),
+            Err(error) => format!("error: cannot run bash: {error}"),
+        },
+        _ = cancellation.changed() => "error: command cancelled".to_owned(),
+        _ = tokio::time::sleep(Duration::from_secs(60)) => "error: command timed out after 60 seconds".to_owned(),
     }
 }
 
@@ -1433,6 +1497,14 @@ mod tests {
             )
             .unwrap();
         assert!(!machine_id.is_empty());
+        let bash_enabled: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'toolset_bash_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bash_enabled, "true");
         let default_model: String = connection
             .query_row(
                 "SELECT value FROM app_meta WHERE key = 'default_model'",
@@ -1511,6 +1583,7 @@ mod tests {
             "gpt-5",
             &[json!({"role":"user","content":"list files"})],
             true,
+            false,
         );
         assert_eq!(
             body.get("input").and_then(Value::as_array).unwrap().len(),
@@ -1526,10 +1599,29 @@ mod tests {
     }
 
     #[test]
-    fn disabled_filesystem_toolset_omits_tools_from_responses_request() {
-        let body = responses_request_body("gpt-5", &[], false);
+    fn disabled_toolsets_omit_tools_from_responses_request() {
+        let body = responses_request_body("gpt-5", &[], false, false);
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
+        let tools = tool_definitions(false, true);
+        let tools = tools.as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].get("name").and_then(Value::as_str),
+            Some("run_bash")
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_tool_returns_stdout_and_exit_status() {
+        let result = run_bash(json!({"command":"printf hello"}), watch::channel(false).1).await;
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result.get("stdout").and_then(Value::as_str), Some("hello"));
+        assert_eq!(result.get("exit_code").and_then(Value::as_i64), Some(0));
     }
 
     #[test]
@@ -1592,6 +1684,7 @@ mod tests {
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
             filesystem_tools_enabled: true,
+            bash_tools_enabled: false,
             machine_id: "machine".to_owned(),
         };
         let (events, mut received_events) = mpsc::channel(4);
