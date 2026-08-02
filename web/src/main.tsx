@@ -38,12 +38,14 @@ type Peer = { id: string; name: string; base_url: string; created_at: string }
 type FileEntry = { name: string; path: string; kind: 'file' | 'directory'; size: number }
 type SystemResources = { sampled_at: number; sample_interval_ms: number; cpu: { usage_percent: number; load_1m: number; logical_cpus: number }; memory: { used_bytes: number; total_bytes: number; available_bytes: number; process_used_bytes: number; other_used_bytes: number; usage_percent: number; swap_used_bytes: number; swap_total_bytes: number }; network: { receive_bytes_per_second: number; transmit_bytes_per_second: number; interfaces: number }; disk: { mount_point: string; used_bytes: number; total_bytes: number; available_bytes: number; usage_percent: number } | null; sqlite: { main_bytes: number; wal_bytes: number; shm_bytes: number; total_bytes: number; freelist_bytes: number; freelist_percent: number } }
 type GeneratedImage = { id: string; data: string }
-type ChatMessage = { role: string; content: string | null; images?: GeneratedImage[]; created_at?: string; duration_ms?: number; input_tokens?: number; output_tokens?: number }
+type ChatMessage = { id?: number; role: string; content: string | null; images?: GeneratedImage[]; created_at?: string; duration_ms?: number; input_tokens?: number; output_tokens?: number }
 type Transcription = { text: string }
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
 type AgentEvent = { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown> } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
 type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; added_lines?: number | null; deleted_lines?: number | null }
+type ConversationRun = { id: string; user_message_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled'; events: AgentEvent[] }
+type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[] }
 type Session = SessionSnapshot
 type Language = 'en' | 'zh'
 type ToolsetPreview = { id: 'filesystem' | 'bash' | 'web_search' | 'image_generation'; name: string; description: string; tools: string[]; enabled: boolean }
@@ -136,17 +138,58 @@ function Workspace({ sdk, token }: { sdk: AuthMiniApi | null; token: string }) {
   return <SidebarProvider><Sidebar><SidebarHeader><div className="flex items-center gap-2 px-2 py-1 font-heading text-lg font-semibold"><TerminalSquareIcon />Mobius</div></SidebarHeader><SidebarContent><SidebarGroup><SidebarGroupLabel>{t('machine')}</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{nav.map(({ to, label, icon: Icon }) => <SidebarMenuItem key={to}><SidebarMenuButton asChild tooltip={label}><NavLink to={to} className={({ isActive }) => isActive ? 'font-medium' : ''}><Icon /><span>{label}</span></NavLink></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent><SidebarFooter><div className="flex items-center gap-2 px-2 text-xs text-muted-foreground"><ServerIcon />{status.data?.hostname ?? t('connecting')}</div><DropdownMenu><DropdownMenuTrigger asChild><Button className="self-center" variant="ghost" size="icon-sm"><LanguagesIcon /><span className="sr-only">{t('language')}</span></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuRadioGroup value={language} onValueChange={(value) => setLanguage(value as Language)}><DropdownMenuRadioItem value="zh">中文</DropdownMenuRadioItem><DropdownMenuRadioItem value="en">English</DropdownMenuRadioItem></DropdownMenuRadioGroup></DropdownMenuContent></DropdownMenu><Button variant="ghost" size="sm" onClick={toggleTheme}><MonitorCogIcon data-icon="inline-start" />{dark ? t('light') : t('dark')}</Button><Button variant="ghost" size="sm" onClick={async () => { await sdk?.session.logout(); navigate('/console') }}>{t('signOut')}</Button></SidebarFooter></Sidebar><SidebarInset><header className="flex h-14 items-center gap-3 border-b px-4"><SidebarTrigger><PanelLeftIcon /></SidebarTrigger><Separator orientation="vertical" className="h-4" /><div className="min-w-0"><p className="truncate text-sm font-medium">{status.data?.hostname ?? t('loadingMachine')}</p></div><Badge className="ml-auto" variant="secondary">{t('online')}</Badge></header><Routes><Route path="/console" element={<Console token={token} />} /><Route path="/work" element={<WorkPage token={token} />} /><Route path="/machines" element={<Machines token={token} />} /><Route path="/files" element={<FilesPage token={token} />} /><Route path="/resources" element={<ResourcesPage token={token} />} /><Route path="/tools" element={<ToolsetsPage token={token} />} /><Route path="/skills" element={<SkillsPage token={token} />} /><Route path="/settings" element={<SettingsPage token={token} />} /><Route path="*" element={<Navigate to="/console" replace />} /></Routes></SidebarInset></SidebarProvider>
 }
 
+function conversationItems(state: ConversationState): ConversationItem[] {
+  const runs = new Map<number, ConversationRun[]>()
+  state.runs.forEach((run) => runs.set(run.user_message_id, [...(runs.get(run.user_message_id) ?? []), run]))
+  return state.messages.flatMap((message) => {
+    const entries: ConversationItem[] = [{ kind: 'message', id: message.id?.toString() ?? crypto.randomUUID(), message, queued: false }]
+    if (message.role !== 'user' || message.id === undefined) return entries
+    runs.get(message.id)?.forEach((run) => run.events.forEach((event) => {
+      if (event.type === 'tool_call') entries.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false })
+      if (event.type === 'tool_result') {
+        const tool = entries.find((entry): entry is Extract<ConversationItem, { kind: 'tool' }> => entry.kind === 'tool' && entry.call_id === event.call_id)
+        if (tool) Object.assign(tool, { complete: true, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
+      }
+    }))
+    return entries
+  })
+}
+
+function latestContextTokens(runs: ConversationRun[]) {
+  for (const event of runs.flatMap((run) => run.events).reverse()) if (event.type === 'context') return event.input_tokens
+  return null
+}
+
+function runError(runs: ConversationRun[]) {
+  const run = runs.at(-1)
+  if (run?.status !== 'failed') return ''
+  for (const event of [...run.events].reverse()) if (event.type === 'error') return event.error
+  return ''
+}
+
 function Console({ token }: { token: string }) {
   const { t } = useUi()
-  const conversationQuery = useQuery({ queryKey: ['conversation'], queryFn: () => api<ChatMessage[]>('/api/conversation', token), refetchOnWindowFocus: false })
-  const [conversation, setConversation] = useState<ConversationItem[]>([]); const conversationRef = useRef(conversation); const queueRef = useRef<{ id: string; message: ChatMessage }[]>([]); const activeRef = useRef<{ id: string; controller: AbortController } | null>(null); const recorderRef = useRef<MediaRecorder | null>(null); const composingRef = useRef(false); const draftRef = useRef<HTMLTextAreaElement>(null)
+  const queryClient = useQueryClient()
+  const conversationQuery = useQuery({ queryKey: ['conversation'], queryFn: () => api<ConversationState>('/api/conversation', token), refetchOnWindowFocus: false })
+  const [conversation, setConversation] = useState<ConversationItem[]>([]); const conversationRef = useRef(conversation); const queueRef = useRef<{ id: string; message: ChatMessage }[]>([]); const activeRef = useRef<{ id: string; controller?: AbortController } | null>(null); const recorderRef = useRef<MediaRecorder | null>(null); const composingRef = useRef(false); const draftRef = useRef<HTMLTextAreaElement>(null)
   const [activeRun, setActiveRun] = useState<string | null>(null); const [contextTokens, setContextTokens] = useState<number | null>(null); const [error, setError] = useState(''); const [recording, setRecording] = useState(false); const [transcribing, setTranscribing] = useState(false); const [conversationInitialized, setConversationInitialized] = useState(false)
   const updateConversation = (next: ConversationItem[]) => { conversationRef.current = next; setConversation(next) }
-  useEffect(() => { if (!conversationQuery.data || activeRef.current) return; updateConversation(conversationQuery.data.map((message) => ({ kind: 'message', id: crypto.randomUUID(), message, queued: false }))); setConversationInitialized(true) }, [conversationQuery.data])
+  useEffect(() => {
+    if (!conversationQuery.data || activeRef.current?.controller) return
+    const running = conversationQuery.data.runs.find((run) => run.status === 'running')
+    updateConversation(conversationItems(conversationQuery.data))
+    setContextTokens(latestContextTokens(conversationQuery.data.runs))
+    setError(runError(conversationQuery.data.runs))
+    setConversationInitialized(true)
+    activeRef.current = running ? { id: running.id } : null
+    setActiveRun(running?.id ?? null)
+    if (!running) void drain()
+  }, [conversationQuery.data])
+  useEffect(() => { if (!conversationQuery.data?.runs.some((run) => run.status === 'running')) return; const interval = window.setInterval(() => { void conversationQuery.refetch() }, 1000); return () => window.clearInterval(interval) }, [conversationQuery.data])
   useEffect(() => () => { const recorder = recorderRef.current; recorderRef.current = null; if (recorder?.state !== 'inactive') recorder?.stop(); recorder?.stream.getTracks().forEach((track) => track.stop()) }, [])
-  const drain = async (): Promise<void> => { if (activeRef.current || queueRef.current.length === 0) return; const next = queueRef.current.shift()!; updateConversation(conversationRef.current.map((item) => item.kind === 'message' && item.id === next.id ? { ...item, queued: false } : item)); const runId = crypto.randomUUID(); const controller = new AbortController(); activeRef.current = { id: runId, controller }; setActiveRun(runId); setError(''); try { await streamAgentTurn(token, runId, next.message, controller.signal, (event) => { if (event.type === 'tool_call') updateConversation([...conversationRef.current, { kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false }]); if (event.type === 'tool_result') updateConversation(conversationRef.current.map((item) => item.kind === 'tool' && item.call_id === event.call_id ? { ...item, complete: true, added_lines: event.added_lines, deleted_lines: event.deleted_lines } : item)); if (event.type === 'context') setContextTokens(event.input_tokens); if (event.type === 'complete') updateConversation([...conversationRef.current, { kind: 'message', id: crypto.randomUUID(), message: event.message, queued: false }]) }) } catch (cause) { if (!controller.signal.aborted) setError(message(cause)) } finally { activeRef.current = null; setActiveRun(null); void drain() } }
+  const drain = async (): Promise<void> => { if (activeRef.current || queueRef.current.length === 0) return; const next = queueRef.current.shift()!; updateConversation(conversationRef.current.map((item) => item.kind === 'message' && item.id === next.id ? { ...item, queued: false } : item)); const runId = crypto.randomUUID(); const controller = new AbortController(); activeRef.current = { id: runId, controller }; setActiveRun(runId); setError(''); try { await streamAgentTurn(token, runId, next.message, controller.signal, (event) => { if (event.type === 'tool_call') updateConversation([...conversationRef.current, { kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false }]); if (event.type === 'tool_result') updateConversation(conversationRef.current.map((item) => item.kind === 'tool' && item.call_id === event.call_id ? { ...item, complete: true, added_lines: event.added_lines, deleted_lines: event.deleted_lines } : item)); if (event.type === 'context') setContextTokens(event.input_tokens); if (event.type === 'complete') updateConversation([...conversationRef.current, { kind: 'message', id: event.message.id?.toString() ?? crypto.randomUUID(), message: event.message, queued: false }]) }) } catch (cause) { if (!controller.signal.aborted) setError(message(cause)) } finally { activeRef.current = null; setActiveRun(null); await queryClient.invalidateQueries({ queryKey: ['conversation'] }); void drain() } }
   const submit = (event: FormEvent) => { event.preventDefault(); const input = draftRef.current; if (!input) return; const content = input.value.trim(); if (!content) return; const queued = activeRef.current !== null || queueRef.current.length > 0; const entry: Extract<ConversationItem, { kind: 'message' }> = { kind: 'message', id: crypto.randomUUID(), message: { role: 'user', content }, queued }; updateConversation([...conversationRef.current, entry]); queueRef.current.push({ id: entry.id, message: entry.message }); input.value = ''; void drain() }
-  const stop = async () => { const active = activeRef.current; if (!active) return; queueRef.current = []; updateConversation(conversationRef.current.filter((item) => item.kind !== 'message' || !item.queued)); active.controller.abort(); await api(`/api/agent/turn/${active.id}`, token, { method: 'DELETE' }).catch(() => undefined) }
+  const stop = async () => { const id = activeRun ?? activeRef.current?.id; if (!id) return; queueRef.current = []; updateConversation(conversationRef.current.filter((item) => item.kind !== 'message' || !item.queued)); activeRef.current?.controller?.abort(); await api(`/api/agent/turn/${id}`, token, { method: 'DELETE' }).catch(() => undefined); await queryClient.invalidateQueries({ queryKey: ['conversation'] }) }
   const toggleRecording = async () => {
     const current = recorderRef.current
     if (current) { if (current.state !== 'inactive') current.stop(); return }

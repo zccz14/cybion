@@ -174,8 +174,9 @@ struct GeneratedImage {
     data: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct ConversationMessage {
+    id: i64,
     role: String,
     content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -187,6 +188,25 @@ struct ConversationMessage {
     input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_tokens: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ConversationState {
+    messages: Vec<ConversationMessage>,
+    runs: Vec<ConversationRun>,
+}
+
+#[derive(Serialize)]
+struct ConversationRun {
+    id: String,
+    user_message_id: i64,
+    status: String,
+    events: Vec<AgentEvent>,
+}
+
+struct AgentEventSink<'a> {
+    run_id: &'a str,
+    sender: &'a mpsc::Sender<AgentEvent>,
 }
 
 #[derive(Clone, Copy)]
@@ -303,7 +323,7 @@ struct SetupInput {
     openai_base_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentEvent {
     ToolCall {
@@ -504,18 +524,19 @@ fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
     let connection = open_db(path)?;
     connection
         .prepare(
-            "SELECT role, content, created_at, duration_ms, input_tokens, output_tokens, images
+            "SELECT id, role, content, created_at, duration_ms, input_tokens, output_tokens, images
              FROM conversation_messages ORDER BY id",
         )?
         .query_map([], |row| {
             Ok(ConversationMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                created_at: row.get(2)?,
-                duration_ms: row.get(3)?,
-                input_tokens: row.get(4)?,
-                output_tokens: row.get(5)?,
-                images: serde_json::from_str(&row.get::<_, Option<String>>(6)?.unwrap_or_default())
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                duration_ms: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                images: serde_json::from_str(&row.get::<_, Option<String>>(7)?.unwrap_or_default())
                     .unwrap_or_default(),
             })
         })?
@@ -563,6 +584,7 @@ fn append_conversation(
         ],
     )?;
     Ok(ConversationMessage {
+        id: connection.last_insert_rowid(),
         role: message.role.clone(),
         content: content.to_owned(),
         images: message.images.clone().unwrap_or_default(),
@@ -571,6 +593,86 @@ fn append_conversation(
         input_tokens: usage.map(|value| value.input_tokens),
         output_tokens: usage.map(|value| value.output_tokens),
     })
+}
+
+fn create_agent_run(path: &Path, id: &str, user_message_id: i64) -> Result<()> {
+    open_db(path)?.execute(
+        "INSERT INTO agent_runs (id, user_message_id, status, created_at)
+         VALUES (?1, ?2, 'running', ?3)",
+        params![id, user_message_id, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn append_agent_event(path: &Path, run_id: &str, event: &AgentEvent) -> Result<()> {
+    let event_type = match event {
+        AgentEvent::ToolCall { .. } => "tool_call",
+        AgentEvent::ToolResult { .. } => "tool_result",
+        AgentEvent::Context { .. } => "context",
+        AgentEvent::Complete { .. } => "complete",
+        AgentEvent::Error { .. } => "error",
+    };
+    open_db(path)?.execute(
+        "INSERT INTO agent_events (run_id, event_type, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            run_id,
+            event_type,
+            serde_json::to_string(event)?,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn finish_agent_run(path: &Path, id: &str, status: &str) -> Result<()> {
+    open_db(path)?.execute(
+        "UPDATE agent_runs SET status = ?1, completed_at = ?2 WHERE id = ?3",
+        params![status, chrono::Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn load_conversation_state(path: &Path) -> Result<ConversationState> {
+    let connection = open_db(path)?;
+    let messages = load_conversation(path)?;
+    let mut runs = connection
+        .prepare("SELECT id, user_message_id, status FROM agent_runs ORDER BY created_at, id")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(id, user_message_id, status)| {
+            let events = connection
+                .prepare("SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY id")?
+                .query_map([&id], |row| row.get::<_, String>(0))?
+                .map(|event| Ok(serde_json::from_str::<AgentEvent>(&event?)?))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(ConversationRun {
+                id,
+                user_message_id,
+                status,
+                events,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    runs.shrink_to_fit();
+    Ok(ConversationState { messages, runs })
+}
+
+async fn send_agent_event(
+    db_path: &Path,
+    sink: &AgentEventSink<'_>,
+    event: AgentEvent,
+) -> Result<()> {
+    append_agent_event(db_path, sink.run_id, &event)?;
+    let _ = sink.sender.send(event).await;
+    Ok(())
 }
 
 fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
@@ -763,6 +865,21 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            output_tokens INTEGER,
            images TEXT
          );
+         CREATE TABLE IF NOT EXISTS agent_runs (
+           id TEXT PRIMARY KEY,
+           user_message_id INTEGER NOT NULL REFERENCES conversation_messages(id),
+           status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+           created_at TEXT NOT NULL,
+           completed_at TEXT
+         );
+         CREATE TABLE IF NOT EXISTS agent_events (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+           event_type TEXT NOT NULL CHECK(event_type IN ('tool_call', 'tool_result', 'context', 'complete', 'error')),
+           payload TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS agent_events_run_id ON agent_events(run_id);
          CREATE TABLE IF NOT EXISTS work_items (
            id INTEGER PRIMARY KEY,
            parent_id INTEGER REFERENCES work_items(id),
@@ -1541,15 +1658,15 @@ async fn peer_status(
 async fn conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> ApiResult<Vec<ConversationMessage>> {
+) -> ApiResult<ConversationState> {
     identity(&state, &headers).await?;
-    let messages = load_conversation(&state.db_path).map_err(|_| {
+    let conversation = load_conversation_state(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot read conversation",
         )
     })?;
-    Ok(Json(messages))
+    Ok(Json(conversation))
 }
 
 async fn work_graph(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<WorkGraph> {
@@ -1767,12 +1884,14 @@ async fn agent_turn(
             "cannot read configuration",
         )
     })?;
-    append_conversation(&state.db_path, &input.message, None).map_err(|_| {
+    let user_message = append_conversation(&state.db_path, &input.message, None).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot save conversation message",
         )
     })?;
+    create_agent_run(&state.db_path, &input.run_id, user_message.id)
+        .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
     let messages = conversation_context(load_conversation(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1789,26 +1908,53 @@ async fn agent_turn(
     let (events, receiver) = mpsc::channel(32);
     let started_at = Instant::now();
     tokio::spawn(async move {
-        let event =
-            match run_agent(&client, &config, messages, &skills, &events, cancellation).await {
-                Ok(result) => {
-                    let usage = AgentUsage {
-                        duration_ms: started_at.elapsed().as_millis() as u64,
-                        input_tokens: result.input_tokens,
-                        output_tokens: result.output_tokens,
-                    };
-                    match append_conversation(&db_path, &result.message, Some(usage)) {
-                        Ok(message) => AgentEvent::Complete { message },
-                        Err(cause) => AgentEvent::Error {
-                            error: format!("cannot save assistant message: {cause}"),
-                        },
-                    }
+        let event = match run_agent(
+            &client,
+            &config,
+            messages,
+            &db_path,
+            &skills,
+            AgentEventSink {
+                run_id: &run_id,
+                sender: &events,
+            },
+            cancellation,
+        )
+        .await
+        {
+            Ok(result) => {
+                let usage = AgentUsage {
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                    input_tokens: result.input_tokens,
+                    output_tokens: result.output_tokens,
+                };
+                match append_conversation(&db_path, &result.message, Some(usage)) {
+                    Ok(message) => AgentEvent::Complete { message },
+                    Err(cause) => AgentEvent::Error {
+                        error: format!("cannot save assistant message: {cause}"),
+                    },
                 }
-                Err(cause) => AgentEvent::Error {
-                    error: cause.to_string(),
-                },
-            };
-        let _ = events.send(event).await;
+            }
+            Err(cause) => AgentEvent::Error {
+                error: cause.to_string(),
+            },
+        };
+        let status = match &event {
+            AgentEvent::Complete { .. } => "completed",
+            AgentEvent::Error { error } if error == "agent stopped" => "cancelled",
+            AgentEvent::Error { .. } => "failed",
+            _ => unreachable!("agent runs always end with a terminal event"),
+        };
+        let _ = send_agent_event(
+            &db_path,
+            &AgentEventSink {
+                run_id: &run_id,
+                sender: &events,
+            },
+            event,
+        )
+        .await;
+        let _ = finish_agent_run(&db_path, &run_id, status);
         active_runs.lock().await.remove(&run_id);
     });
     let stream = ReceiverStream::new(receiver).map(|event| {
@@ -1835,8 +1981,9 @@ async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
     messages: Vec<ChatMessage>,
+    db_path: &Path,
     skills: &Arc<StdRwLock<SkillCatalog>>,
-    events: &mpsc::Sender<AgentEvent>,
+    events: AgentEventSink<'_>,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<AgentResult> {
     let mut input_tokens = 0;
@@ -1879,11 +2026,14 @@ async fn run_agent(
             .and_then(Value::as_u64)
         {
             input_tokens += response_input_tokens;
-            let _ = events
-                .send(AgentEvent::Context {
+            send_agent_event(
+                db_path,
+                &events,
+                AgentEvent::Context {
                     input_tokens: response_input_tokens,
-                })
-                .await;
+                },
+            )
+            .await?;
         }
         output_tokens += response
             .pointer("/usage/output_tokens")
@@ -1895,7 +2045,7 @@ async fn run_agent(
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
         let images = generated_images(&output);
-        emit_response_process_events(&output, events).await?;
+        emit_response_process_events(&output, db_path, &events).await?;
         let calls = output
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
@@ -1929,22 +2079,28 @@ async fn run_agent(
                     .and_then(Value::as_str)
                     .unwrap_or("{}"),
             )?;
-            let _ = events
-                .send(AgentEvent::ToolCall {
+            send_agent_event(
+                db_path,
+                &events,
+                AgentEvent::ToolCall {
                     call_id: call_id.to_owned(),
                     name: name.to_owned(),
                     arguments: args.clone(),
-                })
-                .await;
-            let execution = execute_tool(name, args, cancellation.clone()).await;
-            let _ = events
-                .send(AgentEvent::ToolResult {
+                },
+            )
+            .await?;
+            let execution = execute_tool(name, args, db_path, cancellation.clone()).await;
+            send_agent_event(
+                db_path,
+                &events,
+                AgentEvent::ToolResult {
                     call_id: call_id.to_owned(),
                     name: name.to_owned(),
                     added_lines: execution.added_lines,
                     deleted_lines: execution.deleted_lines,
-                })
-                .await;
+                },
+            )
+            .await?;
             items.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
@@ -2008,7 +2164,7 @@ fn responses_request_body(
 fn skill_instructions(skills: &SkillCatalog) -> String {
     let metadata = serde_json::to_string(&skills.skills).expect("skill metadata is serializable");
     format!(
-        "Installed SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
+        "Work Items are Mobius's persistent delivery graph. For a user request that has a deliverable or needs sustained execution, inspect it with get_work_graph, then create or update Work Items to represent the work. Use parent_id for the work-breakdown tree and depends_on_ids for prerequisites. Keep status accurate: ready, running, waiting, satisfied, superseded, or cancelled. Only mark an item satisfied when evidence_text is non-empty; record the resulting artifact or outcome in delivery_text. Before updating an item, inspect the graph and send every required field back to update_work_item. Do not create Work Items for casual questions with no delivery.\nInstalled SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
     )
 }
 
@@ -2072,7 +2228,8 @@ fn reasoning_parameters(item: &Value) -> Value {
 
 async fn emit_response_process_events(
     output: &[Value],
-    events: &mpsc::Sender<AgentEvent>,
+    db_path: &Path,
+    events: &AgentEventSink<'_>,
 ) -> Result<()> {
     for item in output {
         let response_type = item.get("type").and_then(Value::as_str);
@@ -2089,21 +2246,27 @@ async fn emit_response_process_events(
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("{name} output item has no id"))?;
-        let _ = events
-            .send(AgentEvent::ToolCall {
+        send_agent_event(
+            db_path,
+            events,
+            AgentEvent::ToolCall {
                 call_id: call_id.to_owned(),
                 name: name.to_owned(),
                 arguments,
-            })
-            .await;
-        let _ = events
-            .send(AgentEvent::ToolResult {
+            },
+        )
+        .await?;
+        send_agent_event(
+            db_path,
+            events,
+            AgentEvent::ToolResult {
                 call_id: call_id.to_owned(),
                 name: name.to_owned(),
                 added_lines: None,
                 deleted_lines: None,
-            })
-            .await;
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2123,7 +2286,11 @@ fn tool_definitions(
     web_search_enabled: bool,
     image_generation_enabled: bool,
 ) -> Value {
-    let mut tools = Vec::new();
+    let mut tools = vec![
+        json!({"type":"function","name":"get_work_graph","description":"Read Mobius's persistent Work Item graph, including every item, its parent tree, dependency edges, and the currently unblocked ready_ids.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
+        json!({"type":"function","name":"create_work_item","description":"Create a persistent Work Item for a delivery objective or a bounded part of it. Use parent_id for the work-breakdown tree and depends_on_ids for prerequisites.","parameters":{"type":"object","additionalProperties":false,"required":["title"],"properties":{"parent_id":{"type":["integer","null"]},"title":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["ready","running","waiting","satisfied","superseded","cancelled"]},"evidence_text":{"type":"string"},"delivery_text":{"type":"string"},"depends_on_ids":{"type":"array","items":{"type":"integer"}}}}}),
+        json!({"type":"function","name":"update_work_item","description":"Replace a Work Item's fields and dependencies. First call get_work_graph, then provide every field exactly as it should remain. A satisfied item requires non-empty evidence_text.","parameters":{"type":"object","additionalProperties":false,"required":["id","parent_id","title","description","status","evidence_text","delivery_text","depends_on_ids"],"properties":{"id":{"type":"integer"},"parent_id":{"type":["integer","null"]},"title":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["ready","running","waiting","satisfied","superseded","cancelled"]},"evidence_text":{"type":"string"},"delivery_text":{"type":"string"},"depends_on_ids":{"type":"array","items":{"type":"integer"}}}}}),
+    ];
     if filesystem_tools_enabled {
         tools.extend([
             json!({"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
@@ -2173,10 +2340,17 @@ fn line_change_counts(previous: &str, next: &str) -> (usize, usize) {
 async fn execute_tool(
     name: &str,
     args: Value,
+    db_path: &Path,
     cancellation: watch::Receiver<bool>,
 ) -> ToolExecution {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     match name {
+        "get_work_graph" => load_work_graph(db_path)
+            .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
+            .map(tool_execution)
+            .unwrap_or_else(|cause| tool_execution(format!("error: {cause}"))),
+        "create_work_item" => execute_create_work_item(db_path, args),
+        "update_work_item" => execute_update_work_item(db_path, args),
         "list_files" => match std::fs::read_dir(path) {
             Ok(entries) => tool_execution(
                 serde_json::to_string(
@@ -2212,6 +2386,104 @@ async fn execute_tool(
         "run_bash" => tool_execution(run_bash(args, cancellation).await),
         _ => tool_execution("error: unknown tool"),
     }
+}
+
+fn execute_create_work_item(db_path: &Path, args: Value) -> ToolExecution {
+    let input = match serde_json::from_value::<CreateWorkItem>(args) {
+        Ok(input) => input,
+        Err(cause) => return tool_execution(format!("error: invalid Work Item: {cause}")),
+    };
+    create_work_item_for_agent(db_path, input)
+        .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
+        .map(tool_execution)
+        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+}
+
+fn execute_update_work_item(db_path: &Path, mut args: Value) -> ToolExecution {
+    let id = match args.get("id").and_then(Value::as_i64) {
+        Some(id) => id,
+        None => return tool_execution("error: update_work_item requires an integer id"),
+    };
+    let Some(arguments) = args.as_object_mut() else {
+        return tool_execution("error: update_work_item arguments must be an object");
+    };
+    arguments.remove("id");
+    let input = match serde_json::from_value::<UpdateWorkItem>(args) {
+        Ok(input) => input,
+        Err(cause) => return tool_execution(format!("error: invalid Work Item: {cause}")),
+    };
+    update_work_item_for_agent(db_path, id, input)
+        .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
+        .map(tool_execution)
+        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+}
+
+fn create_work_item_for_agent(db_path: &Path, input: CreateWorkItem) -> Result<WorkGraph> {
+    validate_work_item(&input.title, &input.status, &input.evidence_text)?;
+    let mut connection = open_db(db_path)?;
+    let transaction = connection.transaction()?;
+    if let Some(parent_id) = input.parent_id
+        && !work_item_exists(&transaction, parent_id)?
+    {
+        return Err(anyhow!("work item parent does not exist"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    transaction.execute(
+        "INSERT INTO work_items (parent_id, title, description, status, evidence_text, delivery_text, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        params![
+            input.parent_id,
+            input.title.trim(),
+            input.description,
+            input.status,
+            input.evidence_text,
+            input.delivery_text,
+            now,
+        ],
+    )?;
+    let id = transaction.last_insert_rowid();
+    if work_item_parent_has_cycle(&transaction, id)? {
+        return Err(anyhow!("work item parent would create a cycle"));
+    }
+    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)?;
+    transaction.commit()?;
+    load_work_graph(db_path)
+}
+
+fn update_work_item_for_agent(db_path: &Path, id: i64, input: UpdateWorkItem) -> Result<WorkGraph> {
+    validate_work_item(&input.title, &input.status, &input.evidence_text)?;
+    let mut connection = open_db(db_path)?;
+    let transaction = connection.transaction()?;
+    if !work_item_exists(&transaction, id)? {
+        return Err(anyhow!("work item does not exist"));
+    }
+    if let Some(parent_id) = input.parent_id
+        && !work_item_exists(&transaction, parent_id)?
+    {
+        return Err(anyhow!("work item parent does not exist"));
+    }
+    transaction.execute(
+        "UPDATE work_items
+         SET parent_id = ?1, title = ?2, description = ?3, status = ?4,
+             evidence_text = ?5, delivery_text = ?6, updated_at = ?7
+         WHERE id = ?8",
+        params![
+            input.parent_id,
+            input.title.trim(),
+            input.description,
+            input.status,
+            input.evidence_text,
+            input.delivery_text,
+            chrono::Utc::now().to_rfc3339(),
+            id,
+        ],
+    )?;
+    if work_item_parent_has_cycle(&transaction, id)? {
+        return Err(anyhow!("work item parent would create a cycle"));
+    }
+    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)?;
+    transaction.commit()?;
+    load_work_graph(db_path)
 }
 
 fn execute_write_file(path: &str, content: &str) -> ToolExecution {
@@ -2368,6 +2640,56 @@ mod tests {
     }
 
     #[test]
+    fn conversation_state_restores_persisted_agent_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("inspect the project".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "run_1", user.id).unwrap();
+        append_agent_event(
+            &db,
+            "run_1",
+            &AgentEvent::ToolCall {
+                call_id: "call_1".to_owned(),
+                name: "read_file".to_owned(),
+                arguments: json!({"path": "/project/README.md"}),
+            },
+        )
+        .unwrap();
+        append_agent_event(
+            &db,
+            "run_1",
+            &AgentEvent::ToolResult {
+                call_id: "call_1".to_owned(),
+                name: "read_file".to_owned(),
+                added_lines: None,
+                deleted_lines: None,
+            },
+        )
+        .unwrap();
+        let state = load_conversation_state(&db).unwrap();
+        assert_eq!(state.messages[0].id, user.id);
+        assert_eq!(state.runs.len(), 1);
+        assert_eq!(state.runs[0].user_message_id, user.id);
+        assert_eq!(state.runs[0].status, "running");
+        assert!(matches!(
+            state.runs[0].events[1],
+            AgentEvent::ToolResult { ref name, .. } if name == "read_file"
+        ));
+    }
+
+    #[test]
     fn conversation_metadata_is_added_to_existing_message_tables() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -2481,6 +2803,35 @@ mod tests {
     }
 
     #[test]
+    fn work_item_tools_create_and_update_persistent_items() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let created = execute_create_work_item(
+            &db,
+            json!({"title":"Ship Work Item tools","description":"Expose the graph to the agent"}),
+        );
+        let graph: Value = serde_json::from_str(&created.output).unwrap();
+        assert_eq!(graph["items"][0]["status"], "ready");
+        let updated = execute_update_work_item(
+            &db,
+            json!({
+                "id": 1,
+                "parent_id": null,
+                "title": "Ship Work Item tools",
+                "description": "Expose the graph to the agent",
+                "status": "satisfied",
+                "evidence_text": "tool test passed",
+                "delivery_text": "native Work Item tools",
+                "depends_on_ids": []
+            }),
+        );
+        let graph: Value = serde_json::from_str(&updated.output).unwrap();
+        assert_eq!(graph["items"][0]["status"], "satisfied");
+        assert_eq!(graph["items"][0]["delivery_text"], "native Work Item tools");
+    }
+
+    #[test]
     fn responses_body_uses_input_and_responses_function_schema() {
         let skills = SkillCatalog::default();
         let body = responses_request_body(
@@ -2510,7 +2861,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_toolsets_omit_tools_from_responses_request() {
+    fn disabled_toolsets_leave_the_core_work_item_tools_available() {
         let body = responses_request_body(
             "gpt-5",
             &[],
@@ -2520,8 +2871,14 @@ mod tests {
             false,
             &SkillCatalog::default(),
         );
-        assert!(body.get("tools").is_none());
-        assert!(body.get("tool_choice").is_none());
+        assert_eq!(
+            body.get("tools").and_then(Value::as_array).unwrap().len(),
+            3
+        );
+        assert_eq!(
+            body.get("tool_choice").and_then(Value::as_str),
+            Some("auto")
+        );
     }
 
     #[test]
@@ -2560,10 +2917,34 @@ mod tests {
     fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
         let tools = tool_definitions(false, true, false, false);
         let tools = tools.as_array().unwrap();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 4);
         assert_eq!(
-            tools[0].get("name").and_then(Value::as_str),
+            tools[3].get("name").and_then(Value::as_str),
             Some("run_bash")
+        );
+    }
+
+    #[test]
+    fn work_item_tools_and_instructions_are_always_available() {
+        let body = responses_request_body(
+            "gpt-5",
+            &[],
+            false,
+            false,
+            false,
+            false,
+            &SkillCatalog::default(),
+        );
+        let tools = body.get("tools").and_then(Value::as_array).unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0]["name"], "get_work_graph");
+        assert_eq!(tools[1]["name"], "create_work_item");
+        assert_eq!(tools[2]["name"], "update_work_item");
+        assert!(
+            body["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Work Items")
         );
     }
 
@@ -2578,9 +2959,12 @@ mod tests {
             false,
             &SkillCatalog::default(),
         );
-        assert_eq!(
-            body.pointer("/tools/0/type").and_then(Value::as_str),
-            Some("web_search")
+        assert!(
+            body.get("tools")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .any(|tool| tool["type"] == "web_search")
         );
         assert_eq!(
             body.get("tool_choice").and_then(Value::as_str),
@@ -2616,9 +3000,12 @@ mod tests {
             true,
             &SkillCatalog::default(),
         );
-        assert_eq!(
-            body.pointer("/tools/0/type").and_then(Value::as_str),
-            Some("image_generation")
+        assert!(
+            body.get("tools")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .any(|tool| tool["type"] == "image_generation")
         );
     }
 
@@ -2648,10 +3035,33 @@ mod tests {
                 "action": {"type": "search", "query": "Mobius work graph"},
             }),
         ];
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("search".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "run_1", user.id).unwrap();
         let (events, mut received) = mpsc::channel(4);
-        emit_response_process_events(&output, &events)
-            .await
-            .unwrap();
+        emit_response_process_events(
+            &output,
+            &db,
+            &AgentEventSink {
+                run_id: "run_1",
+                sender: &events,
+            },
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             received.recv().await,
             Some(AgentEvent::ToolCall { name, arguments, .. })
@@ -2806,6 +3216,22 @@ mod tests {
             image_generation_enabled: false,
             machine_id: "machine".to_owned(),
         };
+        let db = tempfile::tempdir().unwrap();
+        let db_path = db.path().join("default.sqlite3");
+        bootstrap_database(&db_path).unwrap();
+        let user = append_conversation(
+            &db_path,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("list root".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db_path, "run_1", user.id).unwrap();
         let (events, mut received_events) = mpsc::channel(4);
         let reply = run_agent(
             &reqwest::Client::new(),
@@ -2817,8 +3243,12 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
             }],
+            &db_path,
             &skills,
-            &events,
+            AgentEventSink {
+                run_id: "run_1",
+                sender: &events,
+            },
             watch::channel(false).1,
         )
         .await
