@@ -141,7 +141,7 @@ struct ChatMessage {
 #[derive(Deserialize)]
 struct AgentTurn {
     run_id: String,
-    messages: Vec<ChatMessage>,
+    message: ChatMessage,
 }
 
 #[derive(Serialize)]
@@ -240,6 +240,7 @@ fn app(state: AppState) -> Router {
         .route("/api/peers", get(list_peers).post(create_peer))
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
+        .route("/api/conversation", get(conversation))
         .route("/api/agent/turn", post(agent_turn))
         .route("/api/agent/turn/{id}", delete(cancel_agent_turn))
         .with_state(state)
@@ -260,6 +261,35 @@ fn open_db(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>> {
+    let connection = open_db(path)?;
+    connection
+        .prepare("SELECT role, content FROM conversation_messages ORDER BY id")?
+        .query_map([], |row| {
+            Ok(ChatMessage {
+                role: row.get(0)?,
+                content: Value::String(row.get(1)?),
+                tool_call_id: None,
+                tool_calls: None,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(Into::into)
+}
+
+fn append_conversation(path: &Path, message: &ChatMessage) -> Result<()> {
+    let content = message
+        .content
+        .as_str()
+        .ok_or_else(|| anyhow!("conversation content must be text"))?;
+    let connection = open_db(path)?;
+    connection.execute(
+        "INSERT INTO conversation_messages (role, content, created_at) VALUES (?1, ?2, ?3)",
+        params![message.role, content, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn bootstrap_database(db: &Path) -> Result<()> {
     let parent = db.parent().context("database path has no parent")?;
     std::fs::create_dir_all(parent)?;
@@ -270,6 +300,12 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            id TEXT PRIMARY KEY,
            name TEXT NOT NULL,
            base_url TEXT NOT NULL UNIQUE,
+           created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS conversation_messages (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+           content TEXT NOT NULL,
            created_at TEXT NOT NULL
          );",
     )?;
@@ -917,27 +953,65 @@ async fn peer_status(
     Ok(Json(response))
 }
 
+async fn conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<ChatMessage>> {
+    identity(&state, &headers).await?;
+    let messages = load_conversation(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read conversation",
+        )
+    })?;
+    Ok(Json(messages))
+}
+
 async fn agent_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<AgentTurn>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     identity(&state, &headers).await?;
+    if input.message.role != "user" || input.message.content.as_str().is_none_or(str::is_empty) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "agent turns require a non-empty user message",
+        ));
+    }
     let config = load_config(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot read configuration",
         )
     })?;
+    append_conversation(&state.db_path, &input.message).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot save conversation message",
+        )
+    })?;
+    let messages = load_conversation(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read conversation",
+        )
+    })?;
     let client = state.client.clone();
+    let db_path = state.db_path.clone();
     let active_runs = state.active_runs.clone();
     let run_id = input.run_id.clone();
     let (cancel, cancellation) = watch::channel(false);
     active_runs.lock().await.insert(run_id.clone(), cancel);
     let (events, receiver) = mpsc::channel(32);
     tokio::spawn(async move {
-        let event = match run_agent(&client, &config, input, &events, cancellation).await {
-            Ok(message) => AgentEvent::Complete { message },
+        let event = match run_agent(&client, &config, messages, &events, cancellation).await {
+            Ok(message) => match append_conversation(&db_path, &message) {
+                Ok(()) => AgentEvent::Complete { message },
+                Err(cause) => AgentEvent::Error {
+                    error: format!("cannot save assistant message: {cause}"),
+                },
+            },
             Err(cause) => AgentEvent::Error {
                 error: cause.to_string(),
             },
@@ -968,12 +1042,11 @@ async fn cancel_agent_turn(
 async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
-    input: AgentTurn,
+    messages: Vec<ChatMessage>,
     events: &mpsc::Sender<AgentEvent>,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<ChatMessage> {
-    let mut items = input
-        .messages
+    let mut items = messages
         .into_iter()
         .map(|message| json!({ "role": message.role, "content": message.content }))
         .collect::<Vec<_>>();
@@ -1192,6 +1265,29 @@ mod tests {
     }
 
     #[test]
+    fn conversation_messages_are_stored_in_one_ordered_sequence() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        for (role, content) in [("user", "hello"), ("assistant", "hi")] {
+            append_conversation(
+                &db,
+                &ChatMessage {
+                    role: role.to_owned(),
+                    content: Value::String(content.to_owned()),
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            )
+            .unwrap();
+        }
+        let messages = load_conversation(&db).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].content, Value::String("hi".to_owned()));
+    }
+
+    #[test]
     fn responses_body_uses_input_and_responses_function_schema() {
         let body = responses_request_body(
             "gpt-5",
@@ -1275,15 +1371,12 @@ mod tests {
         let reply = run_agent(
             &reqwest::Client::new(),
             &config,
-            AgentTurn {
-                run_id: "test-run".to_owned(),
-                messages: vec![ChatMessage {
-                    role: "user".to_owned(),
-                    content: Value::String("list root".to_owned()),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }],
-            },
+            vec![ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("list root".to_owned()),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
             &events,
             watch::channel(false).1,
         )
