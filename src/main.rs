@@ -174,8 +174,9 @@ struct GeneratedImage {
     data: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct ConversationMessage {
+    id: i64,
     role: String,
     content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -187,6 +188,25 @@ struct ConversationMessage {
     input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_tokens: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ConversationState {
+    messages: Vec<ConversationMessage>,
+    runs: Vec<ConversationRun>,
+}
+
+#[derive(Serialize)]
+struct ConversationRun {
+    id: String,
+    user_message_id: i64,
+    status: String,
+    events: Vec<AgentEvent>,
+}
+
+struct AgentEventSink<'a> {
+    run_id: &'a str,
+    sender: &'a mpsc::Sender<AgentEvent>,
 }
 
 #[derive(Clone, Copy)]
@@ -303,7 +323,7 @@ struct SetupInput {
     openai_base_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentEvent {
     ToolCall {
@@ -504,18 +524,19 @@ fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
     let connection = open_db(path)?;
     connection
         .prepare(
-            "SELECT role, content, created_at, duration_ms, input_tokens, output_tokens, images
+            "SELECT id, role, content, created_at, duration_ms, input_tokens, output_tokens, images
              FROM conversation_messages ORDER BY id",
         )?
         .query_map([], |row| {
             Ok(ConversationMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                created_at: row.get(2)?,
-                duration_ms: row.get(3)?,
-                input_tokens: row.get(4)?,
-                output_tokens: row.get(5)?,
-                images: serde_json::from_str(&row.get::<_, Option<String>>(6)?.unwrap_or_default())
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                duration_ms: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                images: serde_json::from_str(&row.get::<_, Option<String>>(7)?.unwrap_or_default())
                     .unwrap_or_default(),
             })
         })?
@@ -563,6 +584,7 @@ fn append_conversation(
         ],
     )?;
     Ok(ConversationMessage {
+        id: connection.last_insert_rowid(),
         role: message.role.clone(),
         content: content.to_owned(),
         images: message.images.clone().unwrap_or_default(),
@@ -571,6 +593,86 @@ fn append_conversation(
         input_tokens: usage.map(|value| value.input_tokens),
         output_tokens: usage.map(|value| value.output_tokens),
     })
+}
+
+fn create_agent_run(path: &Path, id: &str, user_message_id: i64) -> Result<()> {
+    open_db(path)?.execute(
+        "INSERT INTO agent_runs (id, user_message_id, status, created_at)
+         VALUES (?1, ?2, 'running', ?3)",
+        params![id, user_message_id, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn append_agent_event(path: &Path, run_id: &str, event: &AgentEvent) -> Result<()> {
+    let event_type = match event {
+        AgentEvent::ToolCall { .. } => "tool_call",
+        AgentEvent::ToolResult { .. } => "tool_result",
+        AgentEvent::Context { .. } => "context",
+        AgentEvent::Complete { .. } => "complete",
+        AgentEvent::Error { .. } => "error",
+    };
+    open_db(path)?.execute(
+        "INSERT INTO agent_events (run_id, event_type, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            run_id,
+            event_type,
+            serde_json::to_string(event)?,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn finish_agent_run(path: &Path, id: &str, status: &str) -> Result<()> {
+    open_db(path)?.execute(
+        "UPDATE agent_runs SET status = ?1, completed_at = ?2 WHERE id = ?3",
+        params![status, chrono::Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn load_conversation_state(path: &Path) -> Result<ConversationState> {
+    let connection = open_db(path)?;
+    let messages = load_conversation(path)?;
+    let mut runs = connection
+        .prepare("SELECT id, user_message_id, status FROM agent_runs ORDER BY created_at, id")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(id, user_message_id, status)| {
+            let events = connection
+                .prepare("SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY id")?
+                .query_map([&id], |row| row.get::<_, String>(0))?
+                .map(|event| Ok(serde_json::from_str::<AgentEvent>(&event?)?))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(ConversationRun {
+                id,
+                user_message_id,
+                status,
+                events,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    runs.shrink_to_fit();
+    Ok(ConversationState { messages, runs })
+}
+
+async fn send_agent_event(
+    db_path: &Path,
+    sink: &AgentEventSink<'_>,
+    event: AgentEvent,
+) -> Result<()> {
+    append_agent_event(db_path, sink.run_id, &event)?;
+    let _ = sink.sender.send(event).await;
+    Ok(())
 }
 
 fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
@@ -763,6 +865,21 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            output_tokens INTEGER,
            images TEXT
          );
+         CREATE TABLE IF NOT EXISTS agent_runs (
+           id TEXT PRIMARY KEY,
+           user_message_id INTEGER NOT NULL REFERENCES conversation_messages(id),
+           status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+           created_at TEXT NOT NULL,
+           completed_at TEXT
+         );
+         CREATE TABLE IF NOT EXISTS agent_events (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+           event_type TEXT NOT NULL CHECK(event_type IN ('tool_call', 'tool_result', 'context', 'complete', 'error')),
+           payload TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS agent_events_run_id ON agent_events(run_id);
          CREATE TABLE IF NOT EXISTS work_items (
            id INTEGER PRIMARY KEY,
            parent_id INTEGER REFERENCES work_items(id),
@@ -1541,15 +1658,15 @@ async fn peer_status(
 async fn conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> ApiResult<Vec<ConversationMessage>> {
+) -> ApiResult<ConversationState> {
     identity(&state, &headers).await?;
-    let messages = load_conversation(&state.db_path).map_err(|_| {
+    let conversation = load_conversation_state(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot read conversation",
         )
     })?;
-    Ok(Json(messages))
+    Ok(Json(conversation))
 }
 
 async fn work_graph(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<WorkGraph> {
@@ -1767,12 +1884,14 @@ async fn agent_turn(
             "cannot read configuration",
         )
     })?;
-    append_conversation(&state.db_path, &input.message, None).map_err(|_| {
+    let user_message = append_conversation(&state.db_path, &input.message, None).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot save conversation message",
         )
     })?;
+    create_agent_run(&state.db_path, &input.run_id, user_message.id)
+        .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
     let messages = conversation_context(load_conversation(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1795,7 +1914,10 @@ async fn agent_turn(
             messages,
             &db_path,
             &skills,
-            &events,
+            AgentEventSink {
+                run_id: &run_id,
+                sender: &events,
+            },
             cancellation,
         )
         .await
@@ -1817,7 +1939,22 @@ async fn agent_turn(
                 error: cause.to_string(),
             },
         };
-        let _ = events.send(event).await;
+        let status = match &event {
+            AgentEvent::Complete { .. } => "completed",
+            AgentEvent::Error { error } if error == "agent stopped" => "cancelled",
+            AgentEvent::Error { .. } => "failed",
+            _ => unreachable!("agent runs always end with a terminal event"),
+        };
+        let _ = send_agent_event(
+            &db_path,
+            &AgentEventSink {
+                run_id: &run_id,
+                sender: &events,
+            },
+            event,
+        )
+        .await;
+        let _ = finish_agent_run(&db_path, &run_id, status);
         active_runs.lock().await.remove(&run_id);
     });
     let stream = ReceiverStream::new(receiver).map(|event| {
@@ -1846,7 +1983,7 @@ async fn run_agent(
     messages: Vec<ChatMessage>,
     db_path: &Path,
     skills: &Arc<StdRwLock<SkillCatalog>>,
-    events: &mpsc::Sender<AgentEvent>,
+    events: AgentEventSink<'_>,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<AgentResult> {
     let mut input_tokens = 0;
@@ -1889,11 +2026,14 @@ async fn run_agent(
             .and_then(Value::as_u64)
         {
             input_tokens += response_input_tokens;
-            let _ = events
-                .send(AgentEvent::Context {
+            send_agent_event(
+                db_path,
+                &events,
+                AgentEvent::Context {
                     input_tokens: response_input_tokens,
-                })
-                .await;
+                },
+            )
+            .await?;
         }
         output_tokens += response
             .pointer("/usage/output_tokens")
@@ -1905,7 +2045,7 @@ async fn run_agent(
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
         let images = generated_images(&output);
-        emit_response_process_events(&output, events).await?;
+        emit_response_process_events(&output, db_path, &events).await?;
         let calls = output
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
@@ -1939,22 +2079,28 @@ async fn run_agent(
                     .and_then(Value::as_str)
                     .unwrap_or("{}"),
             )?;
-            let _ = events
-                .send(AgentEvent::ToolCall {
+            send_agent_event(
+                db_path,
+                &events,
+                AgentEvent::ToolCall {
                     call_id: call_id.to_owned(),
                     name: name.to_owned(),
                     arguments: args.clone(),
-                })
-                .await;
+                },
+            )
+            .await?;
             let execution = execute_tool(name, args, db_path, cancellation.clone()).await;
-            let _ = events
-                .send(AgentEvent::ToolResult {
+            send_agent_event(
+                db_path,
+                &events,
+                AgentEvent::ToolResult {
                     call_id: call_id.to_owned(),
                     name: name.to_owned(),
                     added_lines: execution.added_lines,
                     deleted_lines: execution.deleted_lines,
-                })
-                .await;
+                },
+            )
+            .await?;
             items.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
@@ -2082,7 +2228,8 @@ fn reasoning_parameters(item: &Value) -> Value {
 
 async fn emit_response_process_events(
     output: &[Value],
-    events: &mpsc::Sender<AgentEvent>,
+    db_path: &Path,
+    events: &AgentEventSink<'_>,
 ) -> Result<()> {
     for item in output {
         let response_type = item.get("type").and_then(Value::as_str);
@@ -2099,21 +2246,27 @@ async fn emit_response_process_events(
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("{name} output item has no id"))?;
-        let _ = events
-            .send(AgentEvent::ToolCall {
+        send_agent_event(
+            db_path,
+            events,
+            AgentEvent::ToolCall {
                 call_id: call_id.to_owned(),
                 name: name.to_owned(),
                 arguments,
-            })
-            .await;
-        let _ = events
-            .send(AgentEvent::ToolResult {
+            },
+        )
+        .await?;
+        send_agent_event(
+            db_path,
+            events,
+            AgentEvent::ToolResult {
                 call_id: call_id.to_owned(),
                 name: name.to_owned(),
                 added_lines: None,
                 deleted_lines: None,
-            })
-            .await;
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2487,6 +2640,56 @@ mod tests {
     }
 
     #[test]
+    fn conversation_state_restores_persisted_agent_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("inspect the project".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "run_1", user.id).unwrap();
+        append_agent_event(
+            &db,
+            "run_1",
+            &AgentEvent::ToolCall {
+                call_id: "call_1".to_owned(),
+                name: "read_file".to_owned(),
+                arguments: json!({"path": "/project/README.md"}),
+            },
+        )
+        .unwrap();
+        append_agent_event(
+            &db,
+            "run_1",
+            &AgentEvent::ToolResult {
+                call_id: "call_1".to_owned(),
+                name: "read_file".to_owned(),
+                added_lines: None,
+                deleted_lines: None,
+            },
+        )
+        .unwrap();
+        let state = load_conversation_state(&db).unwrap();
+        assert_eq!(state.messages[0].id, user.id);
+        assert_eq!(state.runs.len(), 1);
+        assert_eq!(state.runs[0].user_message_id, user.id);
+        assert_eq!(state.runs[0].status, "running");
+        assert!(matches!(
+            state.runs[0].events[1],
+            AgentEvent::ToolResult { ref name, .. } if name == "read_file"
+        ));
+    }
+
+    #[test]
     fn conversation_metadata_is_added_to_existing_message_tables() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -2832,10 +3035,33 @@ mod tests {
                 "action": {"type": "search", "query": "Mobius work graph"},
             }),
         ];
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("search".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "run_1", user.id).unwrap();
         let (events, mut received) = mpsc::channel(4);
-        emit_response_process_events(&output, &events)
-            .await
-            .unwrap();
+        emit_response_process_events(
+            &output,
+            &db,
+            &AgentEventSink {
+                run_id: "run_1",
+                sender: &events,
+            },
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             received.recv().await,
             Some(AgentEvent::ToolCall { name, arguments, .. })
@@ -2991,6 +3217,21 @@ mod tests {
             machine_id: "machine".to_owned(),
         };
         let db = tempfile::tempdir().unwrap();
+        let db_path = db.path().join("default.sqlite3");
+        bootstrap_database(&db_path).unwrap();
+        let user = append_conversation(
+            &db_path,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("list root".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db_path, "run_1", user.id).unwrap();
         let (events, mut received_events) = mpsc::channel(4);
         let reply = run_agent(
             &reqwest::Client::new(),
@@ -3002,9 +3243,12 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
             }],
-            db.path(),
+            &db_path,
             &skills,
-            &events,
+            AgentEventSink {
+                run_id: "run_1",
+                sender: &events,
+            },
             watch::channel(false).1,
         )
         .await
