@@ -1789,25 +1789,34 @@ async fn agent_turn(
     let (events, receiver) = mpsc::channel(32);
     let started_at = Instant::now();
     tokio::spawn(async move {
-        let event =
-            match run_agent(&client, &config, messages, &skills, &events, cancellation).await {
-                Ok(result) => {
-                    let usage = AgentUsage {
-                        duration_ms: started_at.elapsed().as_millis() as u64,
-                        input_tokens: result.input_tokens,
-                        output_tokens: result.output_tokens,
-                    };
-                    match append_conversation(&db_path, &result.message, Some(usage)) {
-                        Ok(message) => AgentEvent::Complete { message },
-                        Err(cause) => AgentEvent::Error {
-                            error: format!("cannot save assistant message: {cause}"),
-                        },
-                    }
+        let event = match run_agent(
+            &client,
+            &config,
+            messages,
+            &db_path,
+            &skills,
+            &events,
+            cancellation,
+        )
+        .await
+        {
+            Ok(result) => {
+                let usage = AgentUsage {
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                    input_tokens: result.input_tokens,
+                    output_tokens: result.output_tokens,
+                };
+                match append_conversation(&db_path, &result.message, Some(usage)) {
+                    Ok(message) => AgentEvent::Complete { message },
+                    Err(cause) => AgentEvent::Error {
+                        error: format!("cannot save assistant message: {cause}"),
+                    },
                 }
-                Err(cause) => AgentEvent::Error {
-                    error: cause.to_string(),
-                },
-            };
+            }
+            Err(cause) => AgentEvent::Error {
+                error: cause.to_string(),
+            },
+        };
         let _ = events.send(event).await;
         active_runs.lock().await.remove(&run_id);
     });
@@ -1835,6 +1844,7 @@ async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
     messages: Vec<ChatMessage>,
+    db_path: &Path,
     skills: &Arc<StdRwLock<SkillCatalog>>,
     events: &mpsc::Sender<AgentEvent>,
     mut cancellation: watch::Receiver<bool>,
@@ -1936,7 +1946,7 @@ async fn run_agent(
                     arguments: args.clone(),
                 })
                 .await;
-            let execution = execute_tool(name, args, cancellation.clone()).await;
+            let execution = execute_tool(name, args, db_path, cancellation.clone()).await;
             let _ = events
                 .send(AgentEvent::ToolResult {
                     call_id: call_id.to_owned(),
@@ -2008,7 +2018,7 @@ fn responses_request_body(
 fn skill_instructions(skills: &SkillCatalog) -> String {
     let metadata = serde_json::to_string(&skills.skills).expect("skill metadata is serializable");
     format!(
-        "Installed SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
+        "Work Items are Mobius's persistent delivery graph. For a user request that has a deliverable or needs sustained execution, inspect it with get_work_graph, then create or update Work Items to represent the work. Use parent_id for the work-breakdown tree and depends_on_ids for prerequisites. Keep status accurate: ready, running, waiting, satisfied, superseded, or cancelled. Only mark an item satisfied when evidence_text is non-empty; record the resulting artifact or outcome in delivery_text. Before updating an item, inspect the graph and send every required field back to update_work_item. Do not create Work Items for casual questions with no delivery.\nInstalled SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
     )
 }
 
@@ -2123,7 +2133,11 @@ fn tool_definitions(
     web_search_enabled: bool,
     image_generation_enabled: bool,
 ) -> Value {
-    let mut tools = Vec::new();
+    let mut tools = vec![
+        json!({"type":"function","name":"get_work_graph","description":"Read Mobius's persistent Work Item graph, including every item, its parent tree, dependency edges, and the currently unblocked ready_ids.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
+        json!({"type":"function","name":"create_work_item","description":"Create a persistent Work Item for a delivery objective or a bounded part of it. Use parent_id for the work-breakdown tree and depends_on_ids for prerequisites.","parameters":{"type":"object","additionalProperties":false,"required":["title"],"properties":{"parent_id":{"type":["integer","null"]},"title":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["ready","running","waiting","satisfied","superseded","cancelled"]},"evidence_text":{"type":"string"},"delivery_text":{"type":"string"},"depends_on_ids":{"type":"array","items":{"type":"integer"}}}}}),
+        json!({"type":"function","name":"update_work_item","description":"Replace a Work Item's fields and dependencies. First call get_work_graph, then provide every field exactly as it should remain. A satisfied item requires non-empty evidence_text.","parameters":{"type":"object","additionalProperties":false,"required":["id","parent_id","title","description","status","evidence_text","delivery_text","depends_on_ids"],"properties":{"id":{"type":"integer"},"parent_id":{"type":["integer","null"]},"title":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["ready","running","waiting","satisfied","superseded","cancelled"]},"evidence_text":{"type":"string"},"delivery_text":{"type":"string"},"depends_on_ids":{"type":"array","items":{"type":"integer"}}}}}),
+    ];
     if filesystem_tools_enabled {
         tools.extend([
             json!({"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
@@ -2173,10 +2187,17 @@ fn line_change_counts(previous: &str, next: &str) -> (usize, usize) {
 async fn execute_tool(
     name: &str,
     args: Value,
+    db_path: &Path,
     cancellation: watch::Receiver<bool>,
 ) -> ToolExecution {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     match name {
+        "get_work_graph" => load_work_graph(db_path)
+            .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
+            .map(tool_execution)
+            .unwrap_or_else(|cause| tool_execution(format!("error: {cause}"))),
+        "create_work_item" => execute_create_work_item(db_path, args),
+        "update_work_item" => execute_update_work_item(db_path, args),
         "list_files" => match std::fs::read_dir(path) {
             Ok(entries) => tool_execution(
                 serde_json::to_string(
@@ -2212,6 +2233,104 @@ async fn execute_tool(
         "run_bash" => tool_execution(run_bash(args, cancellation).await),
         _ => tool_execution("error: unknown tool"),
     }
+}
+
+fn execute_create_work_item(db_path: &Path, args: Value) -> ToolExecution {
+    let input = match serde_json::from_value::<CreateWorkItem>(args) {
+        Ok(input) => input,
+        Err(cause) => return tool_execution(format!("error: invalid Work Item: {cause}")),
+    };
+    create_work_item_for_agent(db_path, input)
+        .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
+        .map(tool_execution)
+        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+}
+
+fn execute_update_work_item(db_path: &Path, mut args: Value) -> ToolExecution {
+    let id = match args.get("id").and_then(Value::as_i64) {
+        Some(id) => id,
+        None => return tool_execution("error: update_work_item requires an integer id"),
+    };
+    let Some(arguments) = args.as_object_mut() else {
+        return tool_execution("error: update_work_item arguments must be an object");
+    };
+    arguments.remove("id");
+    let input = match serde_json::from_value::<UpdateWorkItem>(args) {
+        Ok(input) => input,
+        Err(cause) => return tool_execution(format!("error: invalid Work Item: {cause}")),
+    };
+    update_work_item_for_agent(db_path, id, input)
+        .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
+        .map(tool_execution)
+        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+}
+
+fn create_work_item_for_agent(db_path: &Path, input: CreateWorkItem) -> Result<WorkGraph> {
+    validate_work_item(&input.title, &input.status, &input.evidence_text)?;
+    let mut connection = open_db(db_path)?;
+    let transaction = connection.transaction()?;
+    if let Some(parent_id) = input.parent_id
+        && !work_item_exists(&transaction, parent_id)?
+    {
+        return Err(anyhow!("work item parent does not exist"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    transaction.execute(
+        "INSERT INTO work_items (parent_id, title, description, status, evidence_text, delivery_text, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        params![
+            input.parent_id,
+            input.title.trim(),
+            input.description,
+            input.status,
+            input.evidence_text,
+            input.delivery_text,
+            now,
+        ],
+    )?;
+    let id = transaction.last_insert_rowid();
+    if work_item_parent_has_cycle(&transaction, id)? {
+        return Err(anyhow!("work item parent would create a cycle"));
+    }
+    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)?;
+    transaction.commit()?;
+    load_work_graph(db_path)
+}
+
+fn update_work_item_for_agent(db_path: &Path, id: i64, input: UpdateWorkItem) -> Result<WorkGraph> {
+    validate_work_item(&input.title, &input.status, &input.evidence_text)?;
+    let mut connection = open_db(db_path)?;
+    let transaction = connection.transaction()?;
+    if !work_item_exists(&transaction, id)? {
+        return Err(anyhow!("work item does not exist"));
+    }
+    if let Some(parent_id) = input.parent_id
+        && !work_item_exists(&transaction, parent_id)?
+    {
+        return Err(anyhow!("work item parent does not exist"));
+    }
+    transaction.execute(
+        "UPDATE work_items
+         SET parent_id = ?1, title = ?2, description = ?3, status = ?4,
+             evidence_text = ?5, delivery_text = ?6, updated_at = ?7
+         WHERE id = ?8",
+        params![
+            input.parent_id,
+            input.title.trim(),
+            input.description,
+            input.status,
+            input.evidence_text,
+            input.delivery_text,
+            chrono::Utc::now().to_rfc3339(),
+            id,
+        ],
+    )?;
+    if work_item_parent_has_cycle(&transaction, id)? {
+        return Err(anyhow!("work item parent would create a cycle"));
+    }
+    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)?;
+    transaction.commit()?;
+    load_work_graph(db_path)
 }
 
 fn execute_write_file(path: &str, content: &str) -> ToolExecution {
@@ -2481,6 +2600,35 @@ mod tests {
     }
 
     #[test]
+    fn work_item_tools_create_and_update_persistent_items() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let created = execute_create_work_item(
+            &db,
+            json!({"title":"Ship Work Item tools","description":"Expose the graph to the agent"}),
+        );
+        let graph: Value = serde_json::from_str(&created.output).unwrap();
+        assert_eq!(graph["items"][0]["status"], "ready");
+        let updated = execute_update_work_item(
+            &db,
+            json!({
+                "id": 1,
+                "parent_id": null,
+                "title": "Ship Work Item tools",
+                "description": "Expose the graph to the agent",
+                "status": "satisfied",
+                "evidence_text": "tool test passed",
+                "delivery_text": "native Work Item tools",
+                "depends_on_ids": []
+            }),
+        );
+        let graph: Value = serde_json::from_str(&updated.output).unwrap();
+        assert_eq!(graph["items"][0]["status"], "satisfied");
+        assert_eq!(graph["items"][0]["delivery_text"], "native Work Item tools");
+    }
+
+    #[test]
     fn responses_body_uses_input_and_responses_function_schema() {
         let skills = SkillCatalog::default();
         let body = responses_request_body(
@@ -2510,7 +2658,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_toolsets_omit_tools_from_responses_request() {
+    fn disabled_toolsets_leave_the_core_work_item_tools_available() {
         let body = responses_request_body(
             "gpt-5",
             &[],
@@ -2520,8 +2668,14 @@ mod tests {
             false,
             &SkillCatalog::default(),
         );
-        assert!(body.get("tools").is_none());
-        assert!(body.get("tool_choice").is_none());
+        assert_eq!(
+            body.get("tools").and_then(Value::as_array).unwrap().len(),
+            3
+        );
+        assert_eq!(
+            body.get("tool_choice").and_then(Value::as_str),
+            Some("auto")
+        );
     }
 
     #[test]
@@ -2560,10 +2714,34 @@ mod tests {
     fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
         let tools = tool_definitions(false, true, false, false);
         let tools = tools.as_array().unwrap();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 4);
         assert_eq!(
-            tools[0].get("name").and_then(Value::as_str),
+            tools[3].get("name").and_then(Value::as_str),
             Some("run_bash")
+        );
+    }
+
+    #[test]
+    fn work_item_tools_and_instructions_are_always_available() {
+        let body = responses_request_body(
+            "gpt-5",
+            &[],
+            false,
+            false,
+            false,
+            false,
+            &SkillCatalog::default(),
+        );
+        let tools = body.get("tools").and_then(Value::as_array).unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0]["name"], "get_work_graph");
+        assert_eq!(tools[1]["name"], "create_work_item");
+        assert_eq!(tools[2]["name"], "update_work_item");
+        assert!(
+            body["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Work Items")
         );
     }
 
@@ -2578,9 +2756,12 @@ mod tests {
             false,
             &SkillCatalog::default(),
         );
-        assert_eq!(
-            body.pointer("/tools/0/type").and_then(Value::as_str),
-            Some("web_search")
+        assert!(
+            body.get("tools")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .any(|tool| tool["type"] == "web_search")
         );
         assert_eq!(
             body.get("tool_choice").and_then(Value::as_str),
@@ -2616,9 +2797,12 @@ mod tests {
             true,
             &SkillCatalog::default(),
         );
-        assert_eq!(
-            body.pointer("/tools/0/type").and_then(Value::as_str),
-            Some("image_generation")
+        assert!(
+            body.get("tools")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .any(|tool| tool["type"] == "image_generation")
         );
     }
 
@@ -2806,6 +2990,7 @@ mod tests {
             image_generation_enabled: false,
             machine_id: "machine".to_owned(),
         };
+        let db = tempfile::tempdir().unwrap();
         let (events, mut received_events) = mpsc::channel(4);
         let reply = run_agent(
             &reqwest::Client::new(),
@@ -2817,6 +3002,7 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
             }],
+            db.path(),
             &skills,
             &events,
             watch::channel(false).1,
