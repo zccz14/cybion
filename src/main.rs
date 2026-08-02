@@ -201,23 +201,29 @@ struct AgentTurn {
 #[derive(Serialize)]
 struct SettingsResponse {
     default_model: String,
+    openai_base_url: String,
+    openai_api_key: String,
 }
 
 #[derive(Deserialize)]
 struct UpdateSettings {
     default_model: String,
+    openai_base_url: String,
+    openai_api_key: String,
 }
 
 #[derive(Serialize)]
 struct ToolsetsResponse {
     filesystem_enabled: bool,
     bash_enabled: bool,
+    web_search_enabled: bool,
 }
 
 #[derive(Deserialize)]
 struct UpdateToolsets {
     filesystem_enabled: bool,
     bash_enabled: bool,
+    web_search_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -551,6 +557,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [],
     )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('toolset_web_search_enabled', 'true')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
     Ok(())
 }
 
@@ -567,6 +578,7 @@ struct Config {
     default_model: String,
     filesystem_tools_enabled: bool,
     bash_tools_enabled: bool,
+    web_search_enabled: bool,
     machine_id: String,
 }
 
@@ -590,6 +602,7 @@ fn load_config(path: &Path) -> Result<Config> {
         default_model: required("default_model")?,
         filesystem_tools_enabled: required("toolset_filesystem_enabled")?.parse()?,
         bash_tools_enabled: required("toolset_bash_enabled")?.parse()?,
+        web_search_enabled: required("toolset_web_search_enabled")?.parse()?,
         machine_id: required("machine_id")?,
     })
 }
@@ -878,6 +891,8 @@ async fn settings(
     })?;
     Ok(Json(SettingsResponse {
         default_model: config.default_model,
+        openai_base_url: config.openai_base_url,
+        openai_api_key: config.openai_api_key,
     }))
 }
 
@@ -894,22 +909,53 @@ async fn update_settings(
             "default_model cannot be empty",
         ));
     }
-    let connection = open_db(&state.db_path)
+    let openai_base_url = input.openai_base_url.trim().trim_end_matches('/');
+    Url::parse(openai_base_url).map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "openai_base_url must be an absolute URL",
+        )
+    })?;
+    let openai_api_key = input.openai_api_key.trim();
+    if openai_api_key.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "openai_api_key cannot be empty",
+        ));
+    }
+    let mut connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    connection
+    let transaction = connection
+        .transaction()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
         .execute(
             "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [default_model],
         )
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot save default model",
-            )
-        })?;
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('openai_base_url', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [openai_base_url],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('openai_api_key', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [openai_api_key],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .commit()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     Ok(Json(SettingsResponse {
         default_model: default_model.to_owned(),
+        openai_base_url: openai_base_url.to_owned(),
+        openai_api_key: openai_api_key.to_owned(),
     }))
 }
 
@@ -927,6 +973,7 @@ async fn toolsets(
     Ok(Json(ToolsetsResponse {
         filesystem_enabled: config.filesystem_tools_enabled,
         bash_enabled: config.bash_tools_enabled,
+        web_search_enabled: config.web_search_enabled,
     }))
 }
 
@@ -976,9 +1023,22 @@ async fn update_toolsets(
                 "cannot save toolset configuration",
             )
         })?;
+    connection
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('toolset_web_search_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.web_search_enabled.to_string()],
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save toolset configuration",
+            )
+        })?;
     Ok(Json(ToolsetsResponse {
         filesystem_enabled: input.filesystem_enabled,
         bash_enabled: input.bash_enabled,
+        web_search_enabled: input.web_search_enabled,
     }))
 }
 
@@ -1384,6 +1444,7 @@ async fn run_agent(
                 &items,
                 config.filesystem_tools_enabled,
                 config.bash_tools_enabled,
+                config.web_search_enabled,
                 &skills
                     .read()
                     .map_err(|_| anyhow!("cannot read skills"))?
@@ -1419,6 +1480,30 @@ async fn run_agent(
             .and_then(Value::as_array)
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
+        for item in output
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("web_search_call"))
+        {
+            let call_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("web search call has no id"))?;
+            let _ = events
+                .send(AgentEvent::ToolCall {
+                    call_id: call_id.to_owned(),
+                    name: "web_search".to_owned(),
+                    arguments: Value::Object(Default::default()),
+                })
+                .await;
+            let _ = events
+                .send(AgentEvent::ToolResult {
+                    call_id: call_id.to_owned(),
+                    name: "web_search".to_owned(),
+                    added_lines: None,
+                    deleted_lines: None,
+                })
+                .await;
+        }
         let calls = output
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
@@ -1481,6 +1566,7 @@ fn responses_request_body(
     input: &[Value],
     filesystem_tools_enabled: bool,
     bash_tools_enabled: bool,
+    web_search_enabled: bool,
     skills: &SkillCatalog,
 ) -> Value {
     let mut body = json!({
@@ -1490,8 +1576,16 @@ fn responses_request_body(
         "stream": true,
         "instructions": skill_instructions(skills),
     });
-    let tools = tool_definitions(filesystem_tools_enabled, bash_tools_enabled);
-    if filesystem_tools_enabled || bash_tools_enabled {
+    let tools = tool_definitions(
+        filesystem_tools_enabled,
+        bash_tools_enabled,
+        web_search_enabled,
+    );
+    if !tools
+        .as_array()
+        .expect("tool definitions are an array")
+        .is_empty()
+    {
         body["tools"] = tools;
         body["tool_choice"] = Value::String("auto".to_owned());
     }
@@ -1555,7 +1649,11 @@ fn transcription_text(response: &Value) -> Result<String> {
         .ok_or_else(|| anyhow!("transcription response has no text"))
 }
 
-fn tool_definitions(filesystem_tools_enabled: bool, bash_tools_enabled: bool) -> Value {
+fn tool_definitions(
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+    web_search_enabled: bool,
+) -> Value {
     let mut tools = Vec::new();
     if filesystem_tools_enabled {
         tools.extend([
@@ -1567,6 +1665,9 @@ fn tool_definitions(filesystem_tools_enabled: bool, bash_tools_enabled: bool) ->
     }
     if bash_tools_enabled {
         tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command on this Mobius machine. Return stdout, stderr, and the exit status.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"}}}}));
+    }
+    if web_search_enabled {
+        tools.push(json!({"type":"web_search"}));
     }
     Value::Array(tools)
 }
@@ -1743,6 +1844,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bash_enabled, "true");
+        let web_search_enabled: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'toolset_web_search_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(web_search_enabled, "true");
         let default_model: String = connection
             .query_row(
                 "SELECT value FROM app_meta WHERE key = 'default_model'",
@@ -1823,6 +1932,7 @@ mod tests {
             &[json!({"role":"user","content":"list files"})],
             true,
             false,
+            false,
             &skills,
         );
         assert_eq!(
@@ -1840,7 +1950,8 @@ mod tests {
 
     #[test]
     fn disabled_toolsets_omit_tools_from_responses_request() {
-        let body = responses_request_body("gpt-5", &[], false, false, &SkillCatalog::default());
+        let body =
+            responses_request_body("gpt-5", &[], false, false, false, &SkillCatalog::default());
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
     }
@@ -1854,7 +1965,7 @@ mod tests {
                 directory: "/skills/release".to_owned(),
             }],
         };
-        let body = responses_request_body("gpt-5", &[], false, false, &skills);
+        let body = responses_request_body("gpt-5", &[], false, false, false, &skills);
         let instructions = body.get("instructions").and_then(Value::as_str).unwrap();
         assert!(instructions.contains("release"));
         assert!(instructions.contains("/skills/release"));
@@ -1879,12 +1990,26 @@ mod tests {
 
     #[test]
     fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
-        let tools = tool_definitions(false, true);
+        let tools = tool_definitions(false, true, false);
         let tools = tools.as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(
             tools[0].get("name").and_then(Value::as_str),
             Some("run_bash")
+        );
+    }
+
+    #[test]
+    fn web_search_toolset_uses_the_native_responses_tool() {
+        let body =
+            responses_request_body("gpt-5", &[], false, false, true, &SkillCatalog::default());
+        assert_eq!(
+            body.pointer("/tools/0/type").and_then(Value::as_str),
+            Some("web_search")
+        );
+        assert_eq!(
+            body.get("tool_choice").and_then(Value::as_str),
+            Some("auto")
         );
     }
 
@@ -2007,6 +2132,7 @@ mod tests {
             default_model: DEFAULT_MODEL_ID.to_owned(),
             filesystem_tools_enabled: true,
             bash_tools_enabled: false,
+            web_search_enabled: false,
             machine_id: "machine".to_owned(),
         };
         let (events, mut received_events) = mpsc::channel(4);
