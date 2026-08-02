@@ -238,6 +238,63 @@ struct UpdateToolsets {
     image_generation_enabled: bool,
 }
 
+#[derive(Serialize)]
+struct WorkItem {
+    id: i64,
+    parent_id: Option<i64>,
+    title: String,
+    description: String,
+    status: String,
+    evidence_text: String,
+    delivery_text: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+struct WorkGraph {
+    items: Vec<WorkItem>,
+    dependencies: Vec<WorkItemDependency>,
+    ready_ids: Vec<i64>,
+}
+
+#[derive(Serialize)]
+struct WorkItemDependency {
+    work_item_id: i64,
+    depends_on_id: i64,
+}
+
+#[derive(Deserialize)]
+struct CreateWorkItem {
+    parent_id: Option<i64>,
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default = "default_work_item_status")]
+    status: String,
+    #[serde(default)]
+    evidence_text: String,
+    #[serde(default)]
+    delivery_text: String,
+    #[serde(default)]
+    depends_on_ids: Vec<i64>,
+}
+
+fn default_work_item_status() -> String {
+    "ready".to_owned()
+}
+
+#[derive(Deserialize)]
+struct UpdateWorkItem {
+    parent_id: Option<i64>,
+    title: String,
+    description: String,
+    status: String,
+    evidence_text: String,
+    delivery_text: String,
+    depends_on_ids: Vec<i64>,
+}
+
 #[derive(Deserialize)]
 struct SetupInput {
     auth_url: String,
@@ -340,6 +397,8 @@ fn app(state: AppState) -> Router {
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
         .route("/api/conversation", get(conversation))
+        .route("/api/work-items", get(work_graph).post(create_work_item))
+        .route("/api/work-items/{id}", put(update_work_item))
         .route("/api/agent/turn", post(agent_turn))
         .route("/api/agent/turn/{id}", delete(cancel_agent_turn))
         .with_state(state)
@@ -534,6 +593,154 @@ fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn load_work_graph(path: &Path) -> Result<WorkGraph> {
+    let connection = open_db(path)?;
+    let items = connection
+        .prepare(
+            "SELECT id, parent_id, title, description, status, evidence_text, delivery_text, created_at, updated_at
+             FROM work_items ORDER BY id",
+        )?
+        .query_map([], |row| {
+            Ok(WorkItem {
+                id: row.get(0)?,
+                parent_id: row.get(1)?,
+                title: row.get(2)?,
+                description: row.get(3)?,
+                status: row.get(4)?,
+                evidence_text: row.get(5)?,
+                delivery_text: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let dependencies = connection
+        .prepare(
+            "SELECT work_item_id, depends_on_id FROM work_item_dependencies
+             ORDER BY work_item_id, depends_on_id",
+        )?
+        .query_map([], |row| {
+            Ok(WorkItemDependency {
+                work_item_id: row.get(0)?,
+                depends_on_id: row.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let ready_ids = connection
+        .prepare(
+            "SELECT item.id FROM work_items item
+             WHERE item.status = 'ready'
+             AND NOT EXISTS (
+               SELECT 1 FROM work_item_dependencies dependency
+               JOIN work_items prerequisite ON prerequisite.id = dependency.depends_on_id
+               WHERE dependency.work_item_id = item.id
+               AND prerequisite.status <> 'satisfied'
+             )
+             ORDER BY item.id",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(WorkGraph {
+        items,
+        dependencies,
+        ready_ids,
+    })
+}
+
+fn valid_work_item_status(status: &str) -> bool {
+    matches!(
+        status,
+        "ready" | "running" | "waiting" | "satisfied" | "superseded" | "cancelled"
+    )
+}
+
+fn validate_work_item(title: &str, status: &str, evidence_text: &str) -> Result<()> {
+    if title.trim().is_empty() {
+        return Err(anyhow!("work item title cannot be empty"));
+    }
+    if !valid_work_item_status(status) {
+        return Err(anyhow!("invalid work item status"));
+    }
+    if status == "satisfied" && evidence_text.trim().is_empty() {
+        return Err(anyhow!("satisfied work items require evidence_text"));
+    }
+    Ok(())
+}
+
+fn work_item_exists(connection: &Connection, id: i64) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_items WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn work_item_parent_has_cycle(connection: &Connection, id: i64) -> Result<bool> {
+    connection
+        .query_row(
+            "WITH RECURSIVE ancestors(id) AS (
+               SELECT parent_id FROM work_items WHERE id = ?1 AND parent_id IS NOT NULL
+               UNION
+               SELECT item.parent_id FROM work_items item
+               JOIN ancestors ON item.id = ancestors.id
+               WHERE item.parent_id IS NOT NULL
+             )
+             SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn dependency_creates_cycle(
+    connection: &Connection,
+    work_item_id: i64,
+    depends_on_id: i64,
+) -> Result<bool> {
+    connection
+        .query_row(
+            "WITH RECURSIVE prerequisites(id) AS (
+               SELECT depends_on_id FROM work_item_dependencies WHERE work_item_id = ?1
+               UNION
+               SELECT dependency.depends_on_id FROM work_item_dependencies dependency
+               JOIN prerequisites ON dependency.work_item_id = prerequisites.id
+             )
+             SELECT EXISTS(SELECT 1 FROM prerequisites WHERE id = ?2)",
+            params![depends_on_id, work_item_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn replace_work_item_dependencies(
+    connection: &Connection,
+    work_item_id: i64,
+    depends_on_ids: &[i64],
+) -> Result<()> {
+    let mut ids = depends_on_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    connection.execute(
+        "DELETE FROM work_item_dependencies WHERE work_item_id = ?1",
+        [work_item_id],
+    )?;
+    for depends_on_id in ids {
+        if work_item_id == depends_on_id || !work_item_exists(connection, depends_on_id)? {
+            return Err(anyhow!("invalid work item dependency"));
+        }
+        if dependency_creates_cycle(connection, work_item_id, depends_on_id)? {
+            return Err(anyhow!("work item dependency would create a cycle"));
+        }
+        connection.execute(
+            "INSERT INTO work_item_dependencies (work_item_id, depends_on_id) VALUES (?1, ?2)",
+            params![work_item_id, depends_on_id],
+        )?;
+    }
+    Ok(())
+}
+
 fn bootstrap_database(db: &Path) -> Result<()> {
     let parent = db.parent().context("database path has no parent")?;
     std::fs::create_dir_all(parent)?;
@@ -555,7 +762,26 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            input_tokens INTEGER,
            output_tokens INTEGER,
            images TEXT
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS work_items (
+           id INTEGER PRIMARY KEY,
+           parent_id INTEGER REFERENCES work_items(id),
+           title TEXT NOT NULL,
+           description TEXT NOT NULL DEFAULT '',
+           status TEXT NOT NULL CHECK(status IN ('ready', 'running', 'waiting', 'satisfied', 'superseded', 'cancelled')) DEFAULT 'ready',
+           evidence_text TEXT NOT NULL DEFAULT '',
+           delivery_text TEXT NOT NULL DEFAULT '',
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS work_item_dependencies (
+           work_item_id INTEGER NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+           depends_on_id INTEGER NOT NULL REFERENCES work_items(id) ON DELETE RESTRICT,
+           PRIMARY KEY (work_item_id, depends_on_id),
+           CHECK(work_item_id <> depends_on_id)
+         );
+         CREATE INDEX IF NOT EXISTS work_item_dependencies_depends_on_id
+           ON work_item_dependencies(depends_on_id);",
     )?;
     ensure_conversation_metadata_columns(&connection)?;
     connection.execute(
@@ -1326,6 +1552,151 @@ async fn conversation(
     Ok(Json(messages))
 }
 
+async fn work_graph(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<WorkGraph> {
+    identity(&state, &headers).await?;
+    load_work_graph(&state.db_path)
+        .map(Json)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read work graph"))
+}
+
+async fn create_work_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkItem>,
+) -> ApiResult<WorkGraph> {
+    identity(&state, &headers).await?;
+    validate_work_item(&input.title, &input.status, &input.evidence_text)
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    let mut connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create work item"))?;
+    if let Some(parent_id) = input.parent_id
+        && !work_item_exists(&transaction, parent_id).map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot validate work item",
+            )
+        })?
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "work item parent does not exist",
+        ));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    transaction
+        .execute(
+            "INSERT INTO work_items (parent_id, title, description, status, evidence_text, delivery_text, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                input.parent_id,
+                input.title.trim(),
+                input.description,
+                input.status,
+                input.evidence_text,
+                input.delivery_text,
+                now,
+            ],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create work item"))?;
+    let id = transaction.last_insert_rowid();
+    if work_item_parent_has_cycle(&transaction, id).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot validate work item",
+        )
+    })? {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "work item parent would create a cycle",
+        ));
+    }
+    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    transaction
+        .commit()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create work item"))?;
+    load_work_graph(&state.db_path)
+        .map(Json)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read work graph"))
+}
+
+async fn update_work_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<UpdateWorkItem>,
+) -> ApiResult<WorkGraph> {
+    identity(&state, &headers).await?;
+    validate_work_item(&input.title, &input.status, &input.evidence_text)
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    let mut connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update work item"))?;
+    if !work_item_exists(&transaction, id).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot validate work item",
+        )
+    })? {
+        return Err(error(StatusCode::NOT_FOUND, "work item does not exist"));
+    }
+    if let Some(parent_id) = input.parent_id
+        && !work_item_exists(&transaction, parent_id).map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot validate work item",
+            )
+        })?
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "work item parent does not exist",
+        ));
+    }
+    transaction
+        .execute(
+            "UPDATE work_items
+             SET parent_id = ?1, title = ?2, description = ?3, status = ?4,
+                 evidence_text = ?5, delivery_text = ?6, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                input.parent_id,
+                input.title.trim(),
+                input.description,
+                input.status,
+                input.evidence_text,
+                input.delivery_text,
+                chrono::Utc::now().to_rfc3339(),
+                id,
+            ],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update work item"))?;
+    if work_item_parent_has_cycle(&transaction, id).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot validate work item",
+        )
+    })? {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "work item parent would create a cycle",
+        ));
+    }
+    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    transaction
+        .commit()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update work item"))?;
+    load_work_graph(&state.db_path)
+        .map(Json)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read work graph"))
+}
+
 async fn transcribe_audio(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2001,6 +2372,80 @@ mod tests {
         assert_eq!(message.duration_ms, Some(1_250));
         assert_eq!(message.input_tokens, Some(800));
         assert_eq!(message.output_tokens, Some(200));
+    }
+
+    #[test]
+    fn work_graph_exposes_the_unblocked_topological_frontier() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO work_items (title, status, evidence_text, delivery_text, created_at, updated_at)
+                 VALUES ('Research', 'ready', '', 'research notes', ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        let research_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO work_items (parent_id, title, status, evidence_text, delivery_text, created_at, updated_at)
+                 VALUES (?1, 'Implement', 'ready', '', 'implementation', ?2, ?2)",
+                params![research_id, now],
+            )
+            .unwrap();
+        let implement_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO work_item_dependencies (work_item_id, depends_on_id) VALUES (?1, ?2)",
+                params![implement_id, research_id],
+            )
+            .unwrap();
+        assert_eq!(load_work_graph(&db).unwrap().ready_ids, vec![research_id]);
+        connection
+            .execute(
+                "UPDATE work_items SET status = 'satisfied', evidence_text = 'source reviewed' WHERE id = ?1",
+                [research_id],
+            )
+            .unwrap();
+        let graph = load_work_graph(&db).unwrap();
+        assert_eq!(graph.ready_ids, vec![implement_id]);
+        assert_eq!(
+            graph
+                .items
+                .iter()
+                .find(|item| item.id == implement_id)
+                .unwrap()
+                .delivery_text,
+            "implementation"
+        );
+    }
+
+    #[test]
+    fn work_item_dependencies_reject_cycles_and_satisfied_items_need_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for title in ["A", "B"] {
+            connection
+                .execute(
+                    "INSERT INTO work_items (title, status, created_at, updated_at) VALUES (?1, 'ready', ?2, ?2)",
+                    params![title, now],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO work_item_dependencies (work_item_id, depends_on_id) VALUES (1, 2)",
+                [],
+            )
+            .unwrap();
+        assert!(replace_work_item_dependencies(&connection, 2, &[1]).is_err());
+        assert!(validate_work_item("A", "satisfied", "").is_err());
     }
 
     #[test]
