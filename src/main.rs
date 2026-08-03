@@ -404,7 +404,8 @@ fn app(state: AppState) -> Router {
         .route("/api/toolsets", get(toolsets).put(update_toolsets))
         .route("/api/skills", get(skills))
         .route("/api/system/resources", get(system_resources))
-        .route("/api/update", get(download_update))
+        .route("/api/update", get(update_status))
+        .route("/api/update/check", post(download_update))
         .route("/api/update/restart", post(restart_update))
         .route("/api/files", get(list_files))
         .route("/api/files/read", get(read_file))
@@ -1449,6 +1450,16 @@ async fn download_update(
     let status = update::download_latest(&state.client, &state.db_path)
         .await
         .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))?;
+    Ok(Json(status))
+}
+
+async fn update_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<update::UpdateStatus> {
+    identity(&state, &headers).await?;
+    let status = update::status(&state.db_path)
+        .map_err(|cause| error(StatusCode::INTERNAL_SERVER_ERROR, cause.to_string()))?;
     Ok(Json(status))
 }
 
