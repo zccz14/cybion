@@ -354,13 +354,19 @@ async fn main() -> Result<()> {
         .with_env_filter("mobius=info,tower_http=info")
         .compact()
         .init();
+    if update::run_update_helper()? {
+        return Ok(());
+    }
     let db_path = default_db_path();
+    if update::launch_installed_binary(&db_path)? {
+        return Ok(());
+    }
     bootstrap_database(&db_path)?;
     let skills_directory = default_skills_directory();
     let skills = Arc::new(StdRwLock::new(load_skills(&skills_directory)));
     watch_skills(skills_directory.clone(), skills.clone())?;
     let state = AppState {
-        db_path,
+        db_path: db_path.clone(),
         skills_directory,
         skills,
         client: reqwest::Client::builder()
@@ -376,6 +382,7 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     info!(%addr, "mobius server listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    update::record_startup(&db_path)?;
     axum::serve(listener, app(state)).await?;
     Ok(())
 }

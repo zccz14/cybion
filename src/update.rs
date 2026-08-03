@@ -1,7 +1,10 @@
 use std::{
+    ffi::OsString,
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
+    thread,
     time::Duration,
 };
 
@@ -14,6 +17,14 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 
 const RELEASE_URL: &str = "https://api.github.com/repos/zccz14/mobius/releases/latest";
+const UPDATE_HELPER_FLAG: &str = "--apply-update";
+const STARTUP_WAIT: Duration = Duration::from_secs(10);
+
+#[derive(Deserialize, Serialize)]
+struct StartupMarker {
+    pid: u32,
+    version: String,
+}
 
 #[derive(Serialize)]
 pub struct UpdateStatus {
@@ -175,10 +186,15 @@ pub fn restart(database_path: &Path) -> Result<()> {
     }
     let current =
         std::env::current_exe().context("cannot resolve the current Mobius executable")?;
-    Command::new("sh")
-        .args(["-c", update_helper_script(), "mobius-update"])
+    let installed = installed_binary_path(database_path)?;
+    seed_installation(&current, &installed)?;
+    Command::new(&current)
+        .arg(UPDATE_HELPER_FLAG)
+        .arg(std::process::id().to_string())
         .arg(candidate)
-        .arg(current)
+        .arg(installed)
+        .arg(database_path)
+        .arg(candidate_version)
         .spawn()
         .context("cannot start the update helper")?;
     std::thread::spawn(|| {
@@ -188,37 +204,264 @@ pub fn restart(database_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn current_version() -> String {
-    env!("CARGO_PKG_VERSION").to_owned()
+/// Starts the binary from Mobius's fixed installation location. Release archives and
+/// development builds are only migration sources; the long-running server always uses
+/// `~/.mobius/bin/mobius`.
+pub fn launch_installed_binary(database_path: &Path) -> Result<bool> {
+    let current =
+        std::env::current_exe().context("cannot resolve the current Mobius executable")?;
+    let installed = installed_binary_path(database_path)?;
+    if current == installed {
+        return Ok(false);
+    }
+    seed_installation(&current, &installed)?;
+    Command::new(installed)
+        .spawn()
+        .context("cannot start the installed Mobius binary")?;
+    Ok(true)
 }
 
-fn update_helper_script() -> &'static str {
-    r#"set -eu
-sleep 1
-candidate="$1"
-current="$2"
-staging="${current}.new"
-backup="${current}.previous"
-rm -f "$staging"
-cp "$candidate" "$staging"
-chmod +x "$staging"
-mv -f "$current" "$backup"
-mv -f "$staging" "$current"
-"$current" &
-new_pid=$!
-attempt=0
-while [ "$attempt" -lt 10 ]; do
-  if curl -fsS http://127.0.0.1:1858/health >/dev/null; then
-    wait "$new_pid"
-    exit $?
-  fi
-  kill -0 "$new_pid" 2>/dev/null || break
-  attempt=$((attempt + 1))
-  sleep 1
-done
-kill "$new_pid" 2>/dev/null || true
-mv -f "$backup" "$current"
-exec "$current""#
+pub fn run_update_helper() -> Result<bool> {
+    let mut arguments = std::env::args_os();
+    let _program = arguments.next();
+    let Some(flag) = arguments.next() else {
+        return Ok(false);
+    };
+    if flag != UPDATE_HELPER_FLAG {
+        return Ok(false);
+    }
+    let parent_pid = required_argument(&mut arguments, "parent PID")?
+        .into_string()
+        .map_err(|_| anyhow!("parent PID is not UTF-8"))?
+        .parse()
+        .context("parent PID is not a number")?;
+    let candidate = PathBuf::from(required_argument(&mut arguments, "candidate path")?);
+    let installed = PathBuf::from(required_argument(&mut arguments, "installation path")?);
+    let database_path = PathBuf::from(required_argument(&mut arguments, "database path")?);
+    let expected_version = required_argument(&mut arguments, "expected version")?
+        .into_string()
+        .map_err(|_| anyhow!("expected version is not UTF-8"))?;
+    if arguments.next().is_some() {
+        return Err(anyhow!("unexpected update helper arguments"));
+    }
+    if let Err(cause) = apply_update(
+        parent_pid,
+        &candidate,
+        &installed,
+        &database_path,
+        &expected_version,
+    ) {
+        record_update_failure(&database_path, &cause.to_string())?;
+        return Err(cause);
+    }
+    Ok(true)
+}
+
+pub fn record_startup(database_path: &Path) -> Result<()> {
+    let marker_path = startup_marker_path(database_path)?;
+    let directory = marker_path
+        .parent()
+        .expect("startup marker has a parent directory");
+    fs::create_dir_all(directory)?;
+    let marker = StartupMarker {
+        pid: std::process::id(),
+        version: current_version(),
+    };
+    let temporary = marker_path.with_extension("new");
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(serde_json::to_string(&marker)?.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(temporary, marker_path)?;
+    Ok(())
+}
+
+fn required_argument(
+    arguments: &mut impl Iterator<Item = OsString>,
+    name: &str,
+) -> Result<OsString> {
+    arguments
+        .next()
+        .ok_or_else(|| anyhow!("missing update helper {name}"))
+}
+
+fn apply_update(
+    parent_pid: u32,
+    candidate: &Path,
+    installed: &Path,
+    database_path: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    if !candidate.is_file() {
+        return Err(anyhow!("downloaded update is missing"));
+    }
+    wait_for_process_exit(parent_pid)?;
+    clear_startup_marker(database_path)?;
+    let previous = replace_installed_binary(candidate, installed)?;
+    if updated_binary_started(installed, database_path, expected_version).is_ok() {
+        return Ok(());
+    }
+    restore_previous_binary(installed, &previous)?;
+    Command::new(installed)
+        .spawn()
+        .context("cannot restart the previous Mobius version")?;
+    Err(anyhow!("updated Mobius did not confirm startup"))
+}
+
+fn updated_binary_started(
+    installed: &Path,
+    database_path: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    let mut child = Command::new(installed)
+        .spawn()
+        .context("cannot start updated Mobius")?;
+    match wait_for_startup(&mut child, database_path, expected_version) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(cause) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(cause);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(anyhow!("updated Mobius did not confirm startup"))
+}
+
+fn wait_for_process_exit(parent_pid: u32) -> Result<()> {
+    let deadline = std::time::Instant::now() + STARTUP_WAIT;
+    while process_is_alive(parent_pid)? {
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!("previous Mobius process did not exit"));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+fn process_is_alive(pid: u32) -> Result<bool> {
+    Ok(Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .context("cannot inspect the previous Mobius process")?
+        .success())
+}
+
+fn wait_for_startup(
+    child: &mut Child,
+    database_path: &Path,
+    expected_version: &str,
+) -> Result<bool> {
+    let deadline = std::time::Instant::now() + STARTUP_WAIT;
+    while std::time::Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(false);
+        }
+        if startup_marker_matches(database_path, child.id(), expected_version)? {
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(false)
+}
+
+fn installed_binary_path(database_path: &Path) -> Result<PathBuf> {
+    Ok(database_path
+        .parent()
+        .context("database path has no parent")?
+        .join("bin/mobius"))
+}
+
+fn startup_marker_path(database_path: &Path) -> Result<PathBuf> {
+    Ok(database_path
+        .parent()
+        .context("database path has no parent")?
+        .join("run/started.json"))
+}
+
+fn seed_installation(current: &Path, installed: &Path) -> Result<()> {
+    if current == installed || installed.is_file() {
+        return Ok(());
+    }
+    copy_binary(current, installed)
+}
+
+fn replace_installed_binary(candidate: &Path, installed: &Path) -> Result<PathBuf> {
+    let staging = installed.with_extension("new");
+    let previous = installed.with_extension("previous");
+    copy_binary(candidate, &staging)?;
+    if previous.exists() {
+        fs::remove_file(&previous).context("cannot clear the previous Mobius backup")?;
+    }
+    fs::rename(installed, &previous).context("cannot preserve the previous Mobius binary")?;
+    if let Err(cause) = fs::rename(&staging, installed) {
+        fs::rename(&previous, installed).context("cannot restore the previous Mobius binary")?;
+        return Err(cause.into());
+    }
+    Ok(previous)
+}
+
+fn restore_previous_binary(installed: &Path, previous: &Path) -> Result<()> {
+    let failed = installed.with_extension("failed");
+    if failed.exists() {
+        fs::remove_file(&failed).context("cannot clear the failed Mobius backup")?;
+    }
+    fs::rename(installed, failed).context("cannot preserve the failed Mobius binary")?;
+    fs::rename(previous, installed).context("cannot restore the previous Mobius binary")?;
+    Ok(())
+}
+
+fn copy_binary(source: &Path, destination: &Path) -> Result<()> {
+    let directory = destination
+        .parent()
+        .expect("Mobius binary path has a parent directory");
+    fs::create_dir_all(directory)?;
+    fs::copy(source, destination)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+fn clear_startup_marker(database_path: &Path) -> Result<()> {
+    let marker = startup_marker_path(database_path)?;
+    if marker.exists() {
+        fs::remove_file(marker)?;
+    }
+    Ok(())
+}
+
+fn startup_marker_matches(database_path: &Path, pid: u32, version: &str) -> Result<bool> {
+    let marker = startup_marker_path(database_path)?;
+    let Ok(content) = fs::read_to_string(marker) else {
+        return Ok(false);
+    };
+    let marker: StartupMarker = serde_json::from_str(&content)?;
+    Ok(marker.pid == pid && marker.version == version.trim_start_matches('v'))
+}
+
+fn record_update_failure(database_path: &Path, cause: &str) -> Result<()> {
+    let connection = Connection::open(database_path)?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('update_state', 'ready')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('update_detail', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [format!(
+            "Installation failed; the previous version was restored: {cause}"
+        )],
+    )?;
+    Ok(())
+}
+
+fn current_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
 }
 
 fn release_asset_name() -> Result<&'static str> {
@@ -389,12 +632,59 @@ mod tests {
     }
 
     #[test]
-    fn helper_keeps_a_backup_until_the_replacement_starts() {
-        let script = update_helper_script();
-        assert!(script.contains("cp \"$candidate\" \"$staging\""));
-        assert!(script.contains("mv -f \"$current\" \"$backup\""));
-        assert!(script.contains("curl -fsS http://127.0.0.1:1858/health"));
-        assert!(script.contains("mv -f \"$backup\" \"$current\""));
+    fn installation_path_is_separate_from_the_database_and_source_tree() {
+        let database = Path::new("/tmp/mobius/default.sqlite3");
+        assert_eq!(
+            installed_binary_path(database).unwrap(),
+            PathBuf::from("/tmp/mobius/bin/mobius")
+        );
+    }
+
+    #[test]
+    fn replacement_preserves_the_previous_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("bin/mobius");
+        let candidate = directory.path().join("candidate");
+        copy_binary_bytes(&installed, b"old");
+        copy_binary_bytes(&candidate, b"new");
+        let previous = replace_installed_binary(&candidate, &installed).unwrap();
+        assert_eq!(fs::read(installed).unwrap(), b"new");
+        assert_eq!(fs::read(previous).unwrap(), b"old");
+    }
+
+    #[test]
+    fn replacement_replaces_an_old_backup_with_the_current_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("bin/mobius");
+        let candidate = directory.path().join("candidate");
+        copy_binary_bytes(&installed, b"current");
+        copy_binary_bytes(&candidate, b"next");
+        copy_binary_bytes(&installed.with_extension("previous"), b"stale backup");
+        let previous = replace_installed_binary(&candidate, &installed).unwrap();
+        assert_eq!(fs::read(installed).unwrap(), b"next");
+        assert_eq!(fs::read(previous).unwrap(), b"current");
+    }
+
+    #[test]
+    fn startup_marker_requires_the_expected_pid_and_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("default.sqlite3");
+        record_startup(&database).unwrap();
+        assert!(startup_marker_matches(&database, std::process::id(), &current_version()).unwrap());
+        assert!(!startup_marker_matches(&database, 0, &current_version()).unwrap());
+        assert!(
+            startup_marker_matches(
+                &database,
+                std::process::id(),
+                &format!("v{}", current_version())
+            )
+            .unwrap()
+        );
+    }
+
+    fn copy_binary_bytes(path: &Path, bytes: &[u8]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
     }
 
     #[test]
