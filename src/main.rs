@@ -2132,20 +2132,15 @@ fn response_output_for_input(output: Vec<Value>) -> Vec<Value> {
     output
         .into_iter()
         .map(|mut item| match item.get("type").and_then(Value::as_str) {
-            Some("web_search_call") => {
-                // COMPATIBILITY: Some OpenAI-compatible upstreams reject the output-only
-                // `action` field when a web-search item is replayed through `input`.
-                // Remove this once their Responses input schema accepts this fixture.
+            Some("web_search_call") | Some("image_generation_call") => {
+                // COMPATIBILITY: This upstream rejects `action` when a native tool result is
+                // replayed through `input`. Keep the rest of the item: with `store: false`, an
+                // image-call ID alone cannot be resolved. Remove this once replay accepts
+                // `action`; verify against the Mobius image-generation continuation test.
                 item.as_object_mut()
                     .expect("a JSON value with type is an object")
                     .remove("action");
                 item
-            }
-            Some("image_generation_call") => {
-                // COMPATIBILITY: Some OpenAI-compatible upstreams reject the generated
-                // image `result` during replay. The Responses API accepts an image-call ID
-                // reference for follow-up edits. Remove this once full output replay works.
-                json!({"type":"image_generation_call","id":item.get("id").expect("image generation call has an id")})
             }
             _ => item,
         })
@@ -3015,17 +3010,24 @@ mod tests {
     }
 
     #[test]
-    fn responses_input_uses_image_generation_call_ids() {
+    fn responses_input_preserves_image_generation_result_without_action() {
         let input = response_output_for_input(vec![json!({
             "type": "image_generation_call",
             "id": "image_1",
             "status": "completed",
+            "action": {"type": "generate"},
             "result": "aW1hZ2U=",
             "revised_prompt": "A Mobius logo.",
         })]);
         assert_eq!(
             input,
-            vec![json!({"type":"image_generation_call","id":"image_1"})]
+            vec![json!({
+                "type": "image_generation_call",
+                "id": "image_1",
+                "status": "completed",
+                "result": "aW1hZ2U=",
+                "revised_prompt": "A Mobius logo.",
+            })]
         );
     }
 
@@ -3198,7 +3200,7 @@ mod tests {
             let first_request = requests.is_empty();
             let response = if first_request {
                 json!({"output":[
-                    {"type":"image_generation_call","id":"image_1","status":"completed","result":"aW1hZ2U=","revised_prompt":"A Mobius logo."},
+                    {"type":"image_generation_call","id":"image_1","status":"completed","action":{"type":"generate"},"result":"aW1hZ2U=","revised_prompt":"A Mobius logo."},
                     {"type":"web_search_call","id":"web_1","status":"completed","action":{"type":"search","query":"Mobius"}},
                     {"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}
                 ]})
@@ -3365,7 +3367,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             image_generation_call,
-            &json!({"type":"image_generation_call","id":"image_1"})
+            &json!({
+                "type": "image_generation_call",
+                "id": "image_1",
+                "status": "completed",
+                "result": "aW1hZ2U=",
+                "revised_prompt": "A Mobius logo.",
+            })
         );
         assert!(
             requests[1]
