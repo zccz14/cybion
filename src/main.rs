@@ -403,7 +403,7 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/auth-config.js", get(auth_config_script))
         .route("/", get(index))
-        .route("/mobius-mark.svg", get(mobius_mark))
+        .route("/mobius-mark.png", get(mobius_mark))
         .route("/assets/app.js", get(app_js))
         .route("/assets/app.css", get(app_css))
         .route("/api/setup", post(setup))
@@ -1204,10 +1204,7 @@ async fn index() -> Response {
     )
 }
 async fn mobius_mark() -> Response {
-    asset(
-        include_bytes!("../web/dist/mobius-mark.svg"),
-        "image/svg+xml",
-    )
+    asset(include_bytes!("../web/dist/mobius-mark.png"), "image/png")
 }
 async fn app_js() -> Response {
     asset(
@@ -2605,10 +2602,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn favicon_is_served_as_svg() {
+    async fn favicon_is_served_as_png() {
         let response = mobius_mark().await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
     }
 
     #[test]
