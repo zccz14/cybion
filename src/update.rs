@@ -19,6 +19,7 @@ use tar::Archive;
 const RELEASE_URL: &str = "https://api.github.com/repos/zccz14/mobius/releases/latest";
 const UPDATE_HELPER_FLAG: &str = "--apply-update";
 const STARTUP_WAIT: Duration = Duration::from_secs(10);
+const SUPERVISOR_STARTUP_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize, Serialize)]
 struct StartupMarker {
@@ -301,9 +302,12 @@ fn apply_update(
     if !candidate.is_file() {
         return Err(anyhow!("downloaded update is missing"));
     }
-    wait_for_process_exit(parent_pid)?;
     clear_startup_marker(database_path)?;
     let previous = replace_installed_binary(candidate, installed)?;
+    if let Err(cause) = wait_for_process_exit(parent_pid) {
+        restore_previous_binary(installed, &previous)?;
+        return Err(cause);
+    }
     if updated_binary_started(installed, database_path, expected_version).is_ok() {
         return Ok(());
     }
@@ -319,6 +323,9 @@ fn updated_binary_started(
     database_path: &Path,
     expected_version: &str,
 ) -> Result<()> {
+    if wait_for_supervisor_startup(database_path, expected_version)? {
+        return Ok(());
+    }
     let mut child = Command::new(installed)
         .spawn()
         .context("cannot start updated Mobius")?;
@@ -334,6 +341,17 @@ fn updated_binary_started(
     let _ = child.kill();
     let _ = child.wait();
     Err(anyhow!("updated Mobius did not confirm startup"))
+}
+
+fn wait_for_supervisor_startup(database_path: &Path, expected_version: &str) -> Result<bool> {
+    let deadline = std::time::Instant::now() + SUPERVISOR_STARTUP_WAIT;
+    while std::time::Instant::now() < deadline {
+        if startup_marker_has_version(database_path, expected_version)? {
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(false)
 }
 
 fn wait_for_process_exit(parent_pid: u32) -> Result<()> {
@@ -448,6 +466,15 @@ fn startup_marker_matches(database_path: &Path, pid: u32, version: &str) -> Resu
     };
     let marker: StartupMarker = serde_json::from_str(&content)?;
     Ok(marker.pid == pid && marker.version == version.trim_start_matches('v'))
+}
+
+fn startup_marker_has_version(database_path: &Path, version: &str) -> Result<bool> {
+    let marker = startup_marker_path(database_path)?;
+    let Ok(content) = fs::read_to_string(marker) else {
+        return Ok(false);
+    };
+    let marker: StartupMarker = serde_json::from_str(&content)?;
+    Ok(marker.version == version.trim_start_matches('v'))
 }
 
 fn record_update_failure(database_path: &Path, cause: &str) -> Result<()> {
@@ -687,6 +714,9 @@ mod tests {
             )
             .unwrap()
         );
+        assert!(startup_marker_has_version(&database, &current_version()).unwrap());
+        assert!(startup_marker_has_version(&database, &format!("v{}", current_version())).unwrap());
+        assert!(!startup_marker_has_version(&database, "999.0.0").unwrap());
     }
 
     fn copy_binary_bytes(path: &Path, bytes: &[u8]) {
