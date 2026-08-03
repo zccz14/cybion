@@ -215,10 +215,17 @@ pub fn launch_installed_binary(database_path: &Path) -> Result<bool> {
         return Ok(false);
     }
     seed_installation(&current, &installed)?;
-    Command::new(installed)
-        .spawn()
-        .context("cannot start the installed Mobius binary")?;
-    Ok(true)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let cause = Command::new(installed).exec();
+        return Err(cause).context("cannot start the installed Mobius binary");
+    }
+    #[allow(unreachable_code)]
+    Err(anyhow!(
+        "automatic updates are unavailable for this platform"
+    ))
 }
 
 pub fn run_update_helper() -> Result<bool> {
