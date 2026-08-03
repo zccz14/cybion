@@ -163,6 +163,16 @@ function latestContextTokens(runs: ConversationRun[]) {
   return null
 }
 
+function reasoningSummary(arguments_: Record<string, unknown>) {
+  const summary = arguments_.summary
+  if (!Array.isArray(summary)) return ''
+  return summary.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const text = (item as { text?: unknown }).text
+    return typeof text === 'string' ? [text] : []
+  }).join('\n')
+}
+
 function runError(runs: ConversationRun[]) {
   const run = runs.at(-1)
   if (run?.status !== 'failed') return ''
@@ -230,15 +240,16 @@ function ConversationEntry({ item }: { item: ConversationItem }) {
     const command = typeof item.arguments.command === 'string' ? item.arguments.command : ''
     const query = typeof item.arguments.query === 'string' ? item.arguments.query : ''
     const queries = Array.isArray(item.arguments.queries) ? item.arguments.queries.filter((value): value is string => typeof value === 'string').join(', ') : ''
+    const summary = item.name === 'reasoning' ? reasoningSummary(item.arguments) : ''
     const action = item.complete ? {
       list_files: t('listedFiles'), read_file: t('readFile'), write_file: t('wroteFile'), edit_file: t('wroteFile'), run_bash: t('ranCommand'), web_search: t('searchedWeb'), reasoning: t('reasoning'), image_generation: t('generatedImage'),
     }[item.name] : {
       list_files: t('listingFiles'), read_file: t('readingFile'), write_file: t('writingFile'), edit_file: t('writingFile'), run_bash: t('runningCommand'), web_search: t('searchingWeb'), reasoning: t('reasoning'), image_generation: t('generatingImage'),
     }[item.name]
     const target = command || path || query || queries || item.name
-    const parameters = Object.keys(item.arguments).length ? JSON.stringify(item.arguments) : ''
+    const parameters = item.name === 'reasoning' ? '' : Object.keys(item.arguments).length ? JSON.stringify(item.arguments) : ''
     const changes = item.complete && (item.name === 'write_file' || item.name === 'edit_file') && item.added_lines !== undefined && item.deleted_lines !== undefined ? ` · ${t('addedLines')} ${item.added_lines ?? 0} ${t('lines')} · ${t('deletedLines')} ${item.deleted_lines ?? 0} ${t('lines')}` : ''
-    return <div className="flex items-start gap-2 text-sm text-muted-foreground">{item.complete ? <CheckIcon className="mt-0.5 size-4 text-foreground" /> : <Spinner className="mt-0.5" />}<div className="min-w-0 break-all"><span>{action ?? item.name} <code className="font-mono text-foreground">{target}</code>{changes}</span>{parameters && <p className="mt-1 text-xs"><span>{t('parameters')}: </span><code className="font-mono text-foreground">{parameters}</code></p>}</div></div>
+    return <div className="flex items-start gap-2 text-sm text-muted-foreground">{item.complete ? <CheckIcon className="mt-0.5 size-4 text-foreground" /> : <Spinner className="mt-0.5" />}<div className="min-w-0 break-all">{summary ? <><span>{action ?? item.name}</span><p className="mt-1 whitespace-pre-wrap text-foreground">{summary}</p></> : <><span>{action ?? item.name} <code className="font-mono text-foreground">{target}</code>{changes}</span>{parameters && <p className="mt-1 text-xs"><span>{t('parameters')}: </span><code className="font-mono text-foreground">{parameters}</code></p>}</>}</div></div>
   }
   if (item.message.role !== 'assistant') return <Message align="end"><MessageContent><Card size="sm"><CardContent className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.message.content ?? ''}</ReactMarkdown></CardContent></Card></MessageContent></Message>
   const timestamp = item.message.created_at ? new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(item.message.created_at)) : null
