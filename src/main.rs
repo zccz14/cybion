@@ -2124,16 +2124,23 @@ async fn run_agent(
 fn response_output_for_input(output: Vec<Value>) -> Vec<Value> {
     output
         .into_iter()
-        .map(|mut item| {
-            if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
+        .map(|mut item| match item.get("type").and_then(Value::as_str) {
+            Some("web_search_call") => {
                 // COMPATIBILITY: Some OpenAI-compatible upstreams reject the output-only
                 // `action` field when a web-search item is replayed through `input`.
                 // Remove this once their Responses input schema accepts this fixture.
                 item.as_object_mut()
                     .expect("a JSON value with type is an object")
                     .remove("action");
+                item
             }
-            item
+            Some("image_generation_call") => {
+                // COMPATIBILITY: Some OpenAI-compatible upstreams reject the generated
+                // image `result` during replay. The Responses API accepts an image-call ID
+                // reference for follow-up edits. Remove this once full output replay works.
+                json!({"type":"image_generation_call","id":item.get("id").expect("image generation call has an id")})
+            }
+            _ => item,
         })
         .collect()
 }
@@ -3001,6 +3008,21 @@ mod tests {
     }
 
     #[test]
+    fn responses_input_uses_image_generation_call_ids() {
+        let input = response_output_for_input(vec![json!({
+            "type": "image_generation_call",
+            "id": "image_1",
+            "status": "completed",
+            "result": "aW1hZ2U=",
+            "revised_prompt": "A Mobius logo.",
+        })]);
+        assert_eq!(
+            input,
+            vec![json!({"type":"image_generation_call","id":"image_1"})]
+        );
+    }
+
+    #[test]
     fn image_generation_toolset_uses_the_native_responses_tool() {
         let body = responses_request_body(
             "gpt-5",
@@ -3169,6 +3191,7 @@ mod tests {
             let first_request = requests.is_empty();
             let response = if first_request {
                 json!({"output":[
+                    {"type":"image_generation_call","id":"image_1","status":"completed","result":"aW1hZ2U=","revised_prompt":"A Mobius logo."},
                     {"type":"web_search_call","id":"web_1","status":"completed","action":{"type":"search","query":"Mobius"}},
                     {"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}
                 ]})
@@ -3243,7 +3266,7 @@ mod tests {
         )
         .unwrap();
         create_agent_run(&db_path, "run_1", user.id).unwrap();
-        let (events, mut received_events) = mpsc::channel(4);
+        let (events, mut received_events) = mpsc::channel(6);
         let reply = run_agent(
             &reqwest::Client::new(),
             &config,
@@ -3266,6 +3289,14 @@ mod tests {
         .unwrap();
         server.abort();
         assert_eq!(reply.message.content, Value::String("complete".to_owned()));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolCall { name, .. }) if name == "image_generation"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolResult { name, added_lines: None, deleted_lines: None, .. }) if name == "image_generation"
+        ));
         assert!(matches!(
             received_events.recv().await,
             Some(AgentEvent::ToolCall { name, arguments, .. }) if name == "web_search" && arguments["query"] == "Mobius"
@@ -3318,6 +3349,17 @@ mod tests {
             Some("web_1")
         );
         assert!(web_search_call.get("action").is_none());
+        let image_generation_call = requests[1]
+            .get("input")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
+            .unwrap();
+        assert_eq!(
+            image_generation_call,
+            &json!({"type":"image_generation_call","id":"image_1"})
+        );
         assert!(
             requests[1]
                 .get("instructions")
