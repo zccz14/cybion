@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "mobius"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "axum",
