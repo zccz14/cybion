@@ -403,6 +403,7 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/auth-config.js", get(auth_config_script))
         .route("/", get(index))
+        .route("/mobius-mark.svg", get(mobius_mark))
         .route("/assets/app.js", get(app_js))
         .route("/assets/app.css", get(app_css))
         .route("/api/setup", post(setup))
@@ -1200,6 +1201,12 @@ async fn index() -> Response {
     asset(
         include_bytes!("../web/dist/index.html"),
         "text/html; charset=utf-8",
+    )
+}
+async fn mobius_mark() -> Response {
+    asset(
+        include_bytes!("../web/dist/mobius-mark.svg"),
+        "image/svg+xml",
     )
 }
 async fn app_js() -> Response {
@@ -2596,6 +2603,13 @@ fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn favicon_is_served_as_svg() {
+        let response = mobius_mark().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+    }
 
     #[test]
     fn initialization_creates_the_required_metadata() {
