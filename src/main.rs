@@ -2006,6 +2006,7 @@ async fn run_agent(
 ) -> Result<AgentResult> {
     let mut input_tokens = 0;
     let mut output_tokens = 0;
+    let mut images = Vec::new();
     let mut items = messages
         .into_iter()
         .map(|message| json!({ "role": message.role, "content": message.content }))
@@ -2062,7 +2063,7 @@ async fn run_agent(
             .and_then(Value::as_array)
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
-        let images = generated_images(&output);
+        images.extend(generated_images(&output));
         emit_response_process_events(&output, db_path, &events).await?;
         let calls = output
             .iter()
@@ -3316,6 +3317,10 @@ mod tests {
         .unwrap();
         server.abort();
         assert_eq!(reply.message.content, Value::String("complete".to_owned()));
+        let images = reply.message.images.as_ref().unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id, "image_1");
+        assert_eq!(images[0].data, "aW1hZ2U=");
         assert!(matches!(
             received_events.recv().await,
             Some(AgentEvent::ToolCall { name, .. }) if name == "image_generation"
