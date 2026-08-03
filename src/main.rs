@@ -2132,14 +2132,25 @@ fn response_output_for_input(output: Vec<Value>) -> Vec<Value> {
     output
         .into_iter()
         .map(|mut item| match item.get("type").and_then(Value::as_str) {
-            Some("web_search_call") | Some("image_generation_call") => {
-                // COMPATIBILITY: This upstream rejects `action` when a native tool result is
-                // replayed through `input`. Keep the rest of the item: with `store: false`, an
-                // image-call ID alone cannot be resolved. Remove this once replay accepts
-                // `action`; verify against the Mobius image-generation continuation test.
+            Some("web_search_call") => {
+                // COMPATIBILITY: This upstream rejects `action` when a web-search result is
+                // replayed through `input`. Remove this once replay accepts `action`.
                 item.as_object_mut()
                     .expect("a JSON value with type is an object")
                     .remove("action");
+                item
+            }
+            Some("image_generation_call") => {
+                // COMPATIBILITY: This upstream rejects generated-image `action` and its
+                // native pixel `size` (for example, 1254x1254) during replay. Keep the image
+                // result because `store: false` prevents ID-only references from resolving.
+                // Remove this once the upstream accepts the full output item; verify with the
+                // stateless image-generation continuation test.
+                let image = item
+                    .as_object_mut()
+                    .expect("image generation call is an object");
+                image.remove("action");
+                image.remove("size");
                 item
             }
             _ => item,
@@ -3010,12 +3021,16 @@ mod tests {
     }
 
     #[test]
-    fn responses_input_preserves_image_generation_result_without_action() {
+    fn responses_input_preserves_image_generation_result_without_action_or_size() {
         let input = response_output_for_input(vec![json!({
             "type": "image_generation_call",
             "id": "image_1",
             "status": "completed",
             "action": {"type": "generate"},
+            "size": "1254x1254",
+            "background": "transparent",
+            "output_format": "png",
+            "quality": "medium",
             "result": "aW1hZ2U=",
             "revised_prompt": "A Mobius logo.",
         })]);
@@ -3025,6 +3040,9 @@ mod tests {
                 "type": "image_generation_call",
                 "id": "image_1",
                 "status": "completed",
+                "background": "transparent",
+                "output_format": "png",
+                "quality": "medium",
                 "result": "aW1hZ2U=",
                 "revised_prompt": "A Mobius logo.",
             })]
@@ -3200,7 +3218,7 @@ mod tests {
             let first_request = requests.is_empty();
             let response = if first_request {
                 json!({"output":[
-                    {"type":"image_generation_call","id":"image_1","status":"completed","action":{"type":"generate"},"result":"aW1hZ2U=","revised_prompt":"A Mobius logo."},
+                    {"type":"image_generation_call","id":"image_1","status":"completed","action":{"type":"generate"},"size":"1254x1254","background":"transparent","output_format":"png","quality":"medium","result":"aW1hZ2U=","revised_prompt":"A Mobius logo."},
                     {"type":"web_search_call","id":"web_1","status":"completed","action":{"type":"search","query":"Mobius"}},
                     {"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}
                 ]})
@@ -3371,6 +3389,9 @@ mod tests {
                 "type": "image_generation_call",
                 "id": "image_1",
                 "status": "completed",
+                "background": "transparent",
+                "output_format": "png",
+                "quality": "medium",
                 "result": "aW1hZ2U=",
                 "revised_prompt": "A Mobius logo.",
             })
