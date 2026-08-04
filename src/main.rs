@@ -46,7 +46,9 @@ use uuid::Uuid;
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL_ID: &str = "gpt-5.6-terra";
 const DEFAULT_SUBTHREAD_MODEL_ID: &str = "gpt-5.6-terra";
-const VOICE_SCRIPT_MODEL_ID: &str = "gpt-5.6-luna";
+const DEFAULT_VOICE_SCRIPT_MODEL_ID: &str = "gpt-5.6-luna";
+const DEFAULT_EDGE_TTS_ZH_VOICE: &str = "zh-CN-XiaoxiaoNeural";
+const DEFAULT_EDGE_TTS_EN_VOICE: &str = "en-US-JennyNeural";
 const EDGE_TTS_TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_TTS_GEC_VERSION: &str = "1-143.0.3650.75";
 const EDGE_TTS_MAX_TEXT_BYTES: usize = 4_096;
@@ -410,6 +412,9 @@ struct AgentTurn {
 struct SettingsResponse {
     default_model: String,
     subthread_model: String,
+    voice_script_model: String,
+    edge_tts_zh_voice: String,
+    edge_tts_en_voice: String,
     openai_base_url: String,
     openai_api_key: String,
     deployment_role: String,
@@ -419,6 +424,9 @@ struct SettingsResponse {
 struct UpdateSettings {
     default_model: String,
     subthread_model: String,
+    voice_script_model: String,
+    edge_tts_zh_voice: String,
+    edge_tts_en_voice: String,
     openai_base_url: String,
     openai_api_key: String,
     deployment_role: String,
@@ -1110,7 +1118,7 @@ async fn create_voice_script(
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
         .json(&json!({
-            "model": VOICE_SCRIPT_MODEL_ID,
+            "model": config.voice_script_model,
             "input": [{ "role": "user", "content": content }],
             "store": false,
             "stream": true,
@@ -1132,12 +1140,26 @@ async fn create_voice_script(
     Ok(text)
 }
 
-fn edge_tts_voice(language: &str) -> Result<&'static str> {
-    match language {
-        "zh" => Ok("zh-CN-XiaoxiaoNeural"),
-        "en" => Ok("en-US-JennyNeural"),
+fn valid_edge_tts_voice(voice: &str) -> bool {
+    voice.len() <= 120
+        && voice.ends_with("Neural")
+        && voice
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && voice.split('-').count() >= 3
+        && voice.split('-').all(|part| !part.is_empty())
+}
+
+fn edge_tts_voice<'a>(config: &'a Config, language: &str) -> Result<&'a str> {
+    let voice = match language {
+        "zh" => Ok(&config.edge_tts_zh_voice),
+        "en" => Ok(&config.edge_tts_en_voice),
         _ => Err(anyhow!("unsupported speech language")),
+    }?;
+    if !valid_edge_tts_voice(voice) {
+        return Err(anyhow!("invalid configured Edge speech voice"));
     }
+    Ok(voice)
 }
 
 fn edge_tts_gec(unix_seconds: i64) -> String {
@@ -1285,8 +1307,8 @@ async fn synthesize_edge_speech(endpoint: &str, text: &str, voice: &str) -> Resu
     Ok(audio)
 }
 
-async fn create_edge_speech(text: &str, language: &str) -> Result<Vec<u8>> {
-    let voice = edge_tts_voice(language)?;
+async fn create_edge_speech(config: &Config, text: &str, language: &str) -> Result<Vec<u8>> {
+    let voice = edge_tts_voice(config, language)?;
     let connection_id = Uuid::new_v4().simple();
     let endpoint = format!(
         "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken={EDGE_TTS_TRUSTED_CLIENT_TOKEN}&ConnectionId={connection_id}&Sec-MS-GEC={}&Sec-MS-GEC-Version={EDGE_TTS_GEC_VERSION}",
@@ -1751,6 +1773,17 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [DEFAULT_SUBTHREAD_MODEL_ID],
     )?;
+    for (key, value) in [
+        ("voice_script_model", DEFAULT_VOICE_SCRIPT_MODEL_ID),
+        ("edge_tts_zh_voice", DEFAULT_EDGE_TTS_ZH_VOICE),
+        ("edge_tts_en_voice", DEFAULT_EDGE_TTS_EN_VOICE),
+    ] {
+        connection.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO NOTHING",
+            params![key, value],
+        )?;
+    }
     connection.execute(
         "INSERT INTO app_meta (key, value) VALUES ('deployment_role', 'controller')
          ON CONFLICT(key) DO NOTHING",
@@ -1794,6 +1827,9 @@ struct Config {
     openai_base_url: String,
     openai_api_key: String,
     default_model: String,
+    voice_script_model: String,
+    edge_tts_zh_voice: String,
+    edge_tts_en_voice: String,
     filesystem_tools_enabled: bool,
     bash_tools_enabled: bool,
     web_search_enabled: bool,
@@ -1820,6 +1856,9 @@ fn load_config(path: &Path) -> Result<Config> {
         openai_base_url: required("openai_base_url")?,
         openai_api_key: required("openai_api_key")?,
         default_model: required("default_model")?,
+        voice_script_model: required("voice_script_model")?,
+        edge_tts_zh_voice: required("edge_tts_zh_voice")?,
+        edge_tts_en_voice: required("edge_tts_en_voice")?,
         filesystem_tools_enabled: required("toolset_filesystem_enabled")?.parse()?,
         bash_tools_enabled: required("toolset_bash_enabled")?.parse()?,
         web_search_enabled: required("toolset_web_search_enabled")?.parse()?,
@@ -2182,6 +2221,9 @@ async fn settings(
                 "cannot read subthread model",
             )
         })?,
+        voice_script_model: config.voice_script_model,
+        edge_tts_zh_voice: config.edge_tts_zh_voice,
+        edge_tts_en_voice: config.edge_tts_en_voice,
         openai_base_url: config.openai_base_url,
         openai_api_key: config.openai_api_key,
         deployment_role: config.deployment_role,
@@ -2206,6 +2248,27 @@ async fn update_settings(
         return Err(error(
             StatusCode::BAD_REQUEST,
             "subthread_model cannot be empty",
+        ));
+    }
+    let voice_script_model = input.voice_script_model.trim();
+    if voice_script_model.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "voice_script_model cannot be empty",
+        ));
+    }
+    let edge_tts_zh_voice = input.edge_tts_zh_voice.trim();
+    if !valid_edge_tts_voice(edge_tts_zh_voice) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "edge_tts_zh_voice must be an Edge Neural voice name",
+        ));
+    }
+    let edge_tts_en_voice = input.edge_tts_en_voice.trim();
+    if !valid_edge_tts_voice(edge_tts_en_voice) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "edge_tts_en_voice must be an Edge Neural voice name",
         ));
     }
     let openai_base_url = input.openai_base_url.trim().trim_end_matches('/');
@@ -2251,6 +2314,27 @@ async fn update_settings(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     transaction
         .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('voice_script_model', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [voice_script_model],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('edge_tts_zh_voice', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [edge_tts_zh_voice],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('edge_tts_en_voice', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [edge_tts_en_voice],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
             "INSERT INTO app_meta (key, value) VALUES ('deployment_role', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [&input.deployment_role],
@@ -2276,6 +2360,9 @@ async fn update_settings(
     Ok(Json(SettingsResponse {
         default_model: default_model.to_owned(),
         subthread_model: subthread_model.to_owned(),
+        voice_script_model: voice_script_model.to_owned(),
+        edge_tts_zh_voice: edge_tts_zh_voice.to_owned(),
+        edge_tts_en_voice: edge_tts_en_voice.to_owned(),
         openai_base_url: openai_base_url.to_owned(),
         openai_api_key: openai_api_key.to_owned(),
         deployment_role: input.deployment_role,
@@ -3373,13 +3460,13 @@ async fn speech(
     if text.is_empty() {
         return Err(error(StatusCode::BAD_REQUEST, "speech text is required"));
     }
-    if edge_tts_voice(&input.language).is_err() {
+    if edge_tts_voice(&config, &input.language).is_err() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "unsupported speech language",
         ));
     }
-    let audio = create_edge_speech(text, &input.language)
+    let audio = create_edge_speech(&config, text, &input.language)
         .await
         .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot synthesize Edge speech"))?;
     Ok((
@@ -4462,6 +4549,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(subthread_model, DEFAULT_SUBTHREAD_MODEL_ID);
+        let voice_script_model: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'voice_script_model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(voice_script_model, DEFAULT_VOICE_SCRIPT_MODEL_ID);
+        let edge_tts_zh_voice: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'edge_tts_zh_voice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_tts_zh_voice, DEFAULT_EDGE_TTS_ZH_VOICE);
+        let edge_tts_en_voice: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'edge_tts_en_voice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_tts_en_voice, DEFAULT_EDGE_TTS_EN_VOICE);
         let deployment_role: String = connection
             .query_row(
                 "SELECT value FROM app_meta WHERE key = 'deployment_role'",
@@ -5105,6 +5216,9 @@ mod tests {
             openai_base_url: format!("http://{address}"),
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
+            voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             filesystem_tools_enabled: false,
             bash_tools_enabled: false,
             web_search_enabled: false,
@@ -5146,7 +5260,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_script_uses_luna_and_keeps_the_reply_out_of_history() {
+    async fn voice_script_uses_the_configured_model_and_keeps_the_reply_out_of_history() {
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
@@ -5182,6 +5296,9 @@ mod tests {
             openai_base_url: format!("http://{address}"),
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
+            voice_script_model: "voice-script-test-model".to_owned(),
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             filesystem_tools_enabled: false,
             bash_tools_enabled: false,
             web_search_enabled: false,
@@ -5198,7 +5315,7 @@ mod tests {
         assert_eq!(script, "部署完成。请查看控制台中的两个待处理事项。");
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["model"], VOICE_SCRIPT_MODEL_ID);
+        assert_eq!(requests[0]["model"], "voice-script-test-model");
         assert_eq!(requests[0]["store"], false);
         assert_eq!(requests[0]["stream"], true);
         assert_eq!(requests[0]["input"][0]["content"], source);
@@ -5278,15 +5395,58 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires the public Edge Read Aloud service"]
     async fn edge_tts_live_service_returns_audio() {
-        let audio = create_edge_speech("Mobius Edge TTS verification.", "en")
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: DEFAULT_OPENAI_URL.to_owned(),
+            openai_api_key: "test".to_owned(),
+            default_model: DEFAULT_MODEL_ID.to_owned(),
+            voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
+            filesystem_tools_enabled: false,
+            bash_tools_enabled: false,
+            web_search_enabled: false,
+            image_generation_enabled: false,
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        };
+        let audio = create_edge_speech(&config, "Mobius Edge TTS verification.", "en")
             .await
             .unwrap();
         assert!(audio.len() > 1_000);
     }
 
     #[test]
-    fn edge_tts_rejects_invalid_languages_and_audio_frames() {
-        assert!(edge_tts_voice("fr").is_err());
+    fn edge_tts_uses_configured_voices_and_rejects_invalid_input() {
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: DEFAULT_OPENAI_URL.to_owned(),
+            openai_api_key: "test".to_owned(),
+            default_model: DEFAULT_MODEL_ID.to_owned(),
+            voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            edge_tts_zh_voice: "zh-CN-YunxiNeural".to_owned(),
+            edge_tts_en_voice: "en-US-GuyNeural".to_owned(),
+            filesystem_tools_enabled: false,
+            bash_tools_enabled: false,
+            web_search_enabled: false,
+            image_generation_enabled: false,
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        };
+        assert_eq!(edge_tts_voice(&config, "zh").unwrap(), "zh-CN-YunxiNeural");
+        assert_eq!(edge_tts_voice(&config, "en").unwrap(), "en-US-GuyNeural");
+        assert!(edge_tts_voice(&config, "fr").is_err());
+        assert!(valid_edge_tts_voice("zh-CN-XiaoxiaoNeural"));
+        assert!(!valid_edge_tts_voice("zh-CN-XiaoxiaoNeural\" />"));
+        assert!(!valid_edge_tts_voice("zh-CN-Xiaoxiao"));
+        assert!(!valid_edge_tts_voice("zh--CN-XiaoxiaoNeural"));
+        let unsafe_config = Config {
+            edge_tts_zh_voice: "zh-CN-XiaoxiaoNeural\" />".to_owned(),
+            ..config
+        };
+        assert!(edge_tts_voice(&unsafe_config, "zh").is_err());
         let headers = b"Path:audio\r\n\r\n";
         let mut frame = Vec::from((headers.len() as u16).to_be_bytes());
         frame.extend_from_slice(headers);
@@ -5935,6 +6095,9 @@ mod tests {
             openai_base_url: format!("http://{address}"),
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
+            voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             filesystem_tools_enabled: true,
             bash_tools_enabled: false,
             web_search_enabled: false,
