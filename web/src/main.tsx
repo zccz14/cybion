@@ -157,6 +157,14 @@ function createVoiceScript(sdk: AuthMiniApi, content: string): Promise<VoiceScri
   return api<VoiceScript>('/api/audio/voice-script', sdk, { method: 'POST', body: JSON.stringify({ content }) })
 }
 
+async function createSpeech(sdk: AuthMiniApi, text: string, language: Language): Promise<Blob> {
+  const response = await authenticatedFetch(sdk, '/api/audio/speech', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, language }) })
+  if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
+  const audio = await response.blob()
+  if (!audio.size) throw new Error('Edge TTS returned an empty audio response.')
+  return audio
+}
+
 async function streamAgentTurn(sdk: AuthMiniApi, runId: string, message: ChatMessage, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
   const response = await authenticatedFetch(sdk, '/api/agent/turn', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId, message }) })
   if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
@@ -352,6 +360,8 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const recorderRef = useRef<MediaRecorder | null>(null)
   const continuousVoiceRef = useRef(false)
   const announceRef = useRef(localStorage.getItem('mobius.announce_replies') === 'true')
+  const announcementRef = useRef(0)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
   const announcedMessageRef = useRef<number | null>(null)
   const composingRef = useRef(false)
   const draftRef = useRef<HTMLTextAreaElement>(null)
@@ -388,8 +398,24 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     if (recorder?.state !== 'inactive') recorder?.stop()
     recorder?.stream.getTracks().forEach((track) => track.stop())
     activeRef.current.forEach((controller) => controller.abort())
-    window.speechSynthesis?.cancel()
+    stopAnnouncements()
   }, [])
+
+  function stopEdgeAudio() {
+    const audio = audioRef.current
+    audioRef.current = null
+    if (audio) {
+      audio.pause()
+      URL.revokeObjectURL(audio.src)
+      audio.removeAttribute('src')
+    }
+  }
+
+  function stopAnnouncements() {
+    announcementRef.current += 1
+    stopEdgeAudio()
+    window.speechSynthesis?.cancel()
+  }
 
   function speak(content: string) {
     if (!announceRef.current || !content || !('speechSynthesis' in window)) return
@@ -398,9 +424,35 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     window.speechSynthesis.speak(utterance)
   }
 
+  function playEdgeSpeech(blob: Blob) {
+    stopEdgeAudio()
+    window.speechSynthesis?.cancel()
+    const audio = new Audio(URL.createObjectURL(blob))
+    audioRef.current = audio
+    return new Promise<void>((resolve, reject) => {
+      const finish = () => {
+        URL.revokeObjectURL(audio.src)
+        if (audioRef.current === audio) audioRef.current = null
+      }
+      audio.addEventListener('ended', () => { finish(); resolve() }, { once: true })
+      audio.addEventListener('error', () => { finish(); reject(new Error('Edge TTS audio could not be played.')) }, { once: true })
+      void audio.play().catch(() => { finish(); reject(new Error('Edge TTS audio could not be played.')) })
+    })
+  }
+
   function announce(content: string | null) {
     if (!announceRef.current || !content) return
-    void createVoiceScript(token, content).then(({ text }) => speak(text)).catch((cause: unknown) => setError(message(cause)))
+    const announcement = ++announcementRef.current
+    void createVoiceScript(token, content).then(async ({ text }) => {
+      if (!announceRef.current || announcement !== announcementRef.current) return
+      try {
+        const audio = await createSpeech(token, text, language)
+        if (!announceRef.current || announcement !== announcementRef.current) return
+        await playEdgeSpeech(audio)
+      } catch {
+        if (announceRef.current && announcement === announcementRef.current) speak(text)
+      }
+    }).catch((cause: unknown) => setError(message(cause)))
   }
 
   const startRun = (entryId: string, input: ChatMessage) => {
@@ -547,7 +599,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     announceRef.current = enabled
     setAnnounceReplies(enabled)
     localStorage.setItem('mobius.announce_replies', enabled.toString())
-    if (!enabled) window.speechSynthesis?.cancel()
+    if (!enabled) stopAnnouncements()
   }
 
   const unavailable = conversationQuery.isLoading || Boolean(conversationQuery.error)

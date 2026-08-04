@@ -23,6 +23,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use futures_util::SinkExt;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use notify::{RecursiveMode, Watcher};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -33,6 +34,10 @@ use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message as WebSocketMessage, client::IntoClientRequest},
+};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use url::Url;
@@ -42,6 +47,10 @@ const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL_ID: &str = "gpt-5.6-terra";
 const DEFAULT_SUBTHREAD_MODEL_ID: &str = "gpt-5.6-terra";
 const VOICE_SCRIPT_MODEL_ID: &str = "gpt-5.6-luna";
+const EDGE_TTS_TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+const EDGE_TTS_GEC_VERSION: &str = "1-143.0.3650.75";
+const EDGE_TTS_MAX_TEXT_BYTES: usize = 4_096;
+const EDGE_TTS_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const JWKS_TTL: Duration = Duration::from_secs(300);
 const CONTEXT_TARGET_CHARS: usize = 96_000;
 const CONTEXT_TAIL_MESSAGES: usize = 12;
@@ -131,6 +140,12 @@ struct VoiceScriptRequest {
 #[derive(Serialize)]
 struct VoiceScriptResponse {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct SpeechRequest {
+    text: String,
+    language: String,
 }
 
 #[derive(Clone, Default)]
@@ -786,6 +801,7 @@ fn app(state: AppState) -> Router {
             post(transcribe_audio).layer(DefaultBodyLimit::max(26 * 1024 * 1024)),
         )
         .route("/api/audio/voice-script", post(voice_script))
+        .route("/api/audio/speech", post(speech))
         .route("/api/peers", get(list_peers).post(create_peer))
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
@@ -1114,6 +1130,169 @@ async fn create_voice_script(
         return Err(anyhow!("voice script response has no text"));
     }
     Ok(text)
+}
+
+fn edge_tts_voice(language: &str) -> Result<&'static str> {
+    match language {
+        "zh" => Ok("zh-CN-XiaoxiaoNeural"),
+        "en" => Ok("en-US-JennyNeural"),
+        _ => Err(anyhow!("unsupported speech language")),
+    }
+}
+
+fn edge_tts_gec(unix_seconds: i64) -> String {
+    let windows_file_time_seconds = unix_seconds + 11_644_473_600;
+    let rounded_seconds = windows_file_time_seconds.div_euclid(300) * 300;
+    let source = format!(
+        "{}{EDGE_TTS_TRUSTED_CLIENT_TOKEN}",
+        rounded_seconds * 10_000_000
+    );
+    format!("{:X}", Sha256::digest(source.as_bytes()))
+}
+
+fn edge_tts_timestamp() -> String {
+    chrono::Utc::now()
+        .format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+        .to_string()
+}
+
+fn edge_tts_ssml(text: &str, voice: &str) -> String {
+    let escaped = text
+        .chars()
+        .map(|character| match character {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '\'' => "&apos;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            character if character.is_control() && !matches!(character, '\n' | '\r' | '\t') => {
+                " ".to_owned()
+            }
+            character => character.to_string(),
+        })
+        .collect::<String>();
+    format!(
+        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='{voice}'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>{escaped}</prosody></voice></speak>"
+    )
+}
+
+fn edge_audio_chunk(message: &[u8]) -> Result<Option<&[u8]>> {
+    if message.len() < 2 {
+        return Err(anyhow!("Edge TTS audio frame has no header length"));
+    }
+    let header_length = usize::from(u16::from_be_bytes([message[0], message[1]]));
+    if message.len() < 2 + header_length {
+        return Err(anyhow!("Edge TTS audio frame header is truncated"));
+    }
+    let headers = std::str::from_utf8(&message[2..2 + header_length])?;
+    let path = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Path:"))
+        .map(str::trim);
+    if path != Some("audio") {
+        return Err(anyhow!("Edge TTS returned a non-audio binary frame"));
+    }
+    let content_type = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Type:"))
+        .map(str::trim);
+    let audio = &message[2 + header_length..];
+    match content_type {
+        Some("audio/mpeg") if !audio.is_empty() => Ok(Some(audio)),
+        Some("audio/mpeg") => Err(anyhow!("Edge TTS returned an empty audio frame")),
+        None if audio.is_empty() => Ok(None),
+        _ => Err(anyhow!("Edge TTS returned an unsupported audio frame")),
+    }
+}
+
+async fn synthesize_edge_speech(endpoint: &str, text: &str, voice: &str) -> Result<Vec<u8>> {
+    if text.len() > EDGE_TTS_MAX_TEXT_BYTES {
+        return Err(anyhow!("voice script is too long for Edge TTS"));
+    }
+    let timestamp = edge_tts_timestamp();
+    let mut request = endpoint.into_client_request()?;
+    let headers = request.headers_mut();
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+        ),
+    );
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "muid={};",
+            Uuid::new_v4().simple().to_string().to_uppercase()
+        ))?,
+    );
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(request))
+        .await
+        .map_err(|_| anyhow!("Edge TTS connection timed out"))??;
+    socket
+        .send(WebSocketMessage::Text(
+            format!(
+                "X-Timestamp:{timestamp}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"}},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}}}}}\r\n"
+            )
+            .into(),
+        ))
+        .await?;
+    socket
+        .send(WebSocketMessage::Text(
+            format!(
+                "X-RequestId:{}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:{timestamp}Z\r\nPath:ssml\r\n\r\n{}",
+                Uuid::new_v4().simple(),
+                edge_tts_ssml(text, voice),
+            )
+            .into(),
+        ))
+        .await?;
+
+    let mut audio = Vec::new();
+    loop {
+        let next = tokio::time::timeout(
+            Duration::from_secs(30),
+            futures_util::StreamExt::next(&mut socket),
+        )
+        .await
+        .map_err(|_| anyhow!("Edge TTS response timed out"))?;
+        let Some(message) = next else {
+            break;
+        };
+        match message? {
+            WebSocketMessage::Binary(frame) => {
+                if let Some(chunk) = edge_audio_chunk(&frame)? {
+                    if audio.len() + chunk.len() > EDGE_TTS_MAX_AUDIO_BYTES {
+                        return Err(anyhow!("Edge TTS audio is too large"));
+                    }
+                    audio.extend_from_slice(chunk);
+                }
+            }
+            WebSocketMessage::Text(frame) if frame.contains("Path:turn.end") => break,
+            WebSocketMessage::Ping(payload) => socket.send(WebSocketMessage::Pong(payload)).await?,
+            WebSocketMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+    if audio.is_empty() {
+        return Err(anyhow!("Edge TTS returned no audio"));
+    }
+    Ok(audio)
+}
+
+async fn create_edge_speech(text: &str, language: &str) -> Result<Vec<u8>> {
+    let voice = edge_tts_voice(language)?;
+    let connection_id = Uuid::new_v4().simple();
+    let endpoint = format!(
+        "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken={EDGE_TTS_TRUSTED_CLIENT_TOKEN}&ConnectionId={connection_id}&Sec-MS-GEC={}&Sec-MS-GEC-Version={EDGE_TTS_GEC_VERSION}",
+        edge_tts_gec(chrono::Utc::now().timestamp()),
+    );
+    synthesize_edge_speech(&endpoint, text, voice).await
 }
 
 async fn compile_main_context(
@@ -3172,6 +3351,47 @@ async fn voice_script(
     Ok(Json(VoiceScriptResponse { text }))
 }
 
+async fn speech(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SpeechRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    identity(&state, &headers).await?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    if config.deployment_role != "controller" {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "tool-executor machines do not have Edge TTS",
+        ));
+    }
+    let text = input.text.trim();
+    if text.is_empty() {
+        return Err(error(StatusCode::BAD_REQUEST, "speech text is required"));
+    }
+    if edge_tts_voice(&input.language).is_err() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "unsupported speech language",
+        ));
+    }
+    let audio = create_edge_speech(text, &input.language)
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot synthesize Edge speech"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "audio/mpeg"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        audio,
+    )
+        .into_response())
+}
+
 async fn agent_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4988,6 +5208,90 @@ mod tests {
                 .unwrap()
                 .contains("Never output Markdown")
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn edge_tts_sends_ssml_and_collects_mp3_audio() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                    assert_eq!(
+                        request.headers().get("origin").unwrap(),
+                        "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold"
+                    );
+                    let query = request.uri().query().unwrap();
+                    assert!(query.contains("Sec-MS-GEC="));
+                    assert!(query.contains("Sec-MS-GEC-Version="));
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            let config = futures_util::StreamExt::next(&mut socket)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            assert!(config.contains("Path:speech.config"));
+            assert!(config.contains("audio-24khz-48kbitrate-mono-mp3"));
+            let ssml = futures_util::StreamExt::next(&mut socket)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            assert!(ssml.contains("Path:ssml"));
+            assert!(ssml.contains("zh-CN-XiaoxiaoNeural"));
+            assert!(ssml.contains("&amp;"));
+
+            let headers = b"Path:audio\r\nContent-Type:audio/mpeg\r\n\r\n";
+            let mut frame = Vec::from((headers.len() as u16).to_be_bytes());
+            frame.extend_from_slice(headers);
+            frame.extend_from_slice(b"ID3test-mp3");
+            socket
+                .send(WebSocketMessage::Binary(frame.into()))
+                .await
+                .unwrap();
+            socket
+                .send(WebSocketMessage::Text("Path:turn.end\r\n\r\n".into()))
+                .await
+                .unwrap();
+        });
+
+        let endpoint = format!(
+            "ws://{address}/edge/v1?Sec-MS-GEC={}&Sec-MS-GEC-Version={EDGE_TTS_GEC_VERSION}",
+            edge_tts_gec(1_700_000_000),
+        );
+        let audio = synthesize_edge_speech(&endpoint, "已完成 & verified", "zh-CN-XiaoxiaoNeural")
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(audio, b"ID3test-mp3");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the public Edge Read Aloud service"]
+    async fn edge_tts_live_service_returns_audio() {
+        let audio = create_edge_speech("Mobius Edge TTS verification.", "en")
+            .await
+            .unwrap();
+        assert!(audio.len() > 1_000);
+    }
+
+    #[test]
+    fn edge_tts_rejects_invalid_languages_and_audio_frames() {
+        assert!(edge_tts_voice("fr").is_err());
+        let headers = b"Path:audio\r\n\r\n";
+        let mut frame = Vec::from((headers.len() as u16).to_be_bytes());
+        frame.extend_from_slice(headers);
+        assert_eq!(edge_audio_chunk(&frame).unwrap(), None);
+        assert!(edge_audio_chunk(b"\x00\x02no").is_err());
     }
 
     #[tokio::test]
