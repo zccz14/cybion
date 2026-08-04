@@ -41,6 +41,7 @@ use uuid::Uuid;
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL_ID: &str = "gpt-5.6-terra";
 const DEFAULT_SUBTHREAD_MODEL_ID: &str = "gpt-5.6-terra";
+const VOICE_SCRIPT_MODEL_ID: &str = "gpt-5.6-luna";
 const JWKS_TTL: Duration = Duration::from_secs(300);
 const CONTEXT_TARGET_CHARS: usize = 96_000;
 const CONTEXT_TAIL_MESSAGES: usize = 12;
@@ -119,6 +120,16 @@ struct FileContent {
 
 #[derive(Serialize)]
 struct TranscriptionResponse {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct VoiceScriptRequest {
+    content: String,
+}
+
+#[derive(Serialize)]
+struct VoiceScriptResponse {
     text: String,
 }
 
@@ -774,6 +785,7 @@ fn app(state: AppState) -> Router {
             "/api/audio/transcriptions",
             post(transcribe_audio).layer(DefaultBodyLimit::max(26 * 1024 * 1024)),
         )
+        .route("/api/audio/voice-script", post(voice_script))
         .route("/api/peers", get(list_peers).post(create_peer))
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
@@ -1071,6 +1083,37 @@ async fn summarize_context(
         return Err(anyhow!("checkpoint response has no summary"));
     }
     Ok(summary)
+}
+
+async fn create_voice_script(
+    client: &reqwest::Client,
+    config: &Config,
+    content: &str,
+) -> Result<String> {
+    let response = client
+        .post(format!("{}/responses", config.openai_base_url))
+        .bearer_auth(&config.openai_api_key)
+        .json(&json!({
+            "model": VOICE_SCRIPT_MODEL_ID,
+            "input": [{ "role": "user", "content": content }],
+            "store": false,
+            "stream": true,
+            "instructions": "Rewrite the assistant's final answer as a concise, natural voice announcement in the same language. Return only plain speech text. Preserve important conclusions, caveats, values, and next actions. Never output Markdown, code, tables, URLs, citations, list markers, or formatting instructions. Mention a code block, table, or link only when it is essential for the listener to act.",
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body = response.text().await?;
+    let text = output_text(
+        completed_response_from_sse(&body)?
+            .get("output")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("voice script response has no output"))?,
+    );
+    if text.trim().is_empty() {
+        return Err(anyhow!("voice script response has no text"));
+    }
+    Ok(text)
 }
 
 async fn compile_main_context(
@@ -3101,6 +3144,34 @@ async fn transcribe_audio(
     }))
 }
 
+async fn voice_script(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<VoiceScriptRequest>,
+) -> ApiResult<VoiceScriptResponse> {
+    identity(&state, &headers).await?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    if config.deployment_role != "controller" {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "tool-executor machines do not have a voice-script upstream",
+        ));
+    }
+    let content = input.content.trim();
+    if content.is_empty() {
+        return Err(error(StatusCode::BAD_REQUEST, "reply content is required"));
+    }
+    let text = create_voice_script(&state.client, &config, content)
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot prepare voice script"))?;
+    Ok(Json(VoiceScriptResponse { text }))
+}
+
 async fn agent_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4852,6 +4923,71 @@ mod tests {
             received.recv().await,
             Some(AgentEvent::Checkpoint { id, .. }) if id == checkpoint.id
         ));
+    }
+
+    #[tokio::test]
+    async fn voice_script_uses_luna_and_keeps_the_reply_out_of_history() {
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> String {
+            requests.lock().await.push(request);
+            let item = json!({
+                "type": "message",
+                "content": [{"type": "output_text", "text": "部署完成。请查看控制台中的两个待处理事项。"}]
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            openai_api_key: "test".to_owned(),
+            default_model: DEFAULT_MODEL_ID.to_owned(),
+            filesystem_tools_enabled: false,
+            bash_tools_enabled: false,
+            web_search_enabled: false,
+            image_generation_enabled: false,
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        };
+        let source = "## 部署结果\n\n```sh\nmake deploy\n```\n\n| 状态 | 完成 |";
+        let script = create_voice_script(&reqwest::Client::new(), &config, source)
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_eq!(script, "部署完成。请查看控制台中的两个待处理事项。");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["model"], VOICE_SCRIPT_MODEL_ID);
+        assert_eq!(requests[0]["store"], false);
+        assert_eq!(requests[0]["stream"], true);
+        assert_eq!(requests[0]["input"][0]["content"], source);
+        assert!(
+            requests[0]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Never output Markdown")
+        );
     }
 
     #[tokio::test]

@@ -43,6 +43,7 @@ type SystemResources = { sampled_at: number; sample_interval_ms: number; cpu: { 
 type GeneratedImage = { id: string; data: string }
 type ChatMessage = { id?: number; role: string; content: string | null; images?: GeneratedImage[]; created_at?: string; duration_ms?: number; input_tokens?: number; output_tokens?: number }
 type Transcription = { text: string }
+type VoiceScript = { text: string }
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
 type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing'; message: string } | { type: 'checkpoint'; id: number; through_message_id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown> } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
@@ -150,6 +151,10 @@ async function transcribeAudio(sdk: AuthMiniApi, audio: Blob): Promise<Transcrip
   const response = await authenticatedFetch(sdk, '/api/audio/transcriptions', { method: 'POST', body: form })
   if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
   return response.json() as Promise<Transcription>
+}
+
+function createVoiceScript(sdk: AuthMiniApi, content: string): Promise<VoiceScript> {
+  return api<VoiceScript>('/api/audio/voice-script', sdk, { method: 'POST', body: JSON.stringify({ content }) })
 }
 
 async function streamAgentTurn(sdk: AuthMiniApi, runId: string, message: ChatMessage, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
@@ -364,7 +369,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   useEffect(() => {
     if (!conversationQuery.data || activeRef.current.size > 0) return
     const latestAssistant = [...conversationQuery.data.messages].reverse().find((entry) => entry.role === 'assistant' && entry.id !== undefined)
-    if (conversationInitialized && latestAssistant?.id !== announcedMessageRef.current) speak(latestAssistant?.content ?? null)
+    if (conversationInitialized && latestAssistant?.id !== announcedMessageRef.current) announce(latestAssistant?.content ?? null)
     announcedMessageRef.current = latestAssistant?.id ?? null
     updateConversation(conversationItems(conversationQuery.data))
     setContextTokens(latestContextTokens(conversationQuery.data.runs))
@@ -386,11 +391,16 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     window.speechSynthesis?.cancel()
   }, [])
 
-  function speak(content: string | null) {
+  function speak(content: string) {
     if (!announceRef.current || !content || !('speechSynthesis' in window)) return
     const utterance = new SpeechSynthesisUtterance(content)
     utterance.lang = language === 'zh' ? 'zh-CN' : 'en-US'
     window.speechSynthesis.speak(utterance)
+  }
+
+  function announce(content: string | null) {
+    if (!announceRef.current || !content) return
+    void createVoiceScript(token, content).then(({ text }) => speak(text)).catch((cause: unknown) => setError(message(cause)))
   }
 
   const startRun = (entryId: string, input: ChatMessage) => {
@@ -413,7 +423,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
       if (event.type === 'complete') {
         updateConversation([...conversationRef.current, { kind: 'message', id: event.message.id?.toString() ?? crypto.randomUUID(), message: event.message, queued: false }])
         announcedMessageRef.current = event.message.id ?? null
-        speak(event.message.content)
+        announce(event.message.content)
       }
     }).catch((cause: unknown) => {
       if (!controller.signal.aborted) setError(message(cause))
