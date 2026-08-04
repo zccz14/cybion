@@ -28,6 +28,7 @@ use notify::{RecursiveMode, Watcher};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
@@ -39,7 +40,10 @@ use uuid::Uuid;
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL_ID: &str = "gpt-5.6-terra";
+const DEFAULT_SUBTHREAD_MODEL_ID: &str = "gpt-5.6-terra";
 const JWKS_TTL: Duration = Duration::from_secs(300);
+const CONTEXT_TARGET_CHARS: usize = 96_000;
+const CONTEXT_TAIL_MESSAGES: usize = 12;
 
 #[derive(Clone)]
 struct AppState {
@@ -50,6 +54,8 @@ struct AppState {
     jwks: Arc<RwLock<Option<CachedJwks>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     active_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    active_subthreads: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    main_thread: Arc<Mutex<()>>,
 }
 
 struct CachedJwks {
@@ -72,11 +78,9 @@ struct Jwk {
 }
 
 #[derive(Clone)]
-struct Identity {
-    token: String,
-}
+struct Identity;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
 }
@@ -90,6 +94,7 @@ struct StatusResponse {
     root_user_id: String,
     auth_url: String,
     openai_base_url: String,
+    deployment_role: String,
 }
 
 #[derive(Serialize)]
@@ -147,6 +152,11 @@ struct Peer {
     id: String,
     name: String,
     base_url: String,
+    machine_id: String,
+    hostname: String,
+    deployment_role: String,
+    filesystem_enabled: bool,
+    bash_enabled: bool,
     created_at: String,
 }
 
@@ -154,6 +164,61 @@ struct Peer {
 struct CreatePeer {
     name: String,
     base_url: String,
+    device_token: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RemoteStatus {
+    machine_id: String,
+    hostname: String,
+    root_user_id: String,
+    auth_url: String,
+    deployment_role: String,
+    filesystem_enabled: bool,
+    bash_enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct RemoteToolRequest {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RemoteToolResponse {
+    output: String,
+    added_lines: Option<usize>,
+    deleted_lines: Option<usize>,
+}
+
+#[derive(Clone)]
+struct DeviceGrant {
+    filesystem_enabled: bool,
+    bash_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct DeviceToken {
+    id: String,
+    label: String,
+    filesystem_enabled: bool,
+    bash_enabled: bool,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct CreateDeviceToken {
+    label: String,
+    filesystem_enabled: bool,
+    bash_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct CreatedDeviceToken {
+    #[serde(flatten)]
+    token: DeviceToken,
+    secret: String,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -194,6 +259,30 @@ struct ConversationMessage {
 struct ConversationState {
     messages: Vec<ConversationMessage>,
     runs: Vec<ConversationRun>,
+    context: ContextState,
+}
+
+#[derive(Serialize)]
+struct ContextState {
+    history_messages: usize,
+    checkpoint: Option<ContextCheckpoint>,
+}
+
+#[derive(Clone, Serialize)]
+struct ContextCheckpoint {
+    id: i64,
+    through_message_id: i64,
+    source_message_count: usize,
+    summary: String,
+    created_at: String,
+}
+
+#[derive(Clone)]
+struct HistoryMessage {
+    id: i64,
+    role: String,
+    content: String,
+    source_run_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -202,6 +291,69 @@ struct ConversationRun {
     user_message_id: i64,
     status: String,
     events: Vec<AgentEvent>,
+}
+
+#[derive(Serialize)]
+struct Subthread {
+    id: String,
+    #[serde(skip)]
+    run_id: Option<String>,
+    title: String,
+    task: String,
+    status: String,
+    model: String,
+    result: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+struct MainThreadSummary {
+    status: String,
+    model: String,
+    updated_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ThreadIndex {
+    main_thread: MainThreadSummary,
+    subthreads: Vec<Subthread>,
+}
+
+#[derive(Serialize)]
+struct SubthreadEvent {
+    id: i64,
+    event: AgentEvent,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct SubthreadDetail {
+    thread: Subthread,
+    events: Vec<SubthreadEvent>,
+}
+
+#[derive(Deserialize)]
+struct SubthreadEventQuery {
+    #[serde(default)]
+    after: i64,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SubthreadStreamMessage {
+    Event { item: SubthreadEvent },
+    Reaped,
+    Error { error: String },
+}
+
+struct QueuedSubthread {
+    id: String,
+    title: String,
+    task: String,
+    model: String,
+    context: Vec<Value>,
+    forked_from_message_id: i64,
 }
 
 struct AgentEventSink<'a> {
@@ -231,15 +383,19 @@ struct AgentTurn {
 #[derive(Serialize)]
 struct SettingsResponse {
     default_model: String,
+    subthread_model: String,
     openai_base_url: String,
     openai_api_key: String,
+    deployment_role: String,
 }
 
 #[derive(Deserialize)]
 struct UpdateSettings {
     default_model: String,
+    subthread_model: String,
     openai_base_url: String,
     openai_api_key: String,
+    deployment_role: String,
 }
 
 #[derive(Serialize)]
@@ -258,74 +414,27 @@ struct UpdateToolsets {
     image_generation_enabled: bool,
 }
 
-#[derive(Serialize)]
-struct WorkItem {
-    id: i64,
-    parent_id: Option<i64>,
-    title: String,
-    description: String,
-    status: String,
-    evidence_text: String,
-    delivery_text: String,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Serialize)]
-struct WorkGraph {
-    items: Vec<WorkItem>,
-    dependencies: Vec<WorkItemDependency>,
-    ready_ids: Vec<i64>,
-}
-
-#[derive(Serialize)]
-struct WorkItemDependency {
-    work_item_id: i64,
-    depends_on_id: i64,
-}
-
-#[derive(Deserialize)]
-struct CreateWorkItem {
-    parent_id: Option<i64>,
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default = "default_work_item_status")]
-    status: String,
-    #[serde(default)]
-    evidence_text: String,
-    #[serde(default)]
-    delivery_text: String,
-    #[serde(default)]
-    depends_on_ids: Vec<i64>,
-}
-
-fn default_work_item_status() -> String {
-    "ready".to_owned()
-}
-
-#[derive(Deserialize)]
-struct UpdateWorkItem {
-    parent_id: Option<i64>,
-    title: String,
-    description: String,
-    status: String,
-    evidence_text: String,
-    delivery_text: String,
-    depends_on_ids: Vec<i64>,
-}
-
 #[derive(Deserialize)]
 struct SetupInput {
     auth_url: String,
     openai_api_key: String,
     #[serde(default = "default_openai_url")]
     openai_base_url: String,
+    #[serde(default = "default_deployment_role")]
+    deployment_role: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentEvent {
+    Status {
+        stage: String,
+        message: String,
+    },
+    Checkpoint {
+        id: i64,
+        through_message_id: i64,
+    },
     ToolCall {
         call_id: String,
         name: String,
@@ -336,6 +445,8 @@ enum AgentEvent {
         name: String,
         added_lines: Option<usize>,
         deleted_lines: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     Context {
         input_tokens: u64,
@@ -346,6 +457,12 @@ enum AgentEvent {
     Error {
         error: String,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentScope {
+    Main,
+    Subthread,
 }
 
 #[tokio::main]
@@ -377,7 +494,11 @@ async fn main() -> Result<()> {
             default_db_path(),
         ))),
         active_runs: Arc::new(Mutex::new(HashMap::new())),
+        active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+        main_thread: Arc::new(Mutex::new(())),
     };
+    schedule_recovered_main_runs(state.clone());
+    schedule_subthreads(state.clone());
     schedule_auto_update(state.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     info!(%addr, "mobius server listening");
@@ -396,6 +517,237 @@ fn schedule_auto_update(state: AppState) {
             tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
         }
     });
+}
+
+fn schedule_subthreads(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            match claim_queued_subthreads(&state.db_path) {
+                Ok(jobs) => {
+                    for job in jobs {
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            run_subthread(state, job).await;
+                        });
+                    }
+                }
+                Err(cause) => tracing::warn!(%cause, "cannot claim queued subthreads"),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    });
+}
+
+fn schedule_recovered_main_runs(state: AppState) {
+    let runs = open_db(&state.db_path).and_then(|connection| {
+        connection
+            .prepare(
+                "SELECT run.id, run.user_message_id,
+                        (SELECT event.payload FROM agent_events event
+                         WHERE event.run_id = run.id ORDER BY event.id DESC LIMIT 1)
+                 FROM agent_runs run
+                 WHERE run.kind = 'main' AND run.status = 'running'
+                 ORDER BY run.user_message_id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    });
+    let Ok(runs) = runs else {
+        return;
+    };
+    for (run_id, user_message_id, latest_event) in runs {
+        if !recoverable_main_run(latest_event.as_deref()) {
+            let _ = append_agent_event(
+                &state.db_path,
+                &run_id,
+                &AgentEvent::Error {
+                    error: "main-thread execution was interrupted by a process restart; it was not replayed because tools may have side effects".to_owned(),
+                },
+            );
+            let _ = finish_agent_run(&state.db_path, &run_id, "failed");
+            continue;
+        }
+        let state = state.clone();
+        tokio::spawn(async move {
+            let (cancel, cancellation) = watch::channel(false);
+            state
+                .active_runs
+                .lock()
+                .await
+                .insert(run_id.clone(), cancel);
+            let (events, receiver) = mpsc::channel(1);
+            drop(receiver);
+            process_main_run(state, run_id, user_message_id, events, cancellation).await;
+        });
+    }
+}
+
+fn recoverable_main_run(latest_event: Option<&str>) -> bool {
+    latest_event
+        .and_then(|payload| serde_json::from_str::<AgentEvent>(payload).ok())
+        .is_none_or(|event| {
+            matches!(
+                event,
+                AgentEvent::Status { ref stage, .. } if stage == "queued"
+            )
+        })
+}
+
+fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let jobs = transaction
+        .prepare(
+            "SELECT id, title, task, model, context_json, forked_from_message_id
+             FROM subthreads WHERE status = 'queued' ORDER BY created_at",
+        )?
+        .query_map([], |row| {
+            let context: String = row.get(4)?;
+            Ok(QueuedSubthread {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                task: row.get(2)?,
+                model: row.get(3)?,
+                context: serde_json::from_str(&context).unwrap_or_default(),
+                forked_from_message_id: row.get(5)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    for job in &jobs {
+        transaction.execute(
+            "UPDATE subthreads SET status = 'running', updated_at = ?1
+             WHERE id = ?2 AND status = 'queued'",
+            params![now, job.id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(jobs)
+}
+
+async fn run_subthread(state: AppState, job: QueuedSubthread) {
+    let run_id = format!("subthread-{}", job.id);
+    let result = create_agent_run_with_kind(
+        &state.db_path,
+        &run_id,
+        job.forked_from_message_id,
+        "subthread",
+    );
+    if let Err(cause) = result {
+        let _ = finish_subthread(&state.db_path, &job.id, "failed", Some(&cause.to_string()));
+        return;
+    }
+    let _ = open_db(&state.db_path).and_then(|connection| {
+        connection.execute(
+            "UPDATE subthreads SET run_id = ?1 WHERE id = ?2",
+            params![run_id, job.id],
+        )?;
+        Ok(())
+    });
+    let (cancel, cancellation) = watch::channel(false);
+    state
+        .active_subthreads
+        .lock()
+        .await
+        .insert(job.id.clone(), cancel.clone());
+    let still_running = open_db(&state.db_path)
+        .and_then(|connection| {
+            connection
+                .query_row(
+                    "SELECT status = 'running' FROM subthreads WHERE id = ?1",
+                    [&job.id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(Into::into)
+        })
+        .unwrap_or(false);
+    if !still_running {
+        let _ = cancel.send(true);
+    }
+    let (events, receiver) = mpsc::channel(1);
+    drop(receiver);
+    let sink = AgentEventSink {
+        run_id: &run_id,
+        sender: &events,
+    };
+    let started_at = Instant::now();
+    let result = match load_config(&state.db_path) {
+        Ok(mut config) if config.deployment_role == "controller" => {
+            config.default_model = job.model.clone();
+            let mut items = job.context;
+            items.push(json!({ "role": "user", "content": job.task }));
+            run_agent_items(
+                &state.client,
+                &config,
+                items,
+                &state.db_path,
+                &state.skills,
+                sink,
+                cancellation,
+                AgentScope::Subthread,
+                &state.active_subthreads,
+            )
+            .await
+        }
+        Ok(_) => Err(anyhow!("tool-executor machines cannot run subthreads")),
+        Err(cause) => Err(cause),
+    };
+    let (status, stored_result, message, usage) = match result {
+        Ok(result) => {
+            let content = result
+                .message
+                .content
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let message = ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String(format!(
+                    "### Background task completed: {}\n\n{}",
+                    job.title, content
+                )),
+                images: result.message.images,
+                tool_call_id: None,
+                tool_calls: None,
+            };
+            let usage = AgentUsage {
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                input_tokens: result.input_tokens,
+                output_tokens: result.output_tokens,
+            };
+            ("completed", Some(content), message, Some(usage))
+        }
+        Err(cause) => {
+            let status = if cause.to_string() == "agent stopped" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let detail = cause.to_string();
+            let message = ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String(format!(
+                    "### Background task {}: {}\n\n{}",
+                    status, job.title, detail
+                )),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            };
+            (status, Some(detail), message, None)
+        }
+    };
+    let _ = finish_subthread(&state.db_path, &job.id, status, stored_result.as_deref());
+    let _ = finish_agent_run(&state.db_path, &run_id, status);
+    let _ = append_conversation_for_run(&state.db_path, &message, usage, Some(&run_id));
+    state.active_subthreads.lock().await.remove(&job.id);
 }
 
 fn app(state: AppState) -> Router {
@@ -425,9 +777,20 @@ fn app(state: AppState) -> Router {
         .route("/api/peers", get(list_peers).post(create_peer))
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
+        .route(
+            "/api/device-tokens",
+            get(list_device_tokens).post(create_device_token),
+        )
+        .route("/api/device-tokens/{id}", delete(delete_device_token))
+        .route("/api/remote/status", get(remote_status))
+        .route("/api/remote/tools/execute", post(remote_execute_tool))
         .route("/api/conversation", get(conversation))
-        .route("/api/work-items", get(work_graph).post(create_work_item))
-        .route("/api/work-items/{id}", put(update_work_item))
+        .route("/api/threads", get(list_threads))
+        .route("/api/threads/{id}/events", get(stream_subthread_events))
+        .route(
+            "/api/threads/{id}",
+            get(subthread_detail).delete(cancel_subthread),
+        )
         .route("/api/agent/turn", post(agent_turn))
         .route("/api/agent/turn/{id}", delete(cancel_agent_turn))
         .with_state(state)
@@ -553,23 +916,270 @@ fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
         .map_err(Into::into)
 }
 
-fn conversation_context(messages: Vec<ConversationMessage>) -> Vec<ChatMessage> {
-    messages
-        .into_iter()
-        .map(|message| ChatMessage {
-            role: message.role,
-            content: Value::String(message.content),
-            images: None,
-            tool_call_id: None,
-            tool_calls: None,
+fn load_history_for_run(path: &Path, user_message_id: i64) -> Result<Vec<HistoryMessage>> {
+    let connection = open_db(path)?;
+    let mut history = connection
+        .prepare(
+            "SELECT id, role, content, source_run_id FROM conversation_messages
+             WHERE id <= ?1 OR role = 'assistant'
+             ORDER BY id",
+        )?
+        .query_map([user_message_id], |row| {
+            Ok(HistoryMessage {
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                source_run_id: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for message in &mut history {
+        let Some(run_id) = message.source_run_id.as_deref() else {
+            continue;
+        };
+        let trace = connection
+            .prepare("SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY id")?
+            .query_map([run_id], |row| row.get::<_, String>(0))?
+            .filter_map(std::result::Result::ok)
+            .filter_map(|payload| serde_json::from_str::<AgentEvent>(&payload).ok())
+            .filter_map(|event| match event {
+                AgentEvent::ToolCall {
+                    name, arguments, ..
+                } => Some(format!("Tool call {name}: {arguments}")),
+                AgentEvent::ToolResult {
+                    name,
+                    output: Some(output),
+                    ..
+                } => Some(format!("Tool result {name}: {output}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !trace.is_empty() {
+            message.content = format!(
+                "[Durable execution trace]\n{}\n[/Durable execution trace]\n\n{}",
+                trace.join("\n"),
+                message.content
+            );
+        }
+    }
+    Ok(history)
+}
+
+fn load_latest_checkpoint(
+    connection: &Connection,
+    through_message_id: i64,
+) -> Result<Option<ContextCheckpoint>> {
+    connection
+        .query_row(
+            "SELECT id, through_message_id, source_message_count, summary, created_at
+             FROM context_checkpoints
+             WHERE through_message_id <= ?1
+             ORDER BY through_message_id DESC, id DESC LIMIT 1",
+            [through_message_id],
+            |row| {
+                Ok(ContextCheckpoint {
+                    id: row.get(0)?,
+                    through_message_id: row.get(1)?,
+                    source_message_count: row.get(2)?,
+                    summary: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn context_items(checkpoint: Option<&ContextCheckpoint>, history: &[HistoryMessage]) -> Vec<Value> {
+    let mut items = checkpoint
+        .map(|checkpoint| {
+            vec![json!({
+                "role": "developer",
+                "content": format!(
+                    "Mobius context checkpoint #{} through history message {}. Treat this as a faithful compressed prefix of the complete, auditable main-thread history.\n\n{}",
+                    checkpoint.id, checkpoint.through_message_id, checkpoint.summary
+                )
+            })]
         })
-        .collect()
+        .unwrap_or_default();
+    let through = checkpoint.map(|checkpoint| checkpoint.through_message_id);
+    items.extend(
+        history
+            .iter()
+            .filter(|message| through.is_none_or(|id| message.id > id))
+            .map(|message| json!({ "role": message.role, "content": message.content })),
+    );
+    items
+}
+
+fn context_character_count(items: &[Value]) -> usize {
+    items
+        .iter()
+        .filter_map(|item| item.get("content").and_then(Value::as_str))
+        .map(str::len)
+        .sum()
+}
+
+fn checkpoint_cutoff(
+    history: &[HistoryMessage],
+    checkpoint: Option<&ContextCheckpoint>,
+) -> Option<usize> {
+    if history.len() <= CONTEXT_TAIL_MESSAGES {
+        return None;
+    }
+    let cutoff = history.len() - CONTEXT_TAIL_MESSAGES;
+    let previous = checkpoint.map(|checkpoint| checkpoint.through_message_id);
+    let new_messages = history[..cutoff]
+        .iter()
+        .filter(|message| previous.is_none_or(|id| message.id > id))
+        .count();
+    (new_messages >= 4).then_some(cutoff)
+}
+
+async fn summarize_context(
+    client: &reqwest::Client,
+    config: &Config,
+    items: Vec<Value>,
+    mut cancellation: watch::Receiver<bool>,
+) -> Result<String> {
+    let request = client
+        .post(format!("{}/responses", config.openai_base_url))
+        .bearer_auth(&config.openai_api_key)
+        .json(&json!({
+            "model": config.default_model,
+            "input": items,
+            "store": false,
+            "stream": true,
+            "instructions": "Compress this main-thread history prefix into a faithful durable checkpoint. Preserve user goals, decisions, constraints, unfinished work, evidence, file and machine facts, errors, and exact identifiers needed later. Distinguish completed facts from plans. Do not answer the user or invent facts; output only the checkpoint text.",
+        }));
+    let response = tokio::select! {
+        response = request.send() => response?,
+        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+    }
+    .error_for_status()?;
+    let body = tokio::select! {
+        body = response.text() => body?,
+        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+    };
+    let summary = output_text(
+        completed_response_from_sse(&body)?
+            .get("output")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("checkpoint response has no output"))?,
+    );
+    if summary.trim().is_empty() {
+        return Err(anyhow!("checkpoint response has no summary"));
+    }
+    Ok(summary)
+}
+
+async fn compile_main_context(
+    client: &reqwest::Client,
+    config: &Config,
+    db_path: &Path,
+    user_message_id: i64,
+    events: &AgentEventSink<'_>,
+    cancellation: watch::Receiver<bool>,
+) -> Result<Vec<Value>> {
+    let history = load_history_for_run(db_path, user_message_id)?;
+    let checkpoint = {
+        let connection = open_db(db_path)?;
+        load_latest_checkpoint(&connection, i64::MAX)?
+    };
+    let current_items = context_items(checkpoint.as_ref(), &history);
+    if context_character_count(&current_items) <= CONTEXT_TARGET_CHARS {
+        return Ok(current_items);
+    }
+    let Some(cutoff) = checkpoint_cutoff(&history, checkpoint.as_ref()) else {
+        return Ok(current_items);
+    };
+    let through_message_id = history[cutoff - 1].id;
+    let mut source = checkpoint
+        .as_ref()
+        .map(|checkpoint| {
+            vec![json!({
+                "role": "developer",
+                "content": format!("Previous checkpoint:\n{}", checkpoint.summary)
+            })]
+        })
+        .unwrap_or_default();
+    let previous_through = checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.through_message_id);
+    source.extend(
+        history[..cutoff]
+            .iter()
+            .filter(|message| previous_through.is_none_or(|id| message.id > id))
+            .map(|message| json!({ "role": message.role, "content": message.content })),
+    );
+    send_agent_event(
+        db_path,
+        events,
+        AgentEvent::Status {
+            stage: "checkpointing".to_owned(),
+            message: "Compressing the stable history prefix".to_owned(),
+        },
+    )
+    .await?;
+    // RECOVERY: Checkpointing is an optimization performed before the current context reaches
+    // the model limit. If that auxiliary request fails, the complete persisted history remains
+    // a valid context for this turn and checkpointing can be retried on the next input.
+    let summary = match summarize_context(client, config, source, cancellation).await {
+        Ok(summary) => summary,
+        Err(cause) if cause.to_string() == "agent stopped" => return Err(cause),
+        Err(cause) => {
+            send_agent_event(
+                db_path,
+                events,
+                AgentEvent::Status {
+                    stage: "running".to_owned(),
+                    message: format!("Checkpoint deferred; using the complete history: {cause}"),
+                },
+            )
+            .await?;
+            return Ok(current_items);
+        }
+    };
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let connection = open_db(db_path)?;
+    connection.execute(
+        "INSERT INTO context_checkpoints (
+           through_message_id, source_message_count, summary, created_at
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![through_message_id, cutoff, summary, created_at],
+    )?;
+    let checkpoint = ContextCheckpoint {
+        id: connection.last_insert_rowid(),
+        through_message_id,
+        source_message_count: cutoff,
+        summary,
+        created_at,
+    };
+    send_agent_event(
+        db_path,
+        events,
+        AgentEvent::Checkpoint {
+            id: checkpoint.id,
+            through_message_id,
+        },
+    )
+    .await?;
+    Ok(context_items(Some(&checkpoint), &history))
 }
 
 fn append_conversation(
     path: &Path,
     message: &ChatMessage,
     usage: Option<AgentUsage>,
+) -> Result<ConversationMessage> {
+    append_conversation_for_run(path, message, usage, None)
+}
+
+fn append_conversation_for_run(
+    path: &Path,
+    message: &ChatMessage,
+    usage: Option<AgentUsage>,
+    source_run_id: Option<&str>,
 ) -> Result<ConversationMessage> {
     let content = message
         .content
@@ -580,8 +1190,8 @@ fn append_conversation(
     let images = serde_json::to_string(&images)?;
     let connection = open_db(path)?;
     connection.execute(
-        "INSERT INTO conversation_messages (role, content, created_at, duration_ms, input_tokens, output_tokens, images)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO conversation_messages (role, content, created_at, duration_ms, input_tokens, output_tokens, images, source_run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             message.role,
             content,
@@ -590,6 +1200,7 @@ fn append_conversation(
             usage.map(|value| value.input_tokens),
             usage.map(|value| value.output_tokens),
             images,
+            source_run_id,
         ],
     )?;
     Ok(ConversationMessage {
@@ -605,16 +1216,27 @@ fn append_conversation(
 }
 
 fn create_agent_run(path: &Path, id: &str, user_message_id: i64) -> Result<()> {
+    create_agent_run_with_kind(path, id, user_message_id, "main")
+}
+
+fn create_agent_run_with_kind(
+    path: &Path,
+    id: &str,
+    user_message_id: i64,
+    kind: &str,
+) -> Result<()> {
     open_db(path)?.execute(
-        "INSERT INTO agent_runs (id, user_message_id, status, created_at)
-         VALUES (?1, ?2, 'running', ?3)",
-        params![id, user_message_id, chrono::Utc::now().to_rfc3339()],
+        "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
+         VALUES (?1, ?2, 'running', ?3, ?4)",
+        params![id, user_message_id, chrono::Utc::now().to_rfc3339(), kind],
     )?;
     Ok(())
 }
 
 fn append_agent_event(path: &Path, run_id: &str, event: &AgentEvent) -> Result<()> {
     let event_type = match event {
+        AgentEvent::Status { .. } => "status",
+        AgentEvent::Checkpoint { .. } => "checkpoint",
         AgentEvent::ToolCall { .. } => "tool_call",
         AgentEvent::ToolResult { .. } => "tool_result",
         AgentEvent::Context { .. } => "context",
@@ -646,7 +1268,10 @@ fn load_conversation_state(path: &Path) -> Result<ConversationState> {
     let connection = open_db(path)?;
     let messages = load_conversation(path)?;
     let mut runs = connection
-        .prepare("SELECT id, user_message_id, status FROM agent_runs ORDER BY created_at, id")?
+        .prepare(
+            "SELECT id, user_message_id, status FROM agent_runs
+             WHERE kind = 'main' ORDER BY created_at, id",
+        )?
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -671,7 +1296,15 @@ fn load_conversation_state(path: &Path) -> Result<ConversationState> {
         })
         .collect::<Result<Vec<_>>>()?;
     runs.shrink_to_fit();
-    Ok(ConversationState { messages, runs })
+    let checkpoint = load_latest_checkpoint(&connection, i64::MAX)?;
+    Ok(ConversationState {
+        context: ContextState {
+            history_messages: messages.len(),
+            checkpoint,
+        },
+        messages,
+        runs,
+    })
 }
 
 async fn send_agent_event(
@@ -694,6 +1327,7 @@ fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
         ("input_tokens", "INTEGER"),
         ("output_tokens", "INTEGER"),
         ("images", "TEXT"),
+        ("source_run_id", "TEXT"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute_batch(&format!(
@@ -704,150 +1338,82 @@ fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn load_work_graph(path: &Path) -> Result<WorkGraph> {
-    let connection = open_db(path)?;
-    let items = connection
-        .prepare(
-            "SELECT id, parent_id, title, description, status, evidence_text, delivery_text, created_at, updated_at
-             FROM work_items ORDER BY id",
-        )?
-        .query_map([], |row| {
-            Ok(WorkItem {
-                id: row.get(0)?,
-                parent_id: row.get(1)?,
-                title: row.get(2)?,
-                description: row.get(3)?,
-                status: row.get(4)?,
-                evidence_text: row.get(5)?,
-                delivery_text: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })?
+fn ensure_agent_run_columns(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(agent_runs)")?
+        .query_map([], |row| row.get::<_, String>(1))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let dependencies = connection
-        .prepare(
-            "SELECT work_item_id, depends_on_id FROM work_item_dependencies
-             ORDER BY work_item_id, depends_on_id",
-        )?
-        .query_map([], |row| {
-            Ok(WorkItemDependency {
-                work_item_id: row.get(0)?,
-                depends_on_id: row.get(1)?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let ready_ids = connection
-        .prepare(
-            "SELECT item.id FROM work_items item
-             WHERE item.status = 'ready'
-             AND NOT EXISTS (
-               SELECT 1 FROM work_item_dependencies dependency
-               JOIN work_items prerequisite ON prerequisite.id = dependency.depends_on_id
-               WHERE dependency.work_item_id = item.id
-               AND prerequisite.status <> 'satisfied'
-             )
-             ORDER BY item.id",
-        )?
-        .query_map([], |row| row.get(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(WorkGraph {
-        items,
-        dependencies,
-        ready_ids,
-    })
-}
-
-fn valid_work_item_status(status: &str) -> bool {
-    matches!(
-        status,
-        "ready" | "running" | "waiting" | "satisfied" | "superseded" | "cancelled"
-    )
-}
-
-fn validate_work_item(title: &str, status: &str, evidence_text: &str) -> Result<()> {
-    if title.trim().is_empty() {
-        return Err(anyhow!("work item title cannot be empty"));
-    }
-    if !valid_work_item_status(status) {
-        return Err(anyhow!("invalid work item status"));
-    }
-    if status == "satisfied" && evidence_text.trim().is_empty() {
-        return Err(anyhow!("satisfied work items require evidence_text"));
+    if !columns.iter().any(|column| column == "kind") {
+        connection
+            .execute_batch("ALTER TABLE agent_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'")?;
     }
     Ok(())
 }
 
-fn work_item_exists(connection: &Connection, id: i64) -> Result<bool> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM work_items WHERE id = ?1)",
-            [id],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
+fn ensure_subthread_columns(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(subthreads)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "model") {
+        connection.execute_batch(&format!(
+            "ALTER TABLE subthreads ADD COLUMN model TEXT NOT NULL DEFAULT '{DEFAULT_SUBTHREAD_MODEL_ID}'"
+        ))?;
+    }
+    if columns.iter().any(|column| column == "target_machine_id") {
+        connection.execute_batch("ALTER TABLE subthreads DROP COLUMN target_machine_id")?;
+    }
+    Ok(())
 }
 
-fn work_item_parent_has_cycle(connection: &Connection, id: i64) -> Result<bool> {
-    connection
+fn ensure_agent_event_schema(connection: &Connection) -> Result<()> {
+    let schema = connection
         .query_row(
-            "WITH RECURSIVE ancestors(id) AS (
-               SELECT parent_id FROM work_items WHERE id = ?1 AND parent_id IS NOT NULL
-               UNION
-               SELECT item.parent_id FROM work_items item
-               JOIN ancestors ON item.id = ancestors.id
-               WHERE item.parent_id IS NOT NULL
-             )
-             SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?1)",
-            [id],
-            |row| row.get(0),
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_events'",
+            [],
+            |row| row.get::<_, String>(0),
         )
-        .map_err(Into::into)
-}
-
-fn dependency_creates_cycle(
-    connection: &Connection,
-    work_item_id: i64,
-    depends_on_id: i64,
-) -> Result<bool> {
-    connection
-        .query_row(
-            "WITH RECURSIVE prerequisites(id) AS (
-               SELECT depends_on_id FROM work_item_dependencies WHERE work_item_id = ?1
-               UNION
-               SELECT dependency.depends_on_id FROM work_item_dependencies dependency
-               JOIN prerequisites ON dependency.work_item_id = prerequisites.id
-             )
-             SELECT EXISTS(SELECT 1 FROM prerequisites WHERE id = ?2)",
-            params![depends_on_id, work_item_id],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
-}
-
-fn replace_work_item_dependencies(
-    connection: &Connection,
-    work_item_id: i64,
-    depends_on_ids: &[i64],
-) -> Result<()> {
-    let mut ids = depends_on_ids.to_vec();
-    ids.sort_unstable();
-    ids.dedup();
-    connection.execute(
-        "DELETE FROM work_item_dependencies WHERE work_item_id = ?1",
-        [work_item_id],
+        .optional()?;
+    if schema
+        .as_deref()
+        .is_some_and(|sql| sql.contains("'status'"))
+    {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "ALTER TABLE agent_events RENAME TO agent_events_legacy;
+         CREATE TABLE agent_events (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+           event_type TEXT NOT NULL CHECK(event_type IN ('status', 'checkpoint', 'tool_call', 'tool_result', 'context', 'complete', 'error')),
+           payload TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         INSERT INTO agent_events (id, run_id, event_type, payload, created_at)
+           SELECT id, run_id, event_type, payload, created_at FROM agent_events_legacy;
+         DROP TABLE agent_events_legacy;
+         CREATE INDEX agent_events_run_id ON agent_events(run_id);",
     )?;
-    for depends_on_id in ids {
-        if work_item_id == depends_on_id || !work_item_exists(connection, depends_on_id)? {
-            return Err(anyhow!("invalid work item dependency"));
+    Ok(())
+}
+
+fn ensure_peer_columns(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(peers)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (name, definition) in [
+        ("device_token", "TEXT NOT NULL DEFAULT ''"),
+        ("machine_id", "TEXT NOT NULL DEFAULT ''"),
+        ("hostname", "TEXT NOT NULL DEFAULT ''"),
+        ("deployment_role", "TEXT NOT NULL DEFAULT 'controller'"),
+        ("filesystem_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("bash_enabled", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection
+                .execute_batch(&format!("ALTER TABLE peers ADD COLUMN {name} {definition}"))?;
         }
-        if dependency_creates_cycle(connection, work_item_id, depends_on_id)? {
-            return Err(anyhow!("work item dependency would create a cycle"));
-        }
-        connection.execute(
-            "INSERT INTO work_item_dependencies (work_item_id, depends_on_id) VALUES (?1, ?2)",
-            params![work_item_id, depends_on_id],
-        )?;
     }
     Ok(())
 }
@@ -857,11 +1423,21 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     std::fs::create_dir_all(parent)?;
     let connection = open_db(db)?;
     connection.execute_batch(
+        "DROP TABLE IF EXISTS work_item_dependencies;
+         DROP TABLE IF EXISTS work_items;",
+    )?;
+    connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS peers (
            id TEXT PRIMARY KEY,
            name TEXT NOT NULL,
            base_url TEXT NOT NULL UNIQUE,
+           device_token TEXT NOT NULL DEFAULT '',
+           machine_id TEXT NOT NULL DEFAULT '',
+           hostname TEXT NOT NULL DEFAULT '',
+           deployment_role TEXT NOT NULL DEFAULT 'controller',
+           filesystem_enabled INTEGER NOT NULL DEFAULT 0,
+           bash_enabled INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL
          );
          CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -872,44 +1448,72 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            duration_ms INTEGER,
            input_tokens INTEGER,
            output_tokens INTEGER,
-           images TEXT
+           images TEXT,
+           source_run_id TEXT
          );
          CREATE TABLE IF NOT EXISTS agent_runs (
            id TEXT PRIMARY KEY,
            user_message_id INTEGER NOT NULL REFERENCES conversation_messages(id),
            status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
            created_at TEXT NOT NULL,
-           completed_at TEXT
+           completed_at TEXT,
+           kind TEXT NOT NULL DEFAULT 'main'
          );
          CREATE TABLE IF NOT EXISTS agent_events (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
-           event_type TEXT NOT NULL CHECK(event_type IN ('tool_call', 'tool_result', 'context', 'complete', 'error')),
+           event_type TEXT NOT NULL CHECK(event_type IN ('status', 'checkpoint', 'tool_call', 'tool_result', 'context', 'complete', 'error')),
            payload TEXT NOT NULL,
            created_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS agent_events_run_id ON agent_events(run_id);
-         CREATE TABLE IF NOT EXISTS work_items (
-           id INTEGER PRIMARY KEY,
-           parent_id INTEGER REFERENCES work_items(id),
+         CREATE TABLE IF NOT EXISTS context_checkpoints (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           through_message_id INTEGER NOT NULL REFERENCES conversation_messages(id),
+           source_message_count INTEGER NOT NULL,
+           summary TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS context_checkpoints_through_message_id
+           ON context_checkpoints(through_message_id DESC);
+         CREATE TABLE IF NOT EXISTS subthreads (
+           id TEXT PRIMARY KEY,
+           run_id TEXT UNIQUE,
            title TEXT NOT NULL,
-           description TEXT NOT NULL DEFAULT '',
-           status TEXT NOT NULL CHECK(status IN ('ready', 'running', 'waiting', 'satisfied', 'superseded', 'cancelled')) DEFAULT 'ready',
-           evidence_text TEXT NOT NULL DEFAULT '',
-           delivery_text TEXT NOT NULL DEFAULT '',
+           task TEXT NOT NULL,
+           status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+           model TEXT NOT NULL,
+           context_json TEXT NOT NULL,
+           forked_from_message_id INTEGER NOT NULL REFERENCES conversation_messages(id),
+           result TEXT,
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS work_item_dependencies (
-           work_item_id INTEGER NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
-           depends_on_id INTEGER NOT NULL REFERENCES work_items(id) ON DELETE RESTRICT,
-           PRIMARY KEY (work_item_id, depends_on_id),
-           CHECK(work_item_id <> depends_on_id)
-         );
-         CREATE INDEX IF NOT EXISTS work_item_dependencies_depends_on_id
-           ON work_item_dependencies(depends_on_id);",
+         CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);
+         CREATE TABLE IF NOT EXISTS device_tokens (
+           id TEXT PRIMARY KEY,
+           label TEXT NOT NULL,
+           token_hash TEXT NOT NULL UNIQUE,
+           filesystem_enabled INTEGER NOT NULL,
+           bash_enabled INTEGER NOT NULL,
+           created_at TEXT NOT NULL
+         );",
     )?;
     ensure_conversation_metadata_columns(&connection)?;
+    ensure_agent_run_columns(&connection)?;
+    ensure_agent_event_schema(&connection)?;
+    ensure_subthread_columns(&connection)?;
+    ensure_peer_columns(&connection)?;
+    connection.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS peers_machine_id
+         ON peers(machine_id) WHERE machine_id <> '';
+         DELETE FROM agent_runs WHERE kind = 'subthread' AND status = 'running';",
+    )?;
+    connection.execute(
+        "UPDATE subthreads SET status = 'queued', run_id = NULL, updated_at = ?1
+         WHERE status = 'running'",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
     connection.execute(
         "INSERT INTO app_meta (key, value) VALUES ('machine_id', ?1)
          ON CONFLICT(key) DO NOTHING",
@@ -919,6 +1523,16 @@ fn bootstrap_database(db: &Path) -> Result<()> {
         "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
          ON CONFLICT(key) DO NOTHING",
         [DEFAULT_MODEL_ID],
+    )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('subthread_model', ?1)
+         ON CONFLICT(key) DO NOTHING",
+        [DEFAULT_SUBTHREAD_MODEL_ID],
+    )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('deployment_role', 'controller')
+         ON CONFLICT(key) DO NOTHING",
+        [],
     )?;
     connection.execute(
         "INSERT INTO app_meta (key, value) VALUES ('toolset_filesystem_enabled', 'true')
@@ -947,6 +1561,10 @@ fn default_openai_url() -> String {
     DEFAULT_OPENAI_URL.to_owned()
 }
 
+fn default_deployment_role() -> String {
+    "controller".to_owned()
+}
+
 #[derive(Clone)]
 struct Config {
     root_user_id: String,
@@ -959,6 +1577,7 @@ struct Config {
     web_search_enabled: bool,
     image_generation_enabled: bool,
     machine_id: String,
+    deployment_role: String,
 }
 
 fn load_config(path: &Path) -> Result<Config> {
@@ -984,7 +1603,18 @@ fn load_config(path: &Path) -> Result<Config> {
         web_search_enabled: required("toolset_web_search_enabled")?.parse()?,
         image_generation_enabled: required("toolset_image_generation_enabled")?.parse()?,
         machine_id: required("machine_id")?,
+        deployment_role: required("deployment_role")?,
     })
+}
+
+fn load_subthread_model(path: &Path) -> Result<String> {
+    open_db(path)?
+        .query_row(
+            "SELECT value FROM app_meta WHERE key = 'subthread_model'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -1049,7 +1679,46 @@ async fn identity(
             "Mobius is restricted to its configured root user",
         ));
     }
-    Ok(Identity { token })
+    Ok(Identity)
+}
+
+fn token_hash(token: &str) -> String {
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn device_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> std::result::Result<DeviceGrant, (StatusCode, Json<ApiError>)> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "missing device bearer token"))?;
+    let connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    connection
+        .query_row(
+            "SELECT filesystem_enabled, bash_enabled FROM device_tokens WHERE token_hash = ?1",
+            [token_hash(token)],
+            |row| {
+                Ok(DeviceGrant {
+                    filesystem_enabled: row.get(0)?,
+                    bash_enabled: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot validate device token",
+            )
+        })?
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "invalid device token"))
 }
 
 async fn cached_keys(state: &AppState, auth_url: &str) -> Result<Vec<Jwk>> {
@@ -1106,13 +1775,21 @@ async fn setup(
     let auth_url = input.auth_url.trim_end_matches('/').to_owned();
     Url::parse(&auth_url)
         .map_err(|_| error(StatusCode::BAD_REQUEST, "auth_url must be an absolute URL"))?;
-    Url::parse(&input.openai_base_url).map_err(|_| {
-        error(
+    if !matches!(input.deployment_role.as_str(), "controller" | "executor") {
+        return Err(error(
             StatusCode::BAD_REQUEST,
-            "openai_base_url must be an absolute URL",
-        )
-    })?;
-    if input.openai_api_key.trim().is_empty() {
+            "deployment_role must be controller or executor",
+        ));
+    }
+    if input.deployment_role == "controller" {
+        Url::parse(&input.openai_base_url).map_err(|_| {
+            error(
+                StatusCode::BAD_REQUEST,
+                "openai_base_url must be an absolute URL",
+            )
+        })?;
+    }
+    if input.deployment_role == "controller" && input.openai_api_key.trim().is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "openai_api_key cannot be empty",
@@ -1129,6 +1806,7 @@ async fn setup(
             input.openai_base_url.trim_end_matches('/'),
         ),
         ("openai_api_key", input.openai_api_key.as_str()),
+        ("deployment_role", input.deployment_role.as_str()),
     ] {
         connection.execute("INSERT INTO app_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])
             .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot persist initial configuration"))?;
@@ -1145,6 +1823,7 @@ async fn setup(
         root_user_id: config.root_user_id,
         auth_url: config.auth_url,
         openai_base_url: config.openai_base_url,
+        deployment_role: config.deployment_role,
     }))
 }
 
@@ -1258,6 +1937,7 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         root_user_id: config.root_user_id,
         auth_url: config.auth_url,
         openai_base_url: config.openai_base_url,
+        deployment_role: config.deployment_role,
     }))
 }
 
@@ -1274,8 +1954,15 @@ async fn settings(
     })?;
     Ok(Json(SettingsResponse {
         default_model: config.default_model,
+        subthread_model: load_subthread_model(&state.db_path).map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read subthread model",
+            )
+        })?,
         openai_base_url: config.openai_base_url,
         openai_api_key: config.openai_api_key,
+        deployment_role: config.deployment_role,
     }))
 }
 
@@ -1292,15 +1979,30 @@ async fn update_settings(
             "default_model cannot be empty",
         ));
     }
-    let openai_base_url = input.openai_base_url.trim().trim_end_matches('/');
-    Url::parse(openai_base_url).map_err(|_| {
-        error(
+    let subthread_model = input.subthread_model.trim();
+    if subthread_model.is_empty() {
+        return Err(error(
             StatusCode::BAD_REQUEST,
-            "openai_base_url must be an absolute URL",
-        )
-    })?;
+            "subthread_model cannot be empty",
+        ));
+    }
+    let openai_base_url = input.openai_base_url.trim().trim_end_matches('/');
+    if !matches!(input.deployment_role.as_str(), "controller" | "executor") {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "deployment_role must be controller or executor",
+        ));
+    }
+    if input.deployment_role == "controller" {
+        Url::parse(openai_base_url).map_err(|_| {
+            error(
+                StatusCode::BAD_REQUEST,
+                "openai_base_url must be an absolute URL",
+            )
+        })?;
+    }
     let openai_api_key = input.openai_api_key.trim();
-    if openai_api_key.is_empty() {
+    if input.deployment_role == "controller" && openai_api_key.is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "openai_api_key cannot be empty",
@@ -1316,6 +2018,20 @@ async fn update_settings(
             "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [default_model],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('subthread_model', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [subthread_model],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('deployment_role', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&input.deployment_role],
         )
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     transaction
@@ -1337,8 +2053,10 @@ async fn update_settings(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     Ok(Json(SettingsResponse {
         default_model: default_model.to_owned(),
+        subthread_model: subthread_model.to_owned(),
         openai_base_url: openai_base_url.to_owned(),
         openai_api_key: openai_api_key.to_owned(),
+        deployment_role: input.deployment_role,
     }))
 }
 
@@ -1567,7 +2285,11 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     let connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
     let peers = connection
-        .prepare("SELECT id, name, base_url, created_at FROM peers ORDER BY name")
+        .prepare(
+            "SELECT id, name, base_url, machine_id, hostname, deployment_role,
+                    filesystem_enabled, bash_enabled, created_at
+             FROM peers ORDER BY name",
+        )
         .map_err(|_| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1579,7 +2301,12 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
                 id: row.get(0)?,
                 name: row.get(1)?,
                 base_url: row.get(2)?,
-                created_at: row.get(3)?,
+                machine_id: row.get(3)?,
+                hostname: row.get(4)?,
+                deployment_role: row.get(5)?,
+                filesystem_enabled: row.get(6)?,
+                bash_enabled: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read peers"))?
@@ -1594,16 +2321,83 @@ async fn create_peer(
     Json(input): Json<CreatePeer>,
 ) -> ApiResult<Peer> {
     identity(&state, &headers).await?;
-    Url::parse(&input.base_url).map_err(|_| {
+    let base_url = input.base_url.trim_end_matches('/');
+    let remote_url = Url::parse(base_url).map_err(|_| {
         error(
             StatusCode::BAD_REQUEST,
             "peer base_url must be an absolute URL",
         )
     })?;
+    let loopback = matches!(
+        remote_url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1")
+    );
+    if remote_url.scheme() != "https" && !loopback {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "remote Mobius URLs must use HTTPS except on loopback",
+        ));
+    }
+    if input.device_token.trim().is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "device_token cannot be empty",
+        ));
+    }
+    let remote = state
+        .client
+        .get(format!("{base_url}/api/remote/status"))
+        .bearer_auth(input.device_token.trim())
+        .send()
+        .await
+        .map_err(|cause| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                format!("remote machine is unreachable: {cause}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|cause| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                format!("remote machine rejected its device token: {cause}"),
+            )
+        })?
+        .json::<RemoteStatus>()
+        .await
+        .map_err(|_| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                "remote machine returned invalid status",
+            )
+        })?;
+    let local = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    if remote.auth_url != local.auth_url || remote.root_user_id != local.root_user_id {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "remote machine must use the same Auth Mini issuer and root user",
+        ));
+    }
+    if remote.machine_id == local.machine_id {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "cannot enroll this Mobius machine as its own remote executor",
+        ));
+    }
     let peer = Peer {
         id: Uuid::new_v4().to_string(),
         name: input.name.trim().to_owned(),
-        base_url: input.base_url.trim_end_matches('/').to_owned(),
+        base_url: base_url.to_owned(),
+        machine_id: remote.machine_id,
+        hostname: remote.hostname,
+        deployment_role: remote.deployment_role,
+        filesystem_enabled: remote.filesystem_enabled,
+        bash_enabled: remote.bash_enabled,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     if peer.name.is_empty() {
@@ -1613,8 +2407,22 @@ async fn create_peer(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
     connection
         .execute(
-            "INSERT INTO peers (id, name, base_url, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![peer.id, peer.name, peer.base_url, peer.created_at],
+            "INSERT INTO peers (
+               id, name, base_url, device_token, machine_id, hostname, deployment_role,
+               filesystem_enabled, bash_enabled, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                peer.id,
+                peer.name,
+                peer.base_url,
+                input.device_token.trim(),
+                peer.machine_id,
+                peer.hostname,
+                peer.deployment_role,
+                peer.filesystem_enabled,
+                peer.bash_enabled,
+                peer.created_at,
+            ],
         )
         .map_err(|cause| error(StatusCode::CONFLICT, format!("cannot add peer: {cause}")))?;
     Ok(Json(peer))
@@ -1642,20 +2450,29 @@ async fn peer_status(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Value> {
-    let actor = identity(&state, &headers).await?;
+    identity(&state, &headers).await?;
     let connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    let base_url: String = connection
-        .query_row("SELECT base_url FROM peers WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
+    let peer: Option<(String, String)> = connection
+        .query_row(
+            "SELECT base_url, device_token FROM peers WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read peer"))?
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "peer does not exist"))?;
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read peer"))?;
+    let (base_url, device_token) =
+        peer.ok_or_else(|| error(StatusCode::NOT_FOUND, "peer does not exist"))?;
+    if device_token.is_empty() {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "peer must be re-enrolled with a device token",
+        ));
+    }
     let response = state
         .client
-        .get(format!("{base_url}/api/status"))
-        .bearer_auth(actor.token)
+        .get(format!("{base_url}/api/remote/status"))
+        .bearer_auth(device_token)
         .send()
         .await
         .map_err(|cause| {
@@ -1671,10 +2488,221 @@ async fn peer_status(
                 format!("peer rejected request: {cause}"),
             )
         })?
-        .json::<Value>()
+        .json::<RemoteStatus>()
         .await
         .map_err(|_| error(StatusCode::BAD_GATEWAY, "peer returned invalid JSON"))?;
-    Ok(Json(response))
+    let local = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    if response.auth_url != local.auth_url || response.root_user_id != local.root_user_id {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "remote machine no longer shares this controller's issuer and root user",
+        ));
+    }
+    connection
+        .execute(
+            "UPDATE peers SET hostname = ?1, deployment_role = ?2,
+                              filesystem_enabled = ?3, bash_enabled = ?4
+             WHERE id = ?5",
+            params![
+                response.hostname,
+                response.deployment_role,
+                response.filesystem_enabled,
+                response.bash_enabled,
+                id,
+            ],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot refresh peer"))?;
+    Ok(Json(
+        serde_json::to_value(response).expect("remote status is serializable"),
+    ))
+}
+
+async fn list_device_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<DeviceToken>> {
+    identity(&state, &headers).await?;
+    let connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    let tokens = connection
+        .prepare(
+            "SELECT id, label, filesystem_enabled, bash_enabled, created_at
+             FROM device_tokens ORDER BY created_at DESC",
+        )
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read device tokens",
+            )
+        })?
+        .query_map([], |row| {
+            Ok(DeviceToken {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                filesystem_enabled: row.get(2)?,
+                bash_enabled: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read device tokens",
+            )
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot decode device tokens",
+            )
+        })?;
+    Ok(Json(tokens))
+}
+
+async fn create_device_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateDeviceToken>,
+) -> ApiResult<CreatedDeviceToken> {
+    identity(&state, &headers).await?;
+    let label = input.label.trim();
+    if label.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "token label cannot be empty",
+        ));
+    }
+    if !input.filesystem_enabled && !input.bash_enabled {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "a device token must grant at least one tool capability",
+        ));
+    }
+    let id = Uuid::new_v4().to_string();
+    let secret = format!(
+        "mobius_{}_{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    let token = DeviceToken {
+        id: id.clone(),
+        label: label.to_owned(),
+        filesystem_enabled: input.filesystem_enabled,
+        bash_enabled: input.bash_enabled,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    open_db(&state.db_path)
+        .and_then(|connection| {
+            connection.execute(
+                "INSERT INTO device_tokens (
+                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    token.id,
+                    token.label,
+                    token_hash(&secret),
+                    token.filesystem_enabled,
+                    token.bash_enabled,
+                    token.created_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot create device token",
+            )
+        })?;
+    Ok(Json(CreatedDeviceToken { token, secret }))
+}
+
+async fn delete_device_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    let deleted = open_db(&state.db_path)
+        .and_then(|connection| {
+            connection
+                .execute("DELETE FROM device_tokens WHERE id = ?1", [id])
+                .map_err(Into::into)
+        })
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot revoke device token",
+            )
+        })?;
+    if deleted == 0 {
+        return Err(error(StatusCode::NOT_FOUND, "device token does not exist"));
+    }
+    Ok(Json(json!({ "deleted": true })))
+}
+
+async fn remote_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<RemoteStatus> {
+    let grant = device_identity(&state, &headers)?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    Ok(Json(RemoteStatus {
+        machine_id: config.machine_id,
+        hostname: hostname(),
+        root_user_id: config.root_user_id,
+        auth_url: config.auth_url,
+        deployment_role: config.deployment_role,
+        filesystem_enabled: grant.filesystem_enabled && config.filesystem_tools_enabled,
+        bash_enabled: grant.bash_enabled && config.bash_tools_enabled,
+    }))
+}
+
+async fn remote_execute_tool(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RemoteToolRequest>,
+) -> ApiResult<RemoteToolResponse> {
+    let grant = device_identity(&state, &headers)?;
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    let filesystem_allowed = grant.filesystem_enabled && config.filesystem_tools_enabled;
+    let bash_allowed = grant.bash_enabled && config.bash_tools_enabled;
+    let execution = match input.name.as_str() {
+        "list_files" | "read_file" | "write_file" | "edit_file" if filesystem_allowed => {
+            execute_local_tool(&input.name, input.arguments, watch::channel(false).1).await
+        }
+        "run_bash" if bash_allowed => {
+            execute_local_tool(&input.name, input.arguments, watch::channel(false).1).await
+        }
+        "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
+            return Err(error(
+                StatusCode::FORBIDDEN,
+                "device token does not grant this tool capability",
+            ));
+        }
+        _ => return Err(error(StatusCode::BAD_REQUEST, "unsupported remote tool")),
+    };
+    Ok(Json(RemoteToolResponse {
+        output: execution.output,
+        added_lines: execution.added_lines,
+        deleted_lines: execution.deleted_lines,
+    }))
 }
 
 async fn conversation(
@@ -1691,149 +2719,328 @@ async fn conversation(
     Ok(Json(conversation))
 }
 
-async fn work_graph(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<WorkGraph> {
-    identity(&state, &headers).await?;
-    load_work_graph(&state.db_path)
-        .map(Json)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read work graph"))
+fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
+    Ok(Subthread {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        title: row.get(2)?,
+        task: row.get(3)?,
+        status: row.get(4)?,
+        model: row.get(5)?,
+        result: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
 }
 
-async fn create_work_item(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<CreateWorkItem>,
-) -> ApiResult<WorkGraph> {
-    identity(&state, &headers).await?;
-    validate_work_item(&input.title, &input.status, &input.evidence_text)
-        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
-    let mut connection = open_db(&state.db_path)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    let transaction = connection
-        .transaction()
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create work item"))?;
-    if let Some(parent_id) = input.parent_id
-        && !work_item_exists(&transaction, parent_id).map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot validate work item",
-            )
-        })?
-    {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "work item parent does not exist",
-        ));
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    transaction
-        .execute(
-            "INSERT INTO work_items (parent_id, title, description, status, evidence_text, delivery_text, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-            params![
-                input.parent_id,
-                input.title.trim(),
-                input.description,
-                input.status,
-                input.evidence_text,
-                input.delivery_text,
-                now,
-            ],
-        )
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create work item"))?;
-    let id = transaction.last_insert_rowid();
-    if work_item_parent_has_cycle(&transaction, id).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot validate work item",
-        )
-    })? {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "work item parent would create a cycle",
-        ));
-    }
-    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)
-        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
-    transaction
-        .commit()
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create work item"))?;
-    load_work_graph(&state.db_path)
-        .map(Json)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read work graph"))
+fn load_subthreads(path: &Path) -> Result<Vec<Subthread>> {
+    open_db(path)?
+        .prepare(
+            "SELECT id, run_id, title, task, status, model, result, created_at, updated_at
+             FROM subthreads
+             WHERE status IN ('queued', 'running')
+             ORDER BY created_at DESC",
+        )?
+        .query_map([], subthread_from_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
-async fn update_work_item(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<i64>,
-    Json(input): Json<UpdateWorkItem>,
-) -> ApiResult<WorkGraph> {
-    identity(&state, &headers).await?;
-    validate_work_item(&input.title, &input.status, &input.evidence_text)
-        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
-    let mut connection = open_db(&state.db_path)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    let transaction = connection
-        .transaction()
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update work item"))?;
-    if !work_item_exists(&transaction, id).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot validate work item",
+fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
+    let connection = open_db(path)?;
+    let model = connection.query_row(
+        "SELECT value FROM app_meta WHERE key = 'default_model'",
+        [],
+        |row| row.get(0),
+    )?;
+    let updated_at = connection.query_row(
+        "SELECT MAX(created_at) FROM conversation_messages",
+        [],
+        |row| row.get(0),
+    )?;
+    let running = connection.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM agent_runs WHERE kind = 'main' AND status = 'running'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    drop(connection);
+    Ok(ThreadIndex {
+        main_thread: MainThreadSummary {
+            status: if running { "running" } else { "idle" }.to_owned(),
+            model,
+            updated_at,
+        },
+        subthreads: load_subthreads(path)?,
+    })
+}
+
+fn load_subthread_detail(path: &Path, id: &str) -> Result<Option<SubthreadDetail>> {
+    let connection = open_db(path)?;
+    let thread = connection
+        .query_row(
+            "SELECT id, run_id, title, task, status, model, result, created_at, updated_at
+             FROM subthreads
+             WHERE id = ?1 AND status IN ('queued', 'running')",
+            [id],
+            subthread_from_row,
         )
-    })? {
-        return Err(error(StatusCode::NOT_FOUND, "work item does not exist"));
-    }
-    if let Some(parent_id) = input.parent_id
-        && !work_item_exists(&transaction, parent_id).map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot validate work item",
-            )
+        .optional()?;
+    let Some(thread) = thread else {
+        return Ok(None);
+    };
+    let events = match &thread.run_id {
+        Some(run_id) => connection
+            .prepare(
+                "SELECT id, payload, created_at FROM agent_events
+                 WHERE run_id = ?1 ORDER BY id",
+            )?
+            .query_map([run_id], |row| {
+                let payload = row.get::<_, String>(1)?;
+                Ok((row.get::<_, i64>(0)?, payload, row.get::<_, String>(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(id, payload, created_at)| {
+                Ok(SubthreadEvent {
+                    id,
+                    event: serde_json::from_str(&payload)?,
+                    created_at,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    Ok(Some(SubthreadDetail { thread, events }))
+}
+
+fn load_subthread_events_after(path: &Path, id: &str, after: i64) -> Result<Vec<SubthreadEvent>> {
+    open_db(path)?
+        .prepare(
+            "SELECT event.id, event.payload, event.created_at
+             FROM subthreads thread
+             JOIN agent_events event ON event.run_id = thread.run_id
+             WHERE thread.id = ?1 AND event.id > ?2
+             ORDER BY event.id",
+        )?
+        .query_map(params![id, after], |row| {
+            let payload = row.get::<_, String>(1)?;
+            Ok((row.get::<_, i64>(0)?, payload, row.get::<_, String>(2)?))
         })?
-    {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "work item parent does not exist",
-        ));
-    }
-    transaction
-        .execute(
-            "UPDATE work_items
-             SET parent_id = ?1, title = ?2, description = ?3, status = ?4,
-                 evidence_text = ?5, delivery_text = ?6, updated_at = ?7
-             WHERE id = ?8",
-            params![
-                input.parent_id,
-                input.title.trim(),
-                input.description,
-                input.status,
-                input.evidence_text,
-                input.delivery_text,
-                chrono::Utc::now().to_rfc3339(),
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(id, payload, created_at)| {
+            Ok(SubthreadEvent {
                 id,
-            ],
+                event: serde_json::from_str(&payload)?,
+                created_at,
+            })
+        })
+        .collect()
+}
+
+fn subthread_is_active(path: &Path, id: &str) -> Result<bool> {
+    open_db(path)?
+        .query_row(
+            "SELECT status IN ('queued', 'running') FROM subthreads WHERE id = ?1",
+            [id],
+            |row| row.get(0),
         )
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update work item"))?;
-    if work_item_parent_has_cycle(&transaction, id).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot validate work item",
+        .optional()
+        .map(|active| active.unwrap_or(false))
+        .map_err(Into::into)
+}
+
+fn finish_subthread(path: &Path, id: &str, status: &str, result: Option<&str>) -> Result<()> {
+    open_db(path)?.execute(
+        "UPDATE subthreads SET status = ?1, result = ?2, updated_at = ?3 WHERE id = ?4",
+        params![status, result, chrono::Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn mark_subthread_cancelled(path: &Path, id: &str) -> Result<()> {
+    let changed = open_db(path)?.execute(
+        "UPDATE subthreads SET status = 'cancelled', updated_at = ?1
+         WHERE id = ?2 AND status IN ('queued', 'running')",
+        params![chrono::Utc::now().to_rfc3339(), id],
+    )?;
+    if changed == 0 {
+        return Err(anyhow!("subthread is not active"));
+    }
+    Ok(())
+}
+
+fn execute_fork_subthread(
+    path: &Path,
+    parent_run_id: &str,
+    current_context: &[Value],
+    args: Value,
+) -> ToolExecution {
+    let title = args
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let task = args
+        .get("task")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if title.is_empty() || task.is_empty() {
+        return tool_execution("error: title and task are required");
+    }
+    let connection = match open_db(path) {
+        Ok(connection) => connection,
+        Err(cause) => return tool_execution(format!("error: {cause}")),
+    };
+    let forked_from_message_id = match connection
+        .query_row(
+            "SELECT user_message_id FROM agent_runs WHERE id = ?1 AND kind = 'main'",
+            [parent_run_id],
+            |row| row.get::<_, i64>(0),
         )
-    })? {
+        .optional()
+    {
+        Ok(Some(id)) => id,
+        Ok(None) => return tool_execution("error: subthreads can only fork from the main thread"),
+        Err(cause) => return tool_execution(format!("error: {cause}")),
+    };
+    let model = match connection.query_row(
+        "SELECT value FROM app_meta WHERE key = 'subthread_model'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(model) => model,
+        Err(cause) => return tool_execution(format!("error: {cause}")),
+    };
+    let context = current_context
+        .iter()
+        .filter(|item| item.get("role").is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let inserted = connection.execute(
+        "INSERT INTO subthreads (
+           id, title, task, status, model, context_json,
+           forked_from_message_id, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?7)",
+        params![
+            id,
+            title,
+            task,
+            model,
+            serde_json::to_string(&context).unwrap_or_else(|_| "[]".to_owned()),
+            forked_from_message_id,
+            now,
+        ],
+    );
+    match inserted {
+        Ok(_) => tool_execution(json!({ "id": id, "status": "queued" }).to_string()),
+        Err(cause) => tool_execution(format!("error: {cause}")),
+    }
+}
+
+async fn list_threads(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<ThreadIndex> {
+    identity(&state, &headers).await?;
+    load_thread_index(&state.db_path)
+        .map(Json)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read threads"))
+}
+
+async fn subthread_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<SubthreadDetail> {
+    identity(&state, &headers).await?;
+    load_subthread_detail(&state.db_path, &id)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read subthread"))?
+        .map(Json)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "subthread is no longer active"))
+}
+
+async fn stream_subthread_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Query(cursor): Query<SubthreadEventQuery>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    identity(&state, &headers).await?;
+    if !subthread_is_active(&state.db_path, &id)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read subthread"))?
+    {
         return Err(error(
-            StatusCode::BAD_REQUEST,
-            "work item parent would create a cycle",
+            StatusCode::NOT_FOUND,
+            "subthread is no longer active",
         ));
     }
-    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)
-        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
-    transaction
-        .commit()
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update work item"))?;
-    load_work_graph(&state.db_path)
-        .map(Json)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read work graph"))
+    let db_path = state.db_path.clone();
+    let (sender, receiver) = mpsc::channel(32);
+    tokio::spawn(async move {
+        let mut after = cursor.after;
+        loop {
+            match load_subthread_events_after(&db_path, &id, after) {
+                Ok(events) => {
+                    for item in events {
+                        after = item.id;
+                        if sender
+                            .send(SubthreadStreamMessage::Event { item })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                Err(cause) => {
+                    let _ = sender
+                        .send(SubthreadStreamMessage::Error {
+                            error: cause.to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            }
+            match subthread_is_active(&db_path, &id) {
+                Ok(true) => tokio::time::sleep(Duration::from_millis(250)).await,
+                Ok(false) => {
+                    let _ = sender.send(SubthreadStreamMessage::Reaped).await;
+                    return;
+                }
+                Err(cause) => {
+                    let _ = sender
+                        .send(SubthreadStreamMessage::Error {
+                            error: cause.to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+    let stream = ReceiverStream::new(receiver).map(|message| {
+        Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&message).unwrap()))
+    });
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+async fn cancel_subthread(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    if let Some(cancel) = state.active_subthreads.lock().await.get(&id) {
+        let _ = cancel.send(true);
+    }
+    mark_subthread_cancelled(&state.db_path, &id)
+        .map_err(|cause| error(StatusCode::CONFLICT, cause.to_string()))?;
+    Ok(Json(json!({ "cancelled": true })))
 }
 
 async fn transcribe_audio(
@@ -1848,6 +3055,12 @@ async fn transcribe_audio(
             "cannot read configuration",
         )
     })?;
+    if config.deployment_role != "controller" {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "tool-executor machines do not have an audio transcription upstream",
+        ));
+    }
     let field = multipart
         .next_field()
         .await
@@ -1906,6 +3119,12 @@ async fn agent_turn(
             "cannot read configuration",
         )
     })?;
+    if config.deployment_role != "controller" {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "this Mobius machine is configured as a tool executor and has no model upstream",
+        ));
+    }
     let user_message = append_conversation(&state.db_path, &input.message, None).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1914,77 +3133,165 @@ async fn agent_turn(
     })?;
     create_agent_run(&state.db_path, &input.run_id, user_message.id)
         .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
-    let messages = conversation_context(load_conversation(&state.db_path).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot read conversation",
-        )
-    })?);
-    let client = state.client.clone();
-    let db_path = state.db_path.clone();
-    let skills = state.skills.clone();
-    let active_runs = state.active_runs.clone();
     let run_id = input.run_id.clone();
     let (cancel, cancellation) = watch::channel(false);
-    active_runs.lock().await.insert(run_id.clone(), cancel);
-    let (events, receiver) = mpsc::channel(32);
-    let started_at = Instant::now();
-    tokio::spawn(async move {
-        let event = match run_agent(
-            &client,
-            &config,
-            messages,
-            &db_path,
-            &skills,
-            AgentEventSink {
-                run_id: &run_id,
-                sender: &events,
-            },
-            cancellation,
-        )
+    state
+        .active_runs
+        .lock()
         .await
-        {
-            Ok(result) => {
-                let usage = AgentUsage {
-                    duration_ms: started_at.elapsed().as_millis() as u64,
-                    input_tokens: result.input_tokens,
-                    output_tokens: result.output_tokens,
-                };
-                match append_conversation(&db_path, &result.message, Some(usage)) {
-                    Ok(message) => AgentEvent::Complete { message },
-                    Err(cause) => AgentEvent::Error {
-                        error: format!("cannot save assistant message: {cause}"),
-                    },
-                }
-            }
-            Err(cause) => AgentEvent::Error {
-                error: cause.to_string(),
-            },
-        };
-        let status = match &event {
-            AgentEvent::Complete { .. } => "completed",
-            AgentEvent::Error { error } if error == "agent stopped" => "cancelled",
-            AgentEvent::Error { .. } => "failed",
-            _ => unreachable!("agent runs always end with a terminal event"),
-        };
-        let _ = send_agent_event(
-            &db_path,
-            &AgentEventSink {
-                run_id: &run_id,
-                sender: &events,
-            },
-            event,
-        )
-        .await;
-        let _ = finish_agent_run(&db_path, &run_id, status);
-        active_runs.lock().await.remove(&run_id);
-    });
+        .insert(run_id.clone(), cancel);
+    let (events, receiver) = mpsc::channel(32);
+    tokio::spawn(process_main_run(
+        state.clone(),
+        run_id,
+        user_message.id,
+        events,
+        cancellation,
+    ));
     let stream = ReceiverStream::new(receiver).map(|event| {
         Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&event).unwrap()))
     });
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+fn is_next_main_run(path: &Path, user_message_id: i64) -> Result<bool> {
+    open_db(path)?
+        .query_row(
+            "SELECT NOT EXISTS(
+               SELECT 1 FROM agent_runs
+               WHERE kind = 'main' AND status = 'running' AND user_message_id < ?1
+             )",
+            [user_message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+async fn process_main_run(
+    state: AppState,
+    run_id: String,
+    user_message_id: i64,
+    events: mpsc::Sender<AgentEvent>,
+    cancellation: watch::Receiver<bool>,
+) {
+    let started_at = Instant::now();
+    let sink = AgentEventSink {
+        run_id: &run_id,
+        sender: &events,
+    };
+    let _ = send_agent_event(
+        &state.db_path,
+        &sink,
+        AgentEvent::Status {
+            stage: "queued".to_owned(),
+            message: "Accepted into the main thread".to_owned(),
+        },
+    )
+    .await;
+    let mut queued_cancellation = cancellation.clone();
+    let guard = loop {
+        let candidate = tokio::select! {
+            guard = state.main_thread.lock() => Some(guard),
+            _ = queued_cancellation.changed() => None,
+        };
+        let Some(candidate) = candidate else {
+            break None;
+        };
+        if is_next_main_run(&state.db_path, user_message_id).unwrap_or(false) {
+            break Some(candidate);
+        }
+        drop(candidate);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            _ = queued_cancellation.changed() => break None,
+        }
+    };
+    let result = match guard {
+        None => Err(anyhow!("agent stopped")),
+        Some(_guard) => {
+            let _ = send_agent_event(
+                &state.db_path,
+                &sink,
+                AgentEvent::Status {
+                    stage: "running".to_owned(),
+                    message: "Compiling the main-thread context".to_owned(),
+                },
+            )
+            .await;
+            match load_config(&state.db_path) {
+                Ok(config) if config.deployment_role == "controller" => match compile_main_context(
+                    &state.client,
+                    &config,
+                    &state.db_path,
+                    user_message_id,
+                    &sink,
+                    cancellation.clone(),
+                )
+                .await
+                {
+                    Ok(items) => {
+                        run_agent_items(
+                            &state.client,
+                            &config,
+                            items,
+                            &state.db_path,
+                            &state.skills,
+                            sink,
+                            cancellation,
+                            AgentScope::Main,
+                            &state.active_subthreads,
+                        )
+                        .await
+                    }
+                    Err(cause) => Err(cause),
+                },
+                Ok(_) => Err(anyhow!("tool-executor machines cannot run the main thread")),
+                Err(cause) => Err(cause),
+            }
+        }
+    };
+    let event = match result {
+        Ok(result) => {
+            let usage = AgentUsage {
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                input_tokens: result.input_tokens,
+                output_tokens: result.output_tokens,
+            };
+            match append_conversation_for_run(
+                &state.db_path,
+                &result.message,
+                Some(usage),
+                Some(&run_id),
+            ) {
+                Ok(message) => AgentEvent::Complete { message },
+                Err(cause) => AgentEvent::Error {
+                    error: format!("cannot save assistant message: {cause}"),
+                },
+            }
+        }
+        Err(cause) => AgentEvent::Error {
+            error: cause.to_string(),
+        },
+    };
+    let status = match &event {
+        AgentEvent::Complete { .. } => "completed",
+        AgentEvent::Error { error } if error == "agent stopped" => "cancelled",
+        AgentEvent::Error { .. } => "failed",
+        _ => unreachable!("agent runs always end with a terminal event"),
+    };
+    let _ = send_agent_event(
+        &state.db_path,
+        &AgentEventSink {
+            run_id: &run_id,
+            sender: &events,
+        },
+        event,
+    )
+    .await;
+    let _ = finish_agent_run(&state.db_path, &run_id, status);
+    state.active_runs.lock().await.remove(&run_id);
 }
 
 async fn cancel_agent_turn(
@@ -1999,6 +3306,7 @@ async fn cancel_agent_turn(
     Ok(Json(json!({"cancelled": true})))
 }
 
+#[cfg(test)]
 async fn run_agent(
     client: &reqwest::Client,
     config: &Config,
@@ -2006,15 +3314,41 @@ async fn run_agent(
     db_path: &Path,
     skills: &Arc<StdRwLock<SkillCatalog>>,
     events: AgentEventSink<'_>,
+    cancellation: watch::Receiver<bool>,
+) -> Result<AgentResult> {
+    let items = messages
+        .into_iter()
+        .map(|message| json!({ "role": message.role, "content": message.content }))
+        .collect::<Vec<_>>();
+    run_agent_items(
+        client,
+        config,
+        items,
+        db_path,
+        skills,
+        events,
+        cancellation,
+        AgentScope::Main,
+        &Arc::new(Mutex::new(HashMap::new())),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_items(
+    client: &reqwest::Client,
+    config: &Config,
+    mut items: Vec<Value>,
+    db_path: &Path,
+    skills: &Arc<StdRwLock<SkillCatalog>>,
+    events: AgentEventSink<'_>,
     mut cancellation: watch::Receiver<bool>,
+    scope: AgentScope,
+    active_subthreads: &Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
 ) -> Result<AgentResult> {
     let mut input_tokens = 0;
     let mut output_tokens = 0;
     let mut images = Vec::new();
-    let mut items = messages
-        .into_iter()
-        .map(|message| json!({ "role": message.role, "content": message.content }))
-        .collect::<Vec<_>>();
     loop {
         if *cancellation.borrow() {
             return Err(anyhow!("agent stopped"));
@@ -2022,7 +3356,7 @@ async fn run_agent(
         let request = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
-            .json(&responses_request_body(
+            .json(&scoped_responses_request_body(
                 &config.default_model,
                 &items,
                 config.filesystem_tools_enabled,
@@ -2033,6 +3367,8 @@ async fn run_agent(
                     .read()
                     .map_err(|_| anyhow!("cannot read skills"))?
                     .clone(),
+                scope,
+                db_path,
             ));
         let response = tokio::select! {
             response = request.send() => response?,
@@ -2112,7 +3448,20 @@ async fn run_agent(
                 },
             )
             .await?;
-            let execution = execute_tool(name, args, db_path, cancellation.clone()).await;
+            let execution = execute_tool(
+                name,
+                args,
+                db_path,
+                client,
+                config.filesystem_tools_enabled,
+                config.bash_tools_enabled,
+                &items,
+                events.run_id,
+                scope,
+                active_subthreads,
+                cancellation.clone(),
+            )
+            .await;
             send_agent_event(
                 db_path,
                 &events,
@@ -2121,6 +3470,7 @@ async fn run_agent(
                     name: name.to_owned(),
                     added_lines: execution.added_lines,
                     deleted_lines: execution.deleted_lines,
+                    output: Some(execution.output.clone()),
                 },
             )
             .await?;
@@ -2197,10 +3547,112 @@ fn responses_request_body(
     body
 }
 
+#[allow(clippy::too_many_arguments)]
+fn scoped_responses_request_body(
+    model: &str,
+    input: &[Value],
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+    web_search_enabled: bool,
+    image_generation_enabled: bool,
+    skills: &SkillCatalog,
+    scope: AgentScope,
+    db_path: &Path,
+) -> Value {
+    let (remote_filesystem_enabled, remote_bash_enabled) =
+        remote_tool_capabilities(db_path).unwrap_or_default();
+    let mut body = responses_request_body(
+        model,
+        input,
+        filesystem_tools_enabled || remote_filesystem_enabled,
+        bash_tools_enabled || remote_bash_enabled,
+        web_search_enabled,
+        image_generation_enabled,
+        skills,
+    );
+    let machines = remote_machine_context(db_path).unwrap_or_default();
+    if scope == AgentScope::Main {
+        let tools = body
+            .as_object_mut()
+            .expect("responses request body is an object")
+            .entry("tools")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("tool definitions are an array");
+        tools.extend([
+            json!({"type":"function","name":"list_subthreads","description":"Inspect Mobius's internal background execution branches. These are implementation details of the single user-visible main thread, not user-managed sessions.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
+            json!({"type":"function","name":"fork_subthread","description":"Fork a bounded background task from the compiled main-thread context. The subthread runs on this controller; each filesystem or Bash call may independently select an enrolled device. Return promptly after dispatch because Mobius automatically merges the result into the main conversation.","parameters":{"type":"object","additionalProperties":false,"required":["title","task"],"properties":{"title":{"type":"string"},"task":{"type":"string"}}}}),
+            json!({"type":"function","name":"cancel_subthread","description":"Terminate an active internal subthread that is no longer relevant or must be rebuilt.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
+        ]);
+        body["tool_choice"] = Value::String("auto".to_owned());
+    }
+    let scope_instructions = match scope {
+        AgentScope::Main => {
+            "You are Mobius's single user-visible main thread. Accept every user input as part of one durable conversation. Give a concise response promptly. Fork only bounded work that can proceed without continuous user judgment; inspect existing subthreads before replacing work, cancel obsolete branches, and let Mobius merge background results automatically. Never ask the user to manage subthreads as sessions."
+        }
+        AgentScope::Subthread => {
+            "You are an internal Mobius subthread forked from a compiled main-thread checkpoint. Complete the bounded task using the inherited context, return a self-contained result with reusable environment facts and evidence, and do not ask the user to manage this branch. The result is merged into the main thread automatically."
+        }
+    };
+    let instructions = body
+        .get("instructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    body["instructions"] = Value::String(format!("{instructions}\n{scope_instructions}"));
+    if !machines.is_empty() {
+        let instructions = body
+            .get("instructions")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        body["instructions"] = Value::String(format!(
+            "{instructions}\nEnrolled remote execution devices and their minimal capabilities are listed below. Set a filesystem or Bash tool's target_device to one of these exact IDs to execute that single call remotely; omit target_device to execute locally.\n{machines}"
+        ));
+    }
+    body
+}
+
+fn remote_tool_capabilities(path: &Path) -> Result<(bool, bool)> {
+    open_db(path)?
+        .query_row(
+            "SELECT COALESCE(MAX(filesystem_enabled), 0), COALESCE(MAX(bash_enabled), 0)
+             FROM peers WHERE machine_id <> ''",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(Into::into)
+}
+
+fn remote_machine_context(path: &Path) -> Result<String> {
+    let connection = open_db(path)?;
+    let machines = connection
+        .prepare(
+            "SELECT machine_id, name, hostname, deployment_role, filesystem_enabled, bash_enabled
+             FROM peers WHERE machine_id <> '' ORDER BY name",
+        )?
+        .query_map([], |row| {
+            Ok(json!({
+                "target_device": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "hostname": row.get::<_, String>(2)?,
+                "deployment_role": row.get::<_, String>(3)?,
+                "capabilities": {
+                    "filesystem": row.get::<_, bool>(4)?,
+                    "bash": row.get::<_, bool>(5)?,
+                }
+            }))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if machines.is_empty() {
+        Ok(String::new())
+    } else {
+        serde_json::to_string(&machines).map_err(Into::into)
+    }
+}
+
 fn skill_instructions(skills: &SkillCatalog) -> String {
     let metadata = serde_json::to_string(&skills.skills).expect("skill metadata is serializable");
     format!(
-        "Work Items are Mobius's persistent delivery graph. For a user request that has a deliverable or needs sustained execution, inspect it with get_work_graph, then create or update Work Items to represent the work. Use parent_id for the work-breakdown tree and depends_on_ids for prerequisites. Keep status accurate: ready, running, waiting, satisfied, superseded, or cancelled. Only mark an item satisfied when evidence_text is non-empty; record the resulting artifact or outcome in delivery_text. Before updating an item, inspect the graph and send every required field back to update_work_item. Do not create Work Items for casual questions with no delivery.\nInstalled SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
+        "Follow Mobius's one more step philosophy: use the current conversation, tool feedback, and observed evidence to choose and complete the next useful step, then reassess. Complete one useful, verifiable step at a time and let each result inform what comes next.\nInstalled SKILL metadata is refreshed before every API request. When you choose a skill, first read its SKILL.md with the read_file tool, then follow it. The directory field is the skill installation directory and can be used to read files referenced by SKILL.md.\n{metadata}"
     )
 }
 
@@ -2300,6 +3752,7 @@ async fn emit_response_process_events(
                 name: name.to_owned(),
                 added_lines: None,
                 deleted_lines: None,
+                output: None,
             },
         )
         .await?;
@@ -2322,21 +3775,17 @@ fn tool_definitions(
     web_search_enabled: bool,
     image_generation_enabled: bool,
 ) -> Value {
-    let mut tools = vec![
-        json!({"type":"function","name":"get_work_graph","description":"Read Mobius's persistent Work Item graph, including every item, its parent tree, dependency edges, and the currently unblocked ready_ids.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
-        json!({"type":"function","name":"create_work_item","description":"Create a persistent Work Item for a delivery objective or a bounded part of it. Use parent_id for the work-breakdown tree and depends_on_ids for prerequisites.","parameters":{"type":"object","additionalProperties":false,"required":["title"],"properties":{"parent_id":{"type":["integer","null"]},"title":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["ready","running","waiting","satisfied","superseded","cancelled"]},"evidence_text":{"type":"string"},"delivery_text":{"type":"string"},"depends_on_ids":{"type":"array","items":{"type":"integer"}}}}}),
-        json!({"type":"function","name":"update_work_item","description":"Replace a Work Item's fields and dependencies. First call get_work_graph, then provide every field exactly as it should remain. A satisfied item requires non-empty evidence_text.","parameters":{"type":"object","additionalProperties":false,"required":["id","parent_id","title","description","status","evidence_text","delivery_text","depends_on_ids"],"properties":{"id":{"type":"integer"},"parent_id":{"type":["integer","null"]},"title":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["ready","running","waiting","satisfied","superseded","cancelled"]},"evidence_text":{"type":"string"},"delivery_text":{"type":"string"},"depends_on_ids":{"type":"array","items":{"type":"integer"}}}}}),
-    ];
+    let mut tools = Vec::new();
     if filesystem_tools_enabled {
         tools.extend([
-            json!({"type":"function","name":"list_files","description":"List files in any directory on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
-            json!({"type":"function","name":"read_file","description":"Read a file from any path on this machine. Binary files are returned as base64 JSON.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}}),
-            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path on this machine.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}}),
-            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}}}),
+            json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
+            json!({"type":"function","name":"read_file","description":"Read a file from any path. Binary files are returned as base64 JSON. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
+            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
+            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
         ]);
     }
     if bash_tools_enabled {
-        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command on this Mobius machine. Return stdout, stderr, and the exit status.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"}}}}));
+        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}));
     }
     if web_search_enabled {
         tools.push(json!({"type":"web_search"}));
@@ -2373,20 +3822,96 @@ fn line_change_counts(previous: &str, next: &str) -> (usize, usize) {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     name: &str,
     args: Value,
     db_path: &Path,
+    client: &reqwest::Client,
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+    current_context: &[Value],
+    run_id: &str,
+    scope: AgentScope,
+    active_subthreads: &Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
+    match name {
+        "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
+            execute_device_tool(
+                name,
+                args,
+                db_path,
+                client,
+                filesystem_tools_enabled,
+                bash_tools_enabled,
+                cancellation,
+            )
+            .await
+        }
+        "list_subthreads" if scope == AgentScope::Main => load_subthreads(db_path)
+            .and_then(|threads| serde_json::to_string(&threads).map_err(Into::into))
+            .map(tool_execution)
+            .unwrap_or_else(|cause| tool_execution(format!("error: {cause}"))),
+        "fork_subthread" if scope == AgentScope::Main => {
+            execute_fork_subthread(db_path, run_id, current_context, args)
+        }
+        "cancel_subthread" if scope == AgentScope::Main => {
+            let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+            if let Some(cancel) = active_subthreads.lock().await.get(id) {
+                let _ = cancel.send(true);
+            }
+            match mark_subthread_cancelled(db_path, id) {
+                Ok(()) => tool_execution("cancelled"),
+                Err(cause) => tool_execution(format!("error: {cause}")),
+            }
+        }
+        _ => tool_execution("error: unknown tool"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_device_tool(
+    name: &str,
+    mut args: Value,
+    db_path: &Path,
+    client: &reqwest::Client,
+    filesystem_tools_enabled: bool,
+    bash_tools_enabled: bool,
+    cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
+    let target_device = match args.get("target_device") {
+        None => None,
+        Some(Value::String(target_device)) if !target_device.is_empty() => {
+            Some(target_device.to_owned())
+        }
+        Some(_) => return tool_execution("error: target_device must be a non-empty device ID"),
+    };
+    if let Some(target_device) = target_device {
+        if let Some(arguments) = args.as_object_mut() {
+            arguments.remove("target_device");
+        }
+        return execute_remote_device(client, db_path, &target_device, name, args, cancellation)
+            .await;
+    }
+    let local_enabled = match name {
+        "list_files" | "read_file" | "write_file" | "edit_file" => filesystem_tools_enabled,
+        "run_bash" => bash_tools_enabled,
+        _ => false,
+    };
+    if !local_enabled {
+        return tool_execution("error: this tool is not enabled on the current device");
+    }
+    execute_local_tool(name, args, cancellation).await
+}
+
+async fn execute_local_tool(
+    name: &str,
+    args: Value,
     cancellation: watch::Receiver<bool>,
 ) -> ToolExecution {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     match name {
-        "get_work_graph" => load_work_graph(db_path)
-            .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
-            .map(tool_execution)
-            .unwrap_or_else(|cause| tool_execution(format!("error: {cause}"))),
-        "create_work_item" => execute_create_work_item(db_path, args),
-        "update_work_item" => execute_update_work_item(db_path, args),
         "list_files" => match std::fs::read_dir(path) {
             Ok(entries) => tool_execution(
                 serde_json::to_string(
@@ -2424,102 +3949,50 @@ async fn execute_tool(
     }
 }
 
-fn execute_create_work_item(db_path: &Path, args: Value) -> ToolExecution {
-    let input = match serde_json::from_value::<CreateWorkItem>(args) {
-        Ok(input) => input,
-        Err(cause) => return tool_execution(format!("error: invalid Work Item: {cause}")),
+async fn execute_remote_device(
+    client: &reqwest::Client,
+    db_path: &Path,
+    target_device: &str,
+    tool: &str,
+    arguments: Value,
+    mut cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
+    let peer = open_db(db_path).and_then(|connection| {
+        connection
+            .query_row(
+                "SELECT base_url, device_token FROM peers WHERE machine_id = ?1",
+                [target_device],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    });
+    let (base_url, device_token) = match peer {
+        Ok(Some(peer)) if !peer.1.is_empty() => peer,
+        Ok(Some(_)) => return tool_execution("error: remote device has no device token"),
+        Ok(None) => return tool_execution("error: unknown target device"),
+        Err(cause) => return tool_execution(format!("error: cannot read target device: {cause}")),
     };
-    create_work_item_for_agent(db_path, input)
-        .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
-        .map(tool_execution)
-        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
-}
-
-fn execute_update_work_item(db_path: &Path, mut args: Value) -> ToolExecution {
-    let id = match args.get("id").and_then(Value::as_i64) {
-        Some(id) => id,
-        None => return tool_execution("error: update_work_item requires an integer id"),
+    let request = client
+        .post(format!("{base_url}/api/remote/tools/execute"))
+        .bearer_auth(device_token)
+        .json(&json!({ "name": tool, "arguments": arguments }));
+    let response = tokio::select! {
+        response = request.send() => response,
+        _ = cancellation.changed() => return tool_execution("error: agent stopped"),
     };
-    let Some(arguments) = args.as_object_mut() else {
-        return tool_execution("error: update_work_item arguments must be an object");
+    let response = match response.and_then(reqwest::Response::error_for_status) {
+        Ok(response) => response,
+        Err(cause) => return tool_execution(format!("error: remote tool request failed: {cause}")),
     };
-    arguments.remove("id");
-    let input = match serde_json::from_value::<UpdateWorkItem>(args) {
-        Ok(input) => input,
-        Err(cause) => return tool_execution(format!("error: invalid Work Item: {cause}")),
-    };
-    update_work_item_for_agent(db_path, id, input)
-        .and_then(|graph| serde_json::to_string(&graph).map_err(Into::into))
-        .map(tool_execution)
-        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
-}
-
-fn create_work_item_for_agent(db_path: &Path, input: CreateWorkItem) -> Result<WorkGraph> {
-    validate_work_item(&input.title, &input.status, &input.evidence_text)?;
-    let mut connection = open_db(db_path)?;
-    let transaction = connection.transaction()?;
-    if let Some(parent_id) = input.parent_id
-        && !work_item_exists(&transaction, parent_id)?
-    {
-        return Err(anyhow!("work item parent does not exist"));
+    match response.json::<RemoteToolResponse>().await {
+        Ok(response) => ToolExecution {
+            output: response.output,
+            added_lines: response.added_lines,
+            deleted_lines: response.deleted_lines,
+        },
+        Err(cause) => tool_execution(format!("error: invalid remote tool response: {cause}")),
     }
-    let now = chrono::Utc::now().to_rfc3339();
-    transaction.execute(
-        "INSERT INTO work_items (parent_id, title, description, status, evidence_text, delivery_text, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-        params![
-            input.parent_id,
-            input.title.trim(),
-            input.description,
-            input.status,
-            input.evidence_text,
-            input.delivery_text,
-            now,
-        ],
-    )?;
-    let id = transaction.last_insert_rowid();
-    if work_item_parent_has_cycle(&transaction, id)? {
-        return Err(anyhow!("work item parent would create a cycle"));
-    }
-    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)?;
-    transaction.commit()?;
-    load_work_graph(db_path)
-}
-
-fn update_work_item_for_agent(db_path: &Path, id: i64, input: UpdateWorkItem) -> Result<WorkGraph> {
-    validate_work_item(&input.title, &input.status, &input.evidence_text)?;
-    let mut connection = open_db(db_path)?;
-    let transaction = connection.transaction()?;
-    if !work_item_exists(&transaction, id)? {
-        return Err(anyhow!("work item does not exist"));
-    }
-    if let Some(parent_id) = input.parent_id
-        && !work_item_exists(&transaction, parent_id)?
-    {
-        return Err(anyhow!("work item parent does not exist"));
-    }
-    transaction.execute(
-        "UPDATE work_items
-         SET parent_id = ?1, title = ?2, description = ?3, status = ?4,
-             evidence_text = ?5, delivery_text = ?6, updated_at = ?7
-         WHERE id = ?8",
-        params![
-            input.parent_id,
-            input.title.trim(),
-            input.description,
-            input.status,
-            input.evidence_text,
-            input.delivery_text,
-            chrono::Utc::now().to_rfc3339(),
-            id,
-        ],
-    )?;
-    if work_item_parent_has_cycle(&transaction, id)? {
-        return Err(anyhow!("work item parent would create a cycle"));
-    }
-    replace_work_item_dependencies(&transaction, id, &input.depends_on_ids)?;
-    transaction.commit()?;
-    load_work_graph(db_path)
 }
 
 fn execute_write_file(path: &str, content: &str) -> ToolExecution {
@@ -2601,6 +4074,41 @@ fn hostname() -> String {
 mod tests {
     use super::*;
 
+    fn configure_test_database(db: &Path, openai_base_url: &str) {
+        let connection = open_db(db).unwrap();
+        for (key, value) in [
+            ("root_user_id", "root"),
+            ("auth_url", "https://auth.example.com"),
+            ("openai_base_url", openai_base_url),
+            ("openai_api_key", "test-key"),
+            ("deployment_role", "controller"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )
+                .unwrap();
+        }
+    }
+
+    fn test_state(db_path: PathBuf) -> AppState {
+        let skills_directory = db_path.parent().unwrap().join("skills");
+        std::fs::create_dir_all(&skills_directory).unwrap();
+        AppState {
+            resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(db_path.clone()))),
+            db_path,
+            skills_directory,
+            skills: Arc::new(StdRwLock::new(SkillCatalog::default())),
+            client: reqwest::Client::new(),
+            jwks: Arc::new(RwLock::new(None)),
+            active_runs: Arc::new(Mutex::new(HashMap::new())),
+            active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+            main_thread: Arc::new(Mutex::new(())),
+        }
+    }
+
     #[tokio::test]
     async fn favicon_is_served_as_png() {
         let response = mobius_mark().await;
@@ -2655,6 +4163,768 @@ mod tests {
             )
             .unwrap();
         assert_eq!(default_model, DEFAULT_MODEL_ID);
+        let subthread_model: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'subthread_model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(subthread_model, DEFAULT_SUBTHREAD_MODEL_ID);
+        let deployment_role: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'deployment_role'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deployment_role, "controller");
+    }
+
+    #[test]
+    fn context_checkpoint_is_a_stable_prefix_of_complete_history() {
+        let checkpoint = ContextCheckpoint {
+            id: 7,
+            through_message_id: 2,
+            source_message_count: 2,
+            summary: "The operator selected Mobius and kept the main thread active.".to_owned(),
+            created_at: "2026-08-04T00:00:00Z".to_owned(),
+        };
+        let mut history = vec![
+            HistoryMessage {
+                id: 1,
+                role: "user".to_owned(),
+                content: "Choose a name".to_owned(),
+                source_run_id: None,
+            },
+            HistoryMessage {
+                id: 2,
+                role: "assistant".to_owned(),
+                content: "Mobius".to_owned(),
+                source_run_id: None,
+            },
+            HistoryMessage {
+                id: 3,
+                role: "user".to_owned(),
+                content: "Implement checkpoints".to_owned(),
+                source_run_id: None,
+            },
+        ];
+        let first = context_items(Some(&checkpoint), &history);
+        history.push(HistoryMessage {
+            id: 4,
+            role: "assistant".to_owned(),
+            content: "Implemented".to_owned(),
+            source_run_id: None,
+        });
+        let second = context_items(Some(&checkpoint), &history);
+        assert_eq!(first[0], second[0]);
+        assert_eq!(first[0]["role"], "developer");
+        assert!(
+            first[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("checkpoint #7")
+        );
+        assert_eq!(first[1]["content"], "Implement checkpoints");
+        assert_eq!(second[2]["content"], "Implemented");
+    }
+
+    #[test]
+    fn checkpoint_cutoff_keeps_a_recent_uncompressed_tail() {
+        let history = (1..=20)
+            .map(|id| HistoryMessage {
+                id,
+                role: if id % 2 == 0 { "assistant" } else { "user" }.to_owned(),
+                content: format!("message {id}"),
+                source_run_id: None,
+            })
+            .collect::<Vec<_>>();
+        let cutoff = checkpoint_cutoff(&history, None).unwrap();
+        assert_eq!(history.len() - cutoff, CONTEXT_TAIL_MESSAGES);
+        let checkpoint = ContextCheckpoint {
+            id: 1,
+            through_message_id: 7,
+            source_message_count: 7,
+            summary: "prefix".to_owned(),
+            created_at: "now".to_owned(),
+        };
+        assert_eq!(checkpoint_cutoff(&history, Some(&checkpoint)), None);
+    }
+
+    #[test]
+    fn subthread_fork_persists_compiled_context_and_recovers_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("ship it".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "main-run", user.id).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "UPDATE app_meta SET value = 'subthread-test-model' WHERE key = 'subthread_model'",
+                [],
+            )
+            .unwrap();
+        let execution = execute_fork_subthread(
+            &db,
+            "main-run",
+            &[
+                json!({"role":"developer","content":"checkpoint"}),
+                json!({"role":"user","content":"ship it"}),
+                json!({"type":"function_call","name":"fork_subthread"}),
+            ],
+            json!({"title":"Verify","task":"Run the full test suite"}),
+        );
+        let created: Value = serde_json::from_str(&execution.output).unwrap();
+        assert_eq!(created["status"], "queued");
+        let jobs = claim_queued_subthreads(&db).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].context.len(), 2);
+        assert_eq!(jobs[0].model, "subthread-test-model");
+        let running = load_subthreads(&db).unwrap();
+        assert_eq!(running[0].status, "running");
+        assert_eq!(running[0].model, "subthread-test-model");
+        let columns = open_db(&db)
+            .unwrap()
+            .prepare("PRAGMA table_info(subthreads)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "target_machine_id"));
+        bootstrap_database(&db).unwrap();
+        assert_eq!(load_subthreads(&db).unwrap()[0].status, "queued");
+    }
+
+    #[test]
+    fn legacy_subthread_target_machine_column_is_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute_batch("ALTER TABLE subthreads ADD COLUMN target_machine_id TEXT")
+            .unwrap();
+
+        bootstrap_database(&db).unwrap();
+        let columns = open_db(&db)
+            .unwrap()
+            .prepare("PRAGMA table_info(subthreads)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "target_machine_id"));
+    }
+
+    #[test]
+    fn subthread_detail_loads_history_and_event_cursor_until_reaped() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("inspect history".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "main-run", user.id).unwrap();
+        let fork = execute_fork_subthread(
+            &db,
+            "main-run",
+            &[json!({"role":"user","content":"inspect history"})],
+            json!({"title":"History","task":"Inspect persisted events"}),
+        );
+        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let _ = claim_queued_subthreads(&db).unwrap();
+        let run_id = format!("subthread-{id}");
+        create_agent_run_with_kind(&db, &run_id, user.id, "subthread").unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "UPDATE subthreads SET run_id = ?1 WHERE id = ?2",
+                params![run_id, id],
+            )
+            .unwrap();
+        append_agent_event(
+            &db,
+            &run_id,
+            &AgentEvent::Status {
+                stage: "running".to_owned(),
+                message: "Inspecting".to_owned(),
+            },
+        )
+        .unwrap();
+        append_agent_event(&db, &run_id, &AgentEvent::Context { input_tokens: 42 }).unwrap();
+        let detail = load_subthread_detail(&db, &id).unwrap().unwrap();
+        assert_eq!(detail.thread.model, DEFAULT_SUBTHREAD_MODEL_ID);
+        assert_eq!(detail.events.len(), 2);
+        let next = load_subthread_events_after(&db, &id, detail.events[0].id).unwrap();
+        assert_eq!(next.len(), 1);
+        assert!(matches!(
+            next[0].event,
+            AgentEvent::Context { input_tokens: 42 }
+        ));
+        finish_subthread(&db, &id, "completed", Some("reaped")).unwrap();
+        assert!(load_subthread_detail(&db, &id).unwrap().is_none());
+        assert!(!subthread_is_active(&db, &id).unwrap());
+    }
+
+    #[test]
+    fn thread_index_keeps_main_thread_first_class_and_models_independent() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute_batch(
+                "UPDATE app_meta SET value = 'main-index-model' WHERE key = 'default_model';
+                 UPDATE app_meta SET value = 'sub-index-model' WHERE key = 'subthread_model';",
+            )
+            .unwrap();
+
+        let empty = load_thread_index(&db).unwrap();
+        assert_eq!(empty.main_thread.status, "idle");
+        assert_eq!(empty.main_thread.model, "main-index-model");
+        assert!(empty.main_thread.updated_at.is_none());
+        assert!(empty.subthreads.is_empty());
+
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("index this thread".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "main-index-run", user.id).unwrap();
+        let fork = execute_fork_subthread(
+            &db,
+            "main-index-run",
+            &[json!({"role":"user","content":"index this thread"})],
+            json!({"title":"Index","task":"Verify the thread index"}),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&fork.output).unwrap()["status"],
+            "queued"
+        );
+
+        let active = load_thread_index(&db).unwrap();
+        assert_eq!(active.main_thread.status, "running");
+        assert_eq!(active.main_thread.model, "main-index-model");
+        assert_eq!(
+            active.main_thread.updated_at.as_deref(),
+            Some(user.created_at.as_str())
+        );
+        assert_eq!(active.subthreads.len(), 1);
+        assert_eq!(active.subthreads[0].model, "sub-index-model");
+
+        finish_agent_run(&db, "main-index-run", "completed").unwrap();
+        assert_eq!(load_thread_index(&db).unwrap().main_thread.status, "idle");
+    }
+
+    #[test]
+    fn main_thread_runs_follow_persisted_user_input_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let append_user = |content: &str| {
+            append_conversation(
+                &db,
+                &ChatMessage {
+                    role: "user".to_owned(),
+                    content: Value::String(content.to_owned()),
+                    images: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                None,
+            )
+            .unwrap()
+        };
+        let first = append_user("first");
+        let second = append_user("second");
+        create_agent_run(&db, "run-first", first.id).unwrap();
+        create_agent_run(&db, "run-second", second.id).unwrap();
+        assert!(is_next_main_run(&db, first.id).unwrap());
+        assert!(!is_next_main_run(&db, second.id).unwrap());
+        finish_agent_run(&db, "run-first", "completed").unwrap();
+        assert!(is_next_main_run(&db, second.id).unwrap());
+    }
+
+    #[test]
+    fn restart_recovers_only_inputs_that_never_started_tool_execution() {
+        let queued = serde_json::to_string(&AgentEvent::Status {
+            stage: "queued".to_owned(),
+            message: "accepted".to_owned(),
+        })
+        .unwrap();
+        let running = serde_json::to_string(&AgentEvent::Status {
+            stage: "running".to_owned(),
+            message: "compiling".to_owned(),
+        })
+        .unwrap();
+        let tool = serde_json::to_string(&AgentEvent::ToolCall {
+            call_id: "call".to_owned(),
+            name: "run_bash".to_owned(),
+            arguments: json!({"command":"deploy"}),
+        })
+        .unwrap();
+        assert!(recoverable_main_run(None));
+        assert!(recoverable_main_run(Some(&queued)));
+        assert!(!recoverable_main_run(Some(&running)));
+        assert!(!recoverable_main_run(Some(&tool)));
+    }
+
+    #[test]
+    fn scoped_agent_tools_keep_subthreads_local_and_expose_remote_devices_per_call() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO peers (
+               id, name, base_url, device_token, machine_id, hostname, deployment_role,
+               filesystem_enabled, bash_enabled, created_at
+             ) VALUES ('peer', 'Build host', 'https://build.example', 'secret-token',
+                       'machine-build', 'build-1', 'executor', 1, 0, 'now')",
+                [],
+            )
+            .unwrap();
+        let main = scoped_responses_request_body(
+            "gpt-5",
+            &[],
+            false,
+            false,
+            false,
+            false,
+            &SkillCatalog::default(),
+            AgentScope::Main,
+            &db,
+        );
+        let subthread = scoped_responses_request_body(
+            "gpt-5",
+            &[],
+            false,
+            false,
+            false,
+            false,
+            &SkillCatalog::default(),
+            AgentScope::Subthread,
+            &db,
+        );
+        let names = |body: &Value| {
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert!(names(&main).iter().any(|name| name == "fork_subthread"));
+        assert!(
+            !names(&subthread)
+                .iter()
+                .any(|name| name == "fork_subthread")
+        );
+        assert!(names(&subthread).iter().any(|name| name == "read_file"));
+        assert!(!names(&main).iter().any(|name| name == "run_on_machine"));
+        let fork = main["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "fork_subthread")
+            .unwrap();
+        assert!(fork.pointer("/parameters/properties/machine_id").is_none());
+        let read_file = subthread["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "read_file")
+            .unwrap();
+        assert_eq!(
+            read_file.pointer("/parameters/properties/target_device/type"),
+            Some(&Value::String("string".to_owned()))
+        );
+        let instructions = main["instructions"].as_str().unwrap();
+        assert!(instructions.contains("machine-build"));
+        assert!(instructions.contains("target_device"));
+        assert!(!instructions.contains("secret-token"));
+    }
+
+    #[test]
+    fn filesystem_and_bash_tools_accept_optional_target_device() {
+        let tools = tool_definitions(true, true, false, false);
+        for name in [
+            "list_files",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "run_bash",
+        ] {
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            assert_eq!(
+                tool.pointer("/parameters/properties/target_device/type"),
+                Some(&Value::String("string".to_owned()))
+            );
+            assert!(
+                !tool["parameters"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&Value::String("target_device".to_owned()))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn target_device_routes_only_that_tool_call_to_the_remote_executor() {
+        async fn capture_remote_tool(
+            State(captured): State<Arc<Mutex<Vec<Value>>>>,
+            headers: HeaderMap,
+            Json(request): Json<Value>,
+        ) -> Json<RemoteToolResponse> {
+            captured.lock().await.push(json!({
+                "authorization": headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                "request": request,
+            }));
+            Json(RemoteToolResponse {
+                output: "remote evidence".to_owned(),
+                added_lines: None,
+                deleted_lines: None,
+            })
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let captured = captured.clone();
+            async move {
+                axum::serve(
+                    listener,
+                    Router::new()
+                        .route("/api/remote/tools/execute", post(capture_remote_tool))
+                        .with_state(captured),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO peers (
+                   id, name, base_url, device_token, machine_id, hostname, deployment_role,
+                   filesystem_enabled, bash_enabled, created_at
+                 ) VALUES ('peer', 'Build host', ?1, 'secret-token',
+                           'machine-build', 'build-1', 'executor', 1, 0, 'now')",
+                [format!("http://{address}")],
+            )
+            .unwrap();
+        let local_file = temp.path().join("local.txt");
+        std::fs::write(&local_file, "local evidence").unwrap();
+        let local = execute_device_tool(
+            "read_file",
+            json!({"path": local_file}),
+            &db,
+            &reqwest::Client::new(),
+            true,
+            false,
+            watch::channel(false).1,
+        )
+        .await;
+        assert_eq!(local.output, "local evidence");
+        let invalid_target = execute_device_tool(
+            "read_file",
+            json!({"path": local_file, "target_device": null}),
+            &db,
+            &reqwest::Client::new(),
+            true,
+            false,
+            watch::channel(false).1,
+        )
+        .await;
+        assert_eq!(
+            invalid_target.output,
+            "error: target_device must be a non-empty device ID"
+        );
+        let remote = execute_device_tool(
+            "read_file",
+            json!({"path":"/remote/evidence.txt","target_device":"machine-build"}),
+            &db,
+            &reqwest::Client::new(),
+            false,
+            false,
+            watch::channel(false).1,
+        )
+        .await;
+        server.abort();
+        assert_eq!(remote.output, "remote evidence");
+        assert_eq!(
+            captured.lock().await.as_slice(),
+            &[json!({
+                "authorization": "Bearer secret-token",
+                "request": {
+                    "name": "read_file",
+                    "arguments": {"path": "/remote/evidence.txt"},
+                },
+            })]
+        );
+    }
+
+    #[test]
+    fn device_token_hash_never_contains_the_bearer_secret() {
+        let secret = "mobius_device_secret";
+        let digest = token_hash(secret);
+        assert_eq!(digest.len(), 64);
+        assert_ne!(digest, secret);
+        assert!(!digest.contains(secret));
+    }
+
+    #[tokio::test]
+    async fn remote_executor_enforces_the_device_token_capability_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, "https://openai.example.com/v1");
+        let secret = "mobius_remote_test_secret";
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO device_tokens (
+                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
+                 ) VALUES ('token', 'controller', ?1, 1, 0, 'now')",
+                [token_hash(secret)],
+            )
+            .unwrap();
+        let file = temp.path().join("evidence.txt");
+        std::fs::write(&file, "remote evidence").unwrap();
+        let state = test_state(db);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
+        );
+        let response = remote_execute_tool(
+            State(state.clone()),
+            headers.clone(),
+            Json(RemoteToolRequest {
+                name: "read_file".to_owned(),
+                arguments: json!({"path": file}),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.output, "remote evidence");
+        let denied = remote_execute_tool(
+            State(state),
+            headers,
+            Json(RemoteToolRequest {
+                name: "run_bash".to_owned(),
+                arguments: json!({"command":"printf forbidden"}),
+            }),
+        )
+        .await;
+        assert!(matches!(denied, Err((StatusCode::FORBIDDEN, _))));
+    }
+
+    #[tokio::test]
+    async fn long_history_creates_an_auditable_checkpoint_and_keeps_the_full_log() {
+        async fn responses() -> String {
+            let item = json!({
+                "type":"message",
+                "content":[{"type":"output_text","text":"Stable facts and unfinished work."}]
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/responses", post(responses)))
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let mut current = 0;
+        for index in 1..=17 {
+            let message = append_conversation(
+                &db,
+                &ChatMessage {
+                    role: if index % 2 == 0 { "assistant" } else { "user" }.to_owned(),
+                    content: Value::String(format!("message {index}: {}", "x".repeat(6_000))),
+                    images: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                None,
+            )
+            .unwrap();
+            current = message.id;
+        }
+        create_agent_run(&db, "checkpoint-run", current).unwrap();
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            openai_api_key: "test".to_owned(),
+            default_model: DEFAULT_MODEL_ID.to_owned(),
+            filesystem_tools_enabled: false,
+            bash_tools_enabled: false,
+            web_search_enabled: false,
+            image_generation_enabled: false,
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        };
+        let (events, mut received) = mpsc::channel(4);
+        let items = compile_main_context(
+            &reqwest::Client::new(),
+            &config,
+            &db,
+            current,
+            &AgentEventSink {
+                run_id: "checkpoint-run",
+                sender: &events,
+            },
+            watch::channel(false).1,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(load_conversation(&db).unwrap().len(), 17);
+        assert_eq!(items.len(), CONTEXT_TAIL_MESSAGES + 1);
+        assert_eq!(items[0]["role"], "developer");
+        let checkpoint = load_latest_checkpoint(&open_db(&db).unwrap(), i64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.through_message_id, 5);
+        assert_eq!(checkpoint.summary, "Stable facts and unfinished work.");
+        assert!(matches!(
+            received.recv().await,
+            Some(AgentEvent::Status { stage, .. }) if stage == "checkpointing"
+        ));
+        assert!(matches!(
+            received.recv().await,
+            Some(AgentEvent::Checkpoint { id, .. }) if id == checkpoint.id
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_subthread_is_reaped_into_the_single_main_conversation() {
+        async fn responses() -> String {
+            let item = json!({
+                "type":"message",
+                "content":[{"type":"output_text","text":"Background verification passed."}]
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/responses", post(responses)))
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("verify in the background".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "main-run", user.id).unwrap();
+        let fork = execute_fork_subthread(
+            &db,
+            "main-run",
+            &[json!({"role":"user","content":"verify in the background"})],
+            json!({"title":"Verification","task":"Run verification"}),
+        );
+        assert!(!fork.output.starts_with("error:"));
+        let job = claim_queued_subthreads(&db).unwrap().remove(0);
+        run_subthread(test_state(db.clone()), job).await;
+        server.abort();
+        assert!(load_subthreads(&db).unwrap().is_empty());
+        let (status, result) = open_db(&db)
+            .unwrap()
+            .query_row("SELECT status, result FROM subthreads LIMIT 1", [], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(result.as_deref(), Some("Background verification passed."));
+        let messages = load_conversation(&db).unwrap();
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Background task completed")
+        );
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Background verification passed.")
+        );
     }
 
     #[test]
@@ -2718,6 +4988,7 @@ mod tests {
                 name: "read_file".to_owned(),
                 added_lines: None,
                 deleted_lines: None,
+                output: Some("README contents".to_owned()),
             },
         )
         .unwrap();
@@ -2730,6 +5001,30 @@ mod tests {
             state.runs[0].events[1],
             AgentEvent::ToolResult { ref name, .. } if name == "read_file"
         ));
+        append_conversation_for_run(
+            &db,
+            &ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String("The README was inspected.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+            Some("run_1"),
+        )
+        .unwrap();
+        let history = load_history_for_run(&db, user.id).unwrap();
+        let assistant = history
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        assert!(
+            assistant
+                .content
+                .contains("Tool result read_file: README contents")
+        );
+        assert!(assistant.content.contains("The README was inspected."));
     }
 
     #[test]
@@ -2772,106 +5067,37 @@ mod tests {
     }
 
     #[test]
-    fn work_graph_exposes_the_unblocked_topological_frontier() {
+    fn bootstrap_removes_legacy_work_item_tables() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
+        let connection = open_db(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE work_items (
+                   id INTEGER PRIMARY KEY,
+                   title TEXT NOT NULL
+                 );
+                 CREATE TABLE work_item_dependencies (
+                   work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+                   depends_on_id INTEGER NOT NULL REFERENCES work_items(id)
+                 );
+                 INSERT INTO work_items (id, title) VALUES (1, 'legacy');
+                 INSERT INTO work_item_dependencies (work_item_id, depends_on_id) VALUES (1, 1);",
+            )
+            .unwrap();
+        drop(connection);
         bootstrap_database(&db).unwrap();
         let connection = open_db(&db).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        connection
-            .execute(
-                "INSERT INTO work_items (title, status, evidence_text, delivery_text, created_at, updated_at)
-                 VALUES ('Research', 'ready', '', 'research notes', ?1, ?1)",
-                [&now],
-            )
-            .unwrap();
-        let research_id = connection.last_insert_rowid();
-        connection
-            .execute(
-                "INSERT INTO work_items (parent_id, title, status, evidence_text, delivery_text, created_at, updated_at)
-                 VALUES (?1, 'Implement', 'ready', '', 'implementation', ?2, ?2)",
-                params![research_id, now],
-            )
-            .unwrap();
-        let implement_id = connection.last_insert_rowid();
-        connection
-            .execute(
-                "INSERT INTO work_item_dependencies (work_item_id, depends_on_id) VALUES (?1, ?2)",
-                params![implement_id, research_id],
-            )
-            .unwrap();
-        assert_eq!(load_work_graph(&db).unwrap().ready_ids, vec![research_id]);
-        connection
-            .execute(
-                "UPDATE work_items SET status = 'satisfied', evidence_text = 'source reviewed' WHERE id = ?1",
-                [research_id],
-            )
-            .unwrap();
-        let graph = load_work_graph(&db).unwrap();
-        assert_eq!(graph.ready_ids, vec![implement_id]);
-        assert_eq!(
-            graph
-                .items
-                .iter()
-                .find(|item| item.id == implement_id)
-                .unwrap()
-                .delivery_text,
-            "implementation"
-        );
-    }
-
-    #[test]
-    fn work_item_dependencies_reject_cycles_and_satisfied_items_need_evidence() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let connection = open_db(&db).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        for title in ["A", "B"] {
-            connection
-                .execute(
-                    "INSERT INTO work_items (title, status, created_at, updated_at) VALUES (?1, 'ready', ?2, ?2)",
-                    params![title, now],
+        for table in ["work_items", "work_item_dependencies"] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get(0),
                 )
                 .unwrap();
+            assert!(!exists, "legacy table {table} should be removed");
         }
-        connection
-            .execute(
-                "INSERT INTO work_item_dependencies (work_item_id, depends_on_id) VALUES (1, 2)",
-                [],
-            )
-            .unwrap();
-        assert!(replace_work_item_dependencies(&connection, 2, &[1]).is_err());
-        assert!(validate_work_item("A", "satisfied", "").is_err());
-    }
-
-    #[test]
-    fn work_item_tools_create_and_update_persistent_items() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let created = execute_create_work_item(
-            &db,
-            json!({"title":"Ship Work Item tools","description":"Expose the graph to the agent"}),
-        );
-        let graph: Value = serde_json::from_str(&created.output).unwrap();
-        assert_eq!(graph["items"][0]["status"], "ready");
-        let updated = execute_update_work_item(
-            &db,
-            json!({
-                "id": 1,
-                "parent_id": null,
-                "title": "Ship Work Item tools",
-                "description": "Expose the graph to the agent",
-                "status": "satisfied",
-                "evidence_text": "tool test passed",
-                "delivery_text": "native Work Item tools",
-                "depends_on_ids": []
-            }),
-        );
-        let graph: Value = serde_json::from_str(&updated.output).unwrap();
-        assert_eq!(graph["items"][0]["status"], "satisfied");
-        assert_eq!(graph["items"][0]["delivery_text"], "native Work Item tools");
     }
 
     #[test]
@@ -2904,7 +5130,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_toolsets_leave_the_core_work_item_tools_available() {
+    fn disabled_toolsets_omit_tools_and_tool_choice() {
         let body = responses_request_body(
             "gpt-5",
             &[],
@@ -2914,14 +5140,8 @@ mod tests {
             false,
             &SkillCatalog::default(),
         );
-        assert_eq!(
-            body.get("tools").and_then(Value::as_array).unwrap().len(),
-            3
-        );
-        assert_eq!(
-            body.get("tool_choice").and_then(Value::as_str),
-            Some("auto")
-        );
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
     }
 
     #[test]
@@ -2960,15 +5180,15 @@ mod tests {
     fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
         let tools = tool_definitions(false, true, false, false);
         let tools = tools.as_array().unwrap();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 1);
         assert_eq!(
-            tools[3].get("name").and_then(Value::as_str),
+            tools[0].get("name").and_then(Value::as_str),
             Some("run_bash")
         );
     }
 
     #[test]
-    fn work_item_tools_and_instructions_are_always_available() {
+    fn instructions_encode_the_one_more_step_philosophy() {
         let body = responses_request_body(
             "gpt-5",
             &[],
@@ -2978,17 +5198,9 @@ mod tests {
             false,
             &SkillCatalog::default(),
         );
-        let tools = body.get("tools").and_then(Value::as_array).unwrap();
-        assert_eq!(tools.len(), 3);
-        assert_eq!(tools[0]["name"], "get_work_graph");
-        assert_eq!(tools[1]["name"], "create_work_item");
-        assert_eq!(tools[2]["name"], "update_work_item");
-        assert!(
-            body["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("Work Items")
-        );
+        let instructions = body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("one more step"));
+        assert!(instructions.contains("let each result inform what comes next"));
     }
 
     #[test]
@@ -3104,7 +5316,7 @@ mod tests {
             json!({
                 "type": "web_search_call",
                 "id": "web_1",
-                "action": {"type": "search", "query": "Mobius work graph"},
+                "action": {"type": "search", "query": "Mobius architecture"},
             }),
         ];
         let temp = tempfile::tempdir().unwrap();
@@ -3146,7 +5358,7 @@ mod tests {
         assert!(matches!(
             received.recv().await,
             Some(AgentEvent::ToolCall { name, arguments, .. })
-                if name == "web_search" && arguments["query"] == "Mobius work graph"
+                if name == "web_search" && arguments["query"] == "Mobius architecture"
         ));
         assert!(matches!(
             received.recv().await,
@@ -3288,6 +5500,7 @@ mod tests {
             web_search_enabled: false,
             image_generation_enabled: false,
             machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
         };
         let db = tempfile::tempdir().unwrap();
         let db_path = db.path().join("default.sqlite3");
