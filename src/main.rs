@@ -3983,7 +3983,7 @@ fn scoped_responses_request_body(
             .and_then(Value::as_str)
             .unwrap_or_default();
         body["instructions"] = Value::String(format!(
-            "{instructions}\nAvailable remote execution devices are listed below. For each remote filesystem or Bash call, set target_device to one exact target_device ID from this list and select a device with the required capability. Omit the target_device field to execute locally. Never send target_device as an empty string, null, or a descriptive name.\n{machines}"
+            "{instructions}\nAvailable remote execution devices are listed below. For each remote filesystem or Bash call, set target_device to one exact target_device ID from this list and select a device with the required capability. Omit target_device to execute locally; an empty string also executes locally. Never send target_device as null or a descriptive name.\n{machines}"
         ));
     }
     body
@@ -4162,14 +4162,14 @@ fn tool_definitions(
     let mut tools = Vec::new();
     if filesystem_tools_enabled {
         tools.extend([
-            json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
-            json!({"type":"function","name":"read_file","description":"Read a file from any path. Binary files are returned as base64 JSON. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
-            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
-            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
+            json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+            json!({"type":"function","name":"read_file","description":"Read a file from any path. Binary files are returned as base64 JSON. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
         ]);
     }
     if bash_tools_enabled {
-        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}));
+        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}));
     }
     if web_search_enabled {
         tools.push(json!({"type":"web_search"}));
@@ -4265,11 +4265,11 @@ async fn execute_device_tool(
     cancellation: watch::Receiver<bool>,
 ) -> ToolExecution {
     let target_device = match args.get("target_device") {
-        None => None,
         Some(Value::String(target_device)) if !target_device.is_empty() => {
             Some(target_device.to_owned())
         }
-        Some(_) => return tool_execution("error: target_device must be a non-empty device ID"),
+        None | Some(Value::String(_)) => None,
+        Some(_) => return tool_execution("error: target_device must be a string when provided"),
     };
     if let Some(target_device) = target_device {
         if let Some(arguments) = args.as_object_mut() {
@@ -5005,7 +5005,7 @@ mod tests {
         assert!(instructions.contains("\"target_device\":\"machine-build\""));
         assert!(instructions.contains("\"description\":\"Build host on build-1 (executor)\""));
         assert!(instructions.contains("target_device"));
-        assert!(instructions.contains("Never send target_device as an empty string"));
+        assert!(instructions.contains("an empty string also executes locally"));
         assert!(instructions.contains("Treat fork_subthread as the default execution path"));
         assert!(!instructions.contains("machine-unavailable"));
         assert!(!instructions.contains("secret-token"));
@@ -5041,7 +5041,7 @@ mod tests {
                 tool["parameters"]["properties"]["target_device"]["description"]
                     .as_str()
                     .unwrap()
-                    .contains("never pass an empty string")
+                    .contains("use an empty string to execute locally")
             );
         }
     }
@@ -5121,7 +5121,7 @@ mod tests {
         .await;
         assert_eq!(
             invalid_target.output,
-            "error: target_device must be a non-empty device ID"
+            "error: target_device must be a string when provided"
         );
         let empty_target = execute_device_tool(
             "read_file",
@@ -5133,10 +5133,7 @@ mod tests {
             watch::channel(false).1,
         )
         .await;
-        assert_eq!(
-            empty_target.output,
-            "error: target_device must be a non-empty device ID"
-        );
+        assert_eq!(empty_target.output, "local evidence");
         let remote = execute_device_tool(
             "read_file",
             json!({"path":"/remote/evidence.txt","target_device":"machine-build"}),

@@ -174,8 +174,8 @@ flowchart LR
 无需配置模型上游；它由 root user 创建只显示一次、只保存 SHA-256 哈希的设备 Token，
 并分别授权文件系统和 Bash。控制设备使用该 Token 接入远端时，会验证双方使用同一个
 Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能力提供给 Agent。主线程
-和子线程使用同一组文件系统与 Bash 工具：省略可选的 `target_device` 时在控制设备本机
-执行，填写已接入的设备 ID 时只把这一次工具调用转发到对应设备。子线程完成后的结果仍会
+和子线程使用同一组文件系统与 Bash 工具：省略可选的 `target_device` 或将它填为空字符串时，
+在控制设备本机执行；填写已接入的设备 ID 时只把这一次工具调用转发到对应设备。子线程完成后的结果仍会
 自动回收到同一条主线程。
 
 ### 7. 部署不应限制控制范围
@@ -206,7 +206,7 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
 - 内嵌中英双语 Web GUI，支持亮/暗主题、语音输入、文件浏览和编辑。
 - 浏览器连续语音输入和按主线程顺序播放的主动语音播报。
 - 可配置的文件系统、Bash 与网页搜索工具集；`list_files`、`read_file`、`write_file`、
-  `edit_file` 和 `run_bash` 都接受可选的 `target_device`，省略时在控制设备本机执行。
+  `edit_file` 和 `run_bash` 都接受可选的 `target_device`，省略或填空字符串时在控制设备本机执行。
 - Auth Mini JWT 验证，以首次初始化时绑定的 root user 作为操作边界；浏览器在每次 API 或
   SSE 请求前检查 access token 有效期，临近过期时刷新，并在 401 后刷新重试一次。
 - 设备 Token、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备无需 Responses API
