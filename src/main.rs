@@ -3959,14 +3959,14 @@ fn scoped_responses_request_body(
             .expect("tool definitions are an array");
         tools.extend([
             json!({"type":"function","name":"list_subthreads","description":"Inspect Mobius's internal background execution branches. These are implementation details of the single user-visible main thread, not user-managed sessions.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
-            json!({"type":"function","name":"fork_subthread","description":"Fork a bounded background task from the compiled main-thread context. The subthread runs on this controller; each filesystem or Bash call may independently select an enrolled device. Return promptly after dispatch because Mobius automatically merges the result into the main conversation.","parameters":{"type":"object","additionalProperties":false,"required":["title","task"],"properties":{"title":{"type":"string"},"task":{"type":"string"}}}}),
+            json!({"type":"function","name":"fork_subthread","description":"Use this by default for bounded, independent work such as investigation, implementation, file or command work, research, and verification. Fork from the compiled main-thread context, then keep coordinating in the main thread. The subthread runs on this controller; each filesystem or Bash call may independently select an enrolled device. Return promptly after dispatch because Mobius automatically merges the result into the main conversation.","parameters":{"type":"object","additionalProperties":false,"required":["title","task"],"properties":{"title":{"type":"string"},"task":{"type":"string"}}}}),
             json!({"type":"function","name":"cancel_subthread","description":"Terminate an active internal subthread that is no longer relevant or must be rebuilt.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
         ]);
         body["tool_choice"] = Value::String("auto".to_owned());
     }
     let scope_instructions = match scope {
         AgentScope::Main => {
-            "You are Mobius's single user-visible main thread. Accept every user input as part of one durable conversation. Give a concise response promptly. Fork only bounded work that can proceed without continuous user judgment; inspect existing subthreads before replacing work, cancel obsolete branches, and let Mobius merge background results automatically. Never ask the user to manage subthreads as sessions."
+            "You are Mobius's single user-visible main thread. Accept every user input as part of one durable conversation. Give a concise response promptly. Treat fork_subthread as the default execution path for bounded, independent work, especially investigation, implementation, file or command work, research, and verification. Before using filesystem or Bash tools yourself for that work, fork the smallest useful bounded task and keep coordinating in the main thread. Work directly only for an immediate answer, a clarification, or work that cannot proceed without continuous user judgment. Inspect existing subthreads before replacing work, cancel obsolete branches, and let Mobius merge background results automatically. Never ask the user to manage subthreads as sessions."
         }
         AgentScope::Subthread => {
             "You are an internal Mobius subthread forked from a compiled main-thread checkpoint. Complete the bounded task using the inherited context, return a self-contained result with reusable environment facts and evidence, and do not ask the user to manage this branch. The result is merged into the main thread automatically."
@@ -3983,7 +3983,7 @@ fn scoped_responses_request_body(
             .and_then(Value::as_str)
             .unwrap_or_default();
         body["instructions"] = Value::String(format!(
-            "{instructions}\nEnrolled remote execution devices and their minimal capabilities are listed below. Set a filesystem or Bash tool's target_device to one of these exact IDs to execute that single call remotely; omit target_device to execute locally.\n{machines}"
+            "{instructions}\nAvailable remote execution devices are listed below. For each remote filesystem or Bash call, set target_device to one exact target_device ID from this list and select a device with the required capability. Omit the target_device field to execute locally. Never send target_device as an empty string, null, or a descriptive name.\n{machines}"
         ));
     }
     body
@@ -3993,7 +3993,9 @@ fn remote_tool_capabilities(path: &Path) -> Result<(bool, bool)> {
     open_db(path)?
         .query_row(
             "SELECT COALESCE(MAX(filesystem_enabled), 0), COALESCE(MAX(bash_enabled), 0)
-             FROM peers WHERE machine_id <> ''",
+             FROM peers
+             WHERE machine_id <> '' AND device_token <> ''
+               AND (filesystem_enabled OR bash_enabled)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -4005,14 +4007,18 @@ fn remote_machine_context(path: &Path) -> Result<String> {
     let machines = connection
         .prepare(
             "SELECT machine_id, name, hostname, deployment_role, filesystem_enabled, bash_enabled
-             FROM peers WHERE machine_id <> '' ORDER BY name",
+             FROM peers
+             WHERE machine_id <> '' AND device_token <> ''
+               AND (filesystem_enabled OR bash_enabled)
+             ORDER BY name",
         )?
         .query_map([], |row| {
+            let name = row.get::<_, String>(1)?;
+            let hostname = row.get::<_, String>(2)?;
+            let deployment_role = row.get::<_, String>(3)?;
             Ok(json!({
                 "target_device": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "hostname": row.get::<_, String>(2)?,
-                "deployment_role": row.get::<_, String>(3)?,
+                "description": format!("{name} on {hostname} ({deployment_role})"),
                 "capabilities": {
                     "filesystem": row.get::<_, bool>(4)?,
                     "bash": row.get::<_, bool>(5)?,
@@ -4156,14 +4162,14 @@ fn tool_definitions(
     let mut tools = Vec::new();
     if filesystem_tools_enabled {
         tools.extend([
-            json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
-            json!({"type":"function","name":"read_file","description":"Read a file from any path. Binary files are returned as base64 JSON. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
-            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
-            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}),
+            json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
+            json!({"type":"function","name":"read_file","description":"Read a file from any path. Binary files are returned as base64 JSON. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
+            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
+            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}),
         ]);
     }
     if bash_tools_enabled {
-        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device to use the current device, or set it to an enrolled device ID for this call.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional enrolled device ID. Omit to execute on the current device."}}}}));
+        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device to use the current device, or set it to an exact available remote device ID for this call. Never pass an empty target_device.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field to execute locally; never pass an empty string."}}}}));
     }
     if web_search_enabled {
         tools.push(json!({"type":"web_search"}));
@@ -4921,6 +4927,17 @@ mod tests {
                 [],
             )
             .unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO peers (
+                   id, name, base_url, device_token, machine_id, hostname, deployment_role,
+                   filesystem_enabled, bash_enabled, created_at
+                 ) VALUES ('unavailable', 'Unavailable host', 'https://unavailable.example', '',
+                           'machine-unavailable', 'unavailable-1', 'executor', 1, 0, 'now')",
+                [],
+            )
+            .unwrap();
         let main = scoped_responses_request_body(
             "gpt-5",
             &[],
@@ -4967,6 +4984,12 @@ mod tests {
             .find(|tool| tool["name"] == "fork_subthread")
             .unwrap();
         assert!(fork.pointer("/parameters/properties/machine_id").is_none());
+        assert!(
+            fork["description"]
+                .as_str()
+                .unwrap()
+                .contains("Use this by default")
+        );
         let read_file = subthread["tools"]
             .as_array()
             .unwrap()
@@ -4978,8 +5001,13 @@ mod tests {
             Some(&Value::String("string".to_owned()))
         );
         let instructions = main["instructions"].as_str().unwrap();
-        assert!(instructions.contains("machine-build"));
+        assert!(instructions.contains("Available remote execution devices"));
+        assert!(instructions.contains("\"target_device\":\"machine-build\""));
+        assert!(instructions.contains("\"description\":\"Build host on build-1 (executor)\""));
         assert!(instructions.contains("target_device"));
+        assert!(instructions.contains("Never send target_device as an empty string"));
+        assert!(instructions.contains("Treat fork_subthread as the default execution path"));
+        assert!(!instructions.contains("machine-unavailable"));
         assert!(!instructions.contains("secret-token"));
     }
 
@@ -5008,6 +5036,12 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .contains(&Value::String("target_device".to_owned()))
+            );
+            assert!(
+                tool["parameters"]["properties"]["target_device"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("never pass an empty string")
             );
         }
     }
@@ -5087,6 +5121,20 @@ mod tests {
         .await;
         assert_eq!(
             invalid_target.output,
+            "error: target_device must be a non-empty device ID"
+        );
+        let empty_target = execute_device_tool(
+            "read_file",
+            json!({"path": local_file, "target_device": ""}),
+            &db,
+            &reqwest::Client::new(),
+            true,
+            false,
+            watch::channel(false).1,
+        )
+        .await;
+        assert_eq!(
+            empty_target.output,
             "error: target_device must be a non-empty device ID"
         );
         let remote = execute_device_tool(
