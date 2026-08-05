@@ -433,19 +433,8 @@ struct UpdateSettings {
 }
 
 #[derive(Serialize)]
-struct ToolsetsResponse {
-    filesystem_enabled: bool,
-    bash_enabled: bool,
-    web_search_enabled: bool,
-    image_generation_enabled: bool,
-}
-
-#[derive(Deserialize)]
-struct UpdateToolsets {
-    filesystem_enabled: bool,
-    bash_enabled: bool,
-    web_search_enabled: bool,
-    image_generation_enabled: bool,
+struct ToolCatalogResponse {
+    tools: Vec<Value>,
 }
 
 #[derive(Deserialize)]
@@ -825,7 +814,7 @@ fn app(state: AppState) -> Router {
         .route("/api/setup", post(setup))
         .route("/api/status", get(status))
         .route("/api/settings", get(settings).put(update_settings))
-        .route("/api/toolsets", get(toolsets).put(update_toolsets))
+        .route("/api/tools", get(tools))
         .route("/api/skills", get(skills))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(update_status))
@@ -1842,26 +1831,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [],
     )?;
-    connection.execute(
-        "INSERT INTO app_meta (key, value) VALUES ('toolset_filesystem_enabled', 'true')
-         ON CONFLICT(key) DO NOTHING",
-        [],
-    )?;
-    connection.execute(
-        "INSERT INTO app_meta (key, value) VALUES ('toolset_bash_enabled', 'true')
-         ON CONFLICT(key) DO NOTHING",
-        [],
-    )?;
-    connection.execute(
-        "INSERT INTO app_meta (key, value) VALUES ('toolset_web_search_enabled', 'true')
-         ON CONFLICT(key) DO NOTHING",
-        [],
-    )?;
-    connection.execute(
-        "INSERT INTO app_meta (key, value) VALUES ('toolset_image_generation_enabled', 'true')
-         ON CONFLICT(key) DO NOTHING",
-        [],
-    )?;
     Ok(())
 }
 
@@ -1883,10 +1852,6 @@ struct Config {
     voice_script_model: String,
     edge_tts_zh_voice: String,
     edge_tts_en_voice: String,
-    filesystem_tools_enabled: bool,
-    bash_tools_enabled: bool,
-    web_search_enabled: bool,
-    image_generation_enabled: bool,
     machine_id: String,
     deployment_role: String,
 }
@@ -1912,10 +1877,6 @@ fn load_config(path: &Path) -> Result<Config> {
         voice_script_model: required("voice_script_model")?,
         edge_tts_zh_voice: required("edge_tts_zh_voice")?,
         edge_tts_en_voice: required("edge_tts_en_voice")?,
-        filesystem_tools_enabled: required("toolset_filesystem_enabled")?.parse()?,
-        bash_tools_enabled: required("toolset_bash_enabled")?.parse()?,
-        web_search_enabled: required("toolset_web_search_enabled")?.parse()?,
-        image_generation_enabled: required("toolset_image_generation_enabled")?.parse()?,
         machine_id: required("machine_id")?,
         deployment_role: required("deployment_role")?,
     })
@@ -2422,10 +2383,10 @@ async fn update_settings(
     }))
 }
 
-async fn toolsets(
+async fn tools(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> ApiResult<ToolsetsResponse> {
+) -> ApiResult<ToolCatalogResponse> {
     identity(&state, &headers).await?;
     let config = load_config(&state.db_path).map_err(|_| {
         error(
@@ -2433,12 +2394,24 @@ async fn toolsets(
             "cannot read configuration",
         )
     })?;
-    Ok(Json(ToolsetsResponse {
-        filesystem_enabled: config.filesystem_tools_enabled,
-        bash_enabled: config.bash_tools_enabled,
-        web_search_enabled: config.web_search_enabled,
-        image_generation_enabled: config.image_generation_enabled,
-    }))
+    let skills = state
+        .skills
+        .read()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read skills"))?
+        .clone();
+    let request = scoped_responses_request_body(
+        &config.default_model,
+        &[],
+        &skills,
+        AgentScope::Main,
+        &state.db_path,
+    );
+    let tools = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(Json(ToolCatalogResponse { tools }))
 }
 
 async fn skills(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<SkillsResponse> {
@@ -2452,70 +2425,6 @@ async fn skills(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
     Ok(Json(SkillsResponse {
         directory: state.skills_directory.to_string_lossy().into_owned(),
         skills,
-    }))
-}
-
-async fn update_toolsets(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<UpdateToolsets>,
-) -> ApiResult<ToolsetsResponse> {
-    identity(&state, &headers).await?;
-    let connection = open_db(&state.db_path)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    connection
-        .execute(
-            "INSERT INTO app_meta (key, value) VALUES ('toolset_filesystem_enabled', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [input.filesystem_enabled.to_string()],
-        )
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot save toolset configuration",
-            )
-        })?;
-    connection
-        .execute(
-            "INSERT INTO app_meta (key, value) VALUES ('toolset_bash_enabled', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [input.bash_enabled.to_string()],
-        )
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot save toolset configuration",
-            )
-        })?;
-    connection
-        .execute(
-            "INSERT INTO app_meta (key, value) VALUES ('toolset_web_search_enabled', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [input.web_search_enabled.to_string()],
-        )
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot save toolset configuration",
-            )
-        })?;
-    connection
-        .execute(
-            "INSERT INTO app_meta (key, value) VALUES ('toolset_image_generation_enabled', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [input.image_generation_enabled.to_string()],
-        )
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot save toolset configuration",
-            )
-        })?;
-    Ok(Json(ToolsetsResponse {
-        filesystem_enabled: input.filesystem_enabled,
-        bash_enabled: input.bash_enabled,
-        web_search_enabled: input.web_search_enabled,
-        image_generation_enabled: input.image_generation_enabled,
     }))
 }
 
@@ -3026,8 +2935,8 @@ async fn remote_status(
         root_user_id: config.root_user_id,
         auth_url: config.auth_url,
         deployment_role: config.deployment_role,
-        filesystem_enabled: grant.filesystem_enabled && config.filesystem_tools_enabled,
-        bash_enabled: grant.bash_enabled && config.bash_tools_enabled,
+        filesystem_enabled: grant.filesystem_enabled,
+        bash_enabled: grant.bash_enabled,
     }))
 }
 
@@ -3037,19 +2946,11 @@ async fn remote_execute_tool(
     Json(input): Json<RemoteToolRequest>,
 ) -> ApiResult<RemoteToolResponse> {
     let grant = device_identity(&state, &headers)?;
-    let config = load_config(&state.db_path).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot read configuration",
-        )
-    })?;
-    let filesystem_allowed = grant.filesystem_enabled && config.filesystem_tools_enabled;
-    let bash_allowed = grant.bash_enabled && config.bash_tools_enabled;
     let execution = match input.name.as_str() {
-        "list_files" | "read_file" | "write_file" | "edit_file" if filesystem_allowed => {
+        "list_files" | "read_file" | "write_file" | "edit_file" if grant.filesystem_enabled => {
             execute_local_tool(&input.name, input.arguments, watch::channel(false).1).await
         }
-        "run_bash" if bash_allowed => {
+        "run_bash" if grant.bash_enabled => {
             execute_local_tool(&input.name, input.arguments, watch::channel(false).1).await
         }
         "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
@@ -3898,10 +3799,6 @@ async fn run_agent_items(
             .json(&scoped_responses_request_body(
                 &config.default_model,
                 &items,
-                config.filesystem_tools_enabled,
-                config.bash_tools_enabled,
-                config.web_search_enabled,
-                config.image_generation_enabled,
                 &skills
                     .read()
                     .map_err(|_| anyhow!("cannot read skills"))?
@@ -3993,8 +3890,6 @@ async fn run_agent_items(
                 args,
                 db_path,
                 client,
-                config.filesystem_tools_enabled,
-                config.bash_tools_enabled,
                 &items,
                 events.run_id,
                 scope,
@@ -4054,15 +3949,7 @@ fn response_output_for_input(output: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-fn responses_request_body(
-    model: &str,
-    input: &[Value],
-    filesystem_tools_enabled: bool,
-    bash_tools_enabled: bool,
-    web_search_enabled: bool,
-    image_generation_enabled: bool,
-    skills: &SkillCatalog,
-) -> Value {
+fn responses_request_body(model: &str, input: &[Value], skills: &SkillCatalog) -> Value {
     let mut body = json!({
         "model": model,
         "input": input,
@@ -4071,12 +3958,7 @@ fn responses_request_body(
         "reasoning": { "summary": "auto" },
         "instructions": skill_instructions(skills),
     });
-    let tools = tool_definitions(
-        filesystem_tools_enabled,
-        bash_tools_enabled,
-        web_search_enabled,
-        image_generation_enabled,
-    );
+    let tools = tool_definitions();
     if !tools
         .as_array()
         .expect("tool definitions are an array")
@@ -4088,29 +3970,14 @@ fn responses_request_body(
     body
 }
 
-#[allow(clippy::too_many_arguments)]
 fn scoped_responses_request_body(
     model: &str,
     input: &[Value],
-    filesystem_tools_enabled: bool,
-    bash_tools_enabled: bool,
-    web_search_enabled: bool,
-    image_generation_enabled: bool,
     skills: &SkillCatalog,
     scope: AgentScope,
     db_path: &Path,
 ) -> Value {
-    let (remote_filesystem_enabled, remote_bash_enabled) =
-        remote_tool_capabilities(db_path).unwrap_or_default();
-    let mut body = responses_request_body(
-        model,
-        input,
-        filesystem_tools_enabled || remote_filesystem_enabled,
-        bash_tools_enabled || remote_bash_enabled,
-        web_search_enabled,
-        image_generation_enabled,
-        skills,
-    );
+    let mut body = responses_request_body(model, input, skills);
     let machines = remote_machine_context(db_path).unwrap_or_default();
     if scope == AgentScope::Main {
         let tools = body
@@ -4150,19 +4017,6 @@ fn scoped_responses_request_body(
         ));
     }
     body
-}
-
-fn remote_tool_capabilities(path: &Path) -> Result<(bool, bool)> {
-    open_db(path)?
-        .query_row(
-            "SELECT COALESCE(MAX(filesystem_enabled), 0), COALESCE(MAX(bash_enabled), 0)
-             FROM peers
-             WHERE machine_id <> '' AND device_token <> ''
-               AND (filesystem_enabled OR bash_enabled)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(Into::into)
 }
 
 fn remote_machine_context(path: &Path) -> Result<String> {
@@ -4318,30 +4172,16 @@ fn transcription_text(response: &Value) -> Result<String> {
         .ok_or_else(|| anyhow!("transcription response has no text"))
 }
 
-fn tool_definitions(
-    filesystem_tools_enabled: bool,
-    bash_tools_enabled: bool,
-    web_search_enabled: bool,
-    image_generation_enabled: bool,
-) -> Value {
-    let mut tools = Vec::new();
-    if filesystem_tools_enabled {
-        tools.extend([
-            json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
-            json!({"type":"function","name":"read_file","description":"Read a file from any path. Binary files are returned as base64 JSON. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
-            json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
-            json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
-        ]);
-    }
-    if bash_tools_enabled {
-        tools.push(json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}));
-    }
-    if web_search_enabled {
-        tools.push(json!({"type":"web_search"}));
-    }
-    if image_generation_enabled {
-        tools.push(json!({"type":"image_generation"}));
-    }
+fn tool_definitions() -> Value {
+    let tools = vec![
+        json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+        json!({"type":"function","name":"read_file","description":"Read a file from any path. Binary files are returned as base64 JSON. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+        json!({"type":"function","name":"write_file","description":"Write a UTF-8 text file to any existing path. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+        json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+        json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
+        json!({"type":"web_search"}),
+        json!({"type":"image_generation"}),
+    ];
     Value::Array(tools)
 }
 
@@ -4377,8 +4217,6 @@ async fn execute_tool(
     args: Value,
     db_path: &Path,
     client: &reqwest::Client,
-    filesystem_tools_enabled: bool,
-    bash_tools_enabled: bool,
     current_context: &[Value],
     run_id: &str,
     scope: AgentScope,
@@ -4387,16 +4225,7 @@ async fn execute_tool(
 ) -> ToolExecution {
     match name {
         "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
-            execute_device_tool(
-                name,
-                args,
-                db_path,
-                client,
-                filesystem_tools_enabled,
-                bash_tools_enabled,
-                cancellation,
-            )
-            .await
+            execute_device_tool(name, args, db_path, client, cancellation).await
         }
         "list_subthreads" if scope == AgentScope::Main => load_subthreads(db_path)
             .and_then(|threads| serde_json::to_string(&threads).map_err(Into::into))
@@ -4419,14 +4248,11 @@ async fn execute_tool(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_device_tool(
     name: &str,
     mut args: Value,
     db_path: &Path,
     client: &reqwest::Client,
-    filesystem_tools_enabled: bool,
-    bash_tools_enabled: bool,
     cancellation: watch::Receiver<bool>,
 ) -> ToolExecution {
     let target_device = match args.get("target_device") {
@@ -4442,14 +4268,6 @@ async fn execute_device_tool(
         }
         return execute_remote_device(client, db_path, &target_device, name, args, cancellation)
             .await;
-    }
-    let local_enabled = match name {
-        "list_files" | "read_file" | "write_file" | "edit_file" => filesystem_tools_enabled,
-        "run_bash" => bash_tools_enabled,
-        _ => false,
-    };
-    if !local_enabled {
-        return tool_execution("error: this tool is not enabled on the current device");
     }
     execute_local_tool(name, args, cancellation).await
 }
@@ -4680,30 +4498,6 @@ mod tests {
             )
             .unwrap();
         assert!(!machine_id.is_empty());
-        let bash_enabled: String = connection
-            .query_row(
-                "SELECT value FROM app_meta WHERE key = 'toolset_bash_enabled'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(bash_enabled, "true");
-        let web_search_enabled: String = connection
-            .query_row(
-                "SELECT value FROM app_meta WHERE key = 'toolset_web_search_enabled'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(web_search_enabled, "true");
-        let image_generation_enabled: String = connection
-            .query_row(
-                "SELECT value FROM app_meta WHERE key = 'toolset_image_generation_enabled'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(image_generation_enabled, "true");
         let default_model: String = connection
             .query_row(
                 "SELECT value FROM app_meta WHERE key = 'default_model'",
@@ -5128,10 +4922,6 @@ mod tests {
         let main = scoped_responses_request_body(
             "gpt-5",
             &[],
-            false,
-            false,
-            false,
-            false,
             &SkillCatalog::default(),
             AgentScope::Main,
             &db,
@@ -5139,10 +4929,6 @@ mod tests {
         let subthread = scoped_responses_request_body(
             "gpt-5",
             &[],
-            false,
-            false,
-            false,
-            false,
             &SkillCatalog::default(),
             AgentScope::Subthread,
             &db,
@@ -5200,7 +4986,7 @@ mod tests {
 
     #[test]
     fn filesystem_and_bash_tools_accept_optional_target_device() {
-        let tools = tool_definitions(true, true, false, false);
+        let tools = tool_definitions();
         for name in [
             "list_files",
             "read_file",
@@ -5290,8 +5076,6 @@ mod tests {
             json!({"path": local_file}),
             &db,
             &reqwest::Client::new(),
-            true,
-            false,
             watch::channel(false).1,
         )
         .await;
@@ -5301,8 +5085,6 @@ mod tests {
             json!({"path": local_file, "target_device": null}),
             &db,
             &reqwest::Client::new(),
-            true,
-            false,
             watch::channel(false).1,
         )
         .await;
@@ -5315,8 +5097,6 @@ mod tests {
             json!({"path": local_file, "target_device": ""}),
             &db,
             &reqwest::Client::new(),
-            true,
-            false,
             watch::channel(false).1,
         )
         .await;
@@ -5326,8 +5106,6 @@ mod tests {
             json!({"path":"/remote/evidence.txt","target_device":"machine-build"}),
             &db,
             &reqwest::Client::new(),
-            false,
-            false,
             watch::channel(false).1,
         )
         .await;
@@ -5451,10 +5229,6 @@ mod tests {
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            filesystem_tools_enabled: false,
-            bash_tools_enabled: false,
-            web_search_enabled: false,
-            image_generation_enabled: false,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -5531,10 +5305,6 @@ mod tests {
             voice_script_model: "voice-script-test-model".to_owned(),
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            filesystem_tools_enabled: false,
-            bash_tools_enabled: false,
-            web_search_enabled: false,
-            image_generation_enabled: false,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -5636,10 +5406,6 @@ mod tests {
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            filesystem_tools_enabled: false,
-            bash_tools_enabled: false,
-            web_search_enabled: false,
-            image_generation_enabled: false,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -5660,10 +5426,6 @@ mod tests {
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
             edge_tts_zh_voice: "zh-CN-YunxiNeural".to_owned(),
             edge_tts_en_voice: "en-US-GuyNeural".to_owned(),
-            filesystem_tools_enabled: false,
-            bash_tools_enabled: false,
-            web_search_enabled: false,
-            image_generation_enabled: false,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -6029,10 +5791,6 @@ mod tests {
         let body = responses_request_body(
             "gpt-5",
             &[json!({"role":"user","content":"list files"})],
-            true,
-            false,
-            false,
-            false,
             &skills,
         );
         assert_eq!(
@@ -6053,18 +5811,16 @@ mod tests {
     }
 
     #[test]
-    fn disabled_toolsets_omit_tools_and_tool_choice() {
-        let body = responses_request_body(
-            "gpt-5",
-            &[],
-            false,
-            false,
-            false,
-            false,
-            &SkillCatalog::default(),
+    fn responses_body_keeps_every_tool_enabled() {
+        let body = responses_request_body("gpt-5", &[], &SkillCatalog::default());
+        let tools = body.get("tools").and_then(Value::as_array).unwrap();
+        assert!(tools.iter().any(|tool| tool["name"] == "run_bash"));
+        assert!(tools.iter().any(|tool| tool["type"] == "web_search"));
+        assert!(tools.iter().any(|tool| tool["type"] == "image_generation"));
+        assert_eq!(
+            body.get("tool_choice").and_then(Value::as_str),
+            Some("auto")
         );
-        assert!(body.get("tools").is_none());
-        assert!(body.get("tool_choice").is_none());
     }
 
     #[test]
@@ -6076,7 +5832,7 @@ mod tests {
                 directory: "/skills/release".to_owned(),
             }],
         };
-        let body = responses_request_body("gpt-5", &[], false, false, false, false, &skills);
+        let body = responses_request_body("gpt-5", &[], &skills);
         let instructions = body.get("instructions").and_then(Value::as_str).unwrap();
         assert!(instructions.contains("release"));
         assert!(instructions.contains("/skills/release"));
@@ -6100,43 +5856,24 @@ mod tests {
     }
 
     #[test]
-    fn bash_toolset_adds_only_the_bash_tool_when_filesystem_is_disabled() {
-        let tools = tool_definitions(false, true, false, false);
+    fn tool_definitions_include_bash_and_filesystem_tools() {
+        let tools = tool_definitions();
         let tools = tools.as_array().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(
-            tools[0].get("name").and_then(Value::as_str),
-            Some("run_bash")
-        );
+        assert!(tools.iter().any(|tool| tool["name"] == "run_bash"));
+        assert!(tools.iter().any(|tool| tool["name"] == "read_file"));
     }
 
     #[test]
     fn instructions_encode_the_one_more_step_philosophy() {
-        let body = responses_request_body(
-            "gpt-5",
-            &[],
-            false,
-            false,
-            false,
-            false,
-            &SkillCatalog::default(),
-        );
+        let body = responses_request_body("gpt-5", &[], &SkillCatalog::default());
         let instructions = body["instructions"].as_str().unwrap();
         assert!(instructions.contains("one more step"));
         assert!(instructions.contains("let each result inform what comes next"));
     }
 
     #[test]
-    fn web_search_toolset_uses_the_native_responses_tool() {
-        let body = responses_request_body(
-            "gpt-5",
-            &[],
-            false,
-            false,
-            true,
-            false,
-            &SkillCatalog::default(),
-        );
+    fn web_search_uses_the_native_responses_tool() {
+        let body = responses_request_body("gpt-5", &[], &SkillCatalog::default());
         assert!(
             body.get("tools")
                 .and_then(Value::as_array)
@@ -6197,16 +5934,8 @@ mod tests {
     }
 
     #[test]
-    fn image_generation_toolset_uses_the_native_responses_tool() {
-        let body = responses_request_body(
-            "gpt-5",
-            &[],
-            false,
-            false,
-            false,
-            true,
-            &SkillCatalog::default(),
-        );
+    fn image_generation_uses_the_native_responses_tool() {
+        let body = responses_request_body("gpt-5", &[], &SkillCatalog::default());
         assert!(
             body.get("tools")
                 .and_then(Value::as_array)
@@ -6421,10 +6150,6 @@ mod tests {
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            filesystem_tools_enabled: true,
-            bash_tools_enabled: false,
-            web_search_enabled: false,
-            image_generation_enabled: false,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
