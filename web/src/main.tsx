@@ -46,8 +46,8 @@ type Transcription = { text: string }
 type VoiceScript = { text: string }
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
-type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing'; message: string } | { type: 'checkpoint'; id: number; through_message_id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown> } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
-type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'status'; id: string; stage: 'queued' | 'running' | 'checkpointing'; message: string } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; added_lines?: number | null; deleted_lines?: number | null }
+type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing'; message: string } | { type: 'checkpoint'; id: number; through_message_id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown>; started_at?: string } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string; finished_at?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
+type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'status'; id: string; stage: 'queued' | 'running' | 'checkpointing'; message: string } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
 type ConversationRun = { id: string; user_message_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled'; events: AgentEvent[] }
 type ContextCheckpoint = { id: number; through_message_id: number; source_message_count: number; summary: string; created_at: string }
 type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null } }
@@ -242,10 +242,10 @@ function conversationItems(state: ConversationState): ConversationItem[] {
     runs.get(message.id)?.forEach((run) => run.events.forEach((event, index) => {
       if (event.type === 'status') entries.push({ kind: 'status', id: `${run.id}-${index}`, stage: event.stage, message: event.message })
       if (event.type === 'checkpoint') entries.push({ kind: 'status', id: `${run.id}-${index}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` })
-      if (event.type === 'tool_call') entries.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false })
+      if (event.type === 'tool_call') entries.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, started_at: event.started_at })
       if (event.type === 'tool_result') {
         const tool = entries.find((entry): entry is Extract<ConversationItem, { kind: 'tool' }> => entry.kind === 'tool' && entry.call_id === event.call_id)
-        if (tool) Object.assign(tool, { complete: true, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
+        if (tool) Object.assign(tool, { complete: true, finished_at: event.finished_at, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
       }
     }))
     return entries
@@ -291,10 +291,10 @@ function subthreadConversationItems(thread: Subthread, events: SubthreadEvent[])
   events.forEach(({ id, event }) => {
     if (event.type === 'status') items.push({ kind: 'status', id: `${thread.id}-${id}`, stage: event.stage, message: event.message })
     if (event.type === 'checkpoint') items.push({ kind: 'status', id: `${thread.id}-${id}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` })
-    if (event.type === 'tool_call') items.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false })
+    if (event.type === 'tool_call') items.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, started_at: event.started_at })
     if (event.type === 'tool_result') {
       const tool = [...items].reverse().find((item): item is Extract<ConversationItem, { kind: 'tool' }> => item.kind === 'tool' && item.call_id === event.call_id)
-      if (tool) Object.assign(tool, { complete: true, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
+      if (tool) Object.assign(tool, { complete: true, finished_at: event.finished_at, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
     }
     if (event.type === 'complete') items.push({ kind: 'message', id: `${thread.id}-${id}`, message: event.message, queued: false })
   })
@@ -345,7 +345,17 @@ function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
 }
 
 function ConversationFeed({ items }: { items: ConversationItem[] }) {
-  return <MessageScrollerProvider autoScroll={false} defaultScrollPosition="end"><MessageScroller className="flex-1"><MessageScrollerViewport><MessageScrollerContent className="mx-auto w-full max-w-4xl p-4">{items.map((item) => <MessageScrollerItem key={item.kind === 'tool' ? item.call_id : item.id} className="[content-visibility:visible] [contain-intrinsic-size:auto]"><ConversationEntry item={item} /></MessageScrollerItem>)}</MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton behavior="auto" /></MessageScroller></MessageScrollerProvider>
+  const token = useAuth()
+  const peers = useQuery({ queryKey: ['peers'], queryFn: () => api<Peer[]>('/api/peers', token) })
+  const [now, setNow] = useState(() => Date.now())
+  const hasRunningTool = items.some((item) => item.kind === 'tool' && !item.complete && item.started_at)
+  useEffect(() => {
+    if (!hasRunningTool) return
+    setNow(Date.now())
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [hasRunningTool])
+  return <MessageScrollerProvider autoScroll={false} defaultScrollPosition="end"><MessageScroller className="flex-1"><MessageScrollerViewport><MessageScrollerContent className="mx-auto w-full max-w-4xl p-4">{items.map((item) => <MessageScrollerItem key={item.kind === 'tool' ? item.call_id : item.id} className="[content-visibility:visible] [contain-intrinsic-size:auto]"><ConversationEntry item={item} now={now} peers={peers.data ?? []} /></MessageScrollerItem>)}</MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton behavior="auto" /></MessageScroller></MessageScrollerProvider>
 }
 
 function Console({ children, token }: { children: ReactNode; token: AuthMiniApi }) {
@@ -608,7 +618,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge><Badge variant="outline">{checkpoint ? `${t('checkpoint')} #${checkpoint.id}` : `${conversationQuery.data?.context.history_messages ?? 0} ${t('fullHistory')}`}</Badge>{activeRuns.length > 0 && <Badge variant="secondary">{activeRuns.length} {t('activeInputs')}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div><div className="flex flex-wrap items-center gap-4 border-b px-4 py-2"><Field className="w-auto" orientation="horizontal"><Switch id="continuous-voice" checked={continuousVoice} onCheckedChange={setContinuous} /><FieldLabel htmlFor="continuous-voice">{t('continuousVoice')}</FieldLabel></Field><Field className="w-auto" orientation="horizontal"><Switch id="announce-replies" checked={announceReplies} onCheckedChange={setAnnounce} /><FieldLabel htmlFor="announce-replies">{t('announceReplies')}</FieldLabel></Field>{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>{conversationInitialized ? <ConversationFeed items={conversation} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}{persistedError && <div className="px-4 pb-2"><ErrorAlert error={persistedError} /></div>}</main>
   return <><div className="min-h-0 flex-1 overflow-y-auto">{location.pathname === '/console' ? consoleSurface : children}</div>{error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}<form className="shrink-0 border-t p-3" onSubmit={submit}><InputGroup className="mx-auto max-w-4xl"><InputGroupTextarea ref={draftRef} disabled={unavailable} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} /><InputGroupAddon align="inline-end"><InputGroupButton aria-label={recording ? t('stopRecording') : t('startRecording')} disabled={unavailable || transcribing} onClick={toggleRecording} size="icon-sm" variant={recording ? 'destructive' : 'ghost'}>{recording ? <SquareIcon /> : <MicIcon />}</InputGroupButton><InputGroupButton disabled={unavailable} type="submit" variant="default" size="icon-sm"><SendIcon /><span className="sr-only">{t('mainThread')}</span></InputGroupButton></InputGroupAddon></InputGroup><p className="mx-auto mt-1 max-w-4xl text-xs text-muted-foreground">{t('mainThread')}: {transcribing ? t('transcribing') : t('composeHint')}</p></form></>
 }
-function ConversationEntry({ item }: { item: ConversationItem }) {
+function ConversationEntry({ item, now, peers }: { item: ConversationItem; now: number; peers: Peer[] }) {
   const { language, t } = useUi()
   if (item.kind === 'status') {
     const label = item.stage === 'queued' ? t('mainThreadQueued') : item.stage === 'checkpointing' ? t('checkpointing') : t('mainThreadRunning')
@@ -620,15 +630,21 @@ function ConversationEntry({ item }: { item: ConversationItem }) {
     const query = typeof item.arguments.query === 'string' ? item.arguments.query : ''
     const queries = Array.isArray(item.arguments.queries) ? item.arguments.queries.filter((value): value is string => typeof value === 'string').join(', ') : ''
     const summary = item.name === 'reasoning' ? reasoningSummary(item.arguments) : ''
+    const targetDevice = item.arguments.target_device
+    const targetDeviceLabel = typeof targetDevice !== 'string' ? '' : targetDevice === '' ? '【本机】' : peers.find((peer) => peer.machine_id === targetDevice)?.name ?? targetDevice
     const action = item.complete ? {
       list_files: t('listedFiles'), read_file: t('readFile'), write_file: t('wroteFile'), edit_file: t('wroteFile'), run_bash: t('ranCommand'), web_search: t('searchedWeb'), reasoning: t('reasoning'), image_generation: t('generatedImage'),
     }[item.name] : {
       list_files: t('listingFiles'), read_file: t('readingFile'), write_file: t('writingFile'), edit_file: t('writingFile'), run_bash: t('runningCommand'), web_search: t('searchingWeb'), reasoning: t('reasoning'), image_generation: t('generatingImage'),
     }[item.name]
     const target = command || path || query || queries || item.name
-    const parameters = item.name === 'reasoning' ? '' : Object.keys(item.arguments).length ? JSON.stringify(item.arguments) : ''
+    const parameters = item.name === 'reasoning' ? '' : Object.keys(item.arguments).length ? JSON.stringify(targetDeviceLabel ? { ...item.arguments, target_device: targetDeviceLabel } : item.arguments) : ''
     const changes = item.complete && (item.name === 'write_file' || item.name === 'edit_file') && item.added_lines !== undefined && item.deleted_lines !== undefined ? ` · ${t('addedLines')} ${item.added_lines ?? 0} ${t('lines')} · ${t('deletedLines')} ${item.deleted_lines ?? 0} ${t('lines')}` : ''
-    return <div className="flex items-start gap-2 text-sm text-muted-foreground">{item.complete ? <CheckIcon className="mt-0.5 size-4 text-foreground" /> : <Spinner className="mt-0.5" />}<div className="min-w-0 break-all">{summary ? <><span>{action ?? item.name}</span><p className="mt-1 whitespace-pre-wrap text-foreground">{summary}</p></> : <><span>{action ?? item.name} <code className="font-mono text-foreground">{target}</code>{changes}</span>{parameters && <p className="mt-1 text-xs"><span>{t('parameters')}: </span><code className="font-mono text-foreground">{parameters}</code></p>}</>}</div></div>
+    const started = item.started_at ? Date.parse(item.started_at) : NaN
+    const finished = item.finished_at ? Date.parse(item.finished_at) : now
+    const elapsed = Number.isNaN(started) ? null : Math.max(0, Math.floor((finished - started) / 1000))
+    const duration = elapsed === null ? '' : ` · ${t('duration')}: ${elapsed} ${t('seconds')}`
+    return <div className="flex items-start gap-2 text-sm text-muted-foreground">{item.complete ? item.name === 'run_bash' ? <TerminalSquareIcon className="mt-0.5 size-5 shrink-0 text-foreground" /> : <CheckIcon className="mt-0.5 size-4 text-foreground" /> : <Spinner className="mt-0.5" />}<div className="min-w-0 break-all">{summary ? <><span>{action ?? item.name}{duration}</span><div className="prose prose-sm mt-1 max-w-none text-foreground dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown></div></> : <><span>{action ?? item.name} <code className="font-mono text-foreground">{target}</code>{targetDeviceLabel && <> · {targetDeviceLabel}</>}{changes}{duration}</span>{parameters && <p className="mt-1 text-xs"><span>{t('parameters')}: </span><code className="font-mono text-foreground">{parameters}</code></p>}</>}</div></div>
   }
   if (item.message.role !== 'assistant') return <Message align="end"><MessageContent><Card size="sm"><CardContent className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.message.content ?? ''}</ReactMarkdown></CardContent></Card></MessageContent></Message>
   const timestamp = item.message.created_at ? new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(item.message.created_at)) : null

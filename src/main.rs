@@ -473,6 +473,8 @@ enum AgentEvent {
         call_id: String,
         name: String,
         arguments: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
     },
     ToolResult {
         call_id: String,
@@ -481,6 +483,8 @@ enum AgentEvent {
         deleted_lines: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finished_at: Option<String>,
     },
     Context {
         input_tokens: u64,
@@ -1594,8 +1598,17 @@ fn load_conversation_state(path: &Path) -> Result<ConversationState> {
 async fn send_agent_event(
     db_path: &Path,
     sink: &AgentEventSink<'_>,
-    event: AgentEvent,
+    mut event: AgentEvent,
 ) -> Result<()> {
+    match &mut event {
+        AgentEvent::ToolCall { started_at, .. } if started_at.is_none() => {
+            *started_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+        AgentEvent::ToolResult { finished_at, .. } if finished_at.is_none() => {
+            *finished_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+        _ => {}
+    }
     append_agent_event(db_path, sink.run_id, &event)?;
     let _ = sink.sender.send(event).await;
     Ok(())
@@ -3971,6 +3984,7 @@ async fn run_agent_items(
                     call_id: call_id.to_owned(),
                     name: name.to_owned(),
                     arguments: args.clone(),
+                    started_at: None,
                 },
             )
             .await?;
@@ -3997,6 +4011,7 @@ async fn run_agent_items(
                     added_lines: execution.added_lines,
                     deleted_lines: execution.deleted_lines,
                     output: Some(execution.output.clone()),
+                    finished_at: None,
                 },
             )
             .await?;
@@ -4273,6 +4288,7 @@ async fn emit_response_process_events(
                 call_id: call_id.to_owned(),
                 name: name.to_owned(),
                 arguments,
+                started_at: None,
             },
         )
         .await?;
@@ -4285,6 +4301,7 @@ async fn emit_response_process_events(
                 added_lines: None,
                 deleted_lines: None,
                 output: None,
+                finished_at: None,
             },
         )
         .await?;
@@ -5072,6 +5089,7 @@ mod tests {
             call_id: "call".to_owned(),
             name: "run_bash".to_owned(),
             arguments: json!({"command":"deploy"}),
+            started_at: None,
         })
         .unwrap();
         assert!(recoverable_main_run(None));
@@ -5880,6 +5898,7 @@ mod tests {
                 call_id: "call_1".to_owned(),
                 name: "read_file".to_owned(),
                 arguments: json!({"path": "/project/README.md"}),
+                started_at: None,
             },
         )
         .unwrap();
@@ -5892,6 +5911,7 @@ mod tests {
                 added_lines: None,
                 deleted_lines: None,
                 output: Some("README contents".to_owned()),
+                finished_at: None,
             },
         )
         .unwrap();
@@ -6251,21 +6271,21 @@ mod tests {
         .unwrap();
         assert!(matches!(
             received.recv().await,
-            Some(AgentEvent::ToolCall { name, arguments, .. })
+            Some(AgentEvent::ToolCall { name, arguments, started_at: Some(_), .. })
                 if name == "reasoning" && arguments["summary"][0]["text"] == "Plan the search."
         ));
         assert!(matches!(
             received.recv().await,
-            Some(AgentEvent::ToolResult { name, .. }) if name == "reasoning"
+            Some(AgentEvent::ToolResult { name, finished_at: Some(_), .. }) if name == "reasoning"
         ));
         assert!(matches!(
             received.recv().await,
-            Some(AgentEvent::ToolCall { name, arguments, .. })
+            Some(AgentEvent::ToolCall { name, arguments, started_at: Some(_), .. })
                 if name == "web_search" && arguments["query"] == "Mobius architecture"
         ));
         assert!(matches!(
             received.recv().await,
-            Some(AgentEvent::ToolResult { name, .. }) if name == "web_search"
+            Some(AgentEvent::ToolResult { name, finished_at: Some(_), .. }) if name == "web_search"
         ));
     }
 
