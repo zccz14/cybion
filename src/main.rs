@@ -4,6 +4,7 @@ mod update;
 use std::{
     collections::HashMap,
     convert::Infallible,
+    fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, RwLock as StdRwLock, mpsc as std_mpsc},
@@ -54,8 +55,6 @@ const EDGE_TTS_GEC_VERSION: &str = "1-143.0.3650.75";
 const EDGE_TTS_MAX_TEXT_BYTES: usize = 4_096;
 const EDGE_TTS_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const JWKS_TTL: Duration = Duration::from_secs(300);
-const CONTEXT_TARGET_CHARS: usize = 96_000;
-const CONTEXT_TAIL_MESSAGES: usize = 12;
 
 #[derive(Clone)]
 struct AppState {
@@ -304,6 +303,34 @@ struct ContextCheckpoint {
     summary: String,
     created_at: String,
 }
+
+struct CompiledMainContext {
+    items: Vec<Value>,
+    through_message_id: i64,
+}
+
+#[derive(Clone)]
+enum ContextCheckpointTarget {
+    Main { through_message_id: i64 },
+    Subthread { id: String },
+}
+
+#[derive(Debug)]
+struct ContextOverflow {
+    detail: String,
+}
+
+impl fmt::Display for ContextOverflow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "upstream context length exceeded: {}",
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for ContextOverflow {}
 
 #[derive(Clone)]
 struct HistoryMessage {
@@ -745,6 +772,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                 cancellation,
                 AgentScope::Subthread,
                 &state.active_subthreads,
+                ContextCheckpointTarget::Subthread { id: job.id.clone() },
             )
             .await
         }
@@ -1047,15 +1075,7 @@ fn load_latest_checkpoint(
 
 fn context_items(checkpoint: Option<&ContextCheckpoint>, history: &[HistoryMessage]) -> Vec<Value> {
     let mut items = checkpoint
-        .map(|checkpoint| {
-            vec![json!({
-                "role": "developer",
-                "content": format!(
-                    "Mobius context checkpoint #{} through history message {}. Treat this as a faithful compressed prefix of the complete, auditable main-thread history.\n\n{}",
-                    checkpoint.id, checkpoint.through_message_id, checkpoint.summary
-                )
-            })]
-        })
+        .map(|checkpoint| vec![main_checkpoint_item(checkpoint)])
         .unwrap_or_default();
     let through = checkpoint.map(|checkpoint| checkpoint.through_message_id);
     items.extend(
@@ -1067,28 +1087,23 @@ fn context_items(checkpoint: Option<&ContextCheckpoint>, history: &[HistoryMessa
     items
 }
 
-fn context_character_count(items: &[Value]) -> usize {
-    items
-        .iter()
-        .filter_map(|item| item.get("content").and_then(Value::as_str))
-        .map(str::len)
-        .sum()
+fn main_checkpoint_item(checkpoint: &ContextCheckpoint) -> Value {
+    json!({
+        "role": "developer",
+        "content": format!(
+            "Mobius context checkpoint #{} through history message {}. Treat this as a faithful compressed prefix of the complete, auditable main-thread history.\n\n{}",
+            checkpoint.id, checkpoint.through_message_id, checkpoint.summary
+        )
+    })
 }
 
-fn checkpoint_cutoff(
-    history: &[HistoryMessage],
-    checkpoint: Option<&ContextCheckpoint>,
-) -> Option<usize> {
-    if history.len() <= CONTEXT_TAIL_MESSAGES {
-        return None;
-    }
-    let cutoff = history.len() - CONTEXT_TAIL_MESSAGES;
-    let previous = checkpoint.map(|checkpoint| checkpoint.through_message_id);
-    let new_messages = history[..cutoff]
-        .iter()
-        .filter(|message| previous.is_none_or(|id| message.id > id))
-        .count();
-    (new_messages >= 4).then_some(cutoff)
+fn distilled_checkpoint_item(summary: &str) -> Value {
+    json!({
+        "role": "developer",
+        "content": format!(
+            "Mobius context checkpoint. Treat this as a faithful distilled replacement for the complete prior context.\n\n{summary}"
+        )
+    })
 }
 
 async fn summarize_context(
@@ -1105,17 +1120,9 @@ async fn summarize_context(
             "input": items,
             "store": false,
             "stream": true,
-            "instructions": "Compress this main-thread history prefix into a faithful durable checkpoint. Preserve user goals, decisions, constraints, unfinished work, evidence, file and machine facts, errors, and exact identifiers needed later. Distinguish completed facts from plans. Do not answer the user or invent facts; output only the checkpoint text.",
+            "instructions": "Distill the complete current context into the next faithful durable checkpoint. This checkpoint replaces both any prior checkpoint and every supplied suffix item. Preserve user goals, decisions, constraints, unfinished work, evidence, tool outcomes, file and machine facts, errors, and exact identifiers needed later. Distinguish completed facts from plans. Do not answer the user, call tools, or invent facts; output only the checkpoint text.",
         }));
-    let response = tokio::select! {
-        response = request.send() => response?,
-        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
-    }
-    .error_for_status()?;
-    let body = tokio::select! {
-        body = response.text() => body?,
-        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
-    };
+    let body = send_responses_request(request, &mut cancellation).await?;
     let summary = output_text(
         completed_response_from_sse(&body)?
             .get("output")
@@ -1126,6 +1133,86 @@ async fn summarize_context(
         return Err(anyhow!("checkpoint response has no summary"));
     }
     Ok(summary)
+}
+
+async fn compact_context_after_overflow(
+    client: &reqwest::Client,
+    config: &Config,
+    db_path: &Path,
+    items: Vec<Value>,
+    events: &AgentEventSink<'_>,
+    cancellation: watch::Receiver<bool>,
+    target: &ContextCheckpointTarget,
+) -> Result<Vec<Value>> {
+    send_agent_event(
+        db_path,
+        events,
+        AgentEvent::Status {
+            stage: "checkpointing".to_owned(),
+            message: "Context limit reached; distilling the complete context".to_owned(),
+        },
+    )
+    .await?;
+    let source_message_count = items.len();
+    let summary = summarize_context(client, config, items, cancellation).await?;
+    match target {
+        ContextCheckpointTarget::Main { through_message_id } => {
+            let created_at = chrono::Utc::now().to_rfc3339();
+            let connection = open_db(db_path)?;
+            connection.execute(
+                "INSERT INTO context_checkpoints (
+                   through_message_id, source_message_count, summary, created_at
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    through_message_id,
+                    source_message_count,
+                    summary,
+                    created_at
+                ],
+            )?;
+            let checkpoint = ContextCheckpoint {
+                id: connection.last_insert_rowid(),
+                through_message_id: *through_message_id,
+                source_message_count,
+                summary,
+                created_at,
+            };
+            send_agent_event(
+                db_path,
+                events,
+                AgentEvent::Checkpoint {
+                    id: checkpoint.id,
+                    through_message_id: checkpoint.through_message_id,
+                },
+            )
+            .await?;
+            Ok(vec![main_checkpoint_item(&checkpoint)])
+        }
+        ContextCheckpointTarget::Subthread { id } => {
+            let checkpoint = vec![distilled_checkpoint_item(&summary)];
+            let changed = open_db(db_path)?.execute(
+                "UPDATE subthreads SET context_json = ?1, updated_at = ?2 WHERE id = ?3",
+                params![
+                    serde_json::to_string(&checkpoint)?,
+                    chrono::Utc::now().to_rfc3339(),
+                    id
+                ],
+            )?;
+            if changed != 1 {
+                return Err(anyhow!("cannot persist subthread context checkpoint"));
+            }
+            send_agent_event(
+                db_path,
+                events,
+                AgentEvent::Status {
+                    stage: "running".to_owned(),
+                    message: "Context checkpoint created; retrying the subthread".to_owned(),
+                },
+            )
+            .await?;
+            Ok(checkpoint)
+        }
+    }
 }
 
 async fn create_voice_script(
@@ -1336,98 +1423,20 @@ async fn create_edge_speech(config: &Config, text: &str, language: &str) -> Resu
     synthesize_edge_speech(&endpoint, text, voice).await
 }
 
-async fn compile_main_context(
-    client: &reqwest::Client,
-    config: &Config,
-    db_path: &Path,
-    user_message_id: i64,
-    events: &AgentEventSink<'_>,
-    cancellation: watch::Receiver<bool>,
-) -> Result<Vec<Value>> {
+fn compile_main_context(db_path: &Path, user_message_id: i64) -> Result<CompiledMainContext> {
     let history = load_history_for_run(db_path, user_message_id)?;
     let checkpoint = {
         let connection = open_db(db_path)?;
         load_latest_checkpoint(&connection, i64::MAX)?
     };
-    let current_items = context_items(checkpoint.as_ref(), &history);
-    if context_character_count(&current_items) <= CONTEXT_TARGET_CHARS {
-        return Ok(current_items);
-    }
-    let Some(cutoff) = checkpoint_cutoff(&history, checkpoint.as_ref()) else {
-        return Ok(current_items);
-    };
-    let through_message_id = history[cutoff - 1].id;
-    let mut source = checkpoint
-        .as_ref()
-        .map(|checkpoint| {
-            vec![json!({
-                "role": "developer",
-                "content": format!("Previous checkpoint:\n{}", checkpoint.summary)
-            })]
-        })
-        .unwrap_or_default();
-    let previous_through = checkpoint
-        .as_ref()
-        .map(|checkpoint| checkpoint.through_message_id);
-    source.extend(
-        history[..cutoff]
-            .iter()
-            .filter(|message| previous_through.is_none_or(|id| message.id > id))
-            .map(|message| json!({ "role": message.role, "content": message.content })),
-    );
-    send_agent_event(
-        db_path,
-        events,
-        AgentEvent::Status {
-            stage: "checkpointing".to_owned(),
-            message: "Compressing the stable history prefix".to_owned(),
-        },
-    )
-    .await?;
-    // RECOVERY: Checkpointing is an optimization performed before the current context reaches
-    // the model limit. If that auxiliary request fails, the complete persisted history remains
-    // a valid context for this turn and checkpointing can be retried on the next input.
-    let summary = match summarize_context(client, config, source, cancellation).await {
-        Ok(summary) => summary,
-        Err(cause) if cause.to_string() == "agent stopped" => return Err(cause),
-        Err(cause) => {
-            send_agent_event(
-                db_path,
-                events,
-                AgentEvent::Status {
-                    stage: "running".to_owned(),
-                    message: format!("Checkpoint deferred; using the complete history: {cause}"),
-                },
-            )
-            .await?;
-            return Ok(current_items);
-        }
-    };
-    let created_at = chrono::Utc::now().to_rfc3339();
-    let connection = open_db(db_path)?;
-    connection.execute(
-        "INSERT INTO context_checkpoints (
-           through_message_id, source_message_count, summary, created_at
-         ) VALUES (?1, ?2, ?3, ?4)",
-        params![through_message_id, cutoff, summary, created_at],
-    )?;
-    let checkpoint = ContextCheckpoint {
-        id: connection.last_insert_rowid(),
+    let through_message_id = history
+        .last()
+        .map(|message| message.id)
+        .ok_or_else(|| anyhow!("main-thread context has no messages"))?;
+    Ok(CompiledMainContext {
+        items: context_items(checkpoint.as_ref(), &history),
         through_message_id,
-        source_message_count: cutoff,
-        summary,
-        created_at,
-    };
-    send_agent_event(
-        db_path,
-        events,
-        AgentEvent::Checkpoint {
-            id: checkpoint.id,
-            through_message_id,
-        },
-    )
-    .await?;
-    Ok(context_items(Some(&checkpoint), &history))
+    })
 }
 
 fn append_conversation(
@@ -3655,38 +3664,34 @@ async fn process_main_run(
                 && continuation_is_superseded(&state.db_path, user_message_id).unwrap_or(false);
             match load_config(&state.db_path) {
                 _ if continuation_is_stale => Err(anyhow!("agent stopped")),
-                Ok(config) if config.deployment_role == "controller" => match compile_main_context(
-                    &state.client,
-                    &config,
-                    &state.db_path,
-                    user_message_id,
-                    &sink,
-                    cancellation.clone(),
-                )
-                .await
-                {
-                    Ok(mut items) => {
-                        if reason == MainRunReason::SubthreadSettled {
-                            items.push(json!({
+                Ok(config) if config.deployment_role == "controller" => {
+                    match compile_main_context(&state.db_path, user_message_id) {
+                        Ok(mut context) => {
+                            if reason == MainRunReason::SubthreadSettled {
+                                context.items.push(json!({
                                 "role": "developer",
                                 "content": "A background task has just settled. Re-evaluate its evidence against the original user outcome and take exactly the next useful step: verify directly, repair a concrete defect, or fork one genuinely independent substantial task. Stop only at verifiable completion, when a user decision is required, or when newer user input supersedes this work. Never merely summarize the background result."
                             }));
+                            }
+                            run_agent_items(
+                                &state.client,
+                                &config,
+                                context.items,
+                                &state.db_path,
+                                &state.skills,
+                                sink,
+                                cancellation,
+                                AgentScope::Main,
+                                &state.active_subthreads,
+                                ContextCheckpointTarget::Main {
+                                    through_message_id: context.through_message_id,
+                                },
+                            )
+                            .await
                         }
-                        run_agent_items(
-                            &state.client,
-                            &config,
-                            items,
-                            &state.db_path,
-                            &state.skills,
-                            sink,
-                            cancellation,
-                            AgentScope::Main,
-                            &state.active_subthreads,
-                        )
-                        .await
+                        Err(cause) => Err(cause),
                     }
-                    Err(cause) => Err(cause),
-                },
+                }
                 Ok(_) => Err(anyhow!("tool-executor machines cannot run the main thread")),
                 Err(cause) => Err(cause),
             }
@@ -3770,6 +3775,9 @@ async fn run_agent(
         cancellation,
         AgentScope::Main,
         &Arc::new(Mutex::new(HashMap::new())),
+        ContextCheckpointTarget::Main {
+            through_message_id: 0,
+        },
     )
     .await
 }
@@ -3785,10 +3793,12 @@ async fn run_agent_items(
     mut cancellation: watch::Receiver<bool>,
     scope: AgentScope,
     active_subthreads: &Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    checkpoint_target: ContextCheckpointTarget,
 ) -> Result<AgentResult> {
     let mut input_tokens = 0;
     let mut output_tokens = 0;
     let mut images = Vec::new();
+    let mut retried_after_context_overflow = false;
     loop {
         if *cancellation.borrow() {
             return Err(anyhow!("agent stopped"));
@@ -3806,14 +3816,25 @@ async fn run_agent_items(
                 scope,
                 db_path,
             ));
-        let response = tokio::select! {
-            response = request.send() => response?,
-            _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
-        }
-        .error_for_status()?;
-        let response = tokio::select! {
-            body = response.text() => body?,
-            _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+        let response = match send_responses_request(request, &mut cancellation).await {
+            Ok(response) => response,
+            // RECOVERY: A structured upstream context-length error means the current context
+            // can be replaced by a distilled checkpoint and retried once without replaying tools.
+            Err(cause) if is_context_overflow(&cause) && !retried_after_context_overflow => {
+                items = compact_context_after_overflow(
+                    client,
+                    config,
+                    db_path,
+                    items,
+                    &events,
+                    cancellation.clone(),
+                    &checkpoint_target,
+                )
+                .await?;
+                retried_after_context_overflow = true;
+                continue;
+            }
+            Err(cause) => return Err(cause),
         };
         let response = completed_response_from_sse(&response)?;
         if let Some(response_input_tokens) = response
@@ -4048,6 +4069,57 @@ fn remote_machine_context(path: &Path) -> Result<String> {
     } else {
         serde_json::to_string(&machines).map_err(Into::into)
     }
+}
+
+async fn send_responses_request(
+    request: reqwest::RequestBuilder,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<String> {
+    let response = tokio::select! {
+        response = request.send() => response?,
+        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+    };
+    let status = response.status();
+    let body = tokio::select! {
+        body = response.text() => body?,
+        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+    };
+    if status.is_success() {
+        return Ok(body);
+    }
+    if context_overflow_response(&body) {
+        let detail = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .or_else(|| value.get("message"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "context_length_exceeded".to_owned());
+        return Err(ContextOverflow { detail }.into());
+    }
+    Err(anyhow!(
+        "upstream Responses request failed with HTTP {status}: {body}"
+    ))
+}
+
+fn context_overflow_response(body: &str) -> bool {
+    let Ok(response) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    matches!(
+        response
+            .pointer("/error/code")
+            .or_else(|| response.get("code"))
+            .and_then(Value::as_str),
+        Some("context_length_exceeded" | "context_window_exceeded")
+    )
+}
+
+fn is_context_overflow(cause: &anyhow::Error) -> bool {
+    cause.downcast_ref::<ContextOverflow>().is_some()
 }
 
 fn skill_instructions(skills: &SkillCatalog) -> String {
@@ -4598,25 +4670,17 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_cutoff_keeps_a_recent_uncompressed_tail() {
-        let history = (1..=20)
-            .map(|id| HistoryMessage {
-                id,
-                role: if id % 2 == 0 { "assistant" } else { "user" }.to_owned(),
-                content: format!("message {id}"),
-                source_run_id: None,
-            })
-            .collect::<Vec<_>>();
-        let cutoff = checkpoint_cutoff(&history, None).unwrap();
-        assert_eq!(history.len() - cutoff, CONTEXT_TAIL_MESSAGES);
-        let checkpoint = ContextCheckpoint {
-            id: 1,
-            through_message_id: 7,
-            source_message_count: 7,
-            summary: "prefix".to_owned(),
-            created_at: "now".to_owned(),
-        };
-        assert_eq!(checkpoint_cutoff(&history, Some(&checkpoint)), None);
+    fn context_overflow_detection_requires_a_structured_upstream_code() {
+        assert!(context_overflow_response(
+            r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#
+        ));
+        assert!(context_overflow_response(
+            r#"{"code":"context_window_exceeded"}"#
+        ));
+        assert!(!context_overflow_response(
+            r#"{"error":{"code":"invalid_request_error","message":"too long"}}"#
+        ));
+        assert!(!context_overflow_response("not JSON"));
     }
 
     #[test]
@@ -5181,45 +5245,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_history_creates_an_auditable_checkpoint_and_keeps_the_full_log() {
-        async fn responses() -> String {
+    async fn context_overflow_distills_the_complete_main_context_then_retries_once() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            let request_number = {
+                let mut requests = requests.lock().await;
+                requests.push(request);
+                requests.len()
+            };
+            if request_number == 1 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "code": "context_length_exceeded",
+                            "message": "input exceeds the model context window"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            let text = if request_number == 2 {
+                "Goal: ship the context-overflow recovery. Completed: inspected the old history."
+            } else {
+                "Context recovery completed."
+            };
             let item = json!({
-                "type":"message",
-                "content":[{"type":"output_text","text":"Stable facts and unfinished work."}]
+                "type": "message",
+                "content": [{"type": "output_text", "text": text}]
             });
             format!(
                 "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
                 json!({"type":"response.output_item.done","item":item}),
                 json!({"type":"response.completed","response":{"output":[]}})
             )
+            .into_response()
         }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
         let server = tokio::spawn(async move {
-            axum::serve(listener, Router::new().route("/responses", post(responses)))
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
         });
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
-        let mut current = 0;
-        for index in 1..=17 {
-            let message = append_conversation(
-                &db,
-                &ChatMessage {
-                    role: if index % 2 == 0 { "assistant" } else { "user" }.to_owned(),
-                    content: Value::String(format!("message {index}: {}", "x".repeat(6_000))),
-                    images: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                },
-                None,
-            )
-            .unwrap();
-            current = message.id;
-        }
-        create_agent_run(&db, "checkpoint-run", current).unwrap();
+        append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String(format!("Keep deployment evidence. {}", "x".repeat(50_000))),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        append_conversation(
+            &db,
+            &ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String(format!(
+                    "I inspected the deployment evidence. {}",
+                    "y".repeat(50_000)
+                )),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        let current = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Finish the recovery.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "checkpoint-run", current.id).unwrap();
+        let context = compile_main_context(&db, current.id).unwrap();
+        assert_eq!(context.items.len(), 3);
+        let original_context = context.items.clone();
+        assert!(
+            original_context
+                .iter()
+                .filter_map(|item| item["content"].as_str())
+                .map(str::len)
+                .sum::<usize>()
+                > 96_000
+        );
         let config = Config {
             root_user_id: "root".to_owned(),
             auth_url: "https://auth.example.com".to_owned(),
@@ -5233,28 +5365,35 @@ mod tests {
             deployment_role: "controller".to_owned(),
         };
         let (events, mut received) = mpsc::channel(4);
-        let items = compile_main_context(
+        let result = run_agent_items(
             &reqwest::Client::new(),
             &config,
+            context.items,
             &db,
-            current,
-            &AgentEventSink {
+            &Arc::new(StdRwLock::new(SkillCatalog::default())),
+            AgentEventSink {
                 run_id: "checkpoint-run",
                 sender: &events,
             },
             watch::channel(false).1,
+            AgentScope::Main,
+            &Arc::new(Mutex::new(HashMap::new())),
+            ContextCheckpointTarget::Main {
+                through_message_id: context.through_message_id,
+            },
         )
         .await
         .unwrap();
         server.abort();
-        assert_eq!(load_conversation(&db).unwrap().len(), 17);
-        assert_eq!(items.len(), CONTEXT_TAIL_MESSAGES + 1);
-        assert_eq!(items[0]["role"], "developer");
+
+        assert_eq!(result.message.content, "Context recovery completed.");
+        assert_eq!(load_conversation(&db).unwrap().len(), 3);
         let checkpoint = load_latest_checkpoint(&open_db(&db).unwrap(), i64::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(checkpoint.through_message_id, 5);
-        assert_eq!(checkpoint.summary, "Stable facts and unfinished work.");
+        assert_eq!(checkpoint.through_message_id, current.id);
+        assert_eq!(checkpoint.source_message_count, original_context.len());
+        assert!(checkpoint.summary.contains("context-overflow recovery"));
         assert!(matches!(
             received.recv().await,
             Some(AgentEvent::Status { stage, .. }) if stage == "checkpointing"
@@ -5263,6 +5402,173 @@ mod tests {
             received.recv().await,
             Some(AgentEvent::Checkpoint { id, .. }) if id == checkpoint.id
         ));
+
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["input"], Value::Array(original_context.clone()));
+        assert!(requests[0].get("tools").is_some());
+        assert_eq!(requests[1]["input"], Value::Array(original_context.clone()));
+        assert!(requests[1].get("tools").is_none());
+        assert!(
+            requests[1]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Distill the complete current context")
+        );
+        assert_eq!(requests[2]["input"].as_array().unwrap().len(), 1);
+        assert!(
+            requests[2]["input"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("context-overflow recovery")
+        );
+    }
+
+    #[tokio::test]
+    async fn subthread_context_overflow_uses_the_same_distillation_retry() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            let request_number = {
+                let mut requests = requests.lock().await;
+                requests.push(request);
+                requests.len()
+            };
+            if request_number == 1 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":"context_length_exceeded"}})),
+                )
+                    .into_response();
+            }
+            let text = if request_number == 2 {
+                "Subthread task: verify the release. Evidence: test failure reproduced."
+            } else {
+                "The subthread completed its recovery."
+            };
+            let item = json!({
+                "type": "message",
+                "content": [{"type": "output_text", "text": text}]
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+            .into_response()
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let parent = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Verify the release in the background.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO subthreads (
+                   id, title, task, status, model, context_json,
+                   forked_from_message_id, created_at, updated_at
+                 ) VALUES ('child', 'Release verification', 'Verify the release', 'running', ?1, ?2, ?3, 'now', 'now')",
+                params![
+                    DEFAULT_SUBTHREAD_MODEL_ID,
+                    serde_json::to_string(&vec![json!({"role":"user","content":"Verify the release in the background."})]).unwrap(),
+                    parent.id,
+                ],
+            )
+            .unwrap();
+        create_agent_run_with_kind(&db, "subthread-child", parent.id, "subthread").unwrap();
+        let original_context = vec![
+            json!({"role":"developer","content":"Inherited main-thread checkpoint."}),
+            json!({"role":"user","content":"Verify the release"}),
+        ];
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            openai_api_key: "test".to_owned(),
+            default_model: DEFAULT_SUBTHREAD_MODEL_ID.to_owned(),
+            voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        };
+        let (events, _) = mpsc::channel(4);
+        let result = run_agent_items(
+            &reqwest::Client::new(),
+            &config,
+            original_context.clone(),
+            &db,
+            &Arc::new(StdRwLock::new(SkillCatalog::default())),
+            AgentEventSink {
+                run_id: "subthread-child",
+                sender: &events,
+            },
+            watch::channel(false).1,
+            AgentScope::Subthread,
+            &Arc::new(Mutex::new(HashMap::new())),
+            ContextCheckpointTarget::Subthread {
+                id: "child".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(
+            result.message.content,
+            "The subthread completed its recovery."
+        );
+        let checkpoint: Vec<Value> = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT context_json FROM subthreads WHERE id = 'child'",
+                [],
+                |row| row.get(0),
+            )
+            .map(|value: String| serde_json::from_str(&value).unwrap())
+            .unwrap();
+        assert_eq!(checkpoint.len(), 1);
+        assert!(
+            checkpoint[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("test failure reproduced")
+        );
+
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["input"], Value::Array(original_context.clone()));
+        assert!(requests[0].get("tools").is_some());
+        assert_eq!(requests[1]["input"], Value::Array(original_context.clone()));
+        assert!(requests[1].get("tools").is_none());
+        assert_eq!(requests[2]["input"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
