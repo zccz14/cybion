@@ -499,6 +499,12 @@ enum AgentScope {
     Subthread,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MainRunReason {
+    UserMessage,
+    SubthreadSettled,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -576,18 +582,19 @@ fn schedule_recovered_main_runs(state: AppState) {
     let runs = open_db(&state.db_path).and_then(|connection| {
         connection
             .prepare(
-                "SELECT run.id, run.user_message_id,
+                "SELECT run.id, run.user_message_id, run.kind,
                         (SELECT event.payload FROM agent_events event
                          WHERE event.run_id = run.id ORDER BY event.id DESC LIMIT 1)
                  FROM agent_runs run
-                 WHERE run.kind = 'main' AND run.status = 'running'
+                 WHERE run.kind IN ('main', 'continuation') AND run.status = 'running'
                  ORDER BY run.user_message_id",
             )?
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -596,7 +603,7 @@ fn schedule_recovered_main_runs(state: AppState) {
     let Ok(runs) = runs else {
         return;
     };
-    for (run_id, user_message_id, latest_event) in runs {
+    for (run_id, user_message_id, kind, latest_event) in runs {
         if !recoverable_main_run(latest_event.as_deref()) {
             let _ = append_agent_event(
                 &state.db_path,
@@ -608,6 +615,11 @@ fn schedule_recovered_main_runs(state: AppState) {
             let _ = finish_agent_run(&state.db_path, &run_id, "failed");
             continue;
         }
+        let reason = if kind == "continuation" {
+            MainRunReason::SubthreadSettled
+        } else {
+            MainRunReason::UserMessage
+        };
         let state = state.clone();
         tokio::spawn(async move {
             let (cancel, cancellation) = watch::channel(false);
@@ -618,7 +630,7 @@ fn schedule_recovered_main_runs(state: AppState) {
                 .insert(run_id.clone(), cancel);
             let (events, receiver) = mpsc::channel(1);
             drop(receiver);
-            process_main_run(state, run_id, user_message_id, events, cancellation).await;
+            process_main_run(state, run_id, user_message_id, reason, events, cancellation).await;
         });
     }
 }
@@ -675,7 +687,20 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
         "subthread",
     );
     if let Err(cause) = result {
-        let _ = finish_subthread(&state.db_path, &job.id, "failed", Some(&cause.to_string()));
+        let detail = cause.to_string();
+        let _ = finish_subthread(&state.db_path, &job.id, "failed", Some(&detail));
+        let message = ChatMessage {
+            role: "assistant".to_owned(),
+            content: Value::String(format!(
+                "### Background task failed: {}\n\n{}",
+                job.title, detail
+            )),
+            images: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let _ = append_conversation(&state.db_path, &message, None);
+        schedule_main_continuation(state, job.forked_from_message_id).await;
         return;
     }
     let _ = open_db(&state.db_path).and_then(|connection| {
@@ -782,6 +807,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
     let _ = finish_agent_run(&state.db_path, &run_id, status);
     let _ = append_conversation_for_run(&state.db_path, &message, usage, Some(&run_id));
     state.active_subthreads.lock().await.remove(&job.id);
+    schedule_main_continuation(state, job.forked_from_message_id).await;
 }
 
 fn app(state: AppState) -> Router {
@@ -1459,8 +1485,22 @@ fn append_conversation_for_run(
     })
 }
 
+#[cfg(test)]
 fn create_agent_run(path: &Path, id: &str, user_message_id: i64) -> Result<()> {
-    create_agent_run_with_kind(path, id, user_message_id, "main")
+    create_main_run(path, id, user_message_id, MainRunReason::UserMessage)
+}
+
+fn create_main_run(
+    path: &Path,
+    id: &str,
+    user_message_id: i64,
+    reason: MainRunReason,
+) -> Result<()> {
+    let kind = match reason {
+        MainRunReason::UserMessage => "main",
+        MainRunReason::SubthreadSettled => "continuation",
+    };
+    create_agent_run_with_kind(path, id, user_message_id, kind)
 }
 
 fn create_agent_run_with_kind(
@@ -1514,7 +1554,7 @@ fn load_conversation_state(path: &Path) -> Result<ConversationState> {
     let mut runs = connection
         .prepare(
             "SELECT id, user_message_id, status FROM agent_runs
-             WHERE kind = 'main' ORDER BY created_at, id",
+             WHERE kind IN ('main', 'continuation') ORDER BY created_at, id",
         )?
         .query_map([], |row| {
             Ok((
@@ -3069,7 +3109,8 @@ fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
     )?;
     let running = connection.query_row(
         "SELECT EXISTS(
-           SELECT 1 FROM agent_runs WHERE kind = 'main' AND status = 'running'
+           SELECT 1 FROM agent_runs
+           WHERE kind IN ('main', 'continuation') AND status = 'running'
          )",
         [],
         |row| row.get::<_, bool>(0),
@@ -3206,7 +3247,8 @@ fn execute_fork_subthread(
     };
     let forked_from_message_id = match connection
         .query_row(
-            "SELECT user_message_id FROM agent_runs WHERE id = ?1 AND kind = 'main'",
+            "SELECT user_message_id FROM agent_runs
+             WHERE id = ?1 AND kind IN ('main', 'continuation')",
             [parent_run_id],
             |row| row.get::<_, i64>(0),
         )
@@ -3509,8 +3551,14 @@ async fn agent_turn(
             "cannot save conversation message",
         )
     })?;
-    create_agent_run(&state.db_path, &input.run_id, user_message.id)
-        .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
+    cancel_stale_continuations(&state, user_message.id).await;
+    create_main_run(
+        &state.db_path,
+        &input.run_id,
+        user_message.id,
+        MainRunReason::UserMessage,
+    )
+    .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
     let run_id = input.run_id.clone();
     let (cancel, cancellation) = watch::channel(false);
     state
@@ -3523,6 +3571,7 @@ async fn agent_turn(
         state.clone(),
         run_id,
         user_message.id,
+        MainRunReason::UserMessage,
         events,
         cancellation,
     ));
@@ -3532,6 +3581,90 @@ async fn agent_turn(
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+fn continuation_is_superseded(path: &Path, user_message_id: i64) -> Result<bool> {
+    open_db(path)?
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM conversation_messages
+               WHERE role = 'user' AND id > ?1
+             )",
+            [user_message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn continuation_is_running(path: &Path, user_message_id: i64) -> Result<bool> {
+    open_db(path)?
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM agent_runs
+               WHERE kind = 'continuation' AND status = 'running' AND user_message_id = ?1
+             )",
+            [user_message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+async fn cancel_stale_continuations(state: &AppState, user_message_id: i64) {
+    let stale = open_db(&state.db_path)
+        .and_then(|connection| {
+            connection
+                .prepare(
+                    "SELECT id FROM agent_runs
+                     WHERE kind = 'continuation' AND status = 'running' AND user_message_id < ?1",
+                )?
+                .query_map([user_message_id], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+        .unwrap_or_default();
+    let active_runs = state.active_runs.lock().await;
+    for run_id in stale {
+        if let Some(cancel) = active_runs.get(&run_id) {
+            let _ = cancel.send(true);
+        }
+    }
+}
+
+async fn schedule_main_continuation(state: AppState, user_message_id: i64) {
+    let guard = state.main_thread.lock().await;
+    if continuation_is_superseded(&state.db_path, user_message_id).unwrap_or(true)
+        || continuation_is_running(&state.db_path, user_message_id).unwrap_or(true)
+    {
+        return;
+    }
+    let run_id = format!("continuation-{}", Uuid::new_v4());
+    if create_main_run(
+        &state.db_path,
+        &run_id,
+        user_message_id,
+        MainRunReason::SubthreadSettled,
+    )
+    .is_err()
+    {
+        return;
+    }
+    drop(guard);
+    let (cancel, cancellation) = watch::channel(false);
+    state
+        .active_runs
+        .lock()
+        .await
+        .insert(run_id.clone(), cancel);
+    let (events, receiver) = mpsc::channel(1);
+    drop(receiver);
+    tokio::spawn(process_main_run(
+        state,
+        run_id,
+        user_message_id,
+        MainRunReason::SubthreadSettled,
+        events,
+        cancellation,
+    ));
 }
 
 fn is_next_main_run(path: &Path, user_message_id: i64) -> Result<bool> {
@@ -3551,6 +3684,7 @@ async fn process_main_run(
     state: AppState,
     run_id: String,
     user_message_id: i64,
+    reason: MainRunReason,
     events: mpsc::Sender<AgentEvent>,
     cancellation: watch::Receiver<bool>,
 ) {
@@ -3577,6 +3711,11 @@ async fn process_main_run(
         let Some(candidate) = candidate else {
             break None;
         };
+        if reason == MainRunReason::SubthreadSettled
+            && continuation_is_superseded(&state.db_path, user_message_id).unwrap_or(false)
+        {
+            break None;
+        }
         if is_next_main_run(&state.db_path, user_message_id).unwrap_or(false) {
             break Some(candidate);
         }
@@ -3598,7 +3737,10 @@ async fn process_main_run(
                 },
             )
             .await;
+            let continuation_is_stale = reason == MainRunReason::SubthreadSettled
+                && continuation_is_superseded(&state.db_path, user_message_id).unwrap_or(false);
             match load_config(&state.db_path) {
+                _ if continuation_is_stale => Err(anyhow!("agent stopped")),
                 Ok(config) if config.deployment_role == "controller" => match compile_main_context(
                     &state.client,
                     &config,
@@ -3609,7 +3751,13 @@ async fn process_main_run(
                 )
                 .await
                 {
-                    Ok(items) => {
+                    Ok(mut items) => {
+                        if reason == MainRunReason::SubthreadSettled {
+                            items.push(json!({
+                                "role": "developer",
+                                "content": "A background task has just settled. Re-evaluate its evidence against the original user outcome and take exactly the next useful step: verify directly, repair a concrete defect, or fork one genuinely independent substantial task. Stop only at verifiable completion, when a user decision is required, or when newer user input supersedes this work. Never merely summarize the background result."
+                            }));
+                        }
                         run_agent_items(
                             &state.client,
                             &config,
@@ -3959,14 +4107,14 @@ fn scoped_responses_request_body(
             .expect("tool definitions are an array");
         tools.extend([
             json!({"type":"function","name":"list_subthreads","description":"Inspect Mobius's internal background execution branches. These are implementation details of the single user-visible main thread, not user-managed sessions.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
-            json!({"type":"function","name":"fork_subthread","description":"Use this by default for bounded, independent work such as investigation, implementation, file or command work, research, and verification. Fork from the compiled main-thread context, then keep coordinating in the main thread. The subthread runs on this controller; each filesystem or Bash call may independently select an enrolled device. Return promptly after dispatch because Mobius automatically merges the result into the main conversation.","parameters":{"type":"object","additionalProperties":false,"required":["title","task"],"properties":{"title":{"type":"string"},"task":{"type":"string"}}}}),
+            json!({"type":"function","name":"fork_subthread","description":"Fork only independently executable, substantial work that benefits from parallel execution. Use direct tools for brief, localized checks or edits. Each task must state its scope, constraints, definition of done, and expected evidence. The subthread inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Mobius merges the result and resumes the main thread automatically.","parameters":{"type":"object","additionalProperties":false,"required":["title","task"],"properties":{"title":{"type":"string"},"task":{"type":"string"}}}}),
             json!({"type":"function","name":"cancel_subthread","description":"Terminate an active internal subthread that is no longer relevant or must be rebuilt.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
         ]);
         body["tool_choice"] = Value::String("auto".to_owned());
     }
     let scope_instructions = match scope {
         AgentScope::Main => {
-            "You are Mobius's single user-visible main thread. Accept every user input as part of one durable conversation. Give a concise response promptly. Treat fork_subthread as the default execution path for bounded, independent work, especially investigation, implementation, file or command work, research, and verification. Before using filesystem or Bash tools yourself for that work, fork the smallest useful bounded task and keep coordinating in the main thread. Work directly only for an immediate answer, a clarification, or work that cannot proceed without continuous user judgment. Inspect existing subthreads before replacing work, cancel obsolete branches, and let Mobius merge background results automatically. Never ask the user to manage subthreads as sessions."
+            "You are Mobius's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Fork only independently executable, substantial work that benefits from parallel execution; every fork must state its scope, constraints, definition of done, and expected evidence. Inspect existing subthreads before replacing work and cancel obsolete branches. Mobius merges a settled subthread result and resumes you automatically. Never claim the user objective is complete merely because a subthread was dispatched, and never ask the user to manage subthreads as sessions."
         }
         AgentScope::Subthread => {
             "You are an internal Mobius subthread forked from a compiled main-thread checkpoint. Complete the bounded task using the inherited context, return a self-contained result with reusable environment facts and evidence, and do not ask the user to manage this branch. The result is merged into the main thread automatically."
@@ -4856,6 +5004,19 @@ mod tests {
 
         finish_agent_run(&db, "main-index-run", "completed").unwrap();
         assert_eq!(load_thread_index(&db).unwrap().main_thread.status, "idle");
+        create_main_run(
+            &db,
+            "continuation-index-run",
+            user.id,
+            MainRunReason::SubthreadSettled,
+        )
+        .unwrap();
+        assert_eq!(
+            load_thread_index(&db).unwrap().main_thread.status,
+            "running"
+        );
+        finish_agent_run(&db, "continuation-index-run", "completed").unwrap();
+        assert_eq!(load_thread_index(&db).unwrap().main_thread.status, "idle");
     }
 
     #[test]
@@ -4884,6 +5045,14 @@ mod tests {
         assert!(is_next_main_run(&db, first.id).unwrap());
         assert!(!is_next_main_run(&db, second.id).unwrap());
         finish_agent_run(&db, "run-first", "completed").unwrap();
+        assert!(is_next_main_run(&db, second.id).unwrap());
+        create_main_run(
+            &db,
+            "continuation-first",
+            first.id,
+            MainRunReason::SubthreadSettled,
+        )
+        .unwrap();
         assert!(is_next_main_run(&db, second.id).unwrap());
     }
 
@@ -4988,7 +5157,7 @@ mod tests {
             fork["description"]
                 .as_str()
                 .unwrap()
-                .contains("Use this by default")
+                .contains("independently executable, substantial work")
         );
         let read_file = subthread["tools"]
             .as_array()
@@ -5006,7 +5175,7 @@ mod tests {
         assert!(instructions.contains("\"description\":\"Build host on build-1 (executor)\""));
         assert!(instructions.contains("target_device"));
         assert!(instructions.contains("an empty string also executes locally"));
-        assert!(instructions.contains("Treat fork_subthread as the default execution path"));
+        assert!(instructions.contains("Use direct tools for brief, localized checks or edits"));
         assert!(!instructions.contains("machine-unavailable"));
         assert!(!instructions.contains("secret-token"));
     }
@@ -5501,10 +5670,20 @@ mod tests {
 
     #[tokio::test]
     async fn completed_subthread_is_reaped_into_the_single_main_conversation() {
-        async fn responses() -> String {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> String {
+            let mut requests = requests.lock().await;
+            requests.push(request);
+            let text = if requests.len() == 1 {
+                "Background verification passed."
+            } else {
+                "I verified the background evidence and completed the next useful step."
+            };
             let item = json!({
                 "type":"message",
-                "content":[{"type":"output_text","text":"Background verification passed."}]
+                "content":[{"type":"output_text","text":text}]
             });
             format!(
                 "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
@@ -5514,10 +5693,17 @@ mod tests {
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
         let server = tokio::spawn(async move {
-            axum::serve(listener, Router::new().route("/responses", post(responses)))
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
         });
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -5545,6 +5731,27 @@ mod tests {
         assert!(!fork.output.starts_with("error:"));
         let job = claim_queued_subthreads(&db).unwrap().remove(0);
         run_subthread(test_state(db.clone()), job).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let completed = open_db(&db)
+                    .unwrap()
+                    .query_row(
+                        "SELECT EXISTS(
+                           SELECT 1 FROM agent_runs
+                           WHERE kind = 'continuation' AND status = 'completed'
+                         )",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap();
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         server.abort();
         assert!(load_subthreads(&db).unwrap().is_empty());
         let (status, result) = open_db(&db)
@@ -5558,18 +5765,69 @@ mod tests {
         let messages = load_conversation(&db).unwrap();
         assert!(
             messages
-                .last()
-                .unwrap()
-                .content
-                .contains("Background task completed")
+                .iter()
+                .any(|message| message.content.contains("Background task completed"))
         );
         assert!(
             messages
-                .last()
-                .unwrap()
-                .content
-                .contains("Background verification passed.")
+                .iter()
+                .any(|message| message.content.contains("Background verification passed."))
         );
+        assert!(messages.iter().any(|message| {
+            message
+                .content
+                .contains("I verified the background evidence and completed the next useful step.")
+        }));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]["input"].as_array().unwrap().iter().any(|item| {
+            item["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("A background task has just settled"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn newer_user_input_prevents_a_stale_continuation() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let original = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("finish the release".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("instead inspect the current status".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        schedule_main_continuation(test_state(db.clone()), original.id).await;
+
+        let continuations: i64 = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM agent_runs WHERE kind = 'continuation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(continuations, 0);
     }
 
     #[test]
