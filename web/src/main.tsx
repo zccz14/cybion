@@ -479,8 +479,8 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
         ])
       }
       if (event.type === 'checkpoint') updateConversation([...conversationRef.current, { kind: 'status', id: `${runId}-checkpoint-${event.id}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` }])
-      if (event.type === 'tool_call') updateConversation([...conversationRef.current, { kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false }])
-      if (event.type === 'tool_result') updateConversation(conversationRef.current.map((item) => item.kind === 'tool' && item.call_id === event.call_id ? { ...item, complete: true, added_lines: event.added_lines, deleted_lines: event.deleted_lines } : item))
+      if (event.type === 'tool_call') updateConversation([...conversationRef.current, { kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, started_at: event.started_at }])
+      if (event.type === 'tool_result') updateConversation(conversationRef.current.map((item) => item.kind === 'tool' && item.call_id === event.call_id ? { ...item, complete: true, finished_at: event.finished_at, added_lines: event.added_lines, deleted_lines: event.deleted_lines } : item))
       if (event.type === 'context') setContextTokens(event.input_tokens)
       if (event.type === 'complete') {
         updateConversation([...conversationRef.current, { kind: 'message', id: event.message.id?.toString() ?? crypto.randomUUID(), message: event.message, queued: false }])
