@@ -48,6 +48,7 @@ const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL_ID: &str = "gpt-5.6-terra";
 const DEFAULT_SUBTHREAD_MODEL_ID: &str = "gpt-5.6-terra";
 const DEFAULT_VOICE_SCRIPT_MODEL_ID: &str = "gpt-5.6-luna";
+const DEFAULT_VOICE_SCRIPT_MAX_CHARS: usize = 150;
 const DEFAULT_EDGE_TTS_ZH_VOICE: &str = "zh-CN-XiaoxiaoNeural";
 const DEFAULT_EDGE_TTS_EN_VOICE: &str = "en-US-JennyNeural";
 const EDGE_TTS_TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
@@ -503,6 +504,7 @@ struct SettingsResponse {
     default_model: String,
     subthread_model: String,
     voice_script_model: String,
+    voice_script_max_chars: usize,
     edge_tts_zh_voice: String,
     edge_tts_en_voice: String,
     openai_base_url: String,
@@ -515,6 +517,7 @@ struct UpdateSettings {
     default_model: String,
     subthread_model: String,
     voice_script_model: String,
+    voice_script_max_chars: usize,
     edge_tts_zh_voice: String,
     edge_tts_en_voice: String,
     openai_base_url: String,
@@ -1709,7 +1712,7 @@ async fn create_voice_script(
             "input": [{ "role": "user", "content": content }],
             "store": false,
             "stream": true,
-            "instructions": "Rewrite the assistant's final answer as a concise, natural voice announcement in the same language. Return only plain speech text. Preserve important conclusions, caveats, values, and next actions. Never output Markdown, code, tables, URLs, citations, list markers, or formatting instructions. Mention a code block, table, or link only when it is essential for the listener to act.",
+            "instructions": voice_script_instructions(config.voice_script_max_chars),
         }))
         .send()
         .await?
@@ -1725,6 +1728,12 @@ async fn create_voice_script(
         return Err(anyhow!("voice script response has no text"));
     }
     Ok(text)
+}
+
+fn voice_script_instructions(max_chars: usize) -> String {
+    format!(
+        "Rewrite the assistant's final answer as a concise, natural voice announcement in the same language. Return only plain speech text. Keep the script at or below {max_chars} characters, which is usually about 30 seconds at a natural pace. Preserve important conclusions, caveats, values, and next actions. Never output Markdown, code, tables, URLs, citations, list markers, or formatting instructions. Mention a code block, table, or link only when it is essential for the listener to act."
+    )
 }
 
 fn valid_edge_tts_voice(voice: &str) -> bool {
@@ -2566,6 +2575,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
         )?;
     }
     connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('voice_script_max_chars', ?1)
+         ON CONFLICT(key) DO NOTHING",
+        [DEFAULT_VOICE_SCRIPT_MAX_CHARS.to_string()],
+    )?;
+    connection.execute(
         "INSERT INTO app_meta (key, value) VALUES ('deployment_role', 'controller')
          ON CONFLICT(key) DO NOTHING",
         [],
@@ -2589,6 +2603,7 @@ struct Config {
     openai_api_key: String,
     default_model: String,
     voice_script_model: String,
+    voice_script_max_chars: usize,
     edge_tts_zh_voice: String,
     edge_tts_en_voice: String,
     machine_id: String,
@@ -2614,6 +2629,9 @@ fn load_config(path: &Path) -> Result<Config> {
         openai_api_key: required("openai_api_key")?,
         default_model: required("default_model")?,
         voice_script_model: required("voice_script_model")?,
+        voice_script_max_chars: required("voice_script_max_chars")?
+            .parse()
+            .context("invalid voice_script_max_chars in app_meta")?,
         edge_tts_zh_voice: required("edge_tts_zh_voice")?,
         edge_tts_en_voice: required("edge_tts_en_voice")?,
         machine_id: required("machine_id")?,
@@ -2975,6 +2993,7 @@ async fn settings(
             )
         })?,
         voice_script_model: config.voice_script_model,
+        voice_script_max_chars: config.voice_script_max_chars,
         edge_tts_zh_voice: config.edge_tts_zh_voice,
         edge_tts_en_voice: config.edge_tts_en_voice,
         openai_base_url: config.openai_base_url,
@@ -3008,6 +3027,12 @@ async fn update_settings(
         return Err(error(
             StatusCode::BAD_REQUEST,
             "voice_script_model cannot be empty",
+        ));
+    }
+    if input.voice_script_max_chars == 0 {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "voice_script_max_chars must be greater than zero",
         ));
     }
     let edge_tts_zh_voice = input.edge_tts_zh_voice.trim();
@@ -3074,6 +3099,13 @@ async fn update_settings(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     transaction
         .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('voice_script_max_chars', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [input.voice_script_max_chars.to_string()],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute(
             "INSERT INTO app_meta (key, value) VALUES ('edge_tts_zh_voice', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [edge_tts_zh_voice],
@@ -3114,6 +3146,7 @@ async fn update_settings(
         default_model: default_model.to_owned(),
         subthread_model: subthread_model.to_owned(),
         voice_script_model: voice_script_model.to_owned(),
+        voice_script_max_chars: input.voice_script_max_chars,
         edge_tts_zh_voice: edge_tts_zh_voice.to_owned(),
         edge_tts_en_voice: edge_tts_en_voice.to_owned(),
         openai_base_url: openai_base_url.to_owned(),
@@ -5770,6 +5803,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(voice_script_model, DEFAULT_VOICE_SCRIPT_MODEL_ID);
+        let voice_script_max_chars: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'voice_script_max_chars'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            voice_script_max_chars,
+            DEFAULT_VOICE_SCRIPT_MAX_CHARS.to_string()
+        );
         let edge_tts_zh_voice: String = connection
             .query_row(
                 "SELECT value FROM app_meta WHERE key = 'edge_tts_zh_voice'",
@@ -6991,6 +7035,7 @@ mod tests {
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
@@ -7172,6 +7217,7 @@ mod tests {
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_SUBTHREAD_MODEL_ID.to_owned(),
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
@@ -7267,6 +7313,7 @@ mod tests {
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
             voice_script_model: "voice-script-test-model".to_owned(),
+            voice_script_max_chars: 150,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
@@ -7290,6 +7337,12 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Never output Markdown")
+        );
+        assert!(
+            requests[0]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("at or below 150 characters")
         );
     }
 
@@ -7368,6 +7421,7 @@ mod tests {
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
@@ -7388,6 +7442,7 @@ mod tests {
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: "zh-CN-YunxiNeural".to_owned(),
             edge_tts_en_voice: "en-US-GuyNeural".to_owned(),
             machine_id: "machine".to_owned(),
@@ -8129,6 +8184,7 @@ mod tests {
             openai_api_key: "test".to_owned(),
             default_model: DEFAULT_MODEL_ID.to_owned(),
             voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
