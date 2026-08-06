@@ -57,6 +57,7 @@ const EDGE_TTS_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const JWKS_TTL: Duration = Duration::from_secs(300);
 const HISTORY_PAGE_DEFAULT: usize = 100;
 const HISTORY_PAGE_MAX: usize = 500;
+const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 struct AppState {
@@ -392,6 +393,8 @@ struct ConversationRun {
     id: String,
     user_message_id: i64,
     status: String,
+    retry_attempt: i64,
+    next_retry_at: Option<i64>,
     events: Vec<AgentEvent>,
 }
 
@@ -405,6 +408,8 @@ struct Subthread {
     status: String,
     model: String,
     result: Option<String>,
+    retry_attempt: i64,
+    next_retry_at: Option<i64>,
     created_at: String,
     updated_at: String,
 }
@@ -456,6 +461,17 @@ struct QueuedSubthread {
     model: String,
     context: Vec<Value>,
     forked_from_message_id: i64,
+}
+
+struct QueuedMainRun {
+    id: String,
+    user_message_id: i64,
+    reason: MainRunReason,
+}
+
+struct RetrySchedule {
+    attempt: i64,
+    delay: Duration,
 }
 
 struct AgentEventSink<'a> {
@@ -605,6 +621,7 @@ async fn main() -> Result<()> {
         main_thread: Arc::new(Mutex::new(())),
     };
     schedule_recovered_main_runs(state.clone());
+    schedule_main_retries(state.clone());
     schedule_subthreads(state.clone());
     schedule_auto_update(state.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
@@ -640,7 +657,7 @@ fn schedule_subthreads(state: AppState) {
                 }
                 Err(cause) => tracing::warn!(%cause, "cannot claim queued subthreads"),
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(RETRY_SCHEDULER_INTERVAL).await;
         }
     });
 }
@@ -649,79 +666,60 @@ fn schedule_recovered_main_runs(state: AppState) {
     let runs = open_db(&state.db_path).and_then(|connection| {
         connection
             .prepare(
-                "SELECT run.id, run.user_message_id, run.kind,
-                        (SELECT event.payload FROM agent_events event
-                         WHERE event.run_id = run.id ORDER BY event.id DESC LIMIT 1)
+                "SELECT run.id
                  FROM agent_runs run
-                 WHERE run.kind IN ('main', 'continuation') AND run.status = 'running'
+                 WHERE run.kind IN ('main', 'continuation')
+                   AND run.status = 'running' AND run.next_retry_at IS NULL
                  ORDER BY run.user_message_id",
             )?
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })?
+            .query_map([], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     });
     let Ok(runs) = runs else {
         return;
     };
-    for (run_id, user_message_id, kind, latest_event) in runs {
-        if !recoverable_main_run(latest_event.as_deref()) {
-            let _ = append_agent_event(
-                &state.db_path,
-                &run_id,
-                &AgentEvent::Error {
-                    error: "main-thread execution was interrupted by a process restart; it was not replayed because tools may have side effects".to_owned(),
-                },
-            );
-            let _ = finish_agent_run(&state.db_path, &run_id, "failed");
-            continue;
-        }
-        let reason = if kind == "continuation" {
-            MainRunReason::SubthreadSettled
-        } else {
-            MainRunReason::UserMessage
-        };
-        let state = state.clone();
-        tokio::spawn(async move {
-            let (cancel, cancellation) = watch::channel(false);
-            state
-                .active_runs
-                .lock()
-                .await
-                .insert(run_id.clone(), cancel);
-            let (events, receiver) = mpsc::channel(1);
-            drop(receiver);
-            process_main_run(state, run_id, user_message_id, reason, events, cancellation).await;
-        });
+    for run_id in runs {
+        record_retry(
+            &state.db_path,
+            &run_id,
+            "main-thread execution was interrupted by a process restart",
+        );
     }
+    recover_interrupted_subthreads(&state.db_path);
 }
 
-fn recoverable_main_run(latest_event: Option<&str>) -> bool {
-    latest_event
-        .and_then(|payload| serde_json::from_str::<AgentEvent>(payload).ok())
-        .is_none_or(|event| {
-            matches!(
-                event,
-                AgentEvent::Status { ref stage, .. } if stage == "queued"
-            )
-        })
+fn schedule_main_retries(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            match claim_due_main_retries(&state.db_path, chrono::Utc::now().timestamp()) {
+                Ok(runs) => {
+                    for run in runs {
+                        spawn_main_run(state.clone(), run);
+                    }
+                }
+                Err(cause) => tracing::warn!(%cause, "cannot claim main-thread retries"),
+            }
+            tokio::time::sleep(RETRY_SCHEDULER_INTERVAL).await;
+        }
+    });
 }
 
 fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
     let mut connection = open_db(path)?;
     let transaction = connection.transaction()?;
+    let now_epoch = chrono::Utc::now().timestamp();
     let jobs = transaction
         .prepare(
-            "SELECT id, title, task, model, context_json, forked_from_message_id
-             FROM subthreads WHERE status = 'queued' ORDER BY created_at",
+            "SELECT thread.id, thread.title, thread.task, thread.model,
+                    thread.context_json, thread.forked_from_message_id
+             FROM subthreads thread
+             LEFT JOIN agent_runs run ON run.id = thread.run_id
+             WHERE thread.status = 'queued'
+               AND (run.next_retry_at IS NULL OR run.next_retry_at <= ?1)
+             ORDER BY thread.created_at",
         )?
-        .query_map([], |row| {
+        .query_map([now_epoch], |row| {
             let context: String = row.get(4)?;
             Ok(QueuedSubthread {
                 id: row.get(0)?,
@@ -746,37 +744,15 @@ fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
 }
 
 async fn run_subthread(state: AppState, job: QueuedSubthread) {
-    let run_id = format!("subthread-{}", job.id);
-    let result = create_agent_run_with_kind(
-        &state.db_path,
-        &run_id,
-        job.forked_from_message_id,
-        "subthread",
-    );
-    if let Err(cause) = result {
-        let detail = cause.to_string();
-        let _ = finish_subthread(&state.db_path, &job.id, "failed", Some(&detail));
-        let message = ChatMessage {
-            role: "assistant".to_owned(),
-            content: Value::String(format!(
-                "### Background task failed: {}\n\n{}",
-                job.title, detail
-            )),
-            images: None,
-            tool_call_id: None,
-            tool_calls: None,
+    let run_id =
+        match ensure_subthread_agent_run(&state.db_path, &job.id, job.forked_from_message_id) {
+            Ok(run_id) => run_id,
+            Err(cause) => {
+                tracing::warn!(%cause, subthread = %job.id, "cannot prepare subthread retry run");
+                return;
+            }
         };
-        let _ = append_conversation(&state.db_path, &message, None);
-        schedule_main_continuation(state, job.forked_from_message_id).await;
-        return;
-    }
-    let _ = open_db(&state.db_path).and_then(|connection| {
-        connection.execute(
-            "UPDATE subthreads SET run_id = ?1 WHERE id = ?2",
-            params![run_id, job.id],
-        )?;
-        Ok(())
-    });
+    let _ = activate_agent_run(&state.db_path, &run_id);
     let (cancel, cancellation) = watch::channel(false);
     state
         .active_subthreads
@@ -803,6 +779,15 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
         run_id: &run_id,
         sender: &events,
     };
+    let _ = send_agent_event(
+        &state.db_path,
+        &sink,
+        AgentEvent::Status {
+            stage: "running".to_owned(),
+            message: "Executing the background task".to_owned(),
+        },
+    )
+    .await;
     let started_at = Instant::now();
     let result = match load_config(&state.db_path) {
         Ok(mut config) if config.deployment_role == "controller" => {
@@ -826,7 +811,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
         Ok(_) => Err(anyhow!("tool-executor machines cannot run subthreads")),
         Err(cause) => Err(cause),
     };
-    let (status, stored_result, message, usage) = match result {
+    match result {
         Ok(result) => {
             let content = result
                 .message
@@ -849,33 +834,41 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                 input_tokens: result.input_tokens,
                 output_tokens: result.output_tokens,
             };
-            ("completed", Some(content), message, Some(usage))
+            let _ = finish_subthread(&state.db_path, &job.id, "completed", Some(&content));
+            let _ = finish_agent_run(&state.db_path, &run_id, "completed");
+            let _ =
+                append_conversation_for_run(&state.db_path, &message, Some(usage), Some(&run_id));
+            state.active_subthreads.lock().await.remove(&job.id);
+            schedule_main_continuation(state, job.forked_from_message_id).await;
         }
         Err(cause) => {
-            let status = if cause.to_string() == "agent stopped" {
-                "cancelled"
-            } else {
-                "failed"
-            };
             let detail = cause.to_string();
-            let message = ChatMessage {
-                role: "assistant".to_owned(),
-                content: Value::String(format!(
-                    "### Background task {}: {}\n\n{}",
-                    status, job.title, detail
-                )),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
+            if detail == "agent stopped" {
+                let _ = finish_subthread(&state.db_path, &job.id, "cancelled", Some(&detail));
+                let _ = finish_agent_run(&state.db_path, &run_id, "cancelled");
+                state.active_subthreads.lock().await.remove(&job.id);
+                return;
+            }
+            let sink = AgentEventSink {
+                run_id: &run_id,
+                sender: &events,
             };
-            (status, Some(detail), message, None)
+            let _ = send_agent_event(
+                &state.db_path,
+                &sink,
+                AgentEvent::Error {
+                    error: detail.clone(),
+                },
+            )
+            .await;
+            if let Ok(schedule) = schedule_agent_retry(&state.db_path, &run_id) {
+                let _ =
+                    send_agent_event(&state.db_path, &sink, retry_status_event(&schedule)).await;
+            }
+            let _ = finish_subthread(&state.db_path, &job.id, "queued", Some(&detail));
+            state.active_subthreads.lock().await.remove(&job.id);
         }
-    };
-    let _ = finish_subthread(&state.db_path, &job.id, status, stored_result.as_deref());
-    let _ = finish_agent_run(&state.db_path, &run_id, status);
-    let _ = append_conversation_for_run(&state.db_path, &message, usage, Some(&run_id));
-    state.active_subthreads.lock().await.remove(&job.id);
-    schedule_main_continuation(state, job.forked_from_message_id).await;
+    }
 }
 
 fn app(state: AppState) -> Router {
@@ -922,7 +915,10 @@ fn app(state: AppState) -> Router {
             get(subthread_detail).delete(cancel_subthread),
         )
         .route("/api/agent/turn", post(agent_turn))
-        .route("/api/agent/turn/{id}", delete(cancel_agent_turn))
+        .route(
+            "/api/agent/turn/{id}",
+            post(retry_agent_turn).delete(cancel_agent_turn),
+        )
         .with_state(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -1599,6 +1595,7 @@ async fn compact_context_after_overflow(
     .await?;
     let source_message_count = items.len();
     let distilled = summarize_context(client, config, items, cancellation).await?;
+    reset_agent_retry_after_success(db_path, events.run_id)?;
     match target {
         ContextCheckpointTarget::Main { through_message_id } => {
             let created_at = chrono::Utc::now().to_rfc3339();
@@ -2004,6 +2001,138 @@ fn create_agent_run_with_kind(
     Ok(())
 }
 
+fn ensure_subthread_agent_run(
+    path: &Path,
+    subthread_id: &str,
+    user_message_id: i64,
+) -> Result<String> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let existing = transaction
+        .query_row(
+            "SELECT run_id FROM subthreads WHERE id = ?1",
+            [subthread_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?
+        .unwrap_or_else(|| format!("subthread-{subthread_id}"));
+    transaction.execute(
+        "INSERT OR IGNORE INTO agent_runs (id, user_message_id, status, created_at, kind)
+         VALUES (?1, ?2, 'running', ?3, 'subthread')",
+        params![existing, user_message_id, chrono::Utc::now().to_rfc3339()],
+    )?;
+    transaction.execute(
+        "UPDATE subthreads SET run_id = ?1 WHERE id = ?2",
+        params![existing, subthread_id],
+    )?;
+    transaction.commit()?;
+    Ok(existing)
+}
+
+fn activate_agent_run(path: &Path, run_id: &str) -> Result<()> {
+    open_db(path)?.execute(
+        "UPDATE agent_runs SET next_retry_at = NULL, completed_at = NULL
+         WHERE id = ?1 AND status = 'running'",
+        [run_id],
+    )?;
+    Ok(())
+}
+
+fn retry_delay(attempt: i64) -> Duration {
+    let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    Duration::from_secs(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
+}
+
+fn retry_at(attempt: i64, now: i64) -> i64 {
+    now.saturating_add(i64::try_from(retry_delay(attempt).as_secs()).unwrap_or(i64::MAX))
+}
+
+fn schedule_agent_retry(path: &Path, run_id: &str) -> Result<RetrySchedule> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let current = transaction.query_row(
+        "SELECT retry_attempt FROM agent_runs WHERE id = ?1 AND status = 'running'",
+        [run_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let attempt = current.saturating_add(1);
+    let delay = retry_delay(attempt);
+    transaction.execute(
+        "UPDATE agent_runs SET retry_attempt = ?1, next_retry_at = ?2, completed_at = NULL
+         WHERE id = ?3",
+        params![
+            attempt,
+            retry_at(attempt, chrono::Utc::now().timestamp()),
+            run_id
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(RetrySchedule { attempt, delay })
+}
+
+fn reset_agent_retry_after_success(path: &Path, run_id: &str) -> Result<()> {
+    open_db(path)?.execute(
+        "UPDATE agent_runs SET retry_attempt = 0, next_retry_at = NULL
+         WHERE id = ?1 AND status = 'running'",
+        [run_id],
+    )?;
+    Ok(())
+}
+
+fn retry_status_event(schedule: &RetrySchedule) -> AgentEvent {
+    AgentEvent::Status {
+        stage: "retrying".to_owned(),
+        message: format!(
+            "Request failed; retrying automatically in {} second{} (attempt {})",
+            schedule.delay.as_secs(),
+            if schedule.delay.as_secs() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            schedule.attempt,
+        ),
+    }
+}
+
+fn record_retry(path: &Path, run_id: &str, detail: &str) {
+    let _ = append_agent_event(
+        path,
+        run_id,
+        &AgentEvent::Error {
+            error: detail.to_owned(),
+        },
+    );
+    if let Ok(schedule) = schedule_agent_retry(path, run_id) {
+        let _ = append_agent_event(path, run_id, &retry_status_event(&schedule));
+    }
+}
+
+fn recover_interrupted_subthreads(path: &Path) {
+    let runs = open_db(path).and_then(|connection| {
+        connection
+            .prepare(
+                "SELECT run.id
+                 FROM agent_runs run
+                 JOIN subthreads thread ON thread.run_id = run.id
+                 WHERE run.kind = 'subthread' AND run.status = 'running'
+                   AND run.next_retry_at IS NULL AND thread.status = 'queued'
+                   AND EXISTS(SELECT 1 FROM agent_events event WHERE event.run_id = run.id)",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    });
+    if let Ok(runs) = runs {
+        for run_id in runs {
+            record_retry(
+                path,
+                &run_id,
+                "subthread execution was interrupted by a process restart",
+            );
+        }
+    }
+}
+
 fn append_agent_event(path: &Path, run_id: &str, event: &AgentEvent) -> Result<()> {
     let event_type = match event {
         AgentEvent::Status { .. } => "status",
@@ -2029,7 +2158,11 @@ fn append_agent_event(path: &Path, run_id: &str, event: &AgentEvent) -> Result<(
 
 fn finish_agent_run(path: &Path, id: &str, status: &str) -> Result<()> {
     open_db(path)?.execute(
-        "UPDATE agent_runs SET status = ?1, completed_at = ?2 WHERE id = ?3",
+        "UPDATE agent_runs
+         SET status = ?1, completed_at = ?2,
+             retry_attempt = CASE WHEN ?1 = 'completed' THEN 0 ELSE retry_attempt END,
+             next_retry_at = NULL
+         WHERE id = ?3",
         params![status, chrono::Utc::now().to_rfc3339(), id],
     )?;
     Ok(())
@@ -2040,7 +2173,7 @@ fn load_conversation_state(path: &Path) -> Result<ConversationState> {
     let messages = load_conversation(path)?;
     let mut runs = connection
         .prepare(
-            "SELECT id, user_message_id, status FROM agent_runs
+            "SELECT id, user_message_id, status, retry_attempt, next_retry_at FROM agent_runs
              WHERE kind IN ('main', 'continuation') ORDER BY created_at, id",
         )?
         .query_map([], |row| {
@@ -2048,23 +2181,29 @@ fn load_conversation_state(path: &Path) -> Result<ConversationState> {
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|(id, user_message_id, status)| {
-            let events = connection
-                .prepare("SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY id")?
-                .query_map([&id], |row| row.get::<_, String>(0))?
-                .map(|event| Ok(serde_json::from_str::<AgentEvent>(&event?)?))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(ConversationRun {
-                id,
-                user_message_id,
-                status,
-                events,
-            })
-        })
+        .map(
+            |(id, user_message_id, status, retry_attempt, next_retry_at)| {
+                let events = connection
+                    .prepare("SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY id")?
+                    .query_map([&id], |row| row.get::<_, String>(0))?
+                    .map(|event| Ok(serde_json::from_str::<AgentEvent>(&event?)?))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(ConversationRun {
+                    id,
+                    user_message_id,
+                    status,
+                    retry_attempt,
+                    next_retry_at,
+                    events,
+                })
+            },
+        )
         .collect::<Result<Vec<_>>>()?;
     runs.shrink_to_fit();
     let checkpoint = load_latest_checkpoint(&connection, i64::MAX)?;
@@ -2127,6 +2266,14 @@ fn ensure_agent_run_columns(connection: &Connection) -> Result<()> {
     if !columns.iter().any(|column| column == "kind") {
         connection
             .execute_batch("ALTER TABLE agent_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'")?;
+    }
+    if !columns.iter().any(|column| column == "retry_attempt") {
+        connection.execute_batch(
+            "ALTER TABLE agent_runs ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+    if !columns.iter().any(|column| column == "next_retry_at") {
+        connection.execute_batch("ALTER TABLE agent_runs ADD COLUMN next_retry_at INTEGER")?;
     }
     Ok(())
 }
@@ -2327,7 +2474,9 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
            created_at TEXT NOT NULL,
            completed_at TEXT,
-           kind TEXT NOT NULL DEFAULT 'main'
+           kind TEXT NOT NULL DEFAULT 'main',
+           retry_attempt INTEGER NOT NULL DEFAULT 0,
+           next_retry_at INTEGER
          );
          CREATE TABLE IF NOT EXISTS agent_events (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2382,10 +2531,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     connection.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS peers_machine_id
          ON peers(machine_id) WHERE machine_id <> '';
-         DELETE FROM agent_runs WHERE kind = 'subthread' AND status = 'running';",
+         CREATE INDEX IF NOT EXISTS agent_runs_retry_due
+         ON agent_runs(kind, status, next_retry_at);",
     )?;
     connection.execute(
-        "UPDATE subthreads SET status = 'queued', run_id = NULL, updated_at = ?1
+        "UPDATE subthreads SET status = 'queued', updated_at = ?1
          WHERE status = 'running'",
         [chrono::Utc::now().to_rfc3339()],
     )?;
@@ -3572,14 +3722,23 @@ async fn conversation(
 }
 
 fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
+    let status = row.get::<_, String>(4)?;
+    let retry_attempt: i64 = row.get(9)?;
+    let next_retry_at: Option<i64> = row.get(10)?;
     Ok(Subthread {
         id: row.get(0)?,
         run_id: row.get(1)?,
         title: row.get(2)?,
         task: row.get(3)?,
-        status: row.get(4)?,
+        status: if status == "queued" && next_retry_at.is_some() {
+            "retrying".to_owned()
+        } else {
+            status
+        },
         model: row.get(5)?,
         result: row.get(6)?,
+        retry_attempt,
+        next_retry_at,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
@@ -3588,10 +3747,13 @@ fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
 fn load_subthreads(path: &Path) -> Result<Vec<Subthread>> {
     open_db(path)?
         .prepare(
-            "SELECT id, run_id, title, task, status, model, result, created_at, updated_at
-             FROM subthreads
-             WHERE status IN ('queued', 'running')
-             ORDER BY created_at DESC",
+            "SELECT thread.id, thread.run_id, thread.title, thread.task, thread.status,
+                    thread.model, thread.result, thread.created_at, thread.updated_at,
+                    COALESCE(run.retry_attempt, 0), run.next_retry_at
+             FROM subthreads thread
+             LEFT JOIN agent_runs run ON run.id = thread.run_id
+             WHERE thread.status IN ('queued', 'running')
+             ORDER BY thread.created_at DESC",
         )?
         .query_map([], subthread_from_row)?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -3614,6 +3776,16 @@ fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
         "SELECT EXISTS(
            SELECT 1 FROM agent_runs
            WHERE kind IN ('main', 'continuation') AND status = 'running'
+             AND next_retry_at IS NULL
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let retrying = connection.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM agent_runs
+           WHERE kind IN ('main', 'continuation') AND status = 'running'
+             AND next_retry_at IS NOT NULL
          )",
         [],
         |row| row.get::<_, bool>(0),
@@ -3621,7 +3793,14 @@ fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
     drop(connection);
     Ok(ThreadIndex {
         main_thread: MainThreadSummary {
-            status: if running { "running" } else { "idle" }.to_owned(),
+            status: if running {
+                "running"
+            } else if retrying {
+                "retrying"
+            } else {
+                "idle"
+            }
+            .to_owned(),
             model,
             updated_at,
         },
@@ -3633,9 +3812,12 @@ fn load_subthread_detail(path: &Path, id: &str) -> Result<Option<SubthreadDetail
     let connection = open_db(path)?;
     let thread = connection
         .query_row(
-            "SELECT id, run_id, title, task, status, model, result, created_at, updated_at
-             FROM subthreads
-             WHERE id = ?1 AND status IN ('queued', 'running')",
+            "SELECT thread.id, thread.run_id, thread.title, thread.task, thread.status,
+                    thread.model, thread.result, thread.created_at, thread.updated_at,
+                    COALESCE(run.retry_attempt, 0), run.next_retry_at
+             FROM subthreads thread
+             LEFT JOIN agent_runs run ON run.id = thread.run_id
+             WHERE thread.id = ?1 AND thread.status IN ('queued', 'running')",
             [id],
             subthread_from_row,
         )
@@ -3725,6 +3907,41 @@ fn mark_subthread_cancelled(path: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn retry_subthread_now(path: &Path, id: &str) -> Result<()> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let run_id = transaction
+        .query_row(
+            "SELECT run.id
+             FROM subthreads thread
+             JOIN agent_runs run ON run.id = thread.run_id
+             WHERE thread.id = ?1 AND thread.status = 'queued'
+               AND run.status = 'running' AND run.retry_attempt > 0
+               AND run.next_retry_at IS NOT NULL",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("subthread is not waiting after an error"))?;
+    transaction.execute(
+        "UPDATE agent_runs SET next_retry_at = ?1 WHERE id = ?2",
+        params![chrono::Utc::now().timestamp(), run_id],
+    )?;
+    transaction.execute(
+        "UPDATE subthreads SET updated_at = ?1 WHERE id = ?2",
+        params![chrono::Utc::now().to_rfc3339(), id],
+    )?;
+    transaction.commit()?;
+    append_agent_event(
+        path,
+        &run_id,
+        &AgentEvent::Status {
+            stage: "queued".to_owned(),
+            message: "The main thread requested an immediate retry".to_owned(),
+        },
+    )
+}
+
 fn execute_fork_subthread(
     path: &Path,
     parent_run_id: &str,
@@ -3792,7 +4009,15 @@ fn execute_fork_subthread(
         ],
     );
     match inserted {
-        Ok(_) => tool_execution(json!({ "id": id, "status": "queued" }).to_string()),
+        Ok(_) => {
+            drop(connection);
+            match ensure_subthread_agent_run(path, &id, forked_from_message_id) {
+                Ok(_) => tool_execution(json!({ "id": id, "status": "queued" }).to_string()),
+                Err(cause) => {
+                    tool_execution(format!("error: cannot prepare subthread run: {cause}"))
+                }
+            }
+        }
         Err(cause) => tool_execution(format!("error: {cause}")),
     }
 }
@@ -4099,6 +4324,99 @@ fn continuation_is_superseded(path: &Path, user_message_id: i64) -> Result<bool>
         .map_err(Into::into)
 }
 
+fn main_run_reason(kind: &str) -> Result<MainRunReason> {
+    match kind {
+        "main" => Ok(MainRunReason::UserMessage),
+        "continuation" => Ok(MainRunReason::SubthreadSettled),
+        _ => Err(anyhow!("run is not a main-thread run")),
+    }
+}
+
+fn claim_due_main_retries(path: &Path, now: i64) -> Result<Vec<QueuedMainRun>> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let candidates = transaction
+        .prepare(
+            "SELECT id, user_message_id, kind FROM agent_runs
+             WHERE kind IN ('main', 'continuation') AND status = 'running'
+               AND next_retry_at IS NOT NULL AND next_retry_at <= ?1
+             ORDER BY user_message_id, id",
+        )?
+        .query_map([now], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut runs = Vec::new();
+    for (id, user_message_id, kind) in candidates {
+        let claimed = transaction.execute(
+            "UPDATE agent_runs SET next_retry_at = NULL
+             WHERE id = ?1 AND status = 'running' AND next_retry_at IS NOT NULL
+               AND next_retry_at <= ?2",
+            params![id, now],
+        )?;
+        if claimed == 1 {
+            runs.push(QueuedMainRun {
+                id,
+                user_message_id,
+                reason: main_run_reason(&kind)?,
+            });
+        }
+    }
+    transaction.commit()?;
+    Ok(runs)
+}
+
+fn claim_main_retry_now(path: &Path, id: &str) -> Result<QueuedMainRun> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let (user_message_id, kind) = transaction
+        .query_row(
+            "SELECT user_message_id, kind FROM agent_runs
+             WHERE id = ?1 AND kind IN ('main', 'continuation')
+               AND status = 'running' AND next_retry_at IS NOT NULL",
+            [id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("main-thread run is not waiting after an error"))?;
+    transaction.execute(
+        "UPDATE agent_runs SET next_retry_at = NULL WHERE id = ?1",
+        [id],
+    )?;
+    transaction.commit()?;
+    Ok(QueuedMainRun {
+        id: id.to_owned(),
+        user_message_id,
+        reason: main_run_reason(&kind)?,
+    })
+}
+
+fn spawn_main_run(state: AppState, run: QueuedMainRun) {
+    tokio::spawn(async move {
+        let (cancel, cancellation) = watch::channel(false);
+        state
+            .active_runs
+            .lock()
+            .await
+            .insert(run.id.clone(), cancel);
+        let (events, receiver) = mpsc::channel(1);
+        drop(receiver);
+        process_main_run(
+            state,
+            run.id,
+            run.user_message_id,
+            run.reason,
+            events,
+            cancellation,
+        )
+        .await;
+    });
+}
+
 fn continuation_is_running(path: &Path, user_message_id: i64) -> Result<bool> {
     open_db(path)?
         .query_row(
@@ -4152,22 +4470,14 @@ async fn schedule_main_continuation(state: AppState, user_message_id: i64) {
         return;
     }
     drop(guard);
-    let (cancel, cancellation) = watch::channel(false);
-    state
-        .active_runs
-        .lock()
-        .await
-        .insert(run_id.clone(), cancel);
-    let (events, receiver) = mpsc::channel(1);
-    drop(receiver);
-    tokio::spawn(process_main_run(
+    spawn_main_run(
         state,
-        run_id,
-        user_message_id,
-        MainRunReason::SubthreadSettled,
-        events,
-        cancellation,
-    ));
+        QueuedMainRun {
+            id: run_id,
+            user_message_id,
+            reason: MainRunReason::SubthreadSettled,
+        },
+    );
 }
 
 fn is_next_main_run(path: &Path, user_message_id: i64) -> Result<bool> {
@@ -4300,23 +4610,41 @@ async fn process_main_run(
             error: cause.to_string(),
         },
     };
-    let status = match &event {
-        AgentEvent::Complete { .. } => "completed",
-        AgentEvent::Error { error } if error == "agent stopped" => "cancelled",
-        AgentEvent::Error { .. } => "failed",
-        _ => unreachable!("agent runs always end with a terminal event"),
+    let sink = AgentEventSink {
+        run_id: &run_id,
+        sender: &events,
     };
-    let _ = send_agent_event(
-        &state.db_path,
-        &AgentEventSink {
-            run_id: &run_id,
-            sender: &events,
-        },
-        event,
-    )
-    .await;
-    let _ = finish_agent_run(&state.db_path, &run_id, status);
+    match &event {
+        AgentEvent::Complete { .. } => {
+            let _ = send_agent_event(&state.db_path, &sink, event).await;
+            let _ = finish_agent_run(&state.db_path, &run_id, "completed");
+        }
+        AgentEvent::Error { error } if error == "agent stopped" => {
+            let _ = send_agent_event(&state.db_path, &sink, event).await;
+            let _ = finish_agent_run(&state.db_path, &run_id, "cancelled");
+        }
+        AgentEvent::Error { .. } => {
+            let _ = send_agent_event(&state.db_path, &sink, event).await;
+            if let Ok(schedule) = schedule_agent_retry(&state.db_path, &run_id) {
+                let _ =
+                    send_agent_event(&state.db_path, &sink, retry_status_event(&schedule)).await;
+            }
+        }
+        _ => unreachable!("agent runs always end with a terminal event"),
+    }
     state.active_runs.lock().await.remove(&run_id);
+}
+
+async fn retry_agent_turn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    let run = claim_main_retry_now(&state.db_path, &id)
+        .map_err(|cause| error(StatusCode::CONFLICT, cause.to_string()))?;
+    spawn_main_run(state, run);
+    Ok(Json(json!({ "retrying": true })))
 }
 
 async fn cancel_agent_turn(
@@ -4328,6 +4656,16 @@ async fn cancel_agent_turn(
     if let Some(cancel) = state.active_runs.lock().await.get(&id) {
         let _ = cancel.send(true);
     }
+    open_db(&state.db_path)
+        .and_then(|connection| {
+            connection.execute(
+                "UPDATE agent_runs SET status = 'cancelled', completed_at = ?1, next_retry_at = NULL
+                 WHERE id = ?2 AND kind IN ('main', 'continuation') AND status = 'running'",
+                params![chrono::Utc::now().to_rfc3339(), id],
+            )?;
+            Ok(())
+        })
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot cancel agent run"))?;
     Ok(Json(json!({"cancelled": true})))
 }
 
@@ -4397,7 +4735,10 @@ async fn run_agent_items(
                 db_path,
             ));
         let response = match send_responses_request(request, &mut cancellation).await {
-            Ok(response) => response,
+            Ok(response) => {
+                reset_agent_retry_after_success(db_path, events.run_id)?;
+                response
+            }
             // RECOVERY: A structured upstream context-length error means the current context
             // can be replaced by a distilled checkpoint and retried once without replaying tools.
             Err(cause) if is_context_overflow(&cause) && !retried_after_context_overflow => {
@@ -4592,6 +4933,7 @@ fn scoped_responses_request_body(
             json!({"type":"function","name":"list_subthreads","description":"Inspect Mobius's internal background execution branches. These are implementation details of the single user-visible main thread, not user-managed sessions.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
             json!({"type":"function","name":"fork_subthread","description":"Fork only independently executable, substantial work that benefits from parallel execution. Use direct tools for brief, localized checks or edits. Each task must state its scope, constraints, definition of done, and expected evidence. The subthread inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Mobius merges the result and resumes the main thread automatically.","parameters":{"type":"object","additionalProperties":false,"required":["title","task"],"properties":{"title":{"type":"string"},"task":{"type":"string"}}}}),
             json!({"type":"function","name":"cancel_subthread","description":"Terminate an active internal subthread that is no longer relevant or must be rebuilt.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
+            json!({"type":"function","name":"retry_subthread","description":"Immediately resume an internal subthread that is waiting after an error. This overrides only its current delay; it does not clear the consecutive-error count. Use this when new main-thread evidence makes waiting unnecessary.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
         ]);
         body["tool_choice"] = Value::String("auto".to_owned());
     }
@@ -5140,6 +5482,13 @@ async fn execute_tool(
             }
             match mark_subthread_cancelled(db_path, id) {
                 Ok(()) => tool_execution("cancelled"),
+                Err(cause) => tool_execution(format!("error: {cause}")),
+            }
+        }
+        "retry_subthread" if scope == AgentScope::Main => {
+            let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+            match retry_subthread_now(db_path, id) {
+                Ok(()) => tool_execution("subthread retry scheduled immediately"),
                 Err(cause) => tool_execution(format!("error: {cause}")),
             }
         }
@@ -5870,14 +6219,6 @@ mod tests {
             .to_owned();
         let _ = claim_queued_subthreads(&db).unwrap();
         let run_id = format!("subthread-{id}");
-        create_agent_run_with_kind(&db, &run_id, user.id, "subthread").unwrap();
-        open_db(&db)
-            .unwrap()
-            .execute(
-                "UPDATE subthreads SET run_id = ?1 WHERE id = ?2",
-                params![run_id, id],
-            )
-            .unwrap();
         append_agent_event(
             &db,
             &run_id,
@@ -6010,28 +6351,235 @@ mod tests {
     }
 
     #[test]
-    fn restart_recovers_only_inputs_that_never_started_tool_execution() {
-        let queued = serde_json::to_string(&AgentEvent::Status {
-            stage: "queued".to_owned(),
-            message: "accepted".to_owned(),
-        })
+    fn retries_double_without_a_product_cap() {
+        assert_eq!(retry_delay(1), Duration::from_secs(1));
+        assert_eq!(retry_delay(2), Duration::from_secs(2));
+        assert_eq!(retry_delay(3), Duration::from_secs(4));
+        assert_eq!(retry_delay(63), Duration::from_secs(1_u64 << 62));
+        assert_eq!(retry_delay(64), Duration::from_secs(1_u64 << 63));
+        assert_eq!(retry_delay(65), Duration::from_secs(u64::MAX));
+    }
+
+    #[test]
+    fn retry_state_persists_and_only_main_runs_have_a_manual_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("retry this".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
         .unwrap();
-        let running = serde_json::to_string(&AgentEvent::Status {
-            stage: "running".to_owned(),
-            message: "compiling".to_owned(),
-        })
+        create_agent_run(&db, "main-retry", user.id).unwrap();
+        assert_eq!(
+            schedule_agent_retry(&db, "main-retry").unwrap().delay,
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            schedule_agent_retry(&db, "main-retry").unwrap().delay,
+            Duration::from_secs(2)
+        );
+        let claimed = claim_main_retry_now(&db, "main-retry").unwrap();
+        assert_eq!(claimed.id, "main-retry");
+        reset_agent_retry_after_success(&db, "main-retry").unwrap();
+        let state = load_conversation_state(&db).unwrap();
+        assert_eq!(state.runs[0].retry_attempt, 0);
+        assert_eq!(state.runs[0].next_retry_at, None);
+
+        create_agent_run_with_kind(&db, "subthread-retry", user.id, "subthread").unwrap();
+        schedule_agent_retry(&db, "subthread-retry").unwrap();
+        assert!(claim_main_retry_now(&db, "subthread-retry").is_err());
+    }
+
+    #[test]
+    fn main_scope_exposes_the_only_subthread_retry_reset_tool() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let main = scoped_responses_request_body(
+            "gpt-5",
+            &[],
+            &SkillCatalog::default(),
+            AgentScope::Main,
+            &db,
+        );
+        let subthread = scoped_responses_request_body(
+            "gpt-5",
+            &[],
+            &SkillCatalog::default(),
+            AgentScope::Subthread,
+            &db,
+        );
+        let names = |body: &Value| {
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert!(names(&main).contains(&"retry_subthread".to_owned()));
+        assert!(!names(&subthread).contains(&"retry_subthread".to_owned()));
+    }
+
+    #[test]
+    fn main_tool_can_make_a_subthread_retry_due_without_resetting_its_error_streak() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("delegate this".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
         .unwrap();
-        let tool = serde_json::to_string(&AgentEvent::ToolCall {
-            call_id: "call".to_owned(),
-            name: "run_bash".to_owned(),
-            arguments: json!({"command":"deploy"}),
-            started_at: None,
-        })
+        create_agent_run(&db, "main-run", user.id).unwrap();
+        let fork = execute_fork_subthread(
+            &db,
+            "main-run",
+            &[json!({"role":"user","content":"delegate this"})],
+            json!({"title":"Retry branch","task":"Retry safely"}),
+        );
+        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let run_id = format!("subthread-{id}");
+        schedule_agent_retry(&db, &run_id).unwrap();
+        retry_subthread_now(&db, &id).unwrap();
+        let (attempt, next_retry_at): (i64, i64) = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT retry_attempt, next_retry_at FROM agent_runs WHERE id = ?1",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempt, 1);
+        assert!(next_retry_at <= chrono::Utc::now().timestamp());
+    }
+
+    #[tokio::test]
+    async fn repeated_main_request_failures_retry_and_a_success_resets_backoff() {
+        async fn responses(State(attempts): State<Arc<Mutex<usize>>>) -> (StatusCode, String) {
+            let attempt = {
+                let mut attempts = attempts.lock().await;
+                *attempts += 1;
+                *attempts
+            };
+            if attempt < 3 {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    r#"{"error":{"message":"temporary upstream failure"}}"#.to_owned(),
+                );
+            }
+            let item = json!({
+                "type": "message",
+                "content": [{"type": "output_text", "text": "recovered"}],
+            });
+            (
+                StatusCode::OK,
+                format!(
+                    "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                    json!({"type":"response.output_item.done","item":item}),
+                    json!({"type":"response.completed","response":{"output":[]}}),
+                ),
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts = Arc::new(Mutex::new(0));
+        let server_attempts = attempts.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_attempts),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("finish this request".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
         .unwrap();
-        assert!(recoverable_main_run(None));
-        assert!(recoverable_main_run(Some(&queued)));
-        assert!(!recoverable_main_run(Some(&running)));
-        assert!(!recoverable_main_run(Some(&tool)));
+        create_agent_run(&db, "retry-run", user.id).unwrap();
+        let state = test_state(db.clone());
+
+        for expected_attempt in [1, 2] {
+            let (events, receiver) = mpsc::channel(1);
+            drop(receiver);
+            process_main_run(
+                state.clone(),
+                "retry-run".to_owned(),
+                user.id,
+                MainRunReason::UserMessage,
+                events,
+                watch::channel(false).1,
+            )
+            .await;
+            let mut conversation = load_conversation_state(&db).unwrap();
+            let run = conversation.runs.remove(0);
+            assert_eq!(run.retry_attempt, expected_attempt);
+            assert!(run.next_retry_at.is_some());
+            let claimed = claim_main_retry_now(&db, "retry-run").unwrap();
+            assert_eq!(claimed.user_message_id, user.id);
+        }
+
+        let (events, receiver) = mpsc::channel(1);
+        drop(receiver);
+        process_main_run(
+            state,
+            "retry-run".to_owned(),
+            user.id,
+            MainRunReason::UserMessage,
+            events,
+            watch::channel(false).1,
+        )
+        .await;
+        server.abort();
+
+        let mut conversation = load_conversation_state(&db).unwrap();
+        let run = conversation.runs.remove(0);
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.retry_attempt, 0);
+        assert_eq!(run.next_retry_at, None);
+        assert_eq!(*attempts.lock().await, 3);
+        assert_eq!(
+            run.events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Error { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]
