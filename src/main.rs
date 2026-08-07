@@ -7,7 +7,7 @@ use std::{
     fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock as StdRwLock, mpsc as std_mpsc},
+    sync::{Arc, LazyLock, RwLock as StdRwLock, mpsc as std_mpsc},
     time::{Duration, Instant},
 };
 
@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_tungstenite::{
     connect_async,
@@ -59,6 +59,12 @@ const JWKS_TTL: Duration = Duration::from_secs(300);
 const HISTORY_PAGE_DEFAULT: usize = 100;
 const HISTORY_PAGE_MAX: usize = 500;
 const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
+const FILE_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_FILE_READS: usize = 2;
+const MAX_FILE_READ_BYTES: u64 = 16 * 1024 * 1024;
+
+static FILE_READS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_FILE_READS)));
 
 #[derive(Clone)]
 struct AppState {
@@ -101,6 +107,25 @@ struct ApiError {
 }
 
 type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<ApiError>)>;
+
+#[derive(Debug)]
+enum FileReadError {
+    TimedOut,
+    Failed(anyhow::Error),
+}
+
+impl fmt::Display for FileReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimedOut => write!(
+                formatter,
+                "file read timed out after {} seconds",
+                FILE_READ_TIMEOUT.as_secs()
+            ),
+            Self::Failed(cause) => cause.fmt(formatter),
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct StatusResponse {
@@ -2658,6 +2683,62 @@ fn error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Ap
     )
 }
 
+async fn read_file_with_timeout(
+    path: PathBuf,
+    reads: Arc<Semaphore>,
+    timeout: Duration,
+) -> std::result::Result<Vec<u8>, FileReadError> {
+    let read = async move {
+        let permit = reads
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("file reader is unavailable"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            read_regular_file(&path)
+        })
+        .await
+        .map_err(|cause| anyhow!("file read worker failed: {cause}"))?
+    };
+    match tokio::time::timeout(timeout, read).await {
+        Ok(result) => result.map_err(FileReadError::Failed),
+        Err(_) => Err(FileReadError::TimedOut),
+    }
+}
+
+async fn read_file_bounded(path: PathBuf) -> std::result::Result<Vec<u8>, FileReadError> {
+    read_file_with_timeout(path, FILE_READS.clone(), FILE_READ_TIMEOUT).await
+}
+
+fn read_regular_file(path: &Path) -> Result<Vec<u8>> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("cannot inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(anyhow!("{} is not a regular file", path.display()));
+    }
+    if metadata.len() > MAX_FILE_READ_BYTES {
+        return Err(anyhow!(
+            "{} exceeds the {} MiB file read limit",
+            path.display(),
+            MAX_FILE_READ_BYTES / (1024 * 1024)
+        ));
+    }
+    std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+fn file_read_api_error(cause: FileReadError) -> (StatusCode, Json<ApiError>) {
+    match cause {
+        FileReadError::TimedOut => error(
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "file read timed out after {} seconds",
+                FILE_READ_TIMEOUT.as_secs()
+            ),
+        ),
+        FileReadError::Failed(cause) => error(StatusCode::BAD_REQUEST, cause.to_string()),
+    }
+}
+
 async fn identity(
     state: &AppState,
     headers: &HeaderMap,
@@ -3281,18 +3362,16 @@ async fn read_file(
     Query(query): Query<FileQuery>,
 ) -> ApiResult<FileContent> {
     identity(&state, &headers).await?;
-    let bytes = std::fs::read(&query.path).map_err(|cause| {
-        error(
-            StatusCode::BAD_REQUEST,
-            format!("cannot read {}: {cause}", query.path),
-        )
-    })?;
+    let path = query.path;
+    let bytes = read_file_bounded(PathBuf::from(&path))
+        .await
+        .map_err(file_read_api_error)?;
     let (content, encoding) = match String::from_utf8(bytes) {
         Ok(content) => (content, "utf8".to_owned()),
         Err(error) => (BASE64.encode(error.into_bytes()), "base64".to_owned()),
     };
     Ok(Json(FileContent {
-        path: query.path,
+        path,
         content,
         encoding,
     }))
@@ -5572,17 +5651,16 @@ async fn execute_local_tool(
             ),
             Err(error) => tool_execution(format!("error: {error}")),
         },
-        "read_file" => tool_execution(
-            std::fs::read(path)
-                .map(|bytes| match String::from_utf8(bytes) {
-                    Ok(content) => content,
-                    Err(error) => {
-                        json!({"encoding":"base64","content":BASE64.encode(error.into_bytes())})
-                            .to_string()
-                    }
-                })
-                .unwrap_or_else(|error| format!("error: {error}")),
-        ),
+        "read_file" => match read_file_bounded(PathBuf::from(path)).await {
+            Ok(bytes) => tool_execution(match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(error) => {
+                    json!({"encoding":"base64","content":BASE64.encode(error.into_bytes())})
+                        .to_string()
+                }
+            }),
+            Err(cause) => tool_execution(format!("error: {cause}")),
+        },
         "write_file" => execute_write_file(
             path,
             args.get("content").and_then(Value::as_str).unwrap_or(""),
@@ -5755,6 +5833,39 @@ mod tests {
             active_subthreads: Arc::new(Mutex::new(HashMap::new())),
             main_thread: Arc::new(Mutex::new(())),
         }
+    }
+
+    #[tokio::test]
+    async fn file_reads_are_regular_bounded_and_timed() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("evidence.txt");
+        std::fs::write(&file, "evidence").unwrap();
+        let reads = Arc::new(Semaphore::new(1));
+
+        assert_eq!(
+            read_file_with_timeout(file, reads, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            b"evidence"
+        );
+
+        let directory = temp.path().to_path_buf();
+        let error = read_file_with_timeout(
+            directory,
+            Arc::new(Semaphore::new(1)),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("not a regular file"));
+
+        let timed_out = read_file_with_timeout(
+            temp.path().join("evidence.txt"),
+            Arc::new(Semaphore::new(0)),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(timed_out, Err(FileReadError::TimedOut)));
     }
 
     #[tokio::test]
