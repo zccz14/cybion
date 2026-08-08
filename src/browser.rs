@@ -686,8 +686,8 @@ impl BrowserRunner {
     async fn scroll(&mut self, delta_y: f64) -> Result<()> {
         self.page
             .command(
-                "Input.dispatchMouseEvent",
-                json!({"type":"mouseWheel","x":VIEWPORT_WIDTH / 2,"y":VIEWPORT_HEIGHT / 2,"deltaX":0,"deltaY":delta_y}),
+                "Input.synthesizeScrollGesture",
+                json!({"x":VIEWPORT_WIDTH / 2,"y":VIEWPORT_HEIGHT / 2,"yDistance":-delta_y,"preventFling":true,"gestureSourceType":"mouse"}),
             )
             .await?;
         Ok(())
@@ -1094,5 +1094,79 @@ mod tests {
         assert!(loaded, "the local page did not load");
         runner.close().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a working local Chrome or Chromium runtime"]
+    async fn browser_preview_input_scrolls_and_follows_links_when_chromium_is_available() {
+        if browser_executable().is_err() {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let size = stream.read(&mut request).await.unwrap();
+                let next = std::str::from_utf8(&request[..size])
+                    .unwrap()
+                    .starts_with("GET /next ");
+                let page = if next {
+                    "<!doctype html><title>Next</title><p>Arrived</p>"
+                } else {
+                    "<!doctype html><title>Input</title><style>body{height:2400px}a{position:fixed;left:40px;top:40px}</style><a href=\"/next\">Next</a>"
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                            page.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if next {
+                    return;
+                }
+            }
+        });
+        let mut runner = BrowserRunner::launch(&reqwest::Client::new(), "input-test")
+            .await
+            .unwrap();
+        runner.navigate(&format!("http://{address}")).await.unwrap();
+        for _ in 0..50 {
+            if runner
+                .snapshot()
+                .await
+                .unwrap()
+                .iter()
+                .any(|item| item["tag"] == "a")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        runner.scroll(400.0).await.unwrap();
+        assert!(
+            runner
+                .evaluate("window.scrollY")
+                .await
+                .unwrap()
+                .as_f64()
+                .is_some_and(|scroll_y| scroll_y > 0.0)
+        );
+        runner.click_at(50.0, 50.0).await.unwrap();
+        for _ in 0..50 {
+            if runner.url().await.unwrap().ends_with("/next") {
+                runner.close().await;
+                server.await.unwrap();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        runner.close().await;
+        panic!("the preview click did not navigate to the linked page");
     }
 }
