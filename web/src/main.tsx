@@ -689,12 +689,17 @@ function BrowserPage({ token }: { token: AuthMiniApi }) {
   useEffect(() => {
     const preview = previewRef.current
     if (!preview) return
+    let scrollContainer = preview.parentElement
+    while (scrollContainer && scrollContainer.scrollHeight <= scrollContainer.clientHeight) scrollContainer = scrollContainer.parentElement
     const onWheel = (event: WheelEvent) => {
+      const scrollTop = scrollContainer?.scrollTop
       event.preventDefault()
+      event.stopPropagation()
+      requestAnimationFrame(() => { if (scrollContainer && scrollTop !== undefined) scrollContainer.scrollTop = scrollTop })
       void sendInputRef.current({ type: 'scroll', delta_y: event.deltaY })
     }
-    preview.addEventListener('wheel', onWheel, { passive: false })
-    return () => preview.removeEventListener('wheel', onWheel)
+    preview.addEventListener('wheel', onWheel, { passive: false, capture: true })
+    return () => preview.removeEventListener('wheel', onWheel, true)
   }, [selected?.id])
   const typeInput = async (event: FormEvent) => {
     event.preventDefault()
