@@ -581,6 +581,13 @@ impl BrowserRunner {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("browser did not create a page target"))?
             .to_owned();
+        browser
+            .command(
+                "Target.activateTarget",
+                json!({"targetId":target_id}),
+                domains,
+            )
+            .await?;
         let page_url = target_websocket_url(client, port, &target_id).await?;
         let mut page = CdpClient::connect(&page_url).await?;
         page.command("Page.enable", json!({}), domains).await?;
@@ -1130,6 +1137,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a working local Chrome or Chromium runtime"]
     async fn isolated_runner_captures_an_allowed_local_page_when_chromium_is_available() {
         if browser_executable().is_err() {
             return;
