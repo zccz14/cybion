@@ -1,10 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
@@ -30,7 +24,6 @@ const BROWSER_START_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone, Serialize)]
 pub struct BrowserSessionSummary {
     pub id: String,
-    pub allowed_domains: Vec<String>,
     pub computer_use_enabled: bool,
     pub created_at: String,
     pub url: String,
@@ -57,7 +50,6 @@ pub struct BrowserManager {
 
 struct BrowserSession {
     id: String,
-    allowed_domains: HashSet<String>,
     computer_use_enabled: bool,
     created_at: String,
     url: String,
@@ -76,7 +68,6 @@ struct PendingApproval {
 struct BrowserRunner {
     child: Child,
     profile_dir: PathBuf,
-    allowed_domains: HashSet<String>,
     browser: CdpClient,
     page: CdpClient,
     browser_context_id: String,
@@ -91,41 +82,15 @@ pub fn sessions() -> BrowserSessions {
     Arc::new(Mutex::new(BrowserManager::default()))
 }
 
-pub fn parse_allowed_domains(domains: &[String]) -> Result<HashSet<String>> {
-    let domains = domains
-        .iter()
-        .map(|domain| domain.trim().to_ascii_lowercase())
-        .filter(|domain| !domain.is_empty())
-        .map(|domain| {
-            if domain
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-                && !domain.starts_with('.')
-                && !domain.ends_with('.')
-            {
-                Ok(domain)
-            } else {
-                Err(anyhow!("invalid allowed domain"))
-            }
-        })
-        .collect::<Result<HashSet<_>>>()?;
-    if domains.is_empty() {
-        return Err(anyhow!("at least one allowed domain is required"));
-    }
-    Ok(domains)
-}
-
 pub async fn create(
     sessions: &BrowserSessions,
     client: &reqwest::Client,
-    allowed_domains: HashSet<String>,
     computer_use_enabled: bool,
 ) -> Result<BrowserSessionSummary> {
     let id = Uuid::new_v4().to_string();
-    let runner = BrowserRunner::launch(client, &id, &allowed_domains).await?;
+    let runner = BrowserRunner::launch(client, &id).await?;
     let session = BrowserSession {
         id: id.clone(),
-        allowed_domains,
         computer_use_enabled,
         created_at: chrono::Utc::now().to_rfc3339(),
         url: "about:blank".to_owned(),
@@ -229,32 +194,32 @@ pub enum BrowserInput {
 
 pub async fn execute_tool(
     sessions: &BrowserSessions,
-    scope: &BrowserRunScope,
     name: &str,
     arguments: Value,
     cancellation: watch::Receiver<bool>,
 ) -> Result<String> {
+    let id = required_string(&arguments, "session_id")?.to_owned();
     match name {
-        "browser_snapshot" => snapshot(sessions, &scope.id).await,
-        "browser_screenshot" => screenshot(sessions, &scope.id)
+        "browser_snapshot" => snapshot(sessions, &id).await,
+        "browser_screenshot" => screenshot(sessions, &id)
             .await
             .map(|image| json!({"image":format!("data:image/png;base64,{image}")}).to_string()),
         "browser_navigate" => {
             let url = required_string(&arguments, "url")?;
-            navigate(sessions, &scope.id, url).await
+            navigate(sessions, &id, url).await
         }
         "browser_click" => {
             let reference = required_string(&arguments, "ref")?;
-            click(sessions, &scope.id, reference, cancellation).await
+            click(sessions, &id, reference, cancellation).await
         }
         "browser_type" => {
             let reference = required_string(&arguments, "ref")?;
             let text = required_string(&arguments, "text")?;
-            type_into(sessions, &scope.id, reference, text, cancellation).await
+            type_into(sessions, &id, reference, text, cancellation).await
         }
         "browser_keypress" => {
             let key = required_string(&arguments, "key")?;
-            keypress(sessions, &scope.id, key, cancellation).await
+            keypress(sessions, &id, key, cancellation).await
         }
         "browser_scroll" => {
             let delta_y = arguments
@@ -265,7 +230,7 @@ pub async fn execute_tool(
                 .lock()
                 .await
                 .sessions
-                .get_mut(&scope.id)
+                .get_mut(&id)
                 .ok_or_else(|| anyhow!("browser session does not exist"))?
                 .runner
                 .scroll(delta_y)
@@ -335,14 +300,14 @@ async fn snapshot(sessions: &BrowserSessions, id: &str) -> Result<String> {
 }
 
 async fn navigate(sessions: &BrowserSessions, id: &str, url: &str) -> Result<String> {
+    if !is_web_url(url) {
+        return Err(anyhow!("browser navigation requires an HTTP(S) URL"));
+    }
     let mut sessions = sessions.lock().await;
     let session = sessions
         .sessions
         .get_mut(id)
         .ok_or_else(|| anyhow!("browser session does not exist"))?;
-    if !allowed_url(url, &session.allowed_domains) {
-        return Err(anyhow!("URL is outside this session's allowed domains"));
-    }
     session.runner.navigate(url).await?;
     session.url = session.runner.url().await?;
     Ok(json!({"url":session.url}).to_string())
@@ -494,7 +459,6 @@ impl BrowserSession {
     fn summary(&self) -> BrowserSessionSummary {
         BrowserSessionSummary {
             id: self.id.clone(),
-            allowed_domains: self.allowed_domains.iter().cloned().collect(),
             computer_use_enabled: self.computer_use_enabled,
             created_at: self.created_at.clone(),
             url: self.url.clone(),
@@ -510,7 +474,7 @@ impl BrowserSession {
 }
 
 impl BrowserRunner {
-    async fn launch(client: &reqwest::Client, id: &str, domains: &HashSet<String>) -> Result<Self> {
+    async fn launch(client: &reqwest::Client, id: &str) -> Result<Self> {
         let executable = browser_executable()?;
         let profile_dir = std::env::temp_dir().join(format!("mobius-browser-{id}"));
         std::fs::create_dir_all(&profile_dir)?;
@@ -557,7 +521,7 @@ impl BrowserRunner {
             .ok_or_else(|| anyhow!("browser did not expose a debugging socket"))?;
         let mut browser = CdpClient::connect(browser_url).await?;
         let browser_context_id = browser
-            .command("Target.createBrowserContext", json!({}), domains)
+            .command("Target.createBrowserContext", json!({}))
             .await?
             .get("browserContextId")
             .and_then(Value::as_str)
@@ -567,14 +531,12 @@ impl BrowserRunner {
             .command(
                 "Browser.setDownloadBehavior",
                 json!({"behavior":"deny","browserContextId":browser_context_id}),
-                domains,
             )
             .await?;
         let target_id = browser
             .command(
                 "Target.createTarget",
                 json!({"url":"about:blank","browserContextId":browser_context_id}),
-                domains,
             )
             .await?
             .get("targetId")
@@ -582,31 +544,19 @@ impl BrowserRunner {
             .ok_or_else(|| anyhow!("browser did not create a page target"))?
             .to_owned();
         browser
-            .command(
-                "Target.activateTarget",
-                json!({"targetId":target_id}),
-                domains,
-            )
+            .command("Target.activateTarget", json!({"targetId":target_id}))
             .await?;
         let page_url = target_websocket_url(client, port, &target_id).await?;
         let mut page = CdpClient::connect(&page_url).await?;
-        page.command("Page.enable", json!({}), domains).await?;
+        page.command("Page.enable", json!({})).await?;
         page.command(
             "Emulation.setDeviceMetricsOverride",
             json!({"width":VIEWPORT_WIDTH,"height":VIEWPORT_HEIGHT,"deviceScaleFactor":1,"mobile":false}),
-            domains,
-        )
-        .await?;
-        page.command(
-            "Fetch.enable",
-            json!({"patterns":[{"urlPattern":"*","requestStage":"Request"}]}),
-            domains,
         )
         .await?;
         Ok(Self {
             child,
             profile_dir,
-            allowed_domains: domains.clone(),
             browser,
             page,
             browser_context_id,
@@ -619,7 +569,6 @@ impl BrowserRunner {
             .command(
                 "Target.disposeBrowserContext",
                 json!({"browserContextId":self.browser_context_id}),
-                &self.allowed_domains,
             )
             .await;
         let _ = self.child.start_kill();
@@ -633,7 +582,6 @@ impl BrowserRunner {
             .command(
                 "Runtime.evaluate",
                 json!({"expression":"location.href","returnByValue":true}),
-                &self.allowed_domains,
             )
             .await?;
         value
@@ -645,7 +593,7 @@ impl BrowserRunner {
 
     async fn navigate(&mut self, url: &str) -> Result<()> {
         self.page
-            .command("Page.navigate", json!({"url":url}), &self.allowed_domains)
+            .command("Page.navigate", json!({"url":url}))
             .await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
         Ok(())
@@ -656,7 +604,6 @@ impl BrowserRunner {
             .command(
                 "Page.captureScreenshot",
                 json!({"format":"png","captureBeyondViewport":false}),
-                &self.allowed_domains,
             )
             .await?
             .get("data")
@@ -714,11 +661,7 @@ impl BrowserRunner {
 
     async fn type_text(&mut self, text: &str) -> Result<()> {
         self.page
-            .command(
-                "Input.insertText",
-                json!({"text":text}),
-                &self.allowed_domains,
-            )
+            .command("Input.insertText", json!({"text":text}))
             .await?;
         Ok(())
     }
@@ -729,14 +672,12 @@ impl BrowserRunner {
             .command(
                 "Input.dispatchKeyEvent",
                 json!({"type":"keyDown","key":key,"code":key,"windowsVirtualKeyCode":key_code(&key)}),
-                &self.allowed_domains,
             )
             .await?;
         self.page
             .command(
                 "Input.dispatchKeyEvent",
                 json!({"type":"keyUp","key":key,"code":key,"windowsVirtualKeyCode":key_code(&key)}),
-                &self.allowed_domains,
             )
             .await?;
         Ok(())
@@ -747,7 +688,6 @@ impl BrowserRunner {
             .command(
                 "Input.dispatchMouseEvent",
                 json!({"type":"mouseWheel","x":VIEWPORT_WIDTH / 2,"y":VIEWPORT_HEIGHT / 2,"deltaX":0,"deltaY":delta_y}),
-                &self.allowed_domains,
             )
             .await?;
         Ok(())
@@ -763,7 +703,6 @@ impl BrowserRunner {
             .command(
                 "Input.dispatchMouseEvent",
                 json!({"type":kind,"x":x,"y":y,"button":"left","clickCount":click_count}),
-                &self.allowed_domains,
             )
             .await?;
         Ok(())
@@ -806,7 +745,6 @@ impl BrowserRunner {
                 .command(
                     "Input.dispatchMouseEvent",
                     json!({"type":"mouseMoved","x":required_number(action, "x")?,"y":required_number(action, "y")?}),
-                    &self.allowed_domains,
                 )
                 .await
                 .map(|_| ()),
@@ -831,7 +769,6 @@ impl BrowserRunner {
                 .command(
                     "Input.dispatchMouseEvent",
                     json!({"type":"mouseMoved","x":required_number(point, "x")?,"y":required_number(point, "y")?,"button":"left"}),
-                    &self.allowed_domains,
                 )
                 .await?;
         }
@@ -850,7 +787,6 @@ impl BrowserRunner {
             .command(
                 "Runtime.evaluate",
                 json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
-                &self.allowed_domains,
             )
             .await?
             .pointer("/result/value")
@@ -865,12 +801,7 @@ impl CdpClient {
         Ok(Self { socket, next_id: 1 })
     }
 
-    async fn command(
-        &mut self,
-        method: &str,
-        params: Value,
-        domains: &HashSet<String>,
-    ) -> Result<Value> {
+    async fn command(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         self.socket
@@ -895,9 +826,6 @@ impl CdpClient {
                         }
                         return Ok(value.get("result").cloned().unwrap_or(Value::Null));
                     }
-                    if value.get("method").and_then(Value::as_str) == Some("Fetch.requestPaused") {
-                        self.handle_paused_request(&value, domains).await?;
-                    }
                 }
                 WebSocketMessage::Ping(payload) => {
                     self.socket.send(WebSocketMessage::Pong(payload)).await?
@@ -908,41 +836,6 @@ impl CdpClient {
                 _ => {}
             }
         }
-    }
-
-    async fn handle_paused_request(
-        &mut self,
-        event: &Value,
-        domains: &HashSet<String>,
-    ) -> Result<()> {
-        let request_id = event
-            .pointer("/params/requestId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("browser paused request has no ID"))?;
-        let url = event
-            .pointer("/params/request/url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("browser paused request has no URL"))?;
-        let method = if allowed_url(url, domains) {
-            "Fetch.continueRequest"
-        } else {
-            "Fetch.failRequest"
-        };
-        let params = if method == "Fetch.continueRequest" {
-            json!({"requestId":request_id})
-        } else {
-            json!({"requestId":request_id,"errorReason":"BlockedByClient"})
-        };
-        let id = self.next_id;
-        self.next_id += 1;
-        self.socket
-            .send(WebSocketMessage::Text(
-                json!({"id":id,"method":method,"params":params})
-                    .to_string()
-                    .into(),
-            ))
-            .await?;
-        Ok(())
     }
 }
 
@@ -1025,14 +918,9 @@ async fn target_websocket_url(
         .ok_or_else(|| anyhow!("browser page target did not expose a debugging socket"))
 }
 
-fn allowed_url(value: &str, domains: &HashSet<String>) -> bool {
-    let Ok(url) = Url::parse(value) else {
-        return false;
-    };
-    matches!(url.scheme(), "http" | "https")
-        && url
-            .host_str()
-            .is_some_and(|host| domains.contains(&host.to_ascii_lowercase()))
+fn is_web_url(value: &str) -> bool {
+    Url::parse(value)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -1107,15 +995,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
-    fn allowed_domains_are_exact_hosts() {
-        let domains = parse_allowed_domains(&["example.com".to_owned()]).unwrap();
-        assert!(allowed_url("https://example.com/path", &domains));
-        assert!(!allowed_url("https://evil-example.com", &domains));
-        assert!(!allowed_url("https://sub.example.com", &domains));
-        assert!(!allowed_url("file:///tmp/private", &domains));
-    }
-
-    #[test]
     fn computer_clicks_and_typing_need_approval() {
         assert!(!actions_require_approval(&[json!({"type":"screenshot"})]));
         assert!(!actions_require_approval(&[
@@ -1136,9 +1015,44 @@ mod tests {
         assert!(normalize_key("CTRL").is_err());
     }
 
+    #[test]
+    fn browser_navigation_accepts_any_web_host() {
+        assert!(is_web_url("https://example.com/path"));
+        assert!(is_web_url("https://another.example/path"));
+        assert!(is_web_url("http://127.0.0.1:1858/health"));
+        assert!(!is_web_url("file:///tmp/private"));
+        assert!(!is_web_url("about:blank"));
+    }
+
     #[tokio::test]
     #[ignore = "requires a working local Chrome or Chromium runtime"]
-    async fn isolated_runner_captures_an_allowed_local_page_when_chromium_is_available() {
+    async fn manager_keeps_independent_browser_sessions_when_chromium_is_available() {
+        if browser_executable().is_err() {
+            return;
+        }
+        let sessions = sessions();
+        let first = create(&sessions, &reqwest::Client::new(), false)
+            .await
+            .unwrap();
+        let second = create(&sessions, &reqwest::Client::new(), true)
+            .await
+            .unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(list(&sessions).await.len(), 2);
+        assert!(
+            scope(&sessions, &second.id)
+                .await
+                .unwrap()
+                .computer_use_enabled
+        );
+        close(&sessions, &first.id).await.unwrap();
+        close(&sessions, &second.id).await.unwrap();
+        assert!(list(&sessions).await.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a working local Chrome or Chromium runtime"]
+    async fn isolated_runner_captures_a_local_page_when_chromium_is_available() {
         if browser_executable().is_err() {
             return;
         }
@@ -1153,10 +1067,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let domains = parse_allowed_domains(&["127.0.0.1".to_owned()]).unwrap();
         let mut runner = tokio::time::timeout(
             Duration::from_secs(15),
-            BrowserRunner::launch(&reqwest::Client::new(), "test", &domains),
+            BrowserRunner::launch(&reqwest::Client::new(), "test"),
         )
         .await
         .unwrap()
@@ -1178,7 +1091,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(loaded, "the allowed local page did not load");
+        assert!(loaded, "the local page did not load");
         runner.close().await;
         server.await.unwrap();
     }

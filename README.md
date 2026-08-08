@@ -232,11 +232,12 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
   移除，不形成第二套 Session。对应 HTTP API 统一使用 `/api/threads` 前缀。
 - 内嵌中英双语 Web GUI，支持亮/暗主题、语音输入、文件浏览和编辑。
 - 浏览器连续语音输入和按主线程顺序播放的主动语音播报。
-- **Browser Control 与 Computer Use**：控制设备可启动临时的 Chromium profile，并为每个会话
-  指定精确的允许域名。Agent 可使用结构化 DOM 工具；启用原生 Computer Use 后，截图、点击、
-  输入和滚动由 Responses `computer` 工具驱动。提交表单、敏感字段、Enter 与 Computer Use 的
-  点击/输入会暂停，直到控制台明确批准。会话关闭即销毁 profile；不会接管用户日常浏览器或
-  读取其 cookie、扩展和主机环境变量。
+- **Browser Control 与 Computer Use**：Agent 可自主创建、列出、聚焦与关闭独立的临时 Chromium
+  会话；结构化 DOM 操作显式携带 session ID，因此 Agent 能同时操纵所有会话。会话可访问任意
+  HTTP(S) 网页；启用原生 Computer Use 后，Agent 先聚焦一个会话，再由 Responses `computer`
+  工具驱动其截图、点击、输入和滚动。提交表单、敏感字段、Enter 与 Computer Use 的点击/输入
+  会暂停，直到控制台明确批准。会话关闭即销毁 profile；不会接管用户日常浏览器或读取其 cookie、
+  扩展和主机环境变量。
 - 可配置的文件系统、Bash 与网页搜索工具集；`list_files`、`read_file`、`write_file`、
   `edit_file` 和 `run_bash` 都接受可选的 `target_device`，省略或填空字符串时在控制设备本机执行。
 - Auth Mini JWT 验证，以首次初始化时绑定的 root user 作为操作边界；浏览器在每次 API 或
@@ -276,7 +277,7 @@ flowchart TB
   access token；遇到 401 时只刷新重试一次。Mobius 服务端只缓存用于验证的 JWKS，不读取
   浏览器 refresh token。
 - Browser Control 只在控制设备上运行：它以空环境变量、临时 user-data directory、禁用扩展和
-  loopback-only CDP 启动 headless Chrome/Chromium。网络请求经过精确 host allow list；页面文字、
+  loopback-only CDP 启动 headless Chrome/Chromium。Agent 可访问任意 HTTP(S) 网页；页面文字、
   邮件、PDF 和网页内提示都是不可信内容，不能构成操作授权。
 - 设备 Token 的明文只在创建时显示一次；执行设备只保存 SHA-256 哈希。控制设备为调用
   远端而在自己的 SQLite 中保存明文 Token。Token 可分别限制文件系统和 Bash，并可随时
