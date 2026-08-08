@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createBrowserSdk } from 'auth-mini/sdk/browser'
 import type { AuthMiniApi, SessionSnapshot } from 'auth-mini/sdk/browser'
-import { ActivityIcon, ArrowLeftIcon, BookOpenIcon, CheckIcon, CircleStopIcon, CpuIcon, DatabaseIcon, FileIcon, FolderIcon, GitForkIcon, HardDriveIcon, KeyRoundIcon, LanguagesIcon, MemoryStickIcon, MicIcon, MonitorCogIcon, NetworkIcon, PanelLeftIcon, PlusIcon, RefreshCwIcon, SendIcon, ServerIcon, Settings2Icon, SquareIcon, TerminalSquareIcon, Volume2Icon, WrenchIcon, XIcon } from 'lucide-react'
+import { ActivityIcon, ArrowLeftIcon, BookOpenIcon, CheckIcon, CircleStopIcon, CpuIcon, DatabaseIcon, FileIcon, FolderIcon, GitForkIcon, Globe2Icon, HardDriveIcon, KeyRoundIcon, LanguagesIcon, MemoryStickIcon, MicIcon, MonitorCogIcon, NetworkIcon, PanelLeftIcon, PlusIcon, RefreshCwIcon, SendIcon, ServerIcon, Settings2Icon, SquareIcon, TerminalSquareIcon, Volume2Icon, WrenchIcon, XIcon } from 'lucide-react'
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useRef, useState } from 'react'
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createRoot } from 'react-dom/client'
@@ -61,11 +61,14 @@ type Session = SessionSnapshot
 type Language = 'en' | 'zh'
 type ToolDefinition = { type: string; name?: string; description?: string; parameters?: unknown }
 type ToolCatalog = { tools: ToolDefinition[] }
+type BrowserApproval = { id: string; description: string }
+type BrowserSession = { id: string; allowed_domains: string[]; computer_use_enabled: boolean; created_at: string; url: string; pending_approval?: BrowserApproval }
+type BrowserScreenshot = { data_url: string }
 const words = {
   en: {
     machine: 'Machine', console: 'Console', machines: 'Machines', files: 'Files', resources: 'Resources', tools: 'Tools', skills: 'Skills', settings: 'Settings', connecting: 'Connecting…', loadingMachine: 'Loading machine', online: 'Online', light: 'Light', dark: 'Dark', signOut: 'Sign out', language: 'Language',
     consoleDescription: 'Agent activity is streamed as it happens.', context: 'Context', tokens: 'tokens', duration: 'Duration', seconds: 's', stop: 'Stop', startRecording: 'Start voice input', stopRecording: 'Stop voice input', transcribing: 'Transcribing…', agentWorking: 'Agent is working…', greeting: 'I am connected to this machine. Tell me the outcome you want to reach.', queued: 'Queued', completed: 'Completed', calling: 'Calling', listingFiles: 'Listing', listedFiles: 'Listed', readingFile: 'Reading', readFile: 'Read', writingFile: 'Editing', wroteFile: 'Edited', runningCommand: 'Running command', ranCommand: 'Ran command', searchingWeb: 'Searching the web', searchedWeb: 'Searched the web', reasoning: 'Reasoning', parameters: 'Parameters', generatingImage: 'Generating image', generatedImage: 'Generated image', addedLines: 'added', deletedLines: 'deleted', lines: 'lines', outcomePlaceholder: 'Describe the outcome you want…', queuedPlaceholder: 'Add a follow-up prompt to the queue…', composeHint: 'Enter to send · Shift+Enter for a new line · IME Enter confirms composition', queuedCount: 'queued',
-    machinesTitle: 'Machines', machinesDescription: 'Connect Mobius servers to this operator.', enrolledMachines: 'Enrolled machines', noMachines: 'No remote machines enrolled.', addMachine: 'Add a machine', name: 'Name', mobiusUrl: 'Mobius URL', add: 'Add machine', remove: 'Remove',
+    machinesTitle: 'Machines', machinesDescription: 'Connect Mobius servers to this operator.', enrolledMachines: 'Enrolled machines', noMachines: 'No remote machines enrolled.', addMachine: 'Add a machine', name: 'Name', mobiusUrl: 'Mobius URL', add: 'Add machine', remove: 'Remove', browser: 'Browser', browserTitle: 'Browser Control', browserDescription: 'Use a disposable, isolated Chromium session with a precise domain allow list.', allowedDomains: 'Allowed domains', allowedDomainsHint: 'Comma-separated exact hosts, for example example.com, app.example.com.', createBrowser: 'Create browser session', computerUse: 'Enable Computer Use', computerUseHint: 'Visual actions pause for explicit approval before clicks or typing.', noBrowserSessions: 'No browser sessions are active.', selectBrowser: 'Select browser session', noBrowser: 'No browser', closeBrowser: 'Close session', approveAction: 'Approve action', browserInput: 'Type into browser', sendBrowserInput: 'Send input', browserLiveView: 'Live browser view', browserClickHint: 'Click the preview to take over with direct pointer input.',
     filesTitle: 'Files', filesDescription: 'Browse and edit the active machine.', refresh: 'Refresh', directory: 'Directory', selectFile: 'Select a file', save: 'Save',
     resourcesTitle: 'Resources', resourcesDescription: 'Live capacity and local database usage.', sampled: 'Sampled', cpu: 'CPU', memory: 'Memory', network: 'Network', disk: 'Disk', sqlite: 'SQLite database', load1m: '1m load', logicalCpus: 'Logical CPUs', processMemory: 'Mobius RSS', otherMemory: 'Other system usage', available: 'Available', swap: 'Swap', received: 'Received', transmitted: 'Transmitted', interfaces: 'Interfaces', mount: 'Mount', main: 'Main', wal: 'WAL', shm: 'SHM', reclaimable: 'Reclaimable', unavailable: 'Unavailable',
     settingsTitle: 'Settings', settingsDescription: 'Configure this machine\'s agent upstream, thread models, and reply announcements.', defaultModel: 'Default model', defaultModelDescription: 'Used by the next agent turn.', modelId: 'Model ID', modelHint: 'Use a model supported by the configured upstream.', voiceScriptModel: 'Voice announcement model', voiceScriptModelHint: 'Rewrites final replies into natural speech before playback.', voiceScriptLength: 'Voice announcement length', voiceScriptLengthHint: 'Maximum characters in the generated script. 150 characters is usually about 30 seconds.', chineseVoice: 'Chinese Edge voice', englishVoice: 'English Edge voice', edgeVoiceHint: 'Use an Edge Neural voice name, for example {voice}.', baseUrlDescription: 'Used for the next agent turn.', apiKeyDescription: 'Used for the next agent turn.', saveChanges: 'Save changes', requestFailed: 'Request failed', initializeMobius: 'Initialize Mobius', initializeDescription: 'Bind this machine to your Auth Mini identity and OpenAI-compatible upstream.', authMiniUrl: 'Auth Mini URL', continueAuth: 'Continue with Auth Mini', apiKey: 'OpenAI API key', baseUrl: 'Base URL', initialize: 'Initialize', returnMachine: 'Return to the machine', signInDescription: 'Sign in through the configured Auth Mini server.', toolsTitle: 'Tools', toolsDescription: 'Every tool sent with a main-thread Responses request.', toolName: 'Tool', toolDescription: 'Description', toolParameters: 'Parameters', noTools: 'No tools are available.', status: 'Status',
@@ -76,7 +79,7 @@ const words = {
   zh: {
     machine: '机器', console: '控制台', machines: '机器', files: '文件', resources: '资源', tools: '工具', skills: '技能', settings: '设置', connecting: '正在连接…', loadingMachine: '正在加载机器', online: '在线', light: '亮色', dark: '深色', signOut: '退出登录', language: '语言',
     consoleDescription: '实时展示 Agent 的执行过程。', context: '上下文', tokens: 'tokens', duration: '用时', seconds: '秒', stop: '停止', startRecording: '开始语音输入', stopRecording: '停止语音输入', transcribing: '正在转写…', agentWorking: 'Agent 正在执行…', greeting: '我已连接到这台机器。请告诉我你想要达成的结果。', queued: '排队中', completed: '已完成', calling: '正在调用', listingFiles: '正在列出', listedFiles: '已列出', readingFile: '正在读取', readFile: '已读取', writingFile: '正在编辑', wroteFile: '已编辑', runningCommand: '正在运行命令', ranCommand: '已运行命令', searchingWeb: '正在搜索网页', searchedWeb: '已搜索网页', reasoning: '推理', parameters: '参数', generatingImage: '正在生成图片', generatedImage: '已生成图片', addedLines: '增加', deletedLines: '删除', lines: '行', outcomePlaceholder: '描述你想要的结果…', queuedPlaceholder: '追加一条后续提示词…', composeHint: 'Enter 发送 · Shift+Enter 换行 · 输入法确认候选时不会发送', queuedCount: '条排队中',
-    machinesTitle: '机器', machinesDescription: '将 Mobius 服务器接入当前操作台。', enrolledMachines: '已接入机器', noMachines: '尚未接入远程机器。', addMachine: '添加机器', name: '名称', mobiusUrl: 'Mobius URL', add: '添加机器', remove: '移除',
+    machinesTitle: '机器', machinesDescription: '将 Mobius 服务器接入当前操作台。', enrolledMachines: '已接入机器', noMachines: '尚未接入远程机器。', addMachine: '添加机器', name: '名称', mobiusUrl: 'Mobius URL', add: '添加机器', remove: '移除', browser: '浏览器', browserTitle: '浏览器控制', browserDescription: '使用一次性的隔离 Chromium 会话，并严格限制可访问域名。', allowedDomains: '允许访问的域名', allowedDomainsHint: '以逗号分隔的精确主机名，例如 example.com, app.example.com。', createBrowser: '创建浏览器会话', computerUse: '启用 Computer Use', computerUseHint: '视觉操作在点击或输入前会暂停并请求明确批准。', noBrowserSessions: '当前没有浏览器会话。', selectBrowser: '选择浏览器会话', noBrowser: '不使用浏览器', closeBrowser: '关闭会话', approveAction: '批准操作', browserInput: '向浏览器输入', sendBrowserInput: '发送输入', browserLiveView: '浏览器实时视图', browserClickHint: '点击预览即可直接接管指针输入。',
     filesTitle: '文件', filesDescription: '浏览并编辑当前机器。', refresh: '刷新', directory: '目录', selectFile: '选择文件', save: '保存',
     resourcesTitle: '系统资源', resourcesDescription: '实时容量和本地数据库占用。', sampled: '采样时间', cpu: 'CPU', memory: '内存', network: '网络', disk: '磁盘', sqlite: 'SQLite 数据库', load1m: '1 分钟负载', logicalCpus: '逻辑核心', processMemory: 'Mobius RSS', otherMemory: '其他系统占用', available: '可用', swap: '交换分区', received: '接收', transmitted: '发送', interfaces: '网卡', mount: '挂载点', main: '主文件', wal: 'WAL', shm: 'SHM', reclaimable: '可回收', unavailable: '不可用',
     settingsTitle: '设置', settingsDescription: '配置当前机器的 Agent 上游、线程模型和结果朗读。', defaultModel: '默认模型', defaultModelDescription: '用于下一轮 Agent 对话。', modelId: '模型 ID', modelHint: '请输入当前上游支持的模型。', voiceScriptModel: '朗读模型', voiceScriptModelHint: '播放前将最终回复改写为自然口语。', voiceScriptLength: '朗读字数', voiceScriptLengthHint: '生成语音稿的最大字数；150 字通常约为 30 秒。', chineseVoice: '中文 Edge 音色', englishVoice: '英文 Edge 音色', edgeVoiceHint: '使用 Edge Neural 音色名称，例如 {voice}。', baseUrlDescription: '用于下一轮 Agent 对话。', apiKeyDescription: '用于下一轮 Agent 对话。', saveChanges: '保存更改', requestFailed: '请求失败', initializeMobius: '初始化 Mobius', initializeDescription: '将此机器绑定到你的 Auth Mini 身份和 OpenAI 兼容上游。', authMiniUrl: 'Auth Mini 地址', continueAuth: '使用 Auth Mini 继续', apiKey: 'OpenAI API 密钥', baseUrl: '基础地址', initialize: '初始化', returnMachine: '返回机器', signInDescription: '通过已配置的 Auth Mini 服务登录。', toolsTitle: '工具', toolsDescription: '与主线程 Responses 请求一同发送的全部工具。', toolName: '工具', toolDescription: '说明', toolParameters: '参数格式', noTools: '暂时没有可用工具。', status: '状态',
@@ -165,8 +168,8 @@ async function createSpeech(sdk: AuthMiniApi, text: string, language: Language):
   return audio
 }
 
-async function streamAgentTurn(sdk: AuthMiniApi, runId: string, message: ChatMessage, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
-  const response = await authenticatedFetch(sdk, '/api/agent/turn', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId, message }) })
+async function streamAgentTurn(sdk: AuthMiniApi, runId: string, message: ChatMessage, browserSessionId: string | undefined, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
+  const response = await authenticatedFetch(sdk, '/api/agent/turn', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId, message, browser_session_id: browserSessionId }) })
   if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
   const reader = response.body?.getReader(); if (!reader) throw new Error('The agent did not start an event stream.')
   const decoder = new TextDecoder(); let buffer = ''
@@ -217,7 +220,7 @@ function WorkspaceNav({ nav }: { nav: WorkspaceNavItem[] }) {
 }
 
 function WorkspaceRoutes({ executor, token }: { executor: boolean; token: AuthMiniApi }) {
-  return <Routes><Route path="/console" element={executor ? <Navigate to="/resources" replace /> : null} /><Route path="/threads" element={executor ? <Navigate to="/resources" replace /> : <ThreadsPage token={token} />} /><Route path="/threads/:id" element={executor ? <Navigate to="/resources" replace /> : <ThreadDetailPage token={token} />} /><Route path="/machines" element={<Machines token={token} />} /><Route path="/files" element={<FilesPage token={token} />} /><Route path="/resources" element={<ResourcesPage token={token} />} /><Route path="/tools" element={<ToolCatalogPage token={token} />} /><Route path="/skills" element={<SkillsPage token={token} />} /><Route path="/settings" element={<SettingsPage token={token} />} /><Route path="*" element={<Navigate to={executor ? "/resources" : "/console"} replace />} /></Routes>
+  return <Routes><Route path="/console" element={executor ? <Navigate to="/resources" replace /> : null} /><Route path="/threads" element={executor ? <Navigate to="/resources" replace /> : <ThreadsPage token={token} />} /><Route path="/threads/:id" element={executor ? <Navigate to="/resources" replace /> : <ThreadDetailPage token={token} />} /><Route path="/browser" element={executor ? <Navigate to="/resources" replace /> : <BrowserPage token={token} />} /><Route path="/machines" element={<Machines token={token} />} /><Route path="/files" element={<FilesPage token={token} />} /><Route path="/resources" element={<ResourcesPage token={token} />} /><Route path="/tools" element={<ToolCatalogPage token={token} />} /><Route path="/skills" element={<SkillsPage token={token} />} /><Route path="/settings" element={<SettingsPage token={token} />} /><Route path="*" element={<Navigate to={executor ? "/resources" : "/console"} replace />} /></Routes>
 }
 
 function Workspace() {
@@ -226,7 +229,7 @@ function Workspace() {
   const navigate = useNavigate()
   const { dark, language, setLanguage, toggleTheme, t } = useUi()
   const status = useQuery({ queryKey: ['status'], queryFn: () => api<Status>('/api/status', token) })
-  const operatorNav = [{ to: '/console', label: t('console'), icon: TerminalSquareIcon }, { to: '/threads', label: t('threads'), icon: GitForkIcon }]
+  const operatorNav = [{ to: '/console', label: t('console'), icon: TerminalSquareIcon }, { to: '/threads', label: t('threads'), icon: GitForkIcon }, { to: '/browser', label: t('browser'), icon: Globe2Icon }]
   const machineNav = [{ to: '/machines', label: t('machines'), icon: NetworkIcon }, { to: '/files', label: t('files'), icon: FileIcon }, { to: '/resources', label: t('resources'), icon: ActivityIcon }, { to: '/tools', label: t('tools'), icon: WrenchIcon }, { to: '/skills', label: t('skills'), icon: BookOpenIcon }, { to: '/settings', label: t('settings'), icon: Settings2Icon }]
   const nav = status.data?.deployment_role === 'executor' ? machineNav : [...operatorNav, ...machineNav]
   const executor = status.data?.deployment_role === 'executor'
@@ -373,6 +376,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const queryClient = useQueryClient()
   const conversationQuery = useQuery({ queryKey: ['conversation'], queryFn: () => api<ConversationState>('/api/conversation', token), refetchOnWindowFocus: false })
   const threadsQuery = useQuery({ queryKey: ['threads'], queryFn: () => api<ThreadIndex>('/api/threads', token), refetchInterval: 1000 })
+  const browserSessionsQuery = useQuery({ queryKey: ['browser-sessions'], queryFn: () => api<BrowserSession[]>('/api/browser/sessions', token), refetchInterval: 1000 })
   const [conversation, setConversation] = useState<ConversationItem[]>([])
   const conversationRef = useRef(conversation)
   const activeRef = useRef(new Map<string, AbortController>())
@@ -391,9 +395,14 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const [transcribing, setTranscribing] = useState(false)
   const [continuousVoice, setContinuousVoice] = useState(continuousVoiceRef.current)
   const [announceReplies, setAnnounceReplies] = useState(announceRef.current)
+  const [browserSessionId, setBrowserSessionId] = useState('')
   const [conversationInitialized, setConversationInitialized] = useState(false)
   const updateConversation = (next: ConversationItem[]) => { conversationRef.current = next; setConversation(next) }
   const activeSubthreads = threadsQuery.data?.subthreads ?? []
+
+  useEffect(() => {
+    if (browserSessionId && !browserSessionsQuery.data?.some((session) => session.id === browserSessionId)) setBrowserSessionId('')
+  }, [browserSessionId, browserSessionsQuery.data])
 
   useEffect(() => {
     if (!conversationQuery.data || activeRef.current.size > 0) return
@@ -480,7 +489,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     activeRef.current.set(runId, controller)
     setActiveRuns((runs) => [...runs, runId])
     setError('')
-    void streamAgentTurn(token, runId, input, controller.signal, (event) => {
+    void streamAgentTurn(token, runId, input, browserSessionId || undefined, controller.signal, (event) => {
       if (event.type === 'status') {
         updateConversation([
           ...conversationRef.current.map((item) => item.kind === 'message' && item.id === entryId ? { ...item, queued: false } : item),
@@ -638,9 +647,81 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const persistedError = conversationQuery.data ? runError(conversationQuery.data.runs) : ''
   const retryingMainRun = conversationQuery.data ? retryingRun(conversationQuery.data.runs) : undefined
   const mainThreadRunning = activeRuns.length > 0 || conversationQuery.data?.runs.some((run) => run.status === 'running' && run.next_retry_at === null) === true
-  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge>{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}<Badge variant="outline">{historyMessages} {t('fullHistory')}</Badge><Badge variant="outline">{memoryFacts} {t('memoryFacts')}</Badge>{activeRuns.length > 0 && <Badge variant="secondary">{activeRuns.length} {t('activeInputs')}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div><div className="flex flex-wrap items-center gap-4 border-b px-4 py-2"><Field className="w-auto" orientation="horizontal"><Switch id="continuous-voice" checked={continuousVoice} onCheckedChange={setContinuous} /><FieldLabel htmlFor="continuous-voice">{t('continuousVoice')}</FieldLabel></Field><Field className="w-auto" orientation="horizontal"><Switch id="announce-replies" checked={announceReplies} onCheckedChange={setAnnounce} /><FieldLabel htmlFor="announce-replies">{t('announceReplies')}</FieldLabel></Field>{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}{persistedError && <div className="px-4 pb-2"><Alert variant="destructive"><AlertTitle>{t('retrying')}</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><span>{persistedError}</span>{retryingMainRun && <Button size="sm" variant="outline" onClick={() => void retryNow(retryingMainRun.id)}><RefreshCwIcon data-icon="inline-start" />{t('retryNow')}</Button>}</AlertDescription></Alert></div>}</main>
+  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><div className="min-w-52"><Select value={browserSessionId || '__none'} onValueChange={(value) => setBrowserSessionId(value === '__none' ? '' : value)}><SelectTrigger><SelectValue placeholder={t('selectBrowser')} /></SelectTrigger><SelectContent><SelectItem value="__none">{t('noBrowser')}</SelectItem>{browserSessionsQuery.data?.map((session) => <SelectItem key={session.id} value={session.id}>{session.allowed_domains.join(', ')}</SelectItem>)}</SelectContent></Select></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge>{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}<Badge variant="outline">{historyMessages} {t('fullHistory')}</Badge><Badge variant="outline">{memoryFacts} {t('memoryFacts')}</Badge>{activeRuns.length > 0 && <Badge variant="secondary">{activeRuns.length} {t('activeInputs')}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div><div className="flex flex-wrap items-center gap-4 border-b px-4 py-2"><Field className="w-auto" orientation="horizontal"><Switch id="continuous-voice" checked={continuousVoice} onCheckedChange={setContinuous} /><FieldLabel htmlFor="continuous-voice">{t('continuousVoice')}</FieldLabel></Field><Field className="w-auto" orientation="horizontal"><Switch id="announce-replies" checked={announceReplies} onCheckedChange={setAnnounce} /><FieldLabel htmlFor="announce-replies">{t('announceReplies')}</FieldLabel></Field>{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}{persistedError && <div className="px-4 pb-2"><Alert variant="destructive"><AlertTitle>{t('retrying')}</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><span>{persistedError}</span>{retryingMainRun && <Button size="sm" variant="outline" onClick={() => void retryNow(retryingMainRun.id)}><RefreshCwIcon data-icon="inline-start" />{t('retryNow')}</Button>}</AlertDescription></Alert></div>}</main>
   return <><div className="min-h-0 flex-1 overflow-y-auto">{location.pathname === '/console' ? consoleSurface : children}</div>{error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}<form className="shrink-0 border-t p-3" onSubmit={submit}><InputGroup className="mx-auto max-w-4xl"><InputGroupTextarea ref={draftRef} disabled={unavailable} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} /><InputGroupAddon align="inline-end"><InputGroupButton aria-label={recording ? t('stopRecording') : t('startRecording')} disabled={unavailable || transcribing} onClick={toggleRecording} size="icon-sm" variant={recording ? 'destructive' : 'ghost'}>{recording ? <SquareIcon /> : <MicIcon />}</InputGroupButton><InputGroupButton disabled={unavailable} type="submit" variant="default" size="icon-sm"><SendIcon /><span className="sr-only">{t('mainThread')}</span></InputGroupButton></InputGroupAddon></InputGroup><p className="mx-auto mt-1 max-w-4xl text-xs text-muted-foreground">{t('mainThread')}: {transcribing ? t('transcribing') : t('composeHint')}</p></form></>
 }
+
+function BrowserPage({ token }: { token: AuthMiniApi }) {
+  const { t } = useUi()
+  const queryClient = useQueryClient()
+  const sessions = useQuery({ queryKey: ['browser-sessions'], queryFn: () => api<BrowserSession[]>('/api/browser/sessions', token), refetchInterval: 1000 })
+  const [selectedId, setSelectedId] = useState('')
+  const [domains, setDomains] = useState('')
+  const [computerUse, setComputerUse] = useState(false)
+  const [browserInput, setBrowserInput] = useState('')
+  const [error, setError] = useState('')
+  const [creating, setCreating] = useState(false)
+  const selected = sessions.data?.find((session) => session.id === selectedId) ?? sessions.data?.[0]
+  const screenshot = useQuery({ queryKey: ['browser-screenshot', selected?.id], queryFn: () => api<BrowserScreenshot>(`/api/browser/sessions/${selected!.id}/screenshot`, token), enabled: Boolean(selected), refetchInterval: 1500, retry: false })
+
+  useEffect(() => { if (selected && selected.id !== selectedId) setSelectedId(selected.id) }, [selected, selectedId])
+
+  const refresh = async () => { await queryClient.invalidateQueries({ queryKey: ['browser-sessions'] }); await screenshot.refetch() }
+  const create = async (event: FormEvent) => {
+    event.preventDefault()
+    setCreating(true)
+    setError('')
+    try {
+      const session = await api<BrowserSession>('/api/browser/sessions', token, { method: 'POST', body: JSON.stringify({ allowed_domains: domains.split(',').map((domain) => domain.trim()).filter(Boolean), computer_use_enabled: computerUse }) })
+      setSelectedId(session.id)
+      setDomains('')
+      await refresh()
+    } catch (cause) {
+      setError(message(cause))
+    } finally {
+      setCreating(false)
+    }
+  }
+  const sendInput = async (input: Record<string, unknown>) => {
+    if (!selected) return
+    setError('')
+    try {
+      await api(`/api/browser/sessions/${selected.id}/input`, token, { method: 'POST', body: JSON.stringify(input) })
+      await screenshot.refetch()
+    } catch (cause) {
+      setError(message(cause))
+    }
+  }
+  const typeInput = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!browserInput.trim()) return
+    await sendInput({ type: 'type', text: browserInput })
+    setBrowserInput('')
+  }
+  const close = async () => {
+    if (!selected) return
+    try {
+      await api(`/api/browser/sessions/${selected.id}`, token, { method: 'DELETE' })
+      setSelectedId('')
+      await refresh()
+    } catch (cause) {
+      setError(message(cause))
+    }
+  }
+  const approve = async () => {
+    if (!selected) return
+    try {
+      await api(`/api/browser/sessions/${selected.id}/approve`, token, { method: 'POST' })
+      await refresh()
+    } catch (cause) {
+      setError(message(cause))
+    }
+  }
+
+  if (sessions.error) return <Page title={t('browserTitle')} description={t('browserDescription')}><ErrorAlert error={message(sessions.error)} /></Page>
+  return <Page title={t('browserTitle')} description={t('browserDescription')}><Card><CardHeader><CardTitle>{t('createBrowser')}</CardTitle><CardDescription>{t('allowedDomainsHint')}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-4" onSubmit={create}><Field><FieldLabel htmlFor="browser-domains">{t('allowedDomains')}</FieldLabel><Input id="browser-domains" value={domains} onChange={(event) => setDomains(event.target.value)} placeholder="example.com, app.example.com" required /></Field><Field orientation="horizontal"><Switch id="computer-use" checked={computerUse} onCheckedChange={setComputerUse} /><div><FieldLabel htmlFor="computer-use">{t('computerUse')}</FieldLabel><FieldDescription>{t('computerUseHint')}</FieldDescription></div></Field>{error && <ErrorAlert error={error} />}<Button className="w-fit" disabled={creating}>{creating && <Spinner data-icon="inline-start" />}{t('createBrowser')}</Button></form></CardContent></Card>{sessions.data && sessions.data.length > 0 ? <div className="grid gap-6 lg:grid-cols-[18rem_minmax(0,1fr)]"><Card><CardHeader><CardTitle>{t('selectBrowser')}</CardTitle></CardHeader><CardContent className="flex flex-col gap-2">{sessions.data.map((session) => <Button key={session.id} variant={selected?.id === session.id ? 'secondary' : 'outline'} className="h-auto justify-start whitespace-normal text-left" onClick={() => setSelectedId(session.id)}><span><strong>{session.allowed_domains.join(', ')}</strong><br /><span className="text-xs text-muted-foreground">{session.computer_use_enabled ? 'Computer Use' : 'Browser Control'}</span></span></Button>)}</CardContent></Card><Card><CardHeader><div className="flex flex-wrap items-center gap-2"><div className="flex-1"><CardTitle>{t('browserLiveView')}</CardTitle><CardDescription>{selected?.url}</CardDescription></div>{selected?.pending_approval && <Button onClick={() => void approve()}>{t('approveAction')}</Button>}<Button variant="outline" onClick={() => void close()}>{t('closeBrowser')}</Button></div>{selected?.pending_approval && <Alert><AlertTitle>{t('approveAction')}</AlertTitle><AlertDescription>{selected.pending_approval.description}</AlertDescription></Alert>}</CardHeader><CardContent className="flex flex-col gap-4"><div className="overflow-hidden rounded-md border bg-muted"><img alt={t('browserLiveView')} className="block w-full cursor-crosshair" src={screenshot.data?.data_url} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); void sendInput({ type: 'click', x: (event.clientX - bounds.left) * 1280 / bounds.width, y: (event.clientY - bounds.top) * 800 / bounds.height }) }} />{!screenshot.data && <div className="grid aspect-[8/5] place-items-center"><Spinner /></div>}</div><p className="text-xs text-muted-foreground">{t('browserClickHint')}</p><form className="flex gap-2" onSubmit={(event) => void typeInput(event)}><Input value={browserInput} onChange={(event) => setBrowserInput(event.target.value)} placeholder={t('browserInput')} /><Button type="submit">{t('sendBrowserInput')}</Button></form></CardContent></Card></div> : <Card><CardContent className="pt-6 text-sm text-muted-foreground">{t('noBrowserSessions')}</CardContent></Card>}</Page>
+}
+
 function ConversationEntry({ item, now, peers }: { item: ConversationItem; now: number; peers: Peer[] }) {
   const { language, t } = useUi()
   const [parametersOpen, setParametersOpen] = useState(false)

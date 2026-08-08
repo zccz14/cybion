@@ -10,7 +10,8 @@ Mobius 适合已经拥有本机、家用主机、云服务器等多种设备，�
 > 当前版本已提供持久化主线程、可回收子线程、上下文 checkpoint 与稳定前缀编译、
 > Web GUI、Auth Mini 身份验证、OpenAI-compatible Responses API 上游、本机与远程文件
 > 和 Shell 工具、设备 Token、控制/执行设备角色，以及浏览器中的连续语音输入和主动
-> 播报。AI 音箱、车载智能等专用交互设备仍是产品方向。
+> 播报。控制设备还可启动严格隔离的 Browser Control 会话；启用 Computer Use 时，模型的
+> 视觉操作在高影响动作前必须由操作者批准。AI 音箱、车载智能等专用交互设备仍是产品方向。
 
 ## 为什么还要做一个 Harness？
 
@@ -231,6 +232,11 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
   移除，不形成第二套 Session。对应 HTTP API 统一使用 `/api/threads` 前缀。
 - 内嵌中英双语 Web GUI，支持亮/暗主题、语音输入、文件浏览和编辑。
 - 浏览器连续语音输入和按主线程顺序播放的主动语音播报。
+- **Browser Control 与 Computer Use**：控制设备可启动临时的 Chromium profile，并为每个会话
+  指定精确的允许域名。Agent 可使用结构化 DOM 工具；启用原生 Computer Use 后，截图、点击、
+  输入和滚动由 Responses `computer` 工具驱动。提交表单、敏感字段、Enter 与 Computer Use 的
+  点击/输入会暂停，直到控制台明确批准。会话关闭即销毁 profile；不会接管用户日常浏览器或
+  读取其 cookie、扩展和主机环境变量。
 - 可配置的文件系统、Bash 与网页搜索工具集；`list_files`、`read_file`、`write_file`、
   `edit_file` 和 `run_bash` 都接受可选的 `target_device`，省略或填空字符串时在控制设备本机执行。
 - Auth Mini JWT 验证，以首次初始化时绑定的 root user 作为操作边界；浏览器在每次 API 或
@@ -269,6 +275,9 @@ flowchart TB
 - 浏览器使用 Auth Mini 的 SDK 持久保存会话，并在 API 与 SSE 请求前主动刷新即将过期的
   access token；遇到 401 时只刷新重试一次。Mobius 服务端只缓存用于验证的 JWKS，不读取
   浏览器 refresh token。
+- Browser Control 只在控制设备上运行：它以空环境变量、临时 user-data directory、禁用扩展和
+  loopback-only CDP 启动 headless Chrome/Chromium。网络请求经过精确 host allow list；页面文字、
+  邮件、PDF 和网页内提示都是不可信内容，不能构成操作授权。
 - 设备 Token 的明文只在创建时显示一次；执行设备只保存 SHA-256 哈希。控制设备为调用
   远端而在自己的 SQLite 中保存明文 Token。Token 可分别限制文件系统和 Bash，并可随时
   撤销。
@@ -278,6 +287,10 @@ flowchart TB
 ## 快速开始
 
 前置条件：一个可用的 Auth Mini 服务和 OpenAI-compatible Responses API 上游。
+
+若要使用 Browser Control，控制设备还需要安装 Google Chrome 或 Chromium。Mobius 不使用或
+修改用户的日常浏览器 profile；Computer Use 还要求当前配置的 Responses 上游与模型支持
+`computer` 工具。
 
 ### 优先：安装 Release
 
