@@ -15,7 +15,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{
@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_tungstenite::{
     connect_async,
@@ -973,6 +973,10 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/browser/sessions/{id}/screenshot",
             get(browser_screenshot),
+        )
+        .route(
+            "/api/browser/sessions/{id}/stream",
+            get(browser_preview_stream),
         )
         .route("/api/browser/sessions/{id}/input", post(browser_user_input))
         .route("/api/conversation", get(conversation))
@@ -3930,6 +3934,57 @@ async fn browser_screenshot(
     }))
 }
 
+async fn browser_preview_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    identity(&state, &headers).await?;
+    let mut frames = browser::preview_stream(&state.browser_sessions, &id)
+        .await
+        .map_err(|cause| error(StatusCode::NOT_FOUND, cause.to_string()))?;
+    let (sender, receiver) = mpsc::channel(1);
+    tokio::spawn(async move {
+        loop {
+            match frames.recv().await {
+                Ok(frame) => {
+                    if sender
+                        .send(Ok::<_, Infallible>(multipart_browser_frame(&frame)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "multipart/x-mixed-replace; boundary=mobius-frame",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Body::from_stream(ReceiverStream::new(receiver)),
+    )
+        .into_response())
+}
+
+fn multipart_browser_frame(frame: &[u8]) -> Bytes {
+    let mut message = format!(
+        "--mobius-frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+        frame.len()
+    )
+    .into_bytes();
+    message.extend_from_slice(frame);
+    message.extend_from_slice(b"\r\n");
+    Bytes::from(message)
+}
+
 async fn browser_user_input(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6150,6 +6205,15 @@ fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_preview_frames_use_a_length_delimited_binary_multipart_payload() {
+        let payload = multipart_browser_frame(&[0xff, 0xd8, 0xff]);
+        assert_eq!(
+            payload.as_ref(),
+            b"--mobius-frame\r\nContent-Type: image/jpeg\r\nContent-Length: 3\r\n\r\n\xff\xd8\xff\r\n"
+        );
+    }
 
     fn configure_test_database(db: &Path, openai_base_url: &str) {
         let connection = open_db(db).unwrap();
