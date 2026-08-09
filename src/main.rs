@@ -59,6 +59,8 @@ const EDGE_TTS_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const JWKS_TTL: Duration = Duration::from_secs(300);
 const HISTORY_PAGE_DEFAULT: usize = 100;
 const HISTORY_PAGE_MAX: usize = 500;
+const COMMAND_RUNS_PAGE_DEFAULT: i64 = 20;
+const COMMAND_RUNS_PAGE_MAX: i64 = 100;
 const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
 const FILE_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FILE_READS: usize = 2;
@@ -592,6 +594,25 @@ struct CommandRun {
     status: String,
 }
 
+#[derive(Default, Deserialize)]
+struct CommandRunQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    status: Option<String>,
+    target_machine_id: Option<String>,
+    q: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CommandRunPage {
+    items: Vec<CommandRun>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+    target_machines: Vec<CommandTarget>,
+}
+
+#[derive(Serialize)]
 struct CommandTarget {
     id: String,
     name: String,
@@ -3361,14 +3382,17 @@ async fn tools(
 async fn list_command_runs(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> ApiResult<Vec<CommandRun>> {
+    Query(query): Query<CommandRunQuery>,
+) -> ApiResult<CommandRunPage> {
     identity(&state, &headers).await?;
-    load_command_runs(&state.db_path).map(Json).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot read command history",
-        )
-    })
+    load_command_run_page(&state.db_path, &query)
+        .map(Json)
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read command history",
+            )
+        })
 }
 
 async fn skills(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<SkillsResponse> {
@@ -6454,6 +6478,91 @@ fn finish_command_run(db_path: &Path, id: &str, result: &BashResult) -> Result<(
     Ok(())
 }
 
+fn command_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRun> {
+    Ok(CommandRun {
+        id: row.get(0)?,
+        command: row.get(1)?,
+        target_machine_id: row.get(2)?,
+        target_machine_name: row.get(3)?,
+        started_at: row.get(4)?,
+        completed_at: row.get(5)?,
+        result: row.get(6)?,
+        exit_code: row.get(7)?,
+        status: row.get(8)?,
+    })
+}
+
+fn command_run_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all")
+        .map(str::to_owned)
+}
+
+fn load_command_run_page(db_path: &Path, query: &CommandRunQuery) -> Result<CommandRunPage> {
+    let connection = open_db(db_path)?;
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query
+        .page_size
+        .unwrap_or(COMMAND_RUNS_PAGE_DEFAULT)
+        .clamp(1, COMMAND_RUNS_PAGE_MAX);
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
+    let status = command_run_filter(query.status.as_deref());
+    let target_machine_id = command_run_filter(query.target_machine_id.as_deref());
+    let search = command_run_filter(query.q.as_deref());
+    let total = connection.query_row(
+        "SELECT COUNT(*)
+         FROM command_runs
+         WHERE (?1 IS NULL OR status = ?1)
+           AND (?2 IS NULL OR target_machine_id = ?2)
+           AND (?3 IS NULL OR command LIKE '%' || ?3 || '%'
+                OR target_machine_name LIKE '%' || ?3 || '%'
+                OR COALESCE(result, '') LIKE '%' || ?3 || '%')",
+        params![status, target_machine_id, search],
+        |row| row.get(0),
+    )?;
+    let items = connection
+        .prepare(
+            "SELECT id, command, target_machine_id, target_machine_name, started_at,
+                    completed_at, result, exit_code, status
+             FROM command_runs
+             WHERE (?1 IS NULL OR status = ?1)
+               AND (?2 IS NULL OR target_machine_id = ?2)
+               AND (?3 IS NULL OR command LIKE '%' || ?3 || '%'
+                    OR target_machine_name LIKE '%' || ?3 || '%'
+                    OR COALESCE(result, '') LIKE '%' || ?3 || '%')
+             ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, started_at DESC, id DESC
+             LIMIT ?4 OFFSET ?5",
+        )?
+        .query_map(
+            params![status, target_machine_id, search, page_size, offset],
+            command_run_from_row,
+        )?
+        .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
+    let target_machines = connection
+        .prepare(
+            "SELECT target_machine_id, target_machine_name
+             FROM command_runs
+             GROUP BY target_machine_id, target_machine_name
+             ORDER BY target_machine_name COLLATE NOCASE, target_machine_id",
+        )?
+        .query_map([], |row| {
+            Ok(CommandTarget {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(CommandRunPage {
+        items,
+        total,
+        page,
+        page_size,
+        target_machines,
+    })
+}
+
+#[cfg(test)]
 fn load_command_runs(db_path: &Path) -> Result<Vec<CommandRun>> {
     let connection = open_db(db_path)?;
     connection
@@ -6463,19 +6572,7 @@ fn load_command_runs(db_path: &Path) -> Result<Vec<CommandRun>> {
              FROM command_runs
              ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, started_at DESC, id DESC",
         )?
-        .query_map([], |row| {
-            Ok(CommandRun {
-                id: row.get(0)?,
-                command: row.get(1)?,
-                target_machine_id: row.get(2)?,
-                target_machine_name: row.get(3)?,
-                started_at: row.get(4)?,
-                completed_at: row.get(5)?,
-                result: row.get(6)?,
-                exit_code: row.get(7)?,
-                status: row.get(8)?,
-            })
-        })?
+        .query_map([], command_run_from_row)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -9104,6 +9201,79 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["running", "complete"]
         );
+    }
+
+    #[test]
+    fn command_history_pages_and_filters_without_losing_running_priority() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO command_runs (
+                   id, command, target_machine_id, target_machine_name, started_at, result, status
+                 ) VALUES
+                   ('complete-old', 'printf archive', 'machine-beta', 'Beta', '2026-01-01T00:00:00Z', '{\"stdout\":\"archived\"}', 'complete'),
+                   ('complete-new', 'printf deploy', 'machine-alpha', 'Alpha', '2026-03-01T00:00:00Z', '{\"stdout\":\"deployed\"}', 'complete'),
+                   ('complete-middle', 'printf inspect', 'machine-alpha', 'Alpha', '2026-02-01T00:00:00Z', '{\"stdout\":\"inspected\"}', 'complete'),
+                   ('running', 'sleep 30; printf needle', 'machine-beta', 'Beta', '2025-01-01T00:00:00Z', NULL, 'running');",
+            )
+            .unwrap();
+
+        let first_page = load_command_run_page(
+            &db,
+            &CommandRunQuery {
+                page: Some(1),
+                page_size: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first_page.total, 4);
+        assert_eq!(first_page.items.len(), 2);
+        assert_eq!(first_page.items[0].id, "running");
+        assert_eq!(first_page.items[1].id, "complete-new");
+        assert_eq!(
+            first_page
+                .target_machines
+                .iter()
+                .map(|machine| (machine.id.as_str(), machine.name.as_str()))
+                .collect::<Vec<_>>(),
+            [("machine-alpha", "Alpha"), ("machine-beta", "Beta")]
+        );
+
+        let completed_second_page = load_command_run_page(
+            &db,
+            &CommandRunQuery {
+                page: Some(2),
+                page_size: Some(2),
+                status: Some("complete".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(completed_second_page.total, 3);
+        assert_eq!(
+            completed_second_page
+                .items
+                .iter()
+                .map(|command| command.id.as_str())
+                .collect::<Vec<_>>(),
+            ["complete-old"]
+        );
+
+        let beta_search = load_command_run_page(
+            &db,
+            &CommandRunQuery {
+                target_machine_id: Some("machine-beta".to_owned()),
+                q: Some("needle".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(beta_search.total, 1);
+        assert_eq!(beta_search.items[0].id, "running");
     }
 
     #[test]
