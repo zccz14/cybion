@@ -579,6 +579,30 @@ struct ToolCatalogResponse {
     tools: Vec<Value>,
 }
 
+#[derive(Serialize)]
+struct CommandRun {
+    id: String,
+    command: String,
+    target_machine_id: String,
+    target_machine_name: String,
+    started_at: String,
+    completed_at: Option<String>,
+    result: Option<String>,
+    exit_code: Option<i32>,
+    status: String,
+}
+
+struct CommandTarget {
+    id: String,
+    name: String,
+}
+
+struct BashResult {
+    output: String,
+    exit_code: Option<i32>,
+    status: &'static str,
+}
+
 #[derive(Deserialize)]
 struct SetupInput {
     auth_url: String,
@@ -937,6 +961,7 @@ fn app(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/settings", get(settings).put(update_settings))
         .route("/api/tools", get(tools))
+        .route("/api/commands", get(list_command_runs))
         .route("/api/skills", get(skills))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(update_status))
@@ -2598,6 +2623,17 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            filesystem_enabled INTEGER NOT NULL,
            bash_enabled INTEGER NOT NULL,
            created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS command_runs (
+           id TEXT PRIMARY KEY,
+           command TEXT NOT NULL,
+           target_machine_id TEXT NOT NULL,
+           target_machine_name TEXT NOT NULL,
+           started_at TEXT NOT NULL,
+           completed_at TEXT,
+           result TEXT,
+           exit_code INTEGER,
+           status TEXT NOT NULL CHECK(status IN ('running', 'cancelled', 'complete'))
          );",
     )?;
     ensure_conversation_metadata_columns(&connection)?;
@@ -2610,10 +2646,20 @@ fn bootstrap_database(db: &Path) -> Result<()> {
         "CREATE UNIQUE INDEX IF NOT EXISTS peers_machine_id
          ON peers(machine_id) WHERE machine_id <> '';
          CREATE INDEX IF NOT EXISTS agent_runs_retry_due
-         ON agent_runs(kind, status, next_retry_at);",
+         ON agent_runs(kind, status, next_retry_at);
+         CREATE INDEX IF NOT EXISTS command_runs_active_first
+         ON command_runs(status, started_at DESC);",
     )?;
     connection.execute(
         "UPDATE subthreads SET status = 'queued', updated_at = ?1
+         WHERE status = 'running'",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    connection.execute(
+        "UPDATE command_runs
+         SET status = 'cancelled',
+             completed_at = COALESCE(completed_at, ?1),
+             result = COALESCE(result, 'command cancelled because Mobius restarted')
          WHERE status = 'running'",
         [chrono::Utc::now().to_rfc3339()],
     )?;
@@ -3312,6 +3358,19 @@ async fn tools(
     Ok(Json(ToolCatalogResponse { tools }))
 }
 
+async fn list_command_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<CommandRun>> {
+    identity(&state, &headers).await?;
+    load_command_runs(&state.db_path).map(Json).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read command history",
+        )
+    })
+}
+
 async fn skills(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<SkillsResponse> {
     identity(&state, &headers).await?;
     let skills = state
@@ -3844,10 +3903,22 @@ async fn remote_execute_tool(
     let grant = device_identity(&state, &headers)?;
     let execution = match input.name.as_str() {
         "list_files" | "read_file" | "write_file" | "edit_file" if grant.filesystem_enabled => {
-            execute_local_tool(&input.name, input.arguments, watch::channel(false).1).await
+            execute_local_tool(
+                &input.name,
+                input.arguments,
+                &state.db_path,
+                watch::channel(false).1,
+            )
+            .await
         }
         "run_bash" if grant.bash_enabled => {
-            execute_local_tool(&input.name, input.arguments, watch::channel(false).1).await
+            execute_local_tool(
+                &input.name,
+                input.arguments,
+                &state.db_path,
+                watch::channel(false).1,
+            )
+            .await
         }
         "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
             return Err(error(
@@ -6037,15 +6108,19 @@ async fn execute_device_tool(
         if let Some(arguments) = args.as_object_mut() {
             arguments.remove("target_device");
         }
+        if name == "run_bash" {
+            return execute_remote_bash(client, db_path, &target_device, args, cancellation).await;
+        }
         return execute_remote_device(client, db_path, &target_device, name, args, cancellation)
             .await;
     }
-    execute_local_tool(name, args, cancellation).await
+    execute_local_tool(name, args, db_path, cancellation).await
 }
 
 async fn execute_local_tool(
     name: &str,
     args: Value,
+    db_path: &Path,
     cancellation: watch::Receiver<bool>,
 ) -> ToolExecution {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
@@ -6081,8 +6156,69 @@ async fn execute_local_tool(
             args.get("old_text").and_then(Value::as_str).unwrap_or(""),
             args.get("new_text").and_then(Value::as_str).unwrap_or(""),
         ),
-        "run_bash" => tool_execution(run_bash(args, cancellation).await),
+        "run_bash" => execute_local_bash(args, db_path, cancellation).await,
         _ => tool_execution("error: unknown tool"),
+    }
+}
+
+async fn execute_local_bash(
+    args: Value,
+    db_path: &Path,
+    cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
+    let Some(command) = args.get("command").and_then(Value::as_str) else {
+        return tool_execution("error: missing bash command");
+    };
+    let target = match local_command_target(db_path) {
+        Ok(target) => target,
+        Err(cause) => {
+            return tool_execution(format!("error: cannot identify command target: {cause}"));
+        }
+    };
+    let id = match start_command_run(db_path, command, &target) {
+        Ok(id) => id,
+        Err(cause) => return tool_execution(format!("error: cannot record command: {cause}")),
+    };
+    let result = run_bash(command, cancellation).await;
+    match finish_command_run(db_path, &id, &result) {
+        Ok(()) => tool_execution(result.output),
+        Err(cause) => tool_execution(format!("error: cannot complete command record: {cause}")),
+    }
+}
+
+async fn execute_remote_bash(
+    client: &reqwest::Client,
+    db_path: &Path,
+    target_device: &str,
+    args: Value,
+    cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
+    let Some(command) = args.get("command").and_then(Value::as_str) else {
+        return tool_execution("error: missing bash command");
+    };
+    let target = match remote_command_target(db_path, target_device) {
+        Ok(target) => target,
+        Err(cause) => {
+            return tool_execution(format!("error: cannot identify command target: {cause}"));
+        }
+    };
+    let id = match start_command_run(db_path, command, &target) {
+        Ok(id) => id,
+        Err(cause) => return tool_execution(format!("error: cannot record command: {cause}")),
+    };
+    let execution = execute_remote_device(
+        client,
+        db_path,
+        target_device,
+        "run_bash",
+        args,
+        cancellation,
+    )
+    .await;
+    let result = bash_result_from_output(execution.output.clone());
+    match finish_command_run(db_path, &id, &result) {
+        Ok(()) => execution,
+        Err(cause) => tool_execution(format!("error: cannot complete command record: {cause}")),
     }
 }
 
@@ -6175,12 +6311,13 @@ fn save_file(path: &str, previous: Option<&str>, content: &str, output: &str) ->
     }
 }
 
-async fn run_bash(args: Value, mut cancellation: watch::Receiver<bool>) -> String {
-    let Some(command) = args.get("command").and_then(Value::as_str) else {
-        return "error: missing bash command".to_owned();
-    };
+async fn run_bash(command: &str, mut cancellation: watch::Receiver<bool>) -> BashResult {
     if *cancellation.borrow() {
-        return "error: command cancelled".to_owned();
+        return BashResult {
+            output: "error: command cancelled".to_owned(),
+            exit_code: None,
+            status: "cancelled",
+        };
     }
     let output = Command::new("bash")
         .args(["-lc", command])
@@ -6188,16 +6325,138 @@ async fn run_bash(args: Value, mut cancellation: watch::Receiver<bool>) -> Strin
         .output();
     tokio::select! {
         result = output => match result {
-            Ok(output) => json!({
-                "stdout": String::from_utf8_lossy(&output.stdout),
-                "stderr": String::from_utf8_lossy(&output.stderr),
-                "exit_code": output.status.code(),
-            }).to_string(),
-            Err(error) => format!("error: cannot run bash: {error}"),
+            Ok(output) => BashResult {
+                output: json!({
+                    "stdout": String::from_utf8_lossy(&output.stdout),
+                    "stderr": String::from_utf8_lossy(&output.stderr),
+                    "exit_code": output.status.code(),
+                }).to_string(),
+                exit_code: output.status.code(),
+                status: "complete",
+            },
+            Err(error) => BashResult {
+                output: format!("error: cannot run bash: {error}"),
+                exit_code: None,
+                status: "complete",
+            },
         },
-        _ = cancellation.changed() => "error: command cancelled".to_owned(),
-        _ = tokio::time::sleep(Duration::from_secs(60)) => "error: command timed out after 60 seconds".to_owned(),
+        _ = cancellation.changed() => BashResult {
+            output: "error: command cancelled".to_owned(),
+            exit_code: None,
+            status: "cancelled",
+        },
+        _ = tokio::time::sleep(Duration::from_secs(60)) => BashResult {
+            output: "error: command timed out after 60 seconds".to_owned(),
+            exit_code: None,
+            status: "cancelled",
+        },
     }
+}
+
+fn bash_result_from_output(output: String) -> BashResult {
+    let exit_code = serde_json::from_str::<Value>(&output)
+        .ok()
+        .and_then(|value| value.get("exit_code").and_then(Value::as_i64))
+        .and_then(|code| i32::try_from(code).ok());
+    let status = if output == "error: agent stopped"
+        || output == "error: command cancelled"
+        || output.contains("command timed out")
+    {
+        "cancelled"
+    } else {
+        "complete"
+    };
+    BashResult {
+        output,
+        exit_code,
+        status,
+    }
+}
+
+fn local_command_target(db_path: &Path) -> Result<CommandTarget> {
+    let id = open_db(db_path)?.query_row(
+        "SELECT value FROM app_meta WHERE key = 'machine_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(CommandTarget {
+        id,
+        name: hostname(),
+    })
+}
+
+fn remote_command_target(db_path: &Path, machine_id: &str) -> Result<CommandTarget> {
+    open_db(db_path)?
+        .query_row(
+            "SELECT machine_id, name FROM peers WHERE machine_id = ?1",
+            [machine_id],
+            |row| {
+                Ok(CommandTarget {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            },
+        )
+        .map_err(Into::into)
+}
+
+fn start_command_run(db_path: &Path, command: &str, target: &CommandTarget) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    open_db(db_path)?.execute(
+        "INSERT INTO command_runs (
+           id, command, target_machine_id, target_machine_name, started_at, status
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'running')",
+        params![
+            id,
+            command,
+            target.id,
+            target.name,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(id)
+}
+
+fn finish_command_run(db_path: &Path, id: &str, result: &BashResult) -> Result<()> {
+    open_db(db_path)?.execute(
+        "UPDATE command_runs
+         SET completed_at = ?1, result = ?2, exit_code = ?3, status = ?4
+         WHERE id = ?5",
+        params![
+            chrono::Utc::now().to_rfc3339(),
+            result.output,
+            result.exit_code,
+            result.status,
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_command_runs(db_path: &Path) -> Result<Vec<CommandRun>> {
+    let connection = open_db(db_path)?;
+    connection
+        .prepare(
+            "SELECT id, command, target_machine_id, target_machine_name, started_at,
+                    completed_at, result, exit_code, status
+             FROM command_runs
+             ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, started_at DESC, id DESC",
+        )?
+        .query_map([], |row| {
+            Ok(CommandRun {
+                id: row.get(0)?,
+                command: row.get(1)?,
+                target_machine_id: row.get(2)?,
+                target_machine_name: row.get(3)?,
+                started_at: row.get(4)?,
+                completed_at: row.get(5)?,
+                result: row.get(6)?,
+                exit_code: row.get(7)?,
+                status: row.get(8)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn hostname() -> String {
@@ -8709,10 +8968,114 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_returns_stdout_and_exit_status() {
-        let result = run_bash(json!({"command":"printf hello"}), watch::channel(false).1).await;
-        let result: Value = serde_json::from_str(&result).unwrap();
+        let result = run_bash("printf hello", watch::channel(false).1).await;
+        let result: Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(result.get("stdout").and_then(Value::as_str), Some("hello"));
         assert_eq!(result.get("exit_code").and_then(Value::as_i64), Some(0));
+    }
+
+    #[tokio::test]
+    async fn bash_command_runs_are_persisted_with_their_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let execution = execute_local_tool(
+            "run_bash",
+            json!({"command":"printf audited; exit 7"}),
+            &db,
+            watch::channel(false).1,
+        )
+        .await;
+        assert!(execution.output.contains("audited"));
+        let commands = load_command_runs(&db).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, "printf audited; exit 7");
+        assert_eq!(commands[0].status, "complete");
+        assert_eq!(commands[0].exit_code, Some(7));
+        assert!(commands[0].completed_at.is_some());
+        assert!(
+            commands[0]
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("audited"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_bash_commands_are_persisted_as_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let (cancel, cancellation) = watch::channel(false);
+        cancel.send(true).unwrap();
+        let execution = execute_local_tool(
+            "run_bash",
+            json!({"command":"printf never-runs"}),
+            &db,
+            cancellation,
+        )
+        .await;
+        assert_eq!(execution.output, "error: command cancelled");
+        let commands = load_command_runs(&db).unwrap();
+        assert_eq!(commands[0].status, "cancelled");
+        assert_eq!(commands[0].exit_code, None);
+        assert!(commands[0].completed_at.is_some());
+    }
+
+    #[test]
+    fn command_history_keeps_running_commands_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        connection
+            .execute(
+                "INSERT INTO command_runs (
+                   id, command, target_machine_id, target_machine_name, started_at, status
+                 ) VALUES ('complete', 'printf complete', 'machine', 'local', '2026-01-01T00:00:00Z', 'complete')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO command_runs (
+                   id, command, target_machine_id, target_machine_name, started_at, status
+                 ) VALUES ('running', 'printf running', 'machine', 'local', '2025-01-01T00:00:00Z', 'running')",
+                [],
+            )
+            .unwrap();
+        let commands = load_command_runs(&db).unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.id.as_str())
+                .collect::<Vec<_>>(),
+            ["running", "complete"]
+        );
+    }
+
+    #[test]
+    fn startup_cancels_command_rows_left_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO command_runs (
+                   id, command, target_machine_id, target_machine_name, started_at, status
+                 ) VALUES ('interrupted', 'printf interrupted', 'machine', 'local', '2026-01-01T00:00:00Z', 'running')",
+                [],
+            )
+            .unwrap();
+        bootstrap_database(&db).unwrap();
+        let commands = load_command_runs(&db).unwrap();
+        assert_eq!(commands[0].status, "cancelled");
+        assert!(commands[0].completed_at.is_some());
+        assert_eq!(
+            commands[0].result.as_deref(),
+            Some("command cancelled because Mobius restarted")
+        );
     }
 
     #[test]
