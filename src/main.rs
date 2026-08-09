@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_tungstenite::{
     connect_async,
@@ -3945,19 +3945,24 @@ async fn browser_preview_stream(
         .map_err(|cause| error(StatusCode::NOT_FOUND, cause.to_string()))?;
     let (sender, receiver) = mpsc::channel(1);
     tokio::spawn(async move {
-        loop {
-            match frames.recv().await {
-                Ok(frame) => {
-                    if sender
-                        .send(Ok::<_, Infallible>(multipart_browser_frame(&frame)))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return,
+        let initial = { frames.borrow_and_update().clone() };
+        if let Some(frame) = initial
+            && sender
+                .send(Ok::<_, Infallible>(multipart_browser_frame(&frame)))
+                .await
+                .is_err()
+        {
+            return;
+        }
+        while frames.changed().await.is_ok() {
+            let frame = { frames.borrow_and_update().clone() };
+            if let Some(frame) = frame
+                && sender
+                    .send(Ok::<_, Infallible>(multipart_browser_frame(&frame)))
+                    .await
+                    .is_err()
+            {
+                return;
             }
         }
     });
