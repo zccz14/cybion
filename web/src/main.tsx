@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createBrowserSdk } from 'auth-mini/sdk/browser'
-import type { AuthMiniApi, SessionSnapshot } from 'auth-mini/sdk/browser'
+import type { AuthMiniApi } from 'auth-mini/sdk/browser'
+import { AuthMiniButton, AuthMiniProvider, useAuthMini } from 'auth-mini-react-components'
 import { ActivityIcon, ArrowLeftIcon, BookOpenIcon, CheckIcon, CircleStopIcon, CpuIcon, DatabaseIcon, FileIcon, FolderIcon, GitForkIcon, Globe2Icon, HardDriveIcon, KeyRoundIcon, LanguagesIcon, MemoryStickIcon, MicIcon, MonitorCogIcon, NetworkIcon, PanelLeftIcon, PlusIcon, RefreshCwIcon, SendIcon, ServerIcon, Settings2Icon, SquareIcon, TerminalSquareIcon, Volume2Icon, WrenchIcon, XIcon } from 'lucide-react'
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useRef, useState } from 'react'
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -27,6 +27,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import './styles.css'
+import 'auth-mini-react-components/styles.css'
 
 declare global { interface Window { __MOBIUS_AUTH_URL: string | null } }
 
@@ -57,7 +58,6 @@ type ThreadIndex = { main_thread: MainThreadSummary; subthreads: Subthread[] }
 type SubthreadEvent = { id: number; event: AgentEvent; created_at: string }
 type SubthreadDetail = { thread: Subthread; events: SubthreadEvent[] }
 type SubthreadStreamMessage = { type: 'event'; item: SubthreadEvent } | { type: 'reaped' } | { type: 'error'; error: string }
-type Session = SessionSnapshot
 type Language = 'en' | 'zh'
 type ToolDefinition = { type: string; name?: string; description?: string; parameters?: unknown }
 type ToolCatalog = { tools: ToolDefinition[] }
@@ -65,7 +65,7 @@ type BrowserApproval = { id: string; description: string }
 type BrowserSession = { id: string; computer_use_enabled: boolean; created_at: string; url: string; pending_approval?: BrowserApproval }
 const words = {
   en: {
-    machine: 'Machine', console: 'Console', machines: 'Machines', files: 'Files', resources: 'Resources', tools: 'Tools', skills: 'Skills', settings: 'Settings', connecting: 'Connecting…', loadingMachine: 'Loading machine', online: 'Online', light: 'Light', dark: 'Dark', signOut: 'Sign out', language: 'Language',
+    machine: 'Machine', console: 'Console', machines: 'Machines', files: 'Files', resources: 'Resources', tools: 'Tools', skills: 'Skills', settings: 'Settings', connecting: 'Connecting…', loadingMachine: 'Loading machine', online: 'Online', light: 'Light', dark: 'Dark', language: 'Language',
     consoleDescription: 'Agent activity is streamed as it happens.', context: 'Context', tokens: 'tokens', duration: 'Duration', seconds: 's', stop: 'Stop', startRecording: 'Start voice input', stopRecording: 'Stop voice input', transcribing: 'Transcribing…', agentWorking: 'Agent is working…', greeting: 'I am connected to this machine. Tell me the outcome you want to reach.', queued: 'Queued', completed: 'Completed', calling: 'Calling', listingFiles: 'Listing', listedFiles: 'Listed', readingFile: 'Reading', readFile: 'Read', writingFile: 'Editing', wroteFile: 'Edited', runningCommand: 'Running command', ranCommand: 'Ran command', searchingWeb: 'Searching the web', searchedWeb: 'Searched the web', reasoning: 'Reasoning', parameters: 'Parameters', generatingImage: 'Generating image', generatedImage: 'Generated image', addedLines: 'added', deletedLines: 'deleted', lines: 'lines', outcomePlaceholder: 'Describe the outcome you want…', queuedPlaceholder: 'Add a follow-up prompt to the queue…', composeHint: 'Enter to send · Shift+Enter for a new line · IME Enter confirms composition', queuedCount: 'queued',
     machinesTitle: 'Machines', machinesDescription: 'Connect Mobius servers to this operator.', enrolledMachines: 'Enrolled machines', noMachines: 'No remote machines enrolled.', addMachine: 'Add a machine', name: 'Name', mobiusUrl: 'Mobius URL', add: 'Add machine', remove: 'Remove', browser: 'Browser', browserTitle: 'Browser Control', browserDescription: 'Agents autonomously create and control disposable, isolated Chromium sessions.', browserCreateHint: 'Agents create unrestricted sessions when needed. Create one here only for manual takeover.', createBrowser: 'Create browser session', computerUse: 'Enable Computer Use', computerUseHint: 'Visual actions pause for explicit approval before clicks or typing.', noBrowserSessions: 'No browser sessions are active.', selectBrowser: 'Select browser session', noBrowser: 'No browser', closeBrowser: 'Close session', approveAction: 'Approve action', browserInput: 'Type into browser', sendBrowserInput: 'Send input', browserLiveView: 'Live browser view', browserClickHint: 'Click the preview to take over with direct pointer input. Scroll over it with a mouse or trackpad.',
     filesTitle: 'Files', filesDescription: 'Browse and edit the active machine.', refresh: 'Refresh', directory: 'Directory', selectFile: 'Select a file', save: 'Save',
@@ -76,7 +76,7 @@ const words = {
     controller: 'Controller', executor: 'Tool executor', deploymentRole: 'Deployment role', controllerDescription: 'Runs the main thread, model inference, and local or remote tools.', executorDescription: 'Exposes local tools through device tokens and does not require a model upstream.', checkpoint: 'Checkpoint', fullHistory: 'full-history messages', memoryFacts: 'durable facts', activeInputs: 'active inputs', backgroundWork: 'background tasks', announceReplies: 'Automatic voice announcements', continuousVoice: 'Continuous voice', speakResult: 'Speak', preparingVoice: 'Preparing voice…', showParameters: 'Show parameters', hideParameters: 'Hide parameters', mainThreadQueued: 'Queued in the main thread', mainThreadRunning: 'Compiling context', checkpointing: 'Creating checkpoint', retrying: 'Retrying automatically', retryNow: 'Retry now', executorOnly: 'This machine is a tool executor. Use a controller Mobius to call its tools.', deviceAccess: 'Device access', deviceAccessDescription: 'Create a scoped token for another Mobius controller. The secret is shown once.', createDeviceToken: 'Create device token', tokenLabel: 'Token label', allowFilesystem: 'Allow filesystem', allowBash: 'Allow Bash', tokenSecret: 'Copy this secret now', revoke: 'Revoke', deviceToken: 'Device token', capabilities: 'Capabilities', verifyMachine: 'Enrollment verifies the shared issuer and root user.', threads: 'Threads', threadsTitle: 'Threads', threadsDescription: 'The main thread stays first, followed by live subthreads that have not been reaped.', noActiveThreads: 'No active subthreads.', thread: 'Thread', threadTask: 'Task', threadModel: 'Model', threadUpdated: 'Updated', threadDetails: 'Thread details', threadDetailsDescription: 'Read-only history and live events from this subthread.', backToThreads: 'Back to threads', events: 'Events', noThreadEvents: 'No events yet.', event: 'Event', time: 'Time', details: 'Details', threadQueued: 'Queued', threadRunning: 'Running', threadRetrying: 'Retrying', threadIdle: 'Idle', mainThread: 'Main thread', mainThreadDescription: 'The single user thread that accepts prompts.', mainThreadModel: 'Main thread model', subthreadModel: 'Subthread model', mainThreadModelHint: 'Used only by the main conversation.', subthreadModelHint: 'Captured when each subthread is forked.',
   },
   zh: {
-    machine: '机器', console: '控制台', machines: '机器', files: '文件', resources: '资源', tools: '工具', skills: '技能', settings: '设置', connecting: '正在连接…', loadingMachine: '正在加载机器', online: '在线', light: '亮色', dark: '深色', signOut: '退出登录', language: '语言',
+    machine: '机器', console: '控制台', machines: '机器', files: '文件', resources: '资源', tools: '工具', skills: '技能', settings: '设置', connecting: '正在连接…', loadingMachine: '正在加载机器', online: '在线', light: '亮色', dark: '深色', language: '语言',
     consoleDescription: '实时展示 Agent 的执行过程。', context: '上下文', tokens: 'tokens', duration: '用时', seconds: '秒', stop: '停止', startRecording: '开始语音输入', stopRecording: '停止语音输入', transcribing: '正在转写…', agentWorking: 'Agent 正在执行…', greeting: '我已连接到这台机器。请告诉我你想要达成的结果。', queued: '排队中', completed: '已完成', calling: '正在调用', listingFiles: '正在列出', listedFiles: '已列出', readingFile: '正在读取', readFile: '已读取', writingFile: '正在编辑', wroteFile: '已编辑', runningCommand: '正在运行命令', ranCommand: '已运行命令', searchingWeb: '正在搜索网页', searchedWeb: '已搜索网页', reasoning: '推理', parameters: '参数', generatingImage: '正在生成图片', generatedImage: '已生成图片', addedLines: '增加', deletedLines: '删除', lines: '行', outcomePlaceholder: '描述你想要的结果…', queuedPlaceholder: '追加一条后续提示词…', composeHint: 'Enter 发送 · Shift+Enter 换行 · 输入法确认候选时不会发送', queuedCount: '条排队中',
     machinesTitle: '机器', machinesDescription: '将 Mobius 服务器接入当前操作台。', enrolledMachines: '已接入机器', noMachines: '尚未接入远程机器。', addMachine: '添加机器', name: '名称', mobiusUrl: 'Mobius URL', add: '添加机器', remove: '移除', browser: '浏览器', browserTitle: '浏览器控制', browserDescription: 'Agent 会自主创建并控制一次性的隔离 Chromium 会话。', browserCreateHint: 'Agent 会在需要时创建可访问任意网页的会话；仅在你要手动接管时在此创建。', createBrowser: '创建浏览器会话', computerUse: '启用 Computer Use', computerUseHint: '视觉操作在点击或输入前会暂停并请求明确批准。', noBrowserSessions: '当前没有浏览器会话。', selectBrowser: '选择浏览器会话', noBrowser: '不使用浏览器', closeBrowser: '关闭会话', approveAction: '批准操作', browserInput: '向浏览器输入', sendBrowserInput: '发送输入', browserLiveView: '浏览器实时视图', browserClickHint: '点击预览即可直接接管指针输入；可在预览上使用鼠标或触控板滚动。',
     filesTitle: '文件', filesDescription: '浏览并编辑当前机器。', refresh: '刷新', directory: '目录', selectFile: '选择文件', save: '保存',
@@ -91,8 +91,6 @@ type TranslationKey = keyof typeof words.en
 
 const queryClient = new QueryClient()
 const UiContext = createContext<{ dark: boolean; toggleTheme: () => void; language: Language; setLanguage: (language: Language) => void; t: (key: TranslationKey) => string } | null>(null)
-const AuthContext = createContext<AuthMiniApi | null>(null)
-
 function UiProvider({ children }: { children: ReactNode }) {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem('mobius.language') === 'zh' ? 'zh' : 'en')
   const [dark, setDark] = useState(() => localStorage.getItem('mobius.theme') === 'dark' || (!localStorage.getItem('mobius.theme') && matchMedia('(prefers-color-scheme: dark)').matches))
@@ -102,9 +100,7 @@ function UiProvider({ children }: { children: ReactNode }) {
 }
 
 function useUi() { const value = useContext(UiContext); if (!value) throw new Error('UI context is missing'); return value }
-function useAuth() { const value = useContext(AuthContext); if (!value) throw new Error('Auth context is missing'); return value }
-function anonymous(): Session { return { status: 'anonymous', authenticated: false, sessionId: null, accessToken: null, refreshToken: null, receivedAt: null, expiresAt: null } }
-function useBrowserSession(sdk: AuthMiniApi | null) { const [session, setSession] = useState<Session>(() => sdk?.session.getState() ?? anonymous()); useEffect(() => { if (!sdk) return; setSession(sdk.session.getState()); return sdk.session.onChange(setSession) }, [sdk]); return session }
+function useAuthToken() { const { sdk } = useAuthMini(); if (!sdk) throw new Error('Auth Mini session is missing'); return sdk }
 function message(cause: unknown) { return cause instanceof Error ? cause.message : 'Something went wrong.' }
 function bytes(value: number) { const units = ['B', 'KB', 'MB', 'GB', 'TB']; let size = value; let index = 0; while (size >= 1024 && index < units.length - 1) { size /= 1024; index++ } return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}` }
 
@@ -209,33 +205,43 @@ async function streamSubthreadEvents(sdk: AuthMiniApi, threadId: string, after: 
   for (;;) { const { done, value } = await reader.read(); if (done) throw new Error('The subthread event stream ended.'); buffer += decoder.decode(value, { stream: true }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; for (const line of lines) { if (!line.startsWith('data: ')) continue; const item = JSON.parse(line.slice(6)) as SubthreadStreamMessage; onMessage(item); if (item.type === 'reaped') return; if (item.type === 'error') throw new Error(item.error) } }
 }
 
-function normalizedAuthUrl(authUrl: string) { const url = new URL(authUrl.trim()); url.search = ''; url.hash = ''; url.pathname = url.pathname.endsWith('/') ? url.pathname : `${url.pathname}/`; return url.toString() }
-function beginAuthRedirect(authUrl: string) { const normalized = normalizedAuthUrl(authUrl); const state = crypto.randomUUID(); sessionStorage.setItem('mobius.auth_url', normalized); sessionStorage.setItem('mobius.login_state', state); const callback = `${location.origin}${location.pathname}#/auth/callback`; const params = new URLSearchParams({ redirect_uri: callback, state }); if (location.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) params.set('aud', location.hostname); location.assign(`${normalized}web/#/login?${params.toString()}`) }
-function acceptRedirectSession(): string | null { if (!location.hash.startsWith('#/auth/callback?')) return null; const params = new URLSearchParams(location.hash.slice('#/auth/callback?'.length)); const state = sessionStorage.getItem('mobius.login_state'); const authUrl = sessionStorage.getItem('mobius.auth_url'); if (!authUrl || !state || params.get('state') !== state) return null; const accessToken = params.get('access_token'); const sessionId = params.get('session_id'); const refreshToken = params.get('refresh_token'); const expiresIn = Number(params.get('expires_in')); if (!accessToken || !sessionId || !refreshToken || !Number.isFinite(expiresIn)) return null; const receivedAt = new Date(); localStorage.setItem(`auth-mini.sdk:${normalizedAuthUrl(authUrl)}`, JSON.stringify({ accessToken, sessionId, refreshToken, receivedAt: receivedAt.toISOString(), expiresAt: new Date(receivedAt.getTime() + expiresIn * 1000).toISOString() })); sessionStorage.removeItem('mobius.login_state'); history.replaceState(null, '', `${location.pathname}${location.search}#/console`); return authUrl }
+function callbackUrl() { return `${location.origin}${location.pathname}#/auth/callback` }
+function audience() { return location.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) ? location.hostname : undefined }
 
-function App() { const authUrl = acceptRedirectSession() ?? window.__MOBIUS_AUTH_URL; const [sdk] = useState<AuthMiniApi | null>(() => authUrl ? createBrowserSdk(authUrl) : null); const session = useBrowserSession(sdk); if (!authUrl) return <Bootstrap session={session} />; if (session.status === 'recovering') return <main className="grid min-h-svh place-items-center"><Spinner /></main>; if (!sdk || !session.accessToken) return <SignIn />; return <AuthContext.Provider value={sdk}><Workspace /></AuthContext.Provider> }
+function App() { return window.__MOBIUS_AUTH_URL ? <ConfiguredApp authUrl={window.__MOBIUS_AUTH_URL} /> : <Bootstrap /> }
 
-function Bootstrap({ session }: { session: Session }) {
-  const { t } = useUi()
+function AuthProvider({ authUrl, children }: { authUrl: string; children: ReactNode }) {
+  return <AuthMiniProvider autoRedirectToLogin authMiniBaseUrl={authUrl} callbackUrl={callbackUrl} audience={audience()}>{children}</AuthMiniProvider>
+}
+
+function ConfiguredApp({ authUrl }: { authUrl: string }) { return <AuthProvider authUrl={authUrl}><Workspace /></AuthProvider> }
+
+function Bootstrap() {
   const [authUrl, setAuthUrl] = useState(() => sessionStorage.getItem('mobius.auth_url') ?? 'https://auth.ntnl.io')
+  const updateAuthUrl = (nextAuthUrl: string) => { sessionStorage.setItem('mobius.auth_url', nextAuthUrl); setAuthUrl(nextAuthUrl) }
+  return <AuthProvider authUrl={authUrl}><BootstrapForm authUrl={authUrl} setAuthUrl={updateAuthUrl} /></AuthProvider>
+}
+
+function BootstrapForm({ authUrl, setAuthUrl }: { authUrl: string; setAuthUrl: (authUrl: string) => void }) {
+  const { t } = useUi()
+  const { error: authError, isAuthenticated, session } = useAuthMini()
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('https://openai.ntnl.io/v1')
   const [role, setRole] = useState<DeploymentRole>('controller')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const signIn = () => { try { beginAuthRedirect(authUrl) } catch (cause) { setError(message(cause)) } }
   const setup = async (event: FormEvent) => {
     event.preventDefault()
-    if (!session.accessToken) return
+    const accessToken = session?.accessToken
+    if (!accessToken) return
     setBusy(true)
     try {
-      await bootstrapApi('/api/setup', session.accessToken, { method: 'POST', body: JSON.stringify({ auth_url: authUrl, openai_api_key: apiKey, openai_base_url: baseUrl, deployment_role: role }) })
+      await bootstrapApi('/api/setup', accessToken, { method: 'POST', body: JSON.stringify({ auth_url: authUrl, openai_api_key: apiKey, openai_base_url: baseUrl, deployment_role: role }) })
       location.reload()
     } catch (cause) { setError(message(cause)) } finally { setBusy(false) }
   }
-  return <main className="grid min-h-svh place-items-center p-6"><Card className="w-full max-w-lg"><CardHeader><CardTitle>{t('initializeMobius')}</CardTitle><CardDescription>{t('initializeDescription')}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-6" onSubmit={setup}><FieldGroup><Field><FieldLabel>{t('deploymentRole')}</FieldLabel><Select value={role} onValueChange={(value) => setRole(value as DeploymentRole)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectLabel>{t('deploymentRole')}</SelectLabel><SelectItem value="controller">{t('controller')}</SelectItem><SelectItem value="executor">{t('executor')}</SelectItem></SelectGroup></SelectContent></Select><FieldDescription>{role === 'controller' ? t('controllerDescription') : t('executorDescription')}</FieldDescription></Field><Field><FieldLabel htmlFor="auth-url">{t('authMiniUrl')}</FieldLabel><Input id="auth-url" value={authUrl} onChange={(event) => setAuthUrl(event.target.value)} required /></Field><Button type="button" variant="secondary" onClick={signIn}><KeyRoundIcon data-icon="inline-start" />{t('continueAuth')}</Button>{role === 'controller' && <><Field><FieldLabel htmlFor="api-key">{t('apiKey')}</FieldLabel><Input id="api-key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required /></Field><Field><FieldLabel htmlFor="base-url">{t('baseUrl')}</FieldLabel><Input id="base-url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required /></Field></>}</FieldGroup>{error && <ErrorAlert error={error} />}<Button disabled={busy || !session.authenticated}>{busy && <Spinner data-icon="inline-start" />}{t('initialize')}</Button></form></CardContent></Card></main>
+  return <main className="grid min-h-svh place-items-center p-6"><Card className="w-full max-w-lg"><CardHeader><CardTitle>{t('initializeMobius')}</CardTitle><CardDescription>{t('initializeDescription')}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-6" onSubmit={setup}><FieldGroup><Field><FieldLabel>{t('deploymentRole')}</FieldLabel><Select value={role} onValueChange={(value) => setRole(value as DeploymentRole)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectLabel>{t('deploymentRole')}</SelectLabel><SelectItem value="controller">{t('controller')}</SelectItem><SelectItem value="executor">{t('executor')}</SelectItem></SelectGroup></SelectContent></Select><FieldDescription>{role === 'controller' ? t('controllerDescription') : t('executorDescription')}</FieldDescription></Field><Field><FieldLabel htmlFor="auth-url">{t('authMiniUrl')}</FieldLabel><Input id="auth-url" value={authUrl} onChange={(event) => setAuthUrl(event.target.value)} required /></Field>{role === 'controller' && <><Field><FieldLabel htmlFor="api-key">{t('apiKey')}</FieldLabel><Input id="api-key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required /></Field><Field><FieldLabel htmlFor="base-url">{t('baseUrl')}</FieldLabel><Input id="base-url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required /></Field></>}</FieldGroup>{(error || authError) && <ErrorAlert error={error || authError?.message || ''} />}<Button disabled={busy || !isAuthenticated}>{busy && <Spinner data-icon="inline-start" />}{t('initialize')}</Button></form></CardContent></Card></main>
 }
-function SignIn() { const { t } = useUi(); const [error, setError] = useState(''); return <main className="grid min-h-svh place-items-center p-6"><Card className="w-full max-w-sm"><CardHeader><CardTitle>{t('returnMachine')}</CardTitle><CardDescription>{t('signInDescription')}</CardDescription></CardHeader><CardContent className="flex flex-col gap-4">{error && <ErrorAlert error={error} />}<Button onClick={() => { try { beginAuthRedirect(window.__MOBIUS_AUTH_URL!) } catch (cause) { setError(message(cause)) } }}>{t('continueAuth')}</Button></CardContent></Card></main> }
 
 type WorkspaceNavItem = { to: string; label: string; icon: typeof TerminalSquareIcon }
 
@@ -248,17 +254,22 @@ function WorkspaceRoutes({ executor, token }: { executor: boolean; token: AuthMi
   return <Routes><Route path="/console" element={executor ? <Navigate to="/resources" replace /> : null} /><Route path="/threads" element={executor ? <Navigate to="/resources" replace /> : <ThreadsPage token={token} />} /><Route path="/threads/:id" element={executor ? <Navigate to="/resources" replace /> : <ThreadDetailPage token={token} />} /><Route path="/browser" element={executor ? <Navigate to="/resources" replace /> : <BrowserPage token={token} />} /><Route path="/machines" element={<Machines token={token} />} /><Route path="/files" element={<FilesPage token={token} />} /><Route path="/resources" element={<ResourcesPage token={token} />} /><Route path="/tools" element={<ToolCatalogPage token={token} />} /><Route path="/skills" element={<SkillsPage token={token} />} /><Route path="/settings" element={<SettingsPage token={token} />} /><Route path="*" element={<Navigate to={executor ? "/resources" : "/console"} replace />} /></Routes>
 }
 
+function AppHeader({ role, hostname, language }: { role?: DeploymentRole; hostname?: string; language: Language }) {
+  const { t } = useUi()
+  return <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4"><SidebarTrigger><PanelLeftIcon /></SidebarTrigger><Separator orientation="vertical" className="h-4" /><div className="min-w-0"><p className="truncate font-medium">{hostname ?? t('loadingMachine')}</p></div>{role && <Badge className="ml-auto" variant="outline">{role === 'executor' ? t('executor') : t('controller')}</Badge>}<Badge variant="secondary">{t('online')}</Badge><AuthMiniButton lang={language} size="sm" variant="ghost" /></header>
+}
+
 function Workspace() {
-  const sdk = useAuth()
+  const { sdk } = useAuthMini()
+  if (!sdk) return null
   const token = sdk
-  const navigate = useNavigate()
   const { dark, language, setLanguage, toggleTheme, t } = useUi()
   const status = useQuery({ queryKey: ['status'], queryFn: () => api<Status>('/api/status', token) })
   const operatorNav = [{ to: '/console', label: t('console'), icon: TerminalSquareIcon }, { to: '/threads', label: t('threads'), icon: GitForkIcon }, { to: '/browser', label: t('browser'), icon: Globe2Icon }]
   const machineNav = [{ to: '/machines', label: t('machines'), icon: NetworkIcon }, { to: '/files', label: t('files'), icon: FileIcon }, { to: '/resources', label: t('resources'), icon: ActivityIcon }, { to: '/tools', label: t('tools'), icon: WrenchIcon }, { to: '/skills', label: t('skills'), icon: BookOpenIcon }, { to: '/settings', label: t('settings'), icon: Settings2Icon }]
   const nav = status.data?.deployment_role === 'executor' ? machineNav : [...operatorNav, ...machineNav]
   const executor = status.data?.deployment_role === 'executor'
-  return <SidebarProvider><Sidebar><SidebarHeader><div className="flex items-center gap-2.5 px-2 py-1 font-heading text-lg font-semibold"><img alt="" aria-hidden="true" className="size-6 shrink-0" src="/mobius-mark.png" />Mobius</div></SidebarHeader><SidebarContent><SidebarGroup><SidebarGroupLabel>{t('machine')}</SidebarGroupLabel><SidebarGroupContent><WorkspaceNav nav={nav} /></SidebarGroupContent></SidebarGroup></SidebarContent><SidebarFooter><DropdownMenu><DropdownMenuTrigger asChild><Button className="self-center" variant="ghost" size="icon-sm"><LanguagesIcon /><span className="sr-only">{t('language')}</span></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuRadioGroup value={language} onValueChange={(value) => setLanguage(value as Language)}><DropdownMenuRadioItem value="zh">中文</DropdownMenuRadioItem><DropdownMenuRadioItem value="en">English</DropdownMenuRadioItem></DropdownMenuRadioGroup></DropdownMenuContent></DropdownMenu><Button variant="ghost" size="sm" onClick={toggleTheme}><MonitorCogIcon data-icon="inline-start" />{dark ? t('light') : t('dark')}</Button><Button variant="ghost" size="sm" onClick={async () => { await sdk.session.logout(); navigate('/console') }}>{t('signOut')}</Button></SidebarFooter></Sidebar><SidebarInset className="h-svh overflow-hidden"><header className="flex h-14 shrink-0 items-center gap-3 border-b px-4"><SidebarTrigger><PanelLeftIcon /></SidebarTrigger><Separator orientation="vertical" className="h-4" /><div className="min-w-0"><p className="truncate text-sm font-medium">{status.data?.hostname ?? t('loadingMachine')}</p></div>{status.data && <Badge className="ml-auto" variant="outline">{executor ? t('executor') : t('controller')}</Badge>}<Badge variant="secondary">{t('online')}</Badge></header>{executor ? <div className="min-h-0 flex-1 overflow-y-auto"><WorkspaceRoutes executor token={token} /></div> : <Console token={token}><WorkspaceRoutes executor={false} token={token} /></Console>}</SidebarInset></SidebarProvider>
+  return <SidebarProvider><Sidebar><SidebarHeader><div className="flex items-center gap-2.5 px-2 py-1 font-heading text-lg font-semibold"><img alt="" aria-hidden="true" className="size-6 shrink-0" src="/mobius-mark.png" />Mobius</div></SidebarHeader><SidebarContent><SidebarGroup><SidebarGroupLabel>{t('machine')}</SidebarGroupLabel><SidebarGroupContent><WorkspaceNav nav={nav} /></SidebarGroupContent></SidebarGroup></SidebarContent><SidebarFooter><DropdownMenu><DropdownMenuTrigger asChild><Button className="self-center" variant="ghost" size="icon-sm"><LanguagesIcon /><span className="sr-only">{t('language')}</span></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuRadioGroup value={language} onValueChange={(value) => setLanguage(value as Language)}><DropdownMenuRadioItem value="zh">中文</DropdownMenuRadioItem><DropdownMenuRadioItem value="en">English</DropdownMenuRadioItem></DropdownMenuRadioGroup></DropdownMenuContent></DropdownMenu><Button variant="ghost" size="sm" onClick={toggleTheme}><MonitorCogIcon data-icon="inline-start" />{dark ? t('light') : t('dark')}</Button></SidebarFooter></Sidebar><SidebarInset className="h-svh overflow-hidden"><AppHeader role={status.data?.deployment_role} hostname={status.data?.hostname} language={language} />{executor ? <div className="min-h-0 flex-1 overflow-y-auto"><WorkspaceRoutes executor token={token} /></div> : <Console token={token}><WorkspaceRoutes executor={false} token={token} /></Console>}</SidebarInset></SidebarProvider>
 }
 
 function conversationItems(state: ConversationState): ConversationItem[] {
@@ -377,7 +388,7 @@ function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
 }
 
 function ConversationFeed({ items, running = false }: { items: ConversationItem[]; running?: boolean }) {
-  const token = useAuth()
+  const token = useAuthToken()
   const peers = useQuery({ queryKey: ['peers'], queryFn: () => api<Peer[]>('/api/peers', token) })
   const [now, setNow] = useState(() => Date.now())
   const hasRunningTool = items.some((item) => item.kind === 'tool' && !item.complete && item.started_at)
@@ -863,7 +874,7 @@ function ConversationEntry({ item, now, peers }: { item: ConversationItem; now: 
 }
 
 function ManualAnnouncementButton({ content }: { content: string }) {
-  const token = useAuth()
+  const token = useAuthToken()
   const { language, t } = useUi()
   const [preparing, setPreparing] = useState(false)
   const [error, setError] = useState('')
