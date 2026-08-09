@@ -629,11 +629,30 @@ impl BrowserRunner {
                     let Ok(frame) = BASE64.decode(data) else {
                         continue;
                     };
-                    let _ = frames.send(Some(frame));
+                    frames.send_replace(Some(frame));
                 }
             }));
+            let frame = self.preview_frame().await?;
+            self.frames.send_replace(Some(frame));
         }
         Ok(self.frames.subscribe())
+    }
+
+    async fn preview_frame(&mut self) -> Result<Vec<u8>> {
+        let response = self
+            .page
+            .command(
+                "Page.captureScreenshot",
+                json!({"format":"jpeg","quality":70,"captureBeyondViewport":false}),
+            )
+            .await?;
+        let data = response
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("browser did not return a preview frame"))?;
+        BASE64
+            .decode(data)
+            .context("browser returned an invalid preview frame")
     }
 
     async fn url(&mut self) -> Result<String> {
@@ -1183,11 +1202,11 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut frames = runner.preview_stream().await.unwrap();
-        runner.navigate(&format!("http://{address}")).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), next_preview_frame(&mut frames))
+        let initial = tokio::time::timeout(Duration::from_secs(5), next_preview_frame(&mut frames))
             .await
             .unwrap();
-        assert!(frame.starts_with(&[0xff, 0xd8, 0xff]));
+        assert!(initial.starts_with(&[0xff, 0xd8, 0xff]));
+        runner.navigate(&format!("http://{address}")).await.unwrap();
         let mut loaded = false;
         for _ in 0..50 {
             let screenshot = runner.screenshot().await.unwrap();
