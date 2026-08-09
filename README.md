@@ -240,6 +240,8 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
   扩展和主机环境变量。
 - 可配置的文件系统、Bash 与网页搜索工具集；`list_files`、`read_file`、`write_file`、
   `edit_file` 和 `run_bash` 都接受可选的 `target_device`，省略或填空字符串时在控制设备本机执行。
+  每次 Bash 调用会在开始时持久化记录命令、目标机器和 `running` 状态，并在【命令】页统一展示
+  返回结果、退出码、结束时间和 `complete` 或 `cancelled` 终态；正在运行的命令固定排在前面。
 - Auth Mini JWT 验证，以首次初始化时绑定的 root user 作为操作边界；浏览器在每次 API 或
   SSE 请求前检查 access token 有效期，临近过期时刷新，并在 401 后刷新重试一次。
 - 设备 Token、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备无需 Responses API
@@ -365,7 +367,7 @@ x86_64 和 Linux aarch64 的发布归档与 SHA-256 校验和。
 - 对 checkpoint 压缩质量、长期事实召回、溢出恢复成功率和稳定前缀缓存命中率建立回放
   评测。
 - 在现有浏览器连续语音和主动播报之上，接入 AI 音箱、车载智能等专用交互设备。
-- 为设备 Token 增加路径、命令和有效期等更细粒度的能力约束与审计视图。
+- 为设备 Token 增加路径和有效期等更细粒度的能力约束。
 - 在不暴露 Session 管理的前提下，增强跨机器任务的设备建议、可达性诊断和结果证据视图。
 - 继续保持部署、初始化与权限管理可通过 Web API 和 GUI 完成。
 
