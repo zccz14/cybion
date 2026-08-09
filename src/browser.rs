@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
     process::{Child, Command},
-    sync::{Mutex, broadcast, oneshot, watch},
+    sync::{Mutex, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_tungstenite::{
@@ -17,7 +17,7 @@ use url::Url;
 use uuid::Uuid;
 
 pub type BrowserSessions = Arc<Mutex<BrowserManager>>;
-pub type BrowserFrameStream = broadcast::Receiver<Vec<u8>>;
+pub type BrowserFrameStream = watch::Receiver<Option<Vec<u8>>>;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 const VIEWPORT_WIDTH: u32 = 1280;
@@ -75,7 +75,7 @@ struct BrowserRunner {
     page: CdpClient,
     page_url: String,
     browser_context_id: String,
-    frames: broadcast::Sender<Vec<u8>>,
+    frames: watch::Sender<Option<Vec<u8>>>,
     screencast: Option<JoinHandle<()>>,
 }
 
@@ -572,7 +572,7 @@ impl BrowserRunner {
             json!({"width":VIEWPORT_WIDTH,"height":VIEWPORT_HEIGHT,"deviceScaleFactor":1,"mobile":false}),
         )
         .await?;
-        let (frames, _) = broadcast::channel(2);
+        let (frames, _) = watch::channel(None);
         Ok(Self {
             child,
             profile_dir,
@@ -629,7 +629,7 @@ impl BrowserRunner {
                     let Ok(frame) = BASE64.decode(data) else {
                         continue;
                     };
-                    let _ = frames.send(frame);
+                    let _ = frames.send(Some(frame));
                 }
             }));
         }
@@ -1093,6 +1093,15 @@ mod tests {
     use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    async fn next_preview_frame(frames: &mut BrowserFrameStream) -> Vec<u8> {
+        loop {
+            if let Some(frame) = frames.borrow_and_update().clone() {
+                return frame;
+            }
+            frames.changed().await.expect("screencast ended");
+        }
+    }
+
     #[test]
     fn computer_clicks_and_typing_need_approval() {
         assert!(!actions_require_approval(&[json!({"type":"screenshot"})]));
@@ -1175,17 +1184,9 @@ mod tests {
         .unwrap();
         let mut frames = runner.preview_stream().await.unwrap();
         runner.navigate(&format!("http://{address}")).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match frames.recv().await {
-                    Ok(frame) => return frame,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(cause) => panic!("screencast ended: {cause}"),
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), next_preview_frame(&mut frames))
+            .await
+            .unwrap();
         assert!(frame.starts_with(&[0xff, 0xd8, 0xff]));
         let mut loaded = false;
         for _ in 0..50 {
@@ -1261,16 +1262,17 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        while frames.try_recv().is_ok() {}
+        let _ = frames.borrow_and_update();
         let started = Instant::now();
         let next_frame = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match frames.recv().await {
-                    Ok(frame) => return (frame, started.elapsed()),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(cause) => panic!("screencast ended: {cause}"),
-                }
-            }
+            frames.changed().await.expect("screencast ended");
+            (
+                frames
+                    .borrow_and_update()
+                    .clone()
+                    .expect("screencast frame"),
+                started.elapsed(),
+            )
         });
         let (next_frame, scroll) = tokio::join!(next_frame, runner.scroll(400.0));
         scroll.unwrap();
