@@ -1,12 +1,14 @@
 use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
     process::{Child, Command},
-    sync::{Mutex, oneshot, watch},
+    sync::{Mutex, broadcast, oneshot, watch},
+    task::JoinHandle,
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WebSocketMessage,
@@ -15,6 +17,7 @@ use url::Url;
 use uuid::Uuid;
 
 pub type BrowserSessions = Arc<Mutex<BrowserManager>>;
+pub type BrowserFrameStream = broadcast::Receiver<Vec<u8>>;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 const VIEWPORT_WIDTH: u32 = 1280;
@@ -70,7 +73,10 @@ struct BrowserRunner {
     profile_dir: PathBuf,
     browser: CdpClient,
     page: CdpClient,
+    page_url: String,
     browser_context_id: String,
+    frames: broadcast::Sender<Vec<u8>>,
+    screencast: Option<JoinHandle<()>>,
 }
 
 struct CdpClient {
@@ -165,6 +171,18 @@ pub async fn screenshot(sessions: &BrowserSessions, id: &str) -> Result<String> 
     let image = session.runner.screenshot().await?;
     session.url = session.runner.url().await?;
     Ok(image)
+}
+
+pub async fn preview_stream(sessions: &BrowserSessions, id: &str) -> Result<BrowserFrameStream> {
+    sessions
+        .lock()
+        .await
+        .sessions
+        .get_mut(id)
+        .ok_or_else(|| anyhow!("browser session does not exist"))?
+        .runner
+        .preview_stream()
+        .await
 }
 
 pub async fn user_input(sessions: &BrowserSessions, id: &str, input: BrowserInput) -> Result<()> {
@@ -554,16 +572,23 @@ impl BrowserRunner {
             json!({"width":VIEWPORT_WIDTH,"height":VIEWPORT_HEIGHT,"deviceScaleFactor":1,"mobile":false}),
         )
         .await?;
+        let (frames, _) = broadcast::channel(2);
         Ok(Self {
             child,
             profile_dir,
             browser,
             page,
+            page_url,
             browser_context_id,
+            frames,
+            screencast: None,
         })
     }
 
     async fn close(&mut self) {
+        if let Some(screencast) = self.screencast.take() {
+            screencast.abort();
+        }
         let _ = self
             .browser
             .command(
@@ -574,6 +599,41 @@ impl BrowserRunner {
         let _ = self.child.start_kill();
         let _ = self.child.wait().await;
         let _ = std::fs::remove_dir_all(&self.profile_dir);
+    }
+
+    async fn preview_stream(&mut self) -> Result<BrowserFrameStream> {
+        if self.screencast.is_none() {
+            let mut preview = CdpClient::connect(&self.page_url).await?;
+            preview.command("Page.enable", json!({})).await?;
+            preview
+                .command(
+                    "Page.startScreencast",
+                    json!({"format":"jpeg","quality":70,"maxWidth":VIEWPORT_WIDTH,"maxHeight":VIEWPORT_HEIGHT,"everyNthFrame":1}),
+                )
+                .await?;
+            let frames = self.frames.clone();
+            self.screencast = Some(tokio::spawn(async move {
+                while let Ok(event) = preview.event().await {
+                    if event.get("method").and_then(Value::as_str) != Some("Page.screencastFrame") {
+                        continue;
+                    }
+                    let session_id = event.pointer("/params/sessionId").and_then(Value::as_u64);
+                    if let Some(session_id) = session_id {
+                        let _ = preview
+                            .notify("Page.screencastFrameAck", json!({"sessionId":session_id}))
+                            .await;
+                    }
+                    let Some(data) = event.pointer("/params/data").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Ok(frame) = BASE64.decode(data) else {
+                        continue;
+                    };
+                    let _ = frames.send(frame);
+                }
+            }));
+        }
+        Ok(self.frames.subscribe())
     }
 
     async fn url(&mut self) -> Result<String> {
@@ -837,6 +897,44 @@ impl CdpClient {
             }
         }
     }
+
+    async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.socket
+            .send(WebSocketMessage::Text(
+                json!({"id":id,"method":method,"params":params})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn event(&mut self) -> Result<Value> {
+        loop {
+            let message = self
+                .socket
+                .next()
+                .await
+                .ok_or_else(|| anyhow!("browser debugging socket closed"))??;
+            match message {
+                WebSocketMessage::Text(text) => {
+                    let value: Value = serde_json::from_str(&text)?;
+                    if value.get("method").is_some() {
+                        return Ok(value);
+                    }
+                }
+                WebSocketMessage::Ping(payload) => {
+                    self.socket.send(WebSocketMessage::Pong(payload)).await?
+                }
+                WebSocketMessage::Close(_) => {
+                    return Err(anyhow!("browser debugging socket closed"));
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn browser_executable() -> Result<PathBuf> {
@@ -992,6 +1090,7 @@ fn action_summary(actions: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
@@ -1074,7 +1173,20 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+        let mut frames = runner.preview_stream().await.unwrap();
         runner.navigate(&format!("http://{address}")).await.unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match frames.recv().await {
+                    Ok(frame) => return frame,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(cause) => panic!("screencast ended: {cause}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(frame.starts_with(&[0xff, 0xd8, 0xff]));
         let mut loaded = false;
         for _ in 0..50 {
             let screenshot = runner.screenshot().await.unwrap();
@@ -1135,6 +1247,7 @@ mod tests {
         let mut runner = BrowserRunner::launch(&reqwest::Client::new(), "input-test")
             .await
             .unwrap();
+        let mut frames = runner.preview_stream().await.unwrap();
         runner.navigate(&format!("http://{address}")).await.unwrap();
         for _ in 0..50 {
             if runner
@@ -1148,7 +1261,32 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        runner.scroll(400.0).await.unwrap();
+        while frames.try_recv().is_ok() {}
+        let started = Instant::now();
+        let next_frame = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match frames.recv().await {
+                    Ok(frame) => return (frame, started.elapsed()),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(cause) => panic!("screencast ended: {cause}"),
+                }
+            }
+        });
+        let (next_frame, scroll) = tokio::join!(next_frame, runner.scroll(400.0));
+        scroll.unwrap();
+        let (frame, screencast_latency) = next_frame.unwrap();
+        let started = Instant::now();
+        let png = runner.screenshot().await.unwrap();
+        let screenshot_latency = started.elapsed();
+        let png = BASE64.decode(png).unwrap();
+        println!(
+            "PERF_BROWSER_PREVIEW screencast_latency_ms={} screencast_jpeg_bytes={} screenshot_latency_ms={} screenshot_png_bytes={}",
+            screencast_latency.as_millis(),
+            frame.len(),
+            screenshot_latency.as_millis(),
+            png.len()
+        );
+        assert!(frame.starts_with(&[0xff, 0xd8, 0xff]));
         assert!(
             runner
                 .evaluate("window.scrollY")
