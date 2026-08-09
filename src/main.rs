@@ -6179,10 +6179,20 @@ async fn execute_local_bash(
         Ok(id) => id,
         Err(cause) => return tool_execution(format!("error: cannot record command: {cause}")),
     };
-    let result = run_bash(command, cancellation).await;
-    match finish_command_run(db_path, &id, &result) {
-        Ok(()) => tool_execution(result.output),
-        Err(cause) => tool_execution(format!("error: cannot complete command record: {cause}")),
+    let command = command.to_owned();
+    let db_path = db_path.to_path_buf();
+    match tokio::spawn(async move {
+        let result = run_bash(&command, cancellation).await;
+        let finished = finish_command_run(&db_path, &id, &result);
+        (result, finished)
+    })
+    .await
+    {
+        Ok((result, Ok(()))) => tool_execution(result.output),
+        Ok((_, Err(cause))) => {
+            tool_execution(format!("error: cannot complete command record: {cause}"))
+        }
+        Err(cause) => tool_execution(format!("error: command runner stopped: {cause}")),
     }
 }
 
@@ -6252,7 +6262,7 @@ async fn execute_remote_device(
         .json(&json!({ "name": tool, "arguments": arguments }));
     let response = tokio::select! {
         response = request.send() => response,
-        _ = cancellation.changed() => return tool_execution("error: agent stopped"),
+        _ = wait_for_cancellation(&mut cancellation) => return tool_execution("error: agent stopped"),
     };
     let response = match response.and_then(reqwest::Response::error_for_status) {
         Ok(response) => response,
@@ -6340,7 +6350,7 @@ async fn run_bash(command: &str, mut cancellation: watch::Receiver<bool>) -> Bas
                 status: "complete",
             },
         },
-        _ = cancellation.changed() => BashResult {
+        _ = wait_for_cancellation(&mut cancellation) => BashResult {
             output: "error: command cancelled".to_owned(),
             exit_code: None,
             status: "cancelled",
@@ -6350,6 +6360,17 @@ async fn run_bash(command: &str, mut cancellation: watch::Receiver<bool>) -> Bas
             exit_code: None,
             status: "cancelled",
         },
+    }
+}
+
+async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancellation.borrow_and_update() {
+            return;
+        }
+        if cancellation.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -9020,6 +9041,37 @@ mod tests {
         assert_eq!(commands[0].status, "cancelled");
         assert_eq!(commands[0].exit_code, None);
         assert!(commands[0].completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn interrupted_bash_invocation_still_records_its_terminal_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let db_for_request = db.clone();
+        let request = tokio::spawn(async move {
+            execute_local_tool(
+                "run_bash",
+                json!({"command":"sleep 1; printf detached"}),
+                &db_for_request,
+                watch::channel(false).1,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(load_command_runs(&db).unwrap()[0].status, "running");
+        request.abort();
+        let _ = request.await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let commands = load_command_runs(&db).unwrap();
+        assert_eq!(commands[0].status, "complete");
+        assert_eq!(commands[0].exit_code, Some(0));
+        assert!(
+            commands[0]
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("detached"))
+        );
     }
 
     #[test]
