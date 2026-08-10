@@ -68,8 +68,8 @@ type CommandRun = { id: string; command: string; target_machine_id: string; targ
 type CommandTarget = { id: string; name: string }
 type CommandRunPage = { items: CommandRun[]; total: number; page: number; page_size: number; target_machines: CommandTarget[] }
 const goalCopy = {
-  en: { goals: 'Goals', description: 'Each delegated Goal keeps looping until it is achieved, blocked, or cancelled.', goal: 'Goal', objective: 'Objective', doneWhen: 'Done when', state: 'Goal state', active: 'Active', achieved: 'Achieved', blocked: 'Blocked', cancelled: 'Cancelled', evidence: 'Evidence', blocker: 'Blocker', outcome: 'Outcome', execution: 'Execution', history: 'Event history', back: 'Back to goals' },
-  zh: { goals: '目标', description: '每个委派目标都会持续循环，直到达成、受阻或取消。', goal: '目标', objective: '目标说明', doneWhen: '完成条件', state: '目标状态', active: '进行中', achieved: '已达成', blocked: '已受阻', cancelled: '已取消', evidence: '证据', blocker: '受阻原因', outcome: '最终结果', execution: '执行状态', history: '事件历史', back: '返回目标' },
+  en: { goals: 'Goals', description: 'Each delegated Goal keeps looping until it is achieved, blocked, or cancelled.', goal: 'Goal', objective: 'Objective', doneWhen: 'Done when', state: 'Goal state', active: 'Active', achieved: 'Achieved', blocked: 'Blocked', cancelled: 'Cancelled', evidence: 'Evidence', blocker: 'Blocker', outcome: 'Outcome', execution: 'Execution', history: 'Event history', back: 'Back to goals', newGoal: 'New Goal', editGoal: 'Edit Goal', deleteGoal: 'Delete Goal', saveGoal: 'Save Goal', cancelEdit: 'Cancel', title: 'Title', actions: 'Actions', deleteGoalConfirm: 'Delete “{title}”? Its execution and event history will be permanently removed.' },
+  zh: { goals: '目标', description: '每个委派目标都会持续循环，直到达成、受阻或取消。', goal: '目标', objective: '目标说明', doneWhen: '完成条件', state: '目标状态', active: '进行中', achieved: '已达成', blocked: '已受阻', cancelled: '已取消', evidence: '证据', blocker: '受阻原因', outcome: '最终结果', execution: '执行状态', history: '事件历史', back: '返回目标', newGoal: '新建目标', editGoal: '编辑目标', deleteGoal: '删除目标', saveGoal: '保存目标', cancelEdit: '取消', title: '名称', actions: '操作', deleteGoalConfirm: '删除“{title}”？该目标的执行与事件历史会被永久移除。' },
 } as const
 const words = {
   en: {
@@ -358,13 +358,88 @@ function subthreadConversationItems(thread: Subthread, events: SubthreadEvent[])
   return items
 }
 
+function GoalEditor({ token, goal, onDone }: { token: AuthMiniApi; goal: Subthread | null; onDone: () => void }) {
+  const { language } = useUi()
+  const queryClient = useQueryClient()
+  const [title, setTitle] = useState(goal?.title ?? '')
+  const [task, setTask] = useState(goal?.task ?? '')
+  const [completionCriteria, setCompletionCriteria] = useState(goal?.completion_criteria ?? '')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const editing = goal !== null
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSaving(true)
+    setSaveError('')
+    try {
+      await api<Subthread>(editing ? `/api/threads/${goal.id}` : '/api/threads', token, {
+        method: editing ? 'PUT' : 'POST',
+        body: JSON.stringify({ title, task, completion_criteria: completionCriteria }),
+      })
+      await queryClient.invalidateQueries({ queryKey: ['threads'] })
+      onDone()
+    } catch (cause) {
+      setSaveError(message(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+  return <Card>
+    <CardHeader><CardTitle>{goalText(language, editing ? 'editGoal' : 'newGoal')}</CardTitle><CardDescription>{goalText(language, 'description')}</CardDescription></CardHeader>
+    <CardContent>
+      <form className="space-y-4" onSubmit={(event) => { void submit(event) }}>
+        <FieldGroup>
+          <Field><FieldLabel htmlFor="goal-title">{goalText(language, 'title')}</FieldLabel><Input id="goal-title" value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
+          <Field><FieldLabel htmlFor="goal-task">{goalText(language, 'objective')}</FieldLabel><Textarea id="goal-task" value={task} onChange={(event) => setTask(event.target.value)} required /></Field>
+          <Field><FieldLabel htmlFor="goal-done-when">{goalText(language, 'doneWhen')}</FieldLabel><Textarea id="goal-done-when" value={completionCriteria} onChange={(event) => setCompletionCriteria(event.target.value)} required /></Field>
+        </FieldGroup>
+        {saveError && <ErrorAlert error={saveError} />}
+        <div className="flex gap-2"><Button disabled={saving}>{goalText(language, 'saveGoal')}</Button><Button type="button" variant="outline" onClick={onDone}>{goalText(language, 'cancelEdit')}</Button></div>
+      </form>
+    </CardContent>
+  </Card>
+}
+
 function ThreadsPage({ token }: { token: AuthMiniApi }) {
   const { language, t } = useUi()
+  const queryClient = useQueryClient()
   const title = goalText(language, 'goals')
   const description = goalText(language, 'description')
+  const [editor, setEditor] = useState<Subthread | 'new' | null>(null)
+  const [deleteError, setDeleteError] = useState('')
   const query = useQuery({ queryKey: ['threads'], queryFn: () => api<ThreadIndex>('/api/threads', token), refetchInterval: 1000 })
+  const remove = async (thread: Subthread) => {
+    if (!window.confirm(goalText(language, 'deleteGoalConfirm').replace('{title}', thread.title))) return
+    setDeleteError('')
+    try {
+      await api<{ deleted: boolean }>(`/api/threads/${thread.id}`, token, { method: 'DELETE' })
+      await queryClient.invalidateQueries({ queryKey: ['threads'] })
+    } catch (cause) {
+      setDeleteError(message(cause))
+    }
+  }
   if (query.error) return <Page title={title} description={description}><ErrorAlert error={message(query.error)} /></Page>
-  return <Page title={title} description={description}><Card><CardHeader><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent>{!query.data ? <div className="flex items-center gap-2"><Spinner />{t('loadingMachine')}</div> : <Table><TableHeader><TableRow><TableHead>{goalText(language, 'goal')}</TableHead><TableHead>{goalText(language, 'state')}</TableHead><TableHead>{goalText(language, 'execution')}</TableHead><TableHead>{t('threadModel')}</TableHead><TableHead>{t('threadUpdated')}</TableHead></TableRow></TableHeader><TableBody><TableRow><TableCell><Button asChild className="h-auto p-0" variant="link"><Link to="/console">{t('mainThread')}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground">{t('mainThreadDescription')}</p></TableCell><TableCell>—</TableCell><TableCell><Badge variant={query.data.main_thread.status === 'running' ? 'secondary' : 'outline'}>{mainThreadStatusLabel(t, query.data.main_thread.status)}</Badge></TableCell><TableCell><code>{query.data.main_thread.model}</code></TableCell><TableCell>{query.data.main_thread.updated_at ? formatTimestamp(language, query.data.main_thread.updated_at) : '—'}</TableCell></TableRow>{query.data.subthreads.map((thread) => <TableRow key={thread.id}><TableCell><Button asChild className="h-auto p-0" variant="link"><Link to={`/threads/${thread.id}`}>{thread.title}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground" title={thread.task}>{thread.task}</p></TableCell><TableCell><Badge variant={thread.goal_state === 'active' ? 'secondary' : 'outline'}>{goalStateLabel(language, thread.goal_state)}</Badge></TableCell><TableCell><Badge variant={thread.status === 'running' ? 'secondary' : 'outline'}>{threadStatusLabel(t, thread.status)}</Badge></TableCell><TableCell><code>{thread.model}</code></TableCell><TableCell>{formatTimestamp(language, thread.updated_at)}</TableCell></TableRow>)}</TableBody></Table>}</CardContent></Card></Page>
+  return <Page title={title} description={description}>
+    {editor && <GoalEditor key={editor === 'new' ? 'new' : editor.id} token={token} goal={editor === 'new' ? null : editor} onDone={() => setEditor(null)} />}
+    {deleteError && <ErrorAlert error={deleteError} />}
+    <Card>
+      <CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></div><Button onClick={() => setEditor('new')}><PlusIcon data-icon="inline-start" />{goalText(language, 'newGoal')}</Button></div></CardHeader>
+      <CardContent>{!query.data ? <div className="flex items-center gap-2"><Spinner />{t('loadingMachine')}</div> : <Table>
+        <TableHeader><TableRow><TableHead>{goalText(language, 'goal')}</TableHead><TableHead>{goalText(language, 'state')}</TableHead><TableHead>{goalText(language, 'execution')}</TableHead><TableHead>{t('threadModel')}</TableHead><TableHead>{t('threadUpdated')}</TableHead><TableHead>{goalText(language, 'actions')}</TableHead></TableRow></TableHeader>
+        <TableBody>
+          <TableRow><TableCell><Button asChild className="h-auto p-0" variant="link"><Link to="/console">{t('mainThread')}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground">{t('mainThreadDescription')}</p></TableCell><TableCell>—</TableCell><TableCell><Badge variant={query.data.main_thread.status === 'running' ? 'secondary' : 'outline'}>{mainThreadStatusLabel(t, query.data.main_thread.status)}</Badge></TableCell><TableCell><code>{query.data.main_thread.model}</code></TableCell><TableCell>{query.data.main_thread.updated_at ? formatTimestamp(language, query.data.main_thread.updated_at) : '—'}</TableCell><TableCell>—</TableCell></TableRow>
+          {query.data.subthreads.map((thread) => <TableRow key={thread.id}>
+            <TableCell><Button asChild className="h-auto p-0" variant="link"><Link to={`/threads/${thread.id}`}>{thread.title}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground" title={thread.task}>{thread.task}</p></TableCell>
+            <TableCell><Badge variant={thread.goal_state === 'active' ? 'secondary' : 'outline'}>{goalStateLabel(language, thread.goal_state)}</Badge></TableCell>
+            <TableCell><Badge variant={thread.status === 'running' ? 'secondary' : 'outline'}>{threadStatusLabel(t, thread.status)}</Badge></TableCell>
+            <TableCell><code>{thread.model}</code></TableCell>
+            <TableCell>{formatTimestamp(language, thread.updated_at)}</TableCell>
+            <TableCell><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => setEditor(thread)}>{goalText(language, 'editGoal')}</Button><Button size="sm" variant="destructive" onClick={() => { void remove(thread) }}>{goalText(language, 'deleteGoal')}</Button></div></TableCell>
+          </TableRow>)}
+        </TableBody>
+      </Table>}</CardContent>
+    </Card>
+  </Page>
 }
 
 function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
