@@ -56,9 +56,10 @@ Mobius 的迭代哲学是 **one more step**：依据当前对话、已有产物�
 实现形式。用户始终只面对主线程；它维护长期对话的主线，并负责把完整历史编译为当前
 推理所需的上下文。
 
-每个从主线程 fork 的**子线程 (Subthread)** 就是一个持久 **Goal**。它的 `title` 是简短
-名称，`task` 是持久目标，并且必须在创建时声明可验证的完成条件。子线程携带主线程已
-编译的 checkpoint 与这一份 Goal 提示；它不接收用户 prompt，也不形成第二套 Session。
+每个持久 **Goal** 都由一个**子线程 (Subthread)** 执行。它的 `title` 是简短名称，`task`
+是持久目标，并且必须在创建时声明可验证的完成条件。用户可以直接在 Goals 页面创建、
+查看、编辑和删除 Goal；从主线程 fork 的 Goal 会携带已编译的 checkpoint，直接创建的
+Goal 则从它明确的目标与完成条件开始。子线程不接收用户 prompt，也不形成第二套 Session。
 
 Goal 不以一次自然语言回复为完成。每一轮执行后，系统把回复作为进展持久化并将同一个
 子线程重新排队；它一直循环，直到子线程明确调用 `achieve_goal` 并提供证据，或调用
@@ -226,9 +227,10 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
 - 从主线程 fork 的后台子线程即持久 Goal；每个 Goal 固化名称、目标、完成条件与模型，并在
   非终态回复后记录进展、继续循环。只有 `achieve_goal` 记录可验证证据或 `block_goal` 记录
   具体受阻原因才能结束循环；取消会形成 `cancelled` 终态。Goals 页面将主线程固定置顶，并保留
-  所有 Goal 的状态和模型；详情页显示目标、完成条件、目标语义状态、证据或受阻原因、最终
-  结果与事件历史。只为 active Goal 打开 SSE；终态仍可只读查看。子线程不能接收 prompt，不
-  形成第二套 Session。内部 HTTP API 继续使用 `/api/threads` 前缀。
+  所有 Goal 的状态和模型；可直接新建、编辑或删除 Goal。编辑会清除旧终态并按新目标重新排队，
+  删除会永久移除该 Goal 的执行与事件历史。详情页显示目标、完成条件、目标语义状态、证据或
+  受阻原因、最终结果与事件历史。只为 active Goal 打开 SSE；终态仍可只读查看。子线程不能接收
+  prompt，不形成第二套 Session。内部 HTTP API 继续使用 `/api/threads` 前缀。
 - 内嵌中英双语 Web GUI，支持亮/暗主题、语音输入、文件浏览和编辑。
 - 浏览器连续语音输入和按主线程顺序播放的主动语音播报。
 - **Browser Control 与 Computer Use**：Agent 可自主创建、列出、聚焦与关闭独立的临时 Chromium
