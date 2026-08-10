@@ -3,7 +3,7 @@ import type { AuthMiniApi } from 'auth-mini/sdk/browser'
 import { AuthMiniButton, AuthMiniProvider, useAuthMini } from 'auth-mini-react-components'
 import { ActivityIcon, ArrowLeftIcon, BookOpenIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, CircleStopIcon, CpuIcon, DatabaseIcon, FileIcon, FolderIcon, GitForkIcon, Globe2Icon, HardDriveIcon, KeyRoundIcon, LanguagesIcon, MemoryStickIcon, MicIcon, MonitorCogIcon, NetworkIcon, PanelLeftIcon, PlusIcon, RefreshCwIcon, SearchIcon, SendIcon, ServerIcon, Settings2Icon, SquareIcon, TerminalSquareIcon, Volume2Icon, WrenchIcon, XIcon } from 'lucide-react'
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useRef, useState } from 'react'
-import { HashRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { HashRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { createRoot } from 'react-dom/client'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -52,7 +52,8 @@ type ConversationRun = { id: string; user_message_id: number; status: 'running' 
 type ContextCheckpoint = { id: number; first_message_id: number; through_message_id: number; source_message_count: number; level: number; previous_checkpoint_id?: number; summary: string; created_at: string }
 type ContextMemoryRoot = { facts: number; latest_checkpoint_id?: number; lookup_tool: string }
 type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null; memory: ContextMemoryRoot } }
-type Subthread = { id: string; title: string; task: string; status: 'queued' | 'running' | 'retrying'; model: string; result: string | null; retry_attempt: number; next_retry_at: number | null; created_at: string; updated_at: string }
+type GoalState = 'active' | 'achieved' | 'blocked' | 'cancelled'
+type Subthread = { id: string; title: string; task: string; completion_criteria: string; goal_state: GoalState; goal_evidence: string | null; blocked_reason: string | null; status: 'queued' | 'running' | 'retrying' | 'completed' | 'cancelled' | 'failed'; model: string; result: string | null; retry_attempt: number; next_retry_at: number | null; created_at: string; updated_at: string }
 type MainThreadSummary = { status: 'idle' | 'running' | 'retrying'; model: string; updated_at: string | null }
 type ThreadIndex = { main_thread: MainThreadSummary; subthreads: Subthread[] }
 type SubthreadEvent = { id: number; event: AgentEvent; created_at: string }
@@ -66,6 +67,10 @@ type BrowserSession = { id: string; computer_use_enabled: boolean; created_at: s
 type CommandRun = { id: string; command: string; target_machine_id: string; target_machine_name: string; started_at: string; completed_at: string | null; result: string | null; exit_code: number | null; status: 'running' | 'cancelled' | 'complete' }
 type CommandTarget = { id: string; name: string }
 type CommandRunPage = { items: CommandRun[]; total: number; page: number; page_size: number; target_machines: CommandTarget[] }
+const goalCopy = {
+  en: { goals: 'Goals', description: 'Each delegated Goal keeps looping until it is achieved, blocked, or cancelled.', goal: 'Goal', objective: 'Objective', doneWhen: 'Done when', state: 'Goal state', active: 'Active', achieved: 'Achieved', blocked: 'Blocked', cancelled: 'Cancelled', evidence: 'Evidence', blocker: 'Blocker', outcome: 'Outcome', execution: 'Execution', history: 'Event history', back: 'Back to goals' },
+  zh: { goals: '目标', description: '每个委派目标都会持续循环，直到达成、受阻或取消。', goal: '目标', objective: '目标说明', doneWhen: '完成条件', state: '目标状态', active: '进行中', achieved: '已达成', blocked: '已受阻', cancelled: '已取消', evidence: '证据', blocker: '受阻原因', outcome: '最终结果', execution: '执行状态', history: '事件历史', back: '返回目标' },
+} as const
 const words = {
   en: {
     machine: 'Machine', console: 'Console', machines: 'Machines', files: 'Files', commands: 'Commands', resources: 'Resources', tools: 'Tools', skills: 'Skills', settings: 'Settings', connecting: 'Connecting…', loadingMachine: 'Loading machine', online: 'Online', light: 'Light', dark: 'Dark', language: 'Language',
@@ -93,6 +98,7 @@ const words = {
   },
 } as const
 type TranslationKey = keyof typeof words.en
+type GoalCopyKey = keyof typeof goalCopy.en
 
 const queryClient = new QueryClient()
 const UiContext = createContext<{ dark: boolean; toggleTheme: () => void; language: Language; setLanguage: (language: Language) => void; t: (key: TranslationKey) => string } | null>(null)
@@ -105,6 +111,7 @@ function UiProvider({ children }: { children: ReactNode }) {
 }
 
 function useUi() { const value = useContext(UiContext); if (!value) throw new Error('UI context is missing'); return value }
+function goalText(language: Language, key: GoalCopyKey) { return goalCopy[language][key] }
 function useAuthToken() { const { sdk } = useAuthMini(); if (!sdk) throw new Error('Auth Mini session is missing'); return sdk }
 function message(cause: unknown) { return cause instanceof Error ? cause.message : 'Something went wrong.' }
 function bytes(value: number) { const units = ['B', 'KB', 'MB', 'GB', 'TB']; let size = value; let index = 0; while (size >= 1024 && index < units.length - 1) { size /= 1024; index++ } return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}` }
@@ -270,7 +277,7 @@ function Workspace() {
   const token = sdk
   const { dark, language, setLanguage, toggleTheme, t } = useUi()
   const status = useQuery({ queryKey: ['status'], queryFn: () => api<Status>('/api/status', token) })
-  const operatorNav = [{ to: '/console', label: t('console'), icon: TerminalSquareIcon }, { to: '/threads', label: t('threads'), icon: GitForkIcon }, { to: '/browser', label: t('browser'), icon: Globe2Icon }]
+  const operatorNav = [{ to: '/console', label: t('console'), icon: TerminalSquareIcon }, { to: '/threads', label: goalText(language, 'goals'), icon: GitForkIcon }, { to: '/browser', label: t('browser'), icon: Globe2Icon }]
   const machineNav = [{ to: '/machines', label: t('machines'), icon: NetworkIcon }, { to: '/files', label: t('files'), icon: FileIcon }, { to: '/commands', label: t('commands'), icon: TerminalSquareIcon }, { to: '/resources', label: t('resources'), icon: ActivityIcon }, { to: '/tools', label: t('tools'), icon: WrenchIcon }, { to: '/skills', label: t('skills'), icon: BookOpenIcon }, { to: '/settings', label: t('settings'), icon: Settings2Icon }]
   const nav = status.data?.deployment_role === 'executor' ? machineNav : [...operatorNav, ...machineNav]
   const executor = status.data?.deployment_role === 'executor'
@@ -327,15 +334,17 @@ function formatTimestamp(language: Language, value: string) {
 }
 
 function threadStatusLabel(t: (key: TranslationKey) => string, status: Subthread['status']) {
-  return t(status === 'queued' ? 'threadQueued' : status === 'retrying' ? 'threadRetrying' : 'threadRunning')
+  return t(status === 'queued' ? 'threadQueued' : status === 'retrying' ? 'threadRetrying' : status === 'completed' ? 'completed' : status === 'cancelled' ? 'commandCancelled' : status === 'failed' ? 'requestFailed' : 'threadRunning')
 }
+
+function goalStateLabel(language: Language, state: GoalState) { return goalText(language, state) }
 
 function mainThreadStatusLabel(t: (key: TranslationKey) => string, status: MainThreadSummary['status']) {
   return t(status === 'running' ? 'threadRunning' : status === 'retrying' ? 'threadRetrying' : 'threadIdle')
 }
 
 function subthreadConversationItems(thread: Subthread, events: SubthreadEvent[]): ConversationItem[] {
-  const items: ConversationItem[] = [{ kind: 'message', id: `${thread.id}-task`, message: { role: 'user', content: thread.task, created_at: thread.created_at }, queued: thread.status === 'queued' }]
+  const items: ConversationItem[] = [{ kind: 'message', id: `${thread.id}-task`, message: { role: 'user', content: `## Objective\n${thread.task}\n\n## Done when\n${thread.completion_criteria}`, created_at: thread.created_at }, queued: thread.goal_state === 'active' && thread.status === 'queued' }]
   events.forEach(({ id, event }) => {
     if (event.type === 'status') items.push({ kind: 'status', id: `${thread.id}-${id}`, stage: event.stage, message: event.message })
     if (event.type === 'checkpoint') items.push({ kind: 'status', id: `${thread.id}-${id}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` })
@@ -351,22 +360,22 @@ function subthreadConversationItems(thread: Subthread, events: SubthreadEvent[])
 
 function ThreadsPage({ token }: { token: AuthMiniApi }) {
   const { language, t } = useUi()
+  const title = goalText(language, 'goals')
+  const description = goalText(language, 'description')
   const query = useQuery({ queryKey: ['threads'], queryFn: () => api<ThreadIndex>('/api/threads', token), refetchInterval: 1000 })
-  if (query.error) return <Page title={t('threadsTitle')} description={t('threadsDescription')}><ErrorAlert error={message(query.error)} /></Page>
-  return <Page title={t('threadsTitle')} description={t('threadsDescription')}><Card><CardHeader><CardTitle>{t('threadsTitle')}</CardTitle><CardDescription>{t('threadsDescription')}</CardDescription></CardHeader><CardContent>{!query.data ? <div className="flex items-center gap-2"><Spinner />{t('loadingMachine')}</div> : <Table><TableHeader><TableRow><TableHead>{t('thread')}</TableHead><TableHead>{t('status')}</TableHead><TableHead>{t('threadModel')}</TableHead><TableHead>{t('threadUpdated')}</TableHead></TableRow></TableHeader><TableBody><TableRow><TableCell><Button asChild className="h-auto p-0" variant="link"><Link to="/console">{t('mainThread')}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground">{t('mainThreadDescription')}</p></TableCell><TableCell><Badge variant={query.data.main_thread.status === 'running' ? 'secondary' : 'outline'}>{mainThreadStatusLabel(t, query.data.main_thread.status)}</Badge></TableCell><TableCell><code>{query.data.main_thread.model}</code></TableCell><TableCell>{query.data.main_thread.updated_at ? formatTimestamp(language, query.data.main_thread.updated_at) : '—'}</TableCell></TableRow>{query.data.subthreads.map((thread) => <TableRow key={thread.id}><TableCell><Button asChild className="h-auto p-0" variant="link"><Link to={`/threads/${thread.id}`}>{thread.title}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground" title={thread.task}>{thread.task}</p></TableCell><TableCell><Badge variant={thread.status === 'running' ? 'secondary' : 'outline'}>{threadStatusLabel(t, thread.status)}</Badge></TableCell><TableCell><code>{thread.model}</code></TableCell><TableCell>{formatTimestamp(language, thread.updated_at)}</TableCell></TableRow>)}</TableBody></Table>}</CardContent></Card></Page>
+  if (query.error) return <Page title={title} description={description}><ErrorAlert error={message(query.error)} /></Page>
+  return <Page title={title} description={description}><Card><CardHeader><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent>{!query.data ? <div className="flex items-center gap-2"><Spinner />{t('loadingMachine')}</div> : <Table><TableHeader><TableRow><TableHead>{goalText(language, 'goal')}</TableHead><TableHead>{goalText(language, 'state')}</TableHead><TableHead>{goalText(language, 'execution')}</TableHead><TableHead>{t('threadModel')}</TableHead><TableHead>{t('threadUpdated')}</TableHead></TableRow></TableHeader><TableBody><TableRow><TableCell><Button asChild className="h-auto p-0" variant="link"><Link to="/console">{t('mainThread')}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground">{t('mainThreadDescription')}</p></TableCell><TableCell>—</TableCell><TableCell><Badge variant={query.data.main_thread.status === 'running' ? 'secondary' : 'outline'}>{mainThreadStatusLabel(t, query.data.main_thread.status)}</Badge></TableCell><TableCell><code>{query.data.main_thread.model}</code></TableCell><TableCell>{query.data.main_thread.updated_at ? formatTimestamp(language, query.data.main_thread.updated_at) : '—'}</TableCell></TableRow>{query.data.subthreads.map((thread) => <TableRow key={thread.id}><TableCell><Button asChild className="h-auto p-0" variant="link"><Link to={`/threads/${thread.id}`}>{thread.title}</Link></Button><p className="max-w-md truncate text-xs text-muted-foreground" title={thread.task}>{thread.task}</p></TableCell><TableCell><Badge variant={thread.goal_state === 'active' ? 'secondary' : 'outline'}>{goalStateLabel(language, thread.goal_state)}</Badge></TableCell><TableCell><Badge variant={thread.status === 'running' ? 'secondary' : 'outline'}>{threadStatusLabel(t, thread.status)}</Badge></TableCell><TableCell><code>{thread.model}</code></TableCell><TableCell>{formatTimestamp(language, thread.updated_at)}</TableCell></TableRow>)}</TableBody></Table>}</CardContent></Card></Page>
 }
 
 function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
-  const { t } = useUi()
+  const { language, t } = useUi()
   const { id = '' } = useParams()
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [streamError, setStreamError] = useState('')
   const query = useQuery({ queryKey: ['thread', id], queryFn: () => api<SubthreadDetail>(`/api/threads/${id}`, token), enabled: Boolean(id), retry: false })
-  useEffect(() => { if (query.error && message(query.error) === 'subthread is no longer active') navigate('/threads', { replace: true }) }, [navigate, query.error])
   useEffect(() => {
     const detail = query.data
-    if (!detail) return
+    if (!detail || detail.thread.goal_state !== 'active') return
     const threadId = detail.thread.id
     const controller = new AbortController()
     const after = detail.events.at(-1)?.id ?? 0
@@ -377,19 +386,21 @@ function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
         return
       }
       if (item.type === 'reaped') {
+        void queryClient.invalidateQueries({ queryKey: ['thread', threadId] })
         void queryClient.invalidateQueries({ queryKey: ['threads'] })
-        navigate('/threads', { replace: true })
       }
     }).catch((cause) => { if (!controller.signal.aborted) setStreamError(message(cause)) })
     return () => controller.abort()
-  }, [id, navigate, query.data?.thread.id, queryClient, token])
-  if (query.error) return <Page title={t('threadDetails')} description={t('threadDetailsDescription')}><ErrorAlert error={message(query.error)} /></Page>
-  if (!query.data) return <Page title={t('threadDetails')} description={t('threadDetailsDescription')}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t('loadingMachine')}</CardContent></Card></Page>
+  }, [id, query.data?.thread.goal_state, query.data?.thread.id, queryClient, token])
+  const title = goalText(language, 'goals')
+  const description = goalText(language, 'description')
+  if (query.error) return <Page title={title} description={description}><ErrorAlert error={message(query.error)} /></Page>
+  if (!query.data) return <Page title={title} description={description}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t('loadingMachine')}</CardContent></Card></Page>
   const { thread, events } = query.data
   const conversation = subthreadConversationItems(thread, events)
   const eventError = [...events].reverse().find((item) => item.event.type === 'error')?.event
   const contextTokens = [...events].reverse().find((item) => item.event.type === 'context')?.event
-  return <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><Button asChild variant="outline" size="sm"><Link to="/threads"><ArrowLeftIcon data-icon="inline-start" />{t('backToThreads')}</Link></Button><div className="min-w-0"><h1 className="truncate font-heading text-lg font-semibold">{thread.title}</h1><p className="text-sm text-muted-foreground">{t('threadDetailsDescription')}</p></div><Badge className="ml-auto" variant={thread.status === 'running' ? 'secondary' : 'outline'}>{threadStatusLabel(t, thread.status)}</Badge><Badge variant="outline">{thread.model}</Badge>{contextTokens?.type === 'context' && <Badge variant="outline">{t('context')}: {contextTokens.input_tokens.toLocaleString()} {t('tokens')}</Badge>}</div>{streamError && <div className="px-4 pt-4"><ErrorAlert error={streamError} /></div>}<ConversationFeed items={conversation} running={thread.status === 'running'} />{eventError?.type === 'error' && <div className="px-4 pb-4"><ErrorAlert error={eventError.error} /></div>}</main>
+  return <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><Button asChild variant="outline" size="sm"><Link to="/threads"><ArrowLeftIcon data-icon="inline-start" />{goalText(language, 'back')}</Link></Button><div className="min-w-0"><h1 className="truncate font-heading text-lg font-semibold">{thread.title}</h1><p className="text-sm text-muted-foreground">{goalText(language, 'goal')}</p></div><Badge className="ml-auto" variant={thread.goal_state === 'active' ? 'secondary' : 'outline'}>{goalStateLabel(language, thread.goal_state)}</Badge><Badge variant="outline">{threadStatusLabel(t, thread.status)}</Badge><Badge variant="outline">{thread.model}</Badge>{contextTokens?.type === 'context' && <Badge variant="outline">{t('context')}: {contextTokens.input_tokens.toLocaleString()} {t('tokens')}</Badge>}</div><div className="border-b p-4"><dl className="mx-auto grid w-full max-w-4xl gap-3 text-sm"><div><dt className="font-medium">{goalText(language, 'objective')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.task}</dd></div><div><dt className="font-medium">{goalText(language, 'doneWhen')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.completion_criteria}</dd></div>{thread.goal_evidence && <div><dt className="font-medium">{goalText(language, 'evidence')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.goal_evidence}</dd></div>}{thread.blocked_reason && <div><dt className="font-medium">{goalText(language, 'blocker')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.blocked_reason}</dd></div>}{thread.result && <div><dt className="font-medium">{goalText(language, 'outcome')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.result}</dd></div>}</dl></div>{streamError && <div className="px-4 pt-4"><ErrorAlert error={streamError} /></div>}<div className="border-b px-4 py-2"><p className="mx-auto w-full max-w-4xl text-sm font-medium">{goalText(language, 'history')}</p></div><ConversationFeed items={conversation} running={thread.goal_state === 'active' && thread.status === 'running'} />{eventError?.type === 'error' && <div className="px-4 pb-4"><ErrorAlert error={eventError.error} /></div>}</main>
 }
 
 function ConversationFeed({ items, running = false }: { items: ConversationItem[]; running?: boolean }) {
@@ -437,7 +448,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const [announceReplies, setAnnounceReplies] = useState(announceRef.current)
   const [conversationInitialized, setConversationInitialized] = useState(false)
   const updateConversation = (next: ConversationItem[]) => { conversationRef.current = next; setConversation(next) }
-  const activeSubthreads = threadsQuery.data?.subthreads ?? []
+  const activeSubthreads = (threadsQuery.data?.subthreads ?? []).filter((thread) => thread.goal_state === 'active')
 
   useEffect(() => {
     if (!conversationQuery.data || activeRef.current.size > 0) return
