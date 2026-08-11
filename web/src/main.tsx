@@ -46,12 +46,16 @@ type Transcription = { text: string }
 type VoiceScript = { text: string }
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
-type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { type: 'checkpoint'; id: number; through_message_id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown>; started_at?: string } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string; finished_at?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
-type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'status'; id: string; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
-type ConversationRun = { id: string; user_message_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled'; retry_attempt: number; next_retry_at: number | null; events: AgentEvent[] }
+type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { type: 'checkpoint'; id: number; through_message_id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown>; started_at?: string } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string; output_bytes?: number; finished_at?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
+type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'run'; id: string; run: ConversationRun } | { kind: 'status'; id: string; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; run_id?: string; event_id?: number; output_bytes?: number; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
+type ConversationRun = { id: string; user_message_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled'; retry_attempt: number; next_retry_at: number | null; event_count: number; latest_event_id?: number; latest_context_tokens?: number; last_error?: string }
 type ContextCheckpoint = { id: number; first_message_id: number; through_message_id: number; source_message_count: number; level: number; previous_checkpoint_id?: number; summary: string; created_at: string }
 type ContextMemoryRoot = { facts: number; latest_checkpoint_id?: number; lookup_tool: string }
-type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null; memory: ContextMemoryRoot } }
+type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null; memory: ContextMemoryRoot }; has_more: boolean; next_before_id?: number }
+type ConversationEventSummary = Exclude<AgentEvent, { type: 'complete' }> | { type: 'complete' }
+type ConversationRunEvent = { id: number; event: ConversationEventSummary; created_at: string }
+type ConversationRunEventPage = { events: ConversationRunEvent[]; has_more: boolean; next_before_id?: number }
+type ConversationEventOutput = { output: string; output_bytes: number; next_offset?: number }
 type GoalState = 'active' | 'achieved' | 'blocked' | 'cancelled'
 type Subthread = { id: string; title: string; task: string; completion_criteria: string; goal_state: GoalState; goal_evidence: string | null; blocked_reason: string | null; status: 'queued' | 'running' | 'retrying' | 'completed' | 'cancelled' | 'failed'; model: string; result: string | null; retry_attempt: number; next_retry_at: number | null; created_at: string; updated_at: string }
 type MainThreadSummary = { status: 'idle' | 'running' | 'retrying'; model: string; updated_at: string | null }
@@ -82,7 +86,7 @@ const words = {
     settingsTitle: 'Settings', settingsDescription: 'Configure this machine\'s agent upstream, thread models, and reply announcements.', defaultModel: 'Default model', defaultModelDescription: 'Used by the next agent turn.', modelId: 'Model ID', modelHint: 'Use a model supported by the configured upstream.', voiceScriptModel: 'Voice announcement model', voiceScriptModelHint: 'Rewrites final replies into natural speech before playback.', voiceScriptLength: 'Voice announcement length', voiceScriptLengthHint: 'Maximum characters in the generated script. 150 characters is usually about 30 seconds.', chineseVoice: 'Chinese Edge voice', englishVoice: 'English Edge voice', edgeVoiceHint: 'Use an Edge Neural voice name, for example {voice}.', baseUrlDescription: 'Used for the next agent turn.', apiKeyDescription: 'Used for the next agent turn.', saveChanges: 'Save changes', requestFailed: 'Request failed', initializeMobius: 'Initialize Mobius', initializeDescription: 'Bind this machine to your Auth Mini identity and OpenAI-compatible upstream.', authMiniUrl: 'Auth Mini URL', continueAuth: 'Continue with Auth Mini', apiKey: 'OpenAI API key', baseUrl: 'Base URL', initialize: 'Initialize', returnMachine: 'Return to the machine', signInDescription: 'Sign in through the configured Auth Mini server.', toolsTitle: 'Tools', toolsDescription: 'Every tool sent with a main-thread Responses request.', toolName: 'Tool', toolDescription: 'Description', toolParameters: 'Parameters', noTools: 'No tools are available.', status: 'Status',
     updatesTitle: 'Updates', updatesDescription: 'Mobius checks GitHub Releases at startup and every six hours. Downloads are verified before installation.', currentVersion: 'Current version', latestVersion: 'Latest version', checkForUpdates: 'Check for updates', checkingForUpdates: 'Checking for updates…', updateChecking: 'Checking', updateCurrent: 'Up to date', updateReady: 'Ready to install', updateFailed: 'Check failed', restartToInstall: 'Restart and install', restartingToInstall: 'Restarting to install…',
     skillsTitle: 'Skills', skillsDescription: 'Installed skills are watched and applied to the next agent API request.', skillsDirectory: 'Skills directory', installedSkills: 'Installed skills', noSkills: 'No SKILL.md files found.', skillDirectory: 'Installation directory',
-    controller: 'Controller', executor: 'Tool executor', deploymentRole: 'Deployment role', controllerDescription: 'Runs the main thread, model inference, and local or remote tools.', executorDescription: 'Exposes local tools through device tokens and does not require a model upstream.', checkpoint: 'Checkpoint', fullHistory: 'full-history messages', memoryFacts: 'durable facts', activeInputs: 'active inputs', backgroundWork: 'background tasks', announceReplies: 'Automatic voice announcements', continuousVoice: 'Continuous voice', speakResult: 'Speak', preparingVoice: 'Preparing voice…', showParameters: 'Show parameters', hideParameters: 'Hide parameters', mainThreadQueued: 'Queued in the main thread', mainThreadRunning: 'Compiling context', checkpointing: 'Creating checkpoint', retrying: 'Retrying automatically', retryNow: 'Retry now', executorOnly: 'This machine is a tool executor. Use a controller Mobius to call its tools.', deviceAccess: 'Device access', deviceAccessDescription: 'Create a scoped token for another Mobius controller. The secret is shown once.', createDeviceToken: 'Create device token', tokenLabel: 'Token label', allowFilesystem: 'Allow filesystem', allowBash: 'Allow Bash', tokenSecret: 'Copy this secret now', revoke: 'Revoke', deviceToken: 'Device token', capabilities: 'Capabilities', verifyMachine: 'Enrollment verifies the shared issuer and root user.', threads: 'Threads', threadsTitle: 'Threads', threadsDescription: 'The main thread stays first, followed by live subthreads that have not been reaped.', noActiveThreads: 'No active subthreads.', thread: 'Thread', threadTask: 'Task', threadModel: 'Model', threadUpdated: 'Updated', threadDetails: 'Thread details', threadDetailsDescription: 'Read-only history and live events from this subthread.', backToThreads: 'Back to threads', events: 'Events', noThreadEvents: 'No events yet.', event: 'Event', time: 'Time', details: 'Details', threadQueued: 'Queued', threadRunning: 'Running', threadRetrying: 'Retrying', threadIdle: 'Idle', mainThread: 'Main thread', mainThreadDescription: 'The single user thread that accepts prompts.', mainThreadModel: 'Main thread model', subthreadModel: 'Subthread model', mainThreadModelHint: 'Used only by the main conversation.', subthreadModelHint: 'Captured when each subthread is forked.',
+    controller: 'Controller', executor: 'Tool executor', deploymentRole: 'Deployment role', controllerDescription: 'Runs the main thread, model inference, and local or remote tools.', executorDescription: 'Exposes local tools through device tokens and does not require a model upstream.', checkpoint: 'Checkpoint', fullHistory: 'full-history messages', memoryFacts: 'durable facts', activeInputs: 'active inputs', backgroundWork: 'background tasks', announceReplies: 'Automatic voice announcements', continuousVoice: 'Continuous voice', speakResult: 'Speak', preparingVoice: 'Preparing voice…', showParameters: 'Show parameters', hideParameters: 'Hide parameters', showRunActivity: 'Show activity', hideRunActivity: 'Hide activity', loadEarlierActivity: 'Load earlier activity', loadingActivity: 'Loading activity…', loadEarlierMessages: 'Load earlier messages', loadingEarlierMessages: 'Loading earlier messages…', loadOutput: 'Load output', loadMoreOutput: 'Load more output', loadingOutput: 'Loading output…', mainThreadQueued: 'Queued in the main thread', mainThreadRunning: 'Compiling context', checkpointing: 'Creating checkpoint', retrying: 'Retrying automatically', retryNow: 'Retry now', executorOnly: 'This machine is a tool executor. Use a controller Mobius to call its tools.', deviceAccess: 'Device access', deviceAccessDescription: 'Create a scoped token for another Mobius controller. The secret is shown once.', createDeviceToken: 'Create device token', tokenLabel: 'Token label', allowFilesystem: 'Allow filesystem', allowBash: 'Allow Bash', tokenSecret: 'Copy this secret now', revoke: 'Revoke', deviceToken: 'Device token', capabilities: 'Capabilities', verifyMachine: 'Enrollment verifies the shared issuer and root user.', threads: 'Threads', threadsTitle: 'Threads', threadsDescription: 'The main thread stays first, followed by live subthreads that have not been reaped.', noActiveThreads: 'No active subthreads.', thread: 'Thread', threadTask: 'Task', threadModel: 'Model', threadUpdated: 'Updated', threadDetails: 'Thread details', threadDetailsDescription: 'Read-only history and live events from this subthread.', backToThreads: 'Back to threads', events: 'Events', noThreadEvents: 'No events yet.', event: 'Event', time: 'Time', details: 'Details', threadQueued: 'Queued', threadRunning: 'Running', threadRetrying: 'Retrying', threadIdle: 'Idle', mainThread: 'Main thread', mainThreadDescription: 'The single user thread that accepts prompts.', mainThreadModel: 'Main thread model', subthreadModel: 'Subthread model', mainThreadModelHint: 'Used only by the main conversation.', subthreadModelHint: 'Captured when each subthread is forked.',
   },
   zh: {
     machine: '机器', console: '控制台', machines: '机器', files: '文件', commands: '命令', resources: '资源', tools: '工具', skills: '技能', settings: '设置', connecting: '正在连接…', loadingMachine: '正在加载机器', online: '在线', light: '亮色', dark: '深色', language: '语言',
@@ -94,7 +98,7 @@ const words = {
     settingsTitle: '设置', settingsDescription: '配置当前机器的 Agent 上游、线程模型和结果朗读。', defaultModel: '默认模型', defaultModelDescription: '用于下一轮 Agent 对话。', modelId: '模型 ID', modelHint: '请输入当前上游支持的模型。', voiceScriptModel: '朗读模型', voiceScriptModelHint: '播放前将最终回复改写为自然口语。', voiceScriptLength: '朗读字数', voiceScriptLengthHint: '生成语音稿的最大字数；150 字通常约为 30 秒。', chineseVoice: '中文 Edge 音色', englishVoice: '英文 Edge 音色', edgeVoiceHint: '使用 Edge Neural 音色名称，例如 {voice}。', baseUrlDescription: '用于下一轮 Agent 对话。', apiKeyDescription: '用于下一轮 Agent 对话。', saveChanges: '保存更改', requestFailed: '请求失败', initializeMobius: '初始化 Mobius', initializeDescription: '将此机器绑定到你的 Auth Mini 身份和 OpenAI 兼容上游。', authMiniUrl: 'Auth Mini 地址', continueAuth: '使用 Auth Mini 继续', apiKey: 'OpenAI API 密钥', baseUrl: '基础地址', initialize: '初始化', returnMachine: '返回机器', signInDescription: '通过已配置的 Auth Mini 服务登录。', toolsTitle: '工具', toolsDescription: '与主线程 Responses 请求一同发送的全部工具。', toolName: '工具', toolDescription: '说明', toolParameters: '参数格式', noTools: '暂时没有可用工具。', status: '状态',
     updatesTitle: '版本更新', updatesDescription: 'Mobius 会在启动时及每六小时检查 GitHub Release。安装前会校验下载内容。', currentVersion: '当前版本', latestVersion: '最新版本', checkForUpdates: '检查更新', checkingForUpdates: '正在检查更新…', updateChecking: '检查中', updateCurrent: '已是最新', updateReady: '可以安装', updateFailed: '检查失败', restartToInstall: '重启并安装', restartingToInstall: '正在重启安装…',
     skillsTitle: '技能', skillsDescription: '已安装的技能目录会被监听，并在下一次 Agent API 请求时生效。', skillsDirectory: '技能目录', installedSkills: '已安装技能', noSkills: '未找到 SKILL.md 文件。', skillDirectory: '安装目录',
-    controller: '控制设备', executor: '工具执行设备', deploymentRole: '部署角色', controllerDescription: '运行主线程和模型推理，并调用本机或远程工具。', executorDescription: '通过设备 Token 暴露本机工具，不需要配置模型上游。', checkpoint: '上下文检查点', fullHistory: '条完整历史', memoryFacts: '条长期事实', activeInputs: '条输入处理中', backgroundWork: '个后台任务', announceReplies: '自动语音播报', continuousVoice: '连续语音', speakResult: '播报', preparingVoice: '正在生成语音稿…', showParameters: '展开参数', hideParameters: '收起参数', mainThreadQueued: '已进入主线程队列', mainThreadRunning: '正在编译上下文', checkpointing: '正在创建检查点', retrying: '正在自动重试', retryNow: '立即重试', executorOnly: '这台机器是工具执行设备。请从控制设备上的 Mobius 调用它的工具。', deviceAccess: '设备访问授权', deviceAccessDescription: '为另一台 Mobius 控制设备创建权限受限的 Token；密钥只显示一次。', createDeviceToken: '创建设备 Token', tokenLabel: 'Token 名称', allowFilesystem: '允许文件系统', allowBash: '允许 Bash', tokenSecret: '请立即复制此密钥', revoke: '撤销', deviceToken: '设备 Token', capabilities: '能力', verifyMachine: '接入时会验证双方使用同一 issuer 和 root user。', threads: '线程', threadsTitle: '线程', threadsDescription: '主线程固定置顶，后面列出尚未回收的实时子线程。', noActiveThreads: '当前没有活动子线程。', thread: '线程', threadTask: '任务', threadModel: '模型', threadUpdated: '更新时间', threadDetails: '线程详情', threadDetailsDescription: '只读查看这个子线程的历史记录与实时事件。', backToThreads: '返回线程列表', events: '事件', noThreadEvents: '暂时没有事件。', event: '事件', time: '时间', details: '详情', threadQueued: '排队中', threadRunning: '运行中', threadRetrying: '正在重试', threadIdle: '空闲', mainThread: '主线程', mainThreadDescription: '唯一可以接收 prompt 的用户主线程。', mainThreadModel: '主线程模型', subthreadModel: '子线程模型', mainThreadModelHint: '仅用于主对话。', subthreadModelHint: '每个子线程在 fork 时固化该模型。',
+    controller: '控制设备', executor: '工具执行设备', deploymentRole: '部署角色', controllerDescription: '运行主线程和模型推理，并调用本机或远程工具。', executorDescription: '通过设备 Token 暴露本机工具，不需要配置模型上游。', checkpoint: '上下文检查点', fullHistory: '条完整历史', memoryFacts: '条长期事实', activeInputs: '条输入处理中', backgroundWork: '个后台任务', announceReplies: '自动语音播报', continuousVoice: '连续语音', speakResult: '播报', preparingVoice: '正在生成语音稿…', showParameters: '展开参数', hideParameters: '收起参数', showRunActivity: '查看执行过程', hideRunActivity: '收起执行过程', loadEarlierActivity: '加载更早执行记录', loadingActivity: '正在加载执行记录…', loadEarlierMessages: '加载更早消息', loadingEarlierMessages: '正在加载更早消息…', loadOutput: '加载输出', loadMoreOutput: '继续加载输出', loadingOutput: '正在加载输出…', mainThreadQueued: '已进入主线程队列', mainThreadRunning: '正在编译上下文', checkpointing: '正在创建检查点', retrying: '正在自动重试', retryNow: '立即重试', executorOnly: '这台机器是工具执行设备。请从控制设备上的 Mobius 调用它的工具。', deviceAccess: '设备访问授权', deviceAccessDescription: '为另一台 Mobius 控制设备创建权限受限的 Token；密钥只显示一次。', createDeviceToken: '创建设备 Token', tokenLabel: 'Token 名称', allowFilesystem: '允许文件系统', allowBash: '允许 Bash', tokenSecret: '请立即复制此密钥', revoke: '撤销', deviceToken: '设备 Token', capabilities: '能力', verifyMachine: '接入时会验证双方使用同一 issuer 和 root user。', threads: '线程', threadsTitle: '线程', threadsDescription: '主线程固定置顶，后面列出尚未回收的实时子线程。', noActiveThreads: '当前没有活动子线程。', thread: '线程', threadTask: '任务', threadModel: '模型', threadUpdated: '更新时间', threadDetails: '线程详情', threadDetailsDescription: '只读查看这个子线程的历史记录与实时事件。', backToThreads: '返回线程列表', events: '事件', noThreadEvents: '暂时没有事件。', event: '事件', time: '时间', details: '详情', threadQueued: '排队中', threadRunning: '运行中', threadRetrying: '正在重试', threadIdle: '空闲', mainThread: '主线程', mainThreadDescription: '唯一可以接收 prompt 的用户主线程。', mainThreadModel: '主线程模型', subthreadModel: '子线程模型', mainThreadModelHint: '仅用于主对话。', subthreadModelHint: '每个子线程在 fork 时固化该模型。',
   },
 } as const
 type TranslationKey = keyof typeof words.en
@@ -290,22 +294,37 @@ function conversationItems(state: ConversationState): ConversationItem[] {
   return state.messages.flatMap((message) => {
     const entries: ConversationItem[] = [{ kind: 'message', id: message.id?.toString() ?? crypto.randomUUID(), message, queued: false }]
     if (message.role !== 'user' || message.id === undefined) return entries
-    runs.get(message.id)?.forEach((run) => run.events.forEach((event, index) => {
-      if (event.type === 'status') entries.push({ kind: 'status', id: `${run.id}-${index}`, stage: event.stage, message: event.message })
-      if (event.type === 'checkpoint') entries.push({ kind: 'status', id: `${run.id}-${index}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` })
-      if (event.type === 'tool_call') entries.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, started_at: event.started_at })
-      if (event.type === 'tool_result') {
-        const tool = entries.find((entry): entry is Extract<ConversationItem, { kind: 'tool' }> => entry.kind === 'tool' && entry.call_id === event.call_id)
-        if (tool) Object.assign(tool, { complete: true, finished_at: event.finished_at, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
-      }
-    }))
+    runs.get(message.id)?.forEach((run) => entries.push({ kind: 'run', id: `${run.id}-activity`, run }))
     return entries
   })
 }
 
+function conversationRunItems(run: ConversationRun, events: ConversationRunEvent[]): ConversationItem[] {
+  const entries: ConversationItem[] = []
+  events.forEach(({ id, event }) => {
+    if (event.type === 'status') entries.push({ kind: 'status', id: `${run.id}-${id}`, stage: event.stage, message: event.message })
+    if (event.type === 'checkpoint') entries.push({ kind: 'status', id: `${run.id}-${id}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` })
+    if (event.type === 'tool_call') entries.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, run_id: run.id, started_at: event.started_at })
+    if (event.type === 'tool_result') {
+      const tool = entries.find((entry): entry is Extract<ConversationItem, { kind: 'tool' }> => entry.kind === 'tool' && entry.call_id === event.call_id)
+      if (tool) Object.assign(tool, { complete: true, event_id: id, output_bytes: event.output_bytes, finished_at: event.finished_at, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
+    }
+  })
+  return entries
+}
+
+function mergeConversationPages(latest: ConversationState, older: ConversationState[]): ConversationState {
+  const messageById = new Map<number, ChatMessage>()
+  const runById = new Map<string, ConversationRun>()
+  ;[...older, latest].forEach((page) => {
+    page.messages.forEach((item) => { if (item.id !== undefined) messageById.set(item.id, item) })
+    page.runs.forEach((run) => runById.set(run.id, run))
+  })
+  return { ...latest, messages: [...messageById.values()].sort((left, right) => (left.id ?? 0) - (right.id ?? 0)), runs: [...runById.values()] }
+}
+
 function latestContextTokens(runs: ConversationRun[]) {
-  for (const event of runs.flatMap((run) => run.events).reverse()) if (event.type === 'context') return event.input_tokens
-  return null
+  return [...runs].reverse().find((run) => run.latest_context_tokens !== undefined)?.latest_context_tokens ?? null
 }
 
 function reasoningSummary(arguments_: Record<string, unknown>) {
@@ -323,10 +342,7 @@ function retryingRun(runs: ConversationRun[]) {
 }
 
 function runError(runs: ConversationRun[]) {
-  const run = retryingRun(runs)
-  if (!run) return ''
-  for (const event of [...run.events].reverse()) if (event.type === 'error') return event.error
-  return ''
+  return retryingRun(runs)?.last_error ?? ''
 }
 
 function formatTimestamp(language: Language, value: string) {
@@ -478,8 +494,9 @@ function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
   return <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><Button asChild variant="outline" size="sm"><Link to="/threads"><ArrowLeftIcon data-icon="inline-start" />{goalText(language, 'back')}</Link></Button><div className="min-w-0"><h1 className="truncate font-heading text-lg font-semibold">{thread.title}</h1><p className="text-sm text-muted-foreground">{goalText(language, 'goal')}</p></div><Badge className="ml-auto" variant={thread.goal_state === 'active' ? 'secondary' : 'outline'}>{goalStateLabel(language, thread.goal_state)}</Badge><Badge variant="outline">{threadStatusLabel(t, thread.status)}</Badge><Badge variant="outline">{thread.model}</Badge>{contextTokens?.type === 'context' && <Badge variant="outline">{t('context')}: {contextTokens.input_tokens.toLocaleString()} {t('tokens')}</Badge>}</div><div className="border-b p-4"><dl className="mx-auto grid w-full max-w-4xl gap-3 text-sm"><div><dt className="font-medium">{goalText(language, 'objective')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.task}</dd></div><div><dt className="font-medium">{goalText(language, 'doneWhen')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.completion_criteria}</dd></div>{thread.goal_evidence && <div><dt className="font-medium">{goalText(language, 'evidence')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.goal_evidence}</dd></div>}{thread.blocked_reason && <div><dt className="font-medium">{goalText(language, 'blocker')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.blocked_reason}</dd></div>}{thread.result && <div><dt className="font-medium">{goalText(language, 'outcome')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.result}</dd></div>}</dl></div>{streamError && <div className="px-4 pt-4"><ErrorAlert error={streamError} /></div>}<div className="border-b px-4 py-2"><p className="mx-auto w-full max-w-4xl text-sm font-medium">{goalText(language, 'history')}</p></div><ConversationFeed items={conversation} running={thread.goal_state === 'active' && thread.status === 'running'} />{eventError?.type === 'error' && <div className="px-4 pb-4"><ErrorAlert error={eventError.error} /></div>}</main>
 }
 
-function ConversationFeed({ items, running = false }: { items: ConversationItem[]; running?: boolean }) {
+function ConversationFeed({ items, running = false, hasMore = false, loadingEarlier = false, onLoadEarlier }: { items: ConversationItem[]; running?: boolean; hasMore?: boolean; loadingEarlier?: boolean; onLoadEarlier?: () => void }) {
   const token = useAuthToken()
+  const { t } = useUi()
   const peers = useQuery({ queryKey: ['peers'], queryFn: () => api<Peer[]>('/api/peers', token) })
   const [now, setNow] = useState(() => Date.now())
   const hasRunningTool = items.some((item) => item.kind === 'tool' && !item.complete && item.started_at)
@@ -489,12 +506,67 @@ function ConversationFeed({ items, running = false }: { items: ConversationItem[
     const interval = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(interval)
   }, [hasRunningTool])
-  return <MessageScrollerProvider autoScroll={false} defaultScrollPosition="end"><MessageScroller className="flex-1"><MessageScrollerViewport><MessageScrollerContent className="mx-auto w-full max-w-4xl p-4">{items.map((item) => <MessageScrollerItem key={item.kind === 'tool' ? item.call_id : item.id} className="[content-visibility:visible] [contain-intrinsic-size:auto]"><ConversationEntry item={item} now={now} peers={peers.data ?? []} /></MessageScrollerItem>)}{running && <MessageScrollerItem className="[content-visibility:visible] [contain-intrinsic-size:auto]"><ThreadRunning /></MessageScrollerItem>}</MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton behavior="auto" /></MessageScroller></MessageScrollerProvider>
+  return <MessageScrollerProvider autoScroll={false} defaultScrollPosition="end"><MessageScroller className="flex-1"><MessageScrollerViewport><MessageScrollerContent className="mx-auto w-full max-w-4xl p-4">{hasMore && onLoadEarlier && <MessageScrollerItem className="flex justify-center [content-visibility:auto] [contain-intrinsic-size:3rem]"><Button size="sm" variant="outline" disabled={loadingEarlier} onClick={onLoadEarlier}>{loadingEarlier && <Spinner data-icon="inline-start" />}{loadingEarlier ? t('loadingEarlierMessages') : t('loadEarlierMessages')}</Button></MessageScrollerItem>}{items.map((item) => <MessageScrollerItem key={item.kind === 'tool' ? item.call_id : item.id} className="[content-visibility:auto] [contain-intrinsic-size:6rem]"><ConversationEntry item={item} now={now} peers={peers.data ?? []} /></MessageScrollerItem>)}{running && <MessageScrollerItem className="[content-visibility:auto] [contain-intrinsic-size:3rem]"><ThreadRunning /></MessageScrollerItem>}</MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton behavior="auto" /></MessageScroller></MessageScrollerProvider>
 }
 
 function ThreadRunning() {
   const { t } = useUi()
   return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /><Badge variant="secondary">{t('threadRunning')}</Badge><span>{t('agentWorking')}</span></div>
+}
+
+function RunActivity({ run, now, peers }: { run: ConversationRun; now: number; peers: Peer[] }) {
+  const token = useAuthToken()
+  const { t } = useUi()
+  const [open, setOpen] = useState(false)
+  const [events, setEvents] = useState<ConversationRunEvent[]>([])
+  const [nextBeforeId, setNextBeforeId] = useState<number | undefined>()
+  const [hasMore, setHasMore] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const load = async (before?: number) => {
+    setLoading(true)
+    setError('')
+    try {
+      const suffix = before === undefined ? '' : `?before=${before}`
+      const page = await api<ConversationRunEventPage>(`/api/conversation/runs/${run.id}/events${suffix}`, token)
+      setEvents((current) => before === undefined ? page.events : [...page.events, ...current])
+      setNextBeforeId(page.next_before_id)
+      setHasMore(page.has_more)
+    } catch (cause) {
+      setError(message(cause))
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { if (open && events.length === 0 && !loading) void load() }, [open])
+  const activity = conversationRunItems(run, events)
+  return <div className="flex flex-col gap-2 py-1"><div className="flex flex-wrap items-center gap-2"><Button aria-expanded={open} size="sm" variant="ghost" onClick={() => setOpen((value) => !value)}>{open ? t('hideRunActivity') : t('showRunActivity')}</Button><Badge variant="outline">{run.event_count.toLocaleString()} {t('events')}</Badge></div>{open && <div className="flex flex-col gap-2 border-l pl-3">{error && <ErrorAlert error={error} />}{loading && events.length === 0 && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingActivity')}</div>}{hasMore && <Button className="self-start" size="sm" variant="outline" disabled={loading} onClick={() => void load(nextBeforeId)}>{loading && <Spinner data-icon="inline-start" />}{t('loadEarlierActivity')}</Button>}{activity.map((item) => <ConversationEntry key={item.kind === 'tool' ? item.call_id : item.id} item={item} now={now} peers={peers} />)}</div>}</div>
+}
+
+function EventOutput({ runId, eventId, outputBytes }: { runId: string; eventId: number; outputBytes: number }) {
+  const token = useAuthToken()
+  const { t } = useUi()
+  const [opened, setOpened] = useState(false)
+  const [chunks, setChunks] = useState<string[]>([])
+  const [nextOffset, setNextOffset] = useState<number | undefined>()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const load = async (offset?: number) => {
+    setLoading(true)
+    setError('')
+    try {
+      const suffix = offset === undefined ? '' : `?offset=${offset}`
+      const page = await api<ConversationEventOutput>(`/api/conversation/runs/${runId}/events/${eventId}/output${suffix}`, token)
+      setChunks((current) => [...current, page.output])
+      setNextOffset(page.next_offset)
+    } catch (cause) {
+      setError(message(cause))
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { if (opened && chunks.length === 0 && !loading) void load() }, [opened])
+  return <div className="mt-2 flex flex-col gap-2 text-xs"><Button className="self-start" size="sm" variant="outline" disabled={loading} onClick={() => setOpened(true)}>{loading && <Spinner data-icon="inline-start" />}{opened ? `${bytes(outputBytes)} ${t('loadOutput')}` : `${t('loadOutput')} (${bytes(outputBytes)})`}</Button>{error && <ErrorAlert error={error} />}{chunks.map((chunk, index) => <pre key={index} className="max-h-80 overflow-auto rounded-md bg-muted p-3 font-mono whitespace-pre-wrap break-all"><code>{chunk}</code></pre>)}{nextOffset !== undefined && <Button className="self-start" size="sm" variant="outline" disabled={loading} onClick={() => void load(nextOffset)}>{loading && <Spinner data-icon="inline-start" />}{t('loadMoreOutput')}</Button>}</div>
 }
 
 function Console({ children, token }: { children: ReactNode; token: AuthMiniApi }) {
@@ -503,6 +575,8 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const queryClient = useQueryClient()
   const conversationQuery = useQuery({ queryKey: ['conversation'], queryFn: () => api<ConversationState>('/api/conversation', token), refetchOnWindowFocus: false })
   const threadsQuery = useQuery({ queryKey: ['threads'], queryFn: () => api<ThreadIndex>('/api/threads', token), refetchInterval: 1000 })
+  const [olderPages, setOlderPages] = useState<ConversationState[]>([])
+  const [loadingOlder, setLoadingOlder] = useState(false)
   const [conversation, setConversation] = useState<ConversationItem[]>([])
   const conversationRef = useRef(conversation)
   const activeRef = useRef(new Map<string, AbortController>())
@@ -527,14 +601,15 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
 
   useEffect(() => {
     if (!conversationQuery.data || activeRef.current.size > 0) return
-    const latestAssistant = [...conversationQuery.data.messages].reverse().find((entry) => entry.role === 'assistant' && entry.id !== undefined)
+    const state = mergeConversationPages(conversationQuery.data, olderPages)
+    const latestAssistant = [...state.messages].reverse().find((entry) => entry.role === 'assistant' && entry.id !== undefined)
     if (conversationInitialized && latestAssistant?.id !== announcedMessageRef.current) announce(latestAssistant?.content ?? null)
     announcedMessageRef.current = latestAssistant?.id ?? null
-    updateConversation(conversationItems(conversationQuery.data))
-    setContextTokens(latestContextTokens(conversationQuery.data.runs))
-    setActiveRuns(conversationQuery.data.runs.filter((run) => run.status === 'running' && run.next_retry_at === null).map((run) => run.id))
+    updateConversation(conversationItems(state))
+    setContextTokens(latestContextTokens(state.runs))
+    setActiveRuns(state.runs.filter((run) => run.status === 'running' && run.next_retry_at === null).map((run) => run.id))
     setConversationInitialized(true)
-  }, [conversationQuery.data])
+  }, [conversationQuery.data, olderPages])
   useEffect(() => {
     if (!conversationQuery.data?.runs.some((run) => run.status === 'running') && activeSubthreads.length === 0) return
     const interval = window.setInterval(() => { void conversationQuery.refetch() }, 1000)
@@ -761,14 +836,31 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     }
   }
 
+  const loadOlder = async () => {
+    const current = conversationQuery.data
+    const oldestPage = olderPages.at(-1) ?? current
+    if (!oldestPage?.next_before_id || loadingOlder) return
+    setLoadingOlder(true)
+    try {
+      const page = await api<ConversationState>(`/api/conversation?before=${oldestPage.next_before_id}`, token)
+      setOlderPages((pages) => [...pages, page])
+    } catch (cause) {
+      setError(message(cause))
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
+  const conversationState = conversationQuery.data ? mergeConversationPages(conversationQuery.data, olderPages) : undefined
+  const oldestPage = olderPages.at(-1) ?? conversationQuery.data
   const unavailable = conversationQuery.isLoading || Boolean(conversationQuery.error)
-  const checkpoint = conversationQuery.data?.context.checkpoint
-  const historyMessages = conversationQuery.data?.context.history_messages ?? 0
-  const memoryFacts = conversationQuery.data?.context.memory.facts ?? 0
-  const persistedError = conversationQuery.data ? runError(conversationQuery.data.runs) : ''
-  const retryingMainRun = conversationQuery.data ? retryingRun(conversationQuery.data.runs) : undefined
-  const mainThreadRunning = activeRuns.length > 0 || conversationQuery.data?.runs.some((run) => run.status === 'running' && run.next_retry_at === null) === true
-  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge>{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}<Badge variant="outline">{historyMessages} {t('fullHistory')}</Badge><Badge variant="outline">{memoryFacts} {t('memoryFacts')}</Badge>{activeRuns.length > 0 && <Badge variant="secondary">{activeRuns.length} {t('activeInputs')}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div><div className="flex flex-wrap items-center gap-4 border-b px-4 py-2"><Field className="w-auto" orientation="horizontal"><Switch id="continuous-voice" checked={continuousVoice} onCheckedChange={setContinuous} /><FieldLabel htmlFor="continuous-voice">{t('continuousVoice')}</FieldLabel></Field><Field className="w-auto" orientation="horizontal"><Switch id="announce-replies" checked={announceReplies} onCheckedChange={setAnnounce} /><FieldLabel htmlFor="announce-replies">{t('announceReplies')}</FieldLabel></Field>{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}{persistedError && <div className="px-4 pb-2"><Alert variant="destructive"><AlertTitle>{t('retrying')}</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><span>{persistedError}</span>{retryingMainRun && <Button size="sm" variant="outline" onClick={() => void retryNow(retryingMainRun.id)}><RefreshCwIcon data-icon="inline-start" />{t('retryNow')}</Button>}</AlertDescription></Alert></div>}</main>
+  const checkpoint = conversationState?.context.checkpoint
+  const historyMessages = conversationState?.context.history_messages ?? 0
+  const memoryFacts = conversationState?.context.memory.facts ?? 0
+  const persistedError = conversationState ? runError(conversationState.runs) : ''
+  const retryingMainRun = conversationState ? retryingRun(conversationState.runs) : undefined
+  const mainThreadRunning = activeRuns.length > 0 || conversationState?.runs.some((run) => run.status === 'running' && run.next_retry_at === null) === true
+  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge>{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}<Badge variant="outline">{historyMessages} {t('fullHistory')}</Badge><Badge variant="outline">{memoryFacts} {t('memoryFacts')}</Badge>{activeRuns.length > 0 && <Badge variant="secondary">{activeRuns.length} {t('activeInputs')}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div><div className="flex flex-wrap items-center gap-4 border-b px-4 py-2"><Field className="w-auto" orientation="horizontal"><Switch id="continuous-voice" checked={continuousVoice} onCheckedChange={setContinuous} /><FieldLabel htmlFor="continuous-voice">{t('continuousVoice')}</FieldLabel></Field><Field className="w-auto" orientation="horizontal"><Switch id="announce-replies" checked={announceReplies} onCheckedChange={setAnnounce} /><FieldLabel htmlFor="announce-replies">{t('announceReplies')}</FieldLabel></Field>{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} hasMore={oldestPage?.has_more} loadingEarlier={loadingOlder} onLoadEarlier={() => void loadOlder()} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}{persistedError && <div className="px-4 pb-2"><Alert variant="destructive"><AlertTitle>{t('retrying')}</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><span>{persistedError}</span>{retryingMainRun && <Button size="sm" variant="outline" onClick={() => void retryNow(retryingMainRun.id)}><RefreshCwIcon data-icon="inline-start" />{t('retryNow')}</Button>}</AlertDescription></Alert></div>}</main>
   return <><div className="min-h-0 flex-1 overflow-y-auto">{location.pathname === '/console' ? consoleSurface : children}</div>{error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}<form className="shrink-0 border-t p-3" onSubmit={submit}><InputGroup className="mx-auto max-w-4xl"><InputGroupTextarea ref={draftRef} disabled={unavailable} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} /><InputGroupAddon align="inline-end"><InputGroupButton aria-label={recording ? t('stopRecording') : t('startRecording')} disabled={unavailable || transcribing} onClick={toggleRecording} size="icon-sm" variant={recording ? 'destructive' : 'ghost'}>{recording ? <SquareIcon /> : <MicIcon />}</InputGroupButton><InputGroupButton disabled={unavailable} type="submit" variant="default" size="icon-sm"><SendIcon /><span className="sr-only">{t('mainThread')}</span></InputGroupButton></InputGroupAddon></InputGroup><p className="mx-auto mt-1 max-w-4xl text-xs text-muted-foreground">{t('mainThread')}: {transcribing ? t('transcribing') : t('composeHint')}</p></form></>
 }
 
@@ -931,6 +1023,7 @@ function BrowserPage({ token }: { token: AuthMiniApi }) {
 function ConversationEntry({ item, now, peers }: { item: ConversationItem; now: number; peers: Peer[] }) {
   const { language, t } = useUi()
   const [parametersOpen, setParametersOpen] = useState(false)
+  if (item.kind === 'run') return <RunActivity run={item.run} now={now} peers={peers} />
   if (item.kind === 'status') {
     const label = item.stage === 'queued' ? t('mainThreadQueued') : item.stage === 'checkpointing' ? t('checkpointing') : item.stage === 'retrying' ? t('retrying') : t('mainThreadRunning')
     return <div className="flex items-center gap-2 text-xs text-muted-foreground"><Badge variant="outline">{label}</Badge><span>{item.message}</span></div>
@@ -955,7 +1048,14 @@ function ConversationEntry({ item, now, peers }: { item: ConversationItem; now: 
     const finished = item.finished_at ? Date.parse(item.finished_at) : now
     const elapsed = Number.isNaN(started) ? null : Math.max(0, Math.floor((finished - started) / 1000))
     const duration = elapsed === null ? '' : ` · ${t('duration')}: ${elapsed} ${t('seconds')}`
-    return <div className="flex items-start gap-2 text-sm text-muted-foreground">{item.complete ? item.name === 'run_bash' ? <TerminalSquareIcon className="mt-0.5 size-5 shrink-0 text-foreground" /> : <CheckIcon className={`mt-0.5 text-foreground ${item.name === 'web_search' ? 'size-5 shrink-0' : 'size-4'}`} /> : <Spinner className="mt-0.5" />}<div className="min-w-0 break-all">{summary ? <><span>{action ?? item.name}{duration}</span><div className="prose prose-sm mt-1 max-w-none text-foreground dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown></div></> : <><span>{action ?? item.name} <code className="font-mono text-foreground">{target}</code>{targetDeviceLabel && <> · {targetDeviceLabel}</>}{changes}{duration}</span>{parameters && <div className="mt-1 text-xs"><Button aria-expanded={parametersOpen} size="sm" variant="ghost" onClick={() => setParametersOpen((open) => !open)}>{parametersOpen ? t('hideParameters') : t('showParameters')}</Button>{parametersOpen && <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-2 text-foreground"><code>{parameters}</code></pre>}</div>}</>}</div></div>
+    const output = item.complete && item.run_id !== undefined && item.event_id !== undefined && item.output_bytes !== undefined ? <EventOutput runId={item.run_id} eventId={item.event_id} outputBytes={item.output_bytes} /> : null
+    return <div className="flex items-start gap-2 text-sm text-muted-foreground">
+      {item.complete ? item.name === 'run_bash' ? <TerminalSquareIcon className="mt-0.5 size-5 shrink-0 text-foreground" /> : <CheckIcon className={`mt-0.5 text-foreground ${item.name === 'web_search' ? 'size-5 shrink-0' : 'size-4'}`} /> : <Spinner className="mt-0.5" />}
+      <div className="min-w-0 break-all">
+        {summary ? <><span>{action ?? item.name}{duration}</span><div className="prose prose-sm mt-1 max-w-none text-foreground dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown></div></> : <><span>{action ?? item.name} <code className="font-mono text-foreground">{target}</code>{targetDeviceLabel && <> · {targetDeviceLabel}</>}{changes}{duration}</span>{parameters && <div className="mt-1 text-xs"><Button aria-expanded={parametersOpen} size="sm" variant="ghost" onClick={() => setParametersOpen((open) => !open)}>{parametersOpen ? t('hideParameters') : t('showParameters')}</Button>{parametersOpen && <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-2 text-foreground"><code>{parameters}</code></pre>}</div>}</>}
+        {output}
+      </div>
+    </div>
   }
   if (item.message.role !== 'assistant') return <Message align="end"><MessageContent><Card size="sm"><CardContent className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.message.content ?? ''}</ReactMarkdown></CardContent></Card></MessageContent></Message>
   const timestamp = item.message.created_at ? new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(item.message.created_at)) : null
