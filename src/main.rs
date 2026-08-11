@@ -59,6 +59,12 @@ const EDGE_TTS_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const JWKS_TTL: Duration = Duration::from_secs(300);
 const HISTORY_PAGE_DEFAULT: usize = 100;
 const HISTORY_PAGE_MAX: usize = 500;
+const CONVERSATION_PAGE_DEFAULT: usize = 50;
+const CONVERSATION_PAGE_MAX: usize = 100;
+const CONVERSATION_EVENT_PAGE_DEFAULT: usize = 100;
+const CONVERSATION_EVENT_PAGE_MAX: usize = 200;
+const CONVERSATION_OUTPUT_CHUNK_DEFAULT: usize = 16 * 1024;
+const CONVERSATION_OUTPUT_CHUNK_MAX: usize = 64 * 1024;
 const COMMAND_RUNS_PAGE_DEFAULT: i64 = 20;
 const COMMAND_RUNS_PAGE_MAX: i64 = 100;
 const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
@@ -320,6 +326,9 @@ struct ConversationState {
     messages: Vec<ConversationMessage>,
     runs: Vec<ConversationRun>,
     context: ContextState,
+    has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_id: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -425,7 +434,111 @@ struct ConversationRun {
     status: String,
     retry_attempt: i64,
     next_retry_at: Option<i64>,
-    events: Vec<AgentEvent>,
+    event_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_event_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_context_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct ConversationQuery {
+    before: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Default, Deserialize)]
+struct ConversationRunEventsQuery {
+    before: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Default, Deserialize)]
+struct ConversationEventOutputQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ConversationRunEvents {
+    events: Vec<ConversationEvent>,
+    has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ConversationEvent {
+    id: i64,
+    event: ConversationEventData,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ConversationEventData {
+    Status {
+        stage: String,
+        message: String,
+    },
+    Checkpoint {
+        id: i64,
+        through_message_id: i64,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        added_lines: Option<usize>,
+        deleted_lines: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_bytes: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        finished_at: Option<String>,
+    },
+    Context {
+        input_tokens: u64,
+    },
+    Complete,
+    Error {
+        error: String,
+    },
+}
+
+#[derive(Serialize)]
+struct ConversationEventOutput {
+    output: String,
+    output_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<usize>,
+}
+
+struct ConversationEventFields {
+    id: i64,
+    event_type: String,
+    created_at: String,
+    stage: Option<String>,
+    message: Option<String>,
+    checkpoint_id: Option<i64>,
+    through_message_id: Option<i64>,
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: Option<String>,
+    started_at: Option<String>,
+    added_lines: Option<i64>,
+    deleted_lines: Option<i64>,
+    output_bytes: Option<i64>,
+    finished_at: Option<String>,
+    input_tokens: Option<i64>,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1114,6 +1227,14 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/browser/sessions/{id}/input", post(browser_user_input))
         .route("/api/conversation", get(conversation))
+        .route(
+            "/api/conversation/runs/{run_id}/events",
+            get(conversation_run_events),
+        )
+        .route(
+            "/api/conversation/runs/{run_id}/events/{event_id}/output",
+            get(conversation_event_output),
+        )
         .route("/api/threads", get(list_threads).post(create_goal))
         .route("/api/threads/{id}/events", get(stream_subthread_events))
         .route(
@@ -1224,6 +1345,7 @@ fn open_db(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+#[cfg(test)]
 fn load_conversation(path: &Path) -> Result<Vec<ConversationMessage>> {
     let connection = open_db(path)?;
     connection
@@ -2362,6 +2484,27 @@ fn append_agent_event(path: &Path, run_id: &str, event: &AgentEvent) -> Result<(
     Ok(())
 }
 
+fn agent_event_for_console(event: &AgentEvent) -> AgentEvent {
+    match event {
+        AgentEvent::ToolResult {
+            call_id,
+            name,
+            added_lines,
+            deleted_lines,
+            finished_at,
+            ..
+        } => AgentEvent::ToolResult {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            added_lines: *added_lines,
+            deleted_lines: *deleted_lines,
+            output: None,
+            finished_at: finished_at.clone(),
+        },
+        _ => event.clone(),
+    }
+}
+
 fn finish_agent_run(path: &Path, id: &str, status: &str) -> Result<()> {
     open_db(path)?.execute(
         "UPDATE agent_runs
@@ -2374,54 +2517,297 @@ fn finish_agent_run(path: &Path, id: &str, status: &str) -> Result<()> {
     Ok(())
 }
 
-fn load_conversation_state(path: &Path) -> Result<ConversationState> {
-    let connection = open_db(path)?;
-    let messages = load_conversation(path)?;
-    let mut runs = connection
+fn conversation_page_limit(value: Option<usize>) -> usize {
+    value
+        .unwrap_or(CONVERSATION_PAGE_DEFAULT)
+        .clamp(1, CONVERSATION_PAGE_MAX)
+}
+
+fn conversation_event_page_limit(value: Option<usize>) -> usize {
+    value
+        .unwrap_or(CONVERSATION_EVENT_PAGE_DEFAULT)
+        .clamp(1, CONVERSATION_EVENT_PAGE_MAX)
+}
+
+fn conversation_output_chunk_limit(value: Option<usize>) -> usize {
+    value
+        .unwrap_or(CONVERSATION_OUTPUT_CHUNK_DEFAULT)
+        .clamp(1, CONVERSATION_OUTPUT_CHUNK_MAX)
+}
+
+fn conversation_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationMessage> {
+    Ok(ConversationMessage {
+        id: row.get(0)?,
+        role: row.get(1)?,
+        content: row.get(2)?,
+        created_at: row.get(3)?,
+        duration_ms: row.get(4)?,
+        input_tokens: row.get(5)?,
+        output_tokens: row.get(6)?,
+        images: serde_json::from_str(&row.get::<_, Option<String>>(7)?.unwrap_or_default())
+            .unwrap_or_default(),
+    })
+}
+
+fn load_conversation_runs(
+    connection: &Connection,
+    first_message_id: Option<i64>,
+    last_message_id: Option<i64>,
+) -> Result<Vec<ConversationRun>> {
+    let first_message_id = first_message_id.unwrap_or(i64::MAX);
+    let last_message_id = last_message_id.unwrap_or(i64::MIN);
+    connection
         .prepare(
-            "SELECT id, user_message_id, status, retry_attempt, next_retry_at FROM agent_runs
-             WHERE kind IN ('main', 'continuation') ORDER BY created_at, id",
+            "SELECT run.id, run.user_message_id, run.status, run.retry_attempt, run.next_retry_at,
+                    (SELECT COUNT(*) FROM agent_events event WHERE event.run_id = run.id),
+                    (SELECT event.id FROM agent_events event WHERE event.run_id = run.id ORDER BY event.id DESC LIMIT 1),
+                    (SELECT CAST(json_extract(event.payload, '$.input_tokens') AS INTEGER)
+                     FROM agent_events event
+                     WHERE event.run_id = run.id AND event.event_type = 'context'
+                     ORDER BY event.id DESC LIMIT 1),
+                    (SELECT json_extract(event.payload, '$.error')
+                     FROM agent_events event
+                     WHERE event.run_id = run.id AND event.event_type = 'error'
+                     ORDER BY event.id DESC LIMIT 1)
+             FROM agent_runs run
+             WHERE run.kind IN ('main', 'continuation')
+               AND (run.status = 'running' OR run.user_message_id BETWEEN ?1 AND ?2)
+             ORDER BY run.created_at, run.id",
         )?
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-            ))
+        .query_map(params![first_message_id, last_message_id], |row| {
+            let input_tokens: Option<i64> = row.get(7)?;
+            Ok(ConversationRun {
+                id: row.get(0)?,
+                user_message_id: row.get(1)?,
+                status: row.get(2)?,
+                retry_attempt: row.get(3)?,
+                next_retry_at: row.get(4)?,
+                event_count: row.get(5)?,
+                latest_event_id: row.get(6)?,
+                latest_context_tokens: input_tokens.and_then(|value| value.try_into().ok()),
+                last_error: row.get(8)?,
+            })
         })?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(
-            |(id, user_message_id, status, retry_attempt, next_retry_at)| {
-                let events = connection
-                    .prepare("SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY id")?
-                    .query_map([&id], |row| row.get::<_, String>(0))?
-                    .map(|event| Ok(serde_json::from_str::<AgentEvent>(&event?)?))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(ConversationRun {
-                    id,
-                    user_message_id,
-                    status,
-                    retry_attempt,
-                    next_retry_at,
-                    events,
-                })
-            },
-        )
-        .collect::<Result<Vec<_>>>()?;
-    runs.shrink_to_fit();
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<ConversationState> {
+    let connection = open_db(path)?;
+    let before = query.before.filter(|id| *id > 0).unwrap_or(i64::MAX);
+    let limit = conversation_page_limit(query.limit);
+    let mut messages = connection
+        .prepare(
+            "SELECT id, role, content, created_at, duration_ms, input_tokens, output_tokens, images
+             FROM conversation_messages WHERE id < ?1 ORDER BY id DESC LIMIT ?2",
+        )?
+        .query_map(
+            params![before, (limit + 1) as i64],
+            conversation_message_from_row,
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let has_more = messages.len() > limit;
+    messages.truncate(limit);
+    messages.reverse();
+    let next_before_id = has_more
+        .then(|| messages.first().map(|message| message.id))
+        .flatten();
+    let runs = load_conversation_runs(
+        &connection,
+        messages.first().map(|message| message.id),
+        messages.last().map(|message| message.id),
+    )?;
+    let history_messages =
+        connection.query_row("SELECT COUNT(*) FROM conversation_messages", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
     let checkpoint = load_latest_checkpoint(&connection, i64::MAX)?;
     Ok(ConversationState {
         context: ContextState {
-            history_messages: messages.len(),
+            history_messages: history_messages.try_into().unwrap_or(usize::MAX),
             checkpoint,
             memory: load_context_memory_root(&connection)?,
         },
         messages,
         runs,
+        has_more,
+        next_before_id,
     })
+}
+
+#[cfg(test)]
+fn load_conversation_state(path: &Path) -> Result<ConversationState> {
+    load_conversation_page(path, ConversationQuery::default())
+}
+
+fn conversation_event_data_from_fields(
+    fields: ConversationEventFields,
+) -> Result<ConversationEvent> {
+    let event = match fields.event_type.as_str() {
+        "status" => ConversationEventData::Status {
+            stage: fields.stage.unwrap_or_default(),
+            message: fields.message.unwrap_or_default(),
+        },
+        "checkpoint" => ConversationEventData::Checkpoint {
+            id: fields.checkpoint_id.unwrap_or_default(),
+            through_message_id: fields.through_message_id.unwrap_or_default(),
+        },
+        "tool_call" => ConversationEventData::ToolCall {
+            call_id: fields.call_id.unwrap_or_default(),
+            name: fields.name.unwrap_or_default(),
+            arguments: serde_json::from_str(&fields.arguments.unwrap_or_else(|| "{}".to_owned()))?,
+            started_at: fields.started_at,
+        },
+        "tool_result" => ConversationEventData::ToolResult {
+            call_id: fields.call_id.unwrap_or_default(),
+            name: fields.name.unwrap_or_default(),
+            added_lines: fields.added_lines.and_then(|value| value.try_into().ok()),
+            deleted_lines: fields.deleted_lines.and_then(|value| value.try_into().ok()),
+            output_bytes: fields.output_bytes.and_then(|value| value.try_into().ok()),
+            finished_at: fields.finished_at,
+        },
+        "context" => ConversationEventData::Context {
+            input_tokens: fields
+                .input_tokens
+                .and_then(|value| value.try_into().ok())
+                .unwrap_or_default(),
+        },
+        "complete" => ConversationEventData::Complete,
+        "error" => ConversationEventData::Error {
+            error: fields.error.unwrap_or_default(),
+        },
+        _ => {
+            return Err(anyhow!(
+                "unknown persisted agent event type: {}",
+                fields.event_type
+            ));
+        }
+    };
+    Ok(ConversationEvent {
+        id: fields.id,
+        event,
+        created_at: fields.created_at,
+    })
+}
+
+fn load_conversation_run_events(
+    path: &Path,
+    run_id: &str,
+    query: ConversationRunEventsQuery,
+) -> Result<Option<ConversationRunEvents>> {
+    let connection = open_db(path)?;
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE id = ?1 AND kind IN ('main', 'continuation'))",
+        [run_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let before = query.before.filter(|id| *id > 0).unwrap_or(i64::MAX);
+    let limit = conversation_event_page_limit(query.limit);
+    let mut events = connection
+        .prepare(
+            "SELECT id, event_type, created_at,
+                    json_extract(payload, '$.stage'), json_extract(payload, '$.message'),
+                    CAST(json_extract(payload, '$.id') AS INTEGER),
+                    CAST(json_extract(payload, '$.through_message_id') AS INTEGER),
+                    json_extract(payload, '$.call_id'), json_extract(payload, '$.name'),
+                    json_extract(payload, '$.arguments'), json_extract(payload, '$.started_at'),
+                    CAST(json_extract(payload, '$.added_lines') AS INTEGER),
+                    CAST(json_extract(payload, '$.deleted_lines') AS INTEGER),
+                    length(CAST(json_extract(payload, '$.output') AS BLOB)),
+                    json_extract(payload, '$.finished_at'),
+                    CAST(json_extract(payload, '$.input_tokens') AS INTEGER),
+                    json_extract(payload, '$.error')
+             FROM agent_events
+             WHERE run_id = ?1 AND id < ?2
+             ORDER BY id DESC LIMIT ?3",
+        )?
+        .query_map(params![run_id, before, (limit + 1) as i64], |row| {
+            Ok(ConversationEventFields {
+                id: row.get(0)?,
+                event_type: row.get(1)?,
+                created_at: row.get(2)?,
+                stage: row.get(3)?,
+                message: row.get(4)?,
+                checkpoint_id: row.get(5)?,
+                through_message_id: row.get(6)?,
+                call_id: row.get(7)?,
+                name: row.get(8)?,
+                arguments: row.get(9)?,
+                started_at: row.get(10)?,
+                added_lines: row.get(11)?,
+                deleted_lines: row.get(12)?,
+                output_bytes: row.get(13)?,
+                finished_at: row.get(14)?,
+                input_tokens: row.get(15)?,
+                error: row.get(16)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let has_more = events.len() > limit;
+    events.truncate(limit);
+    events.reverse();
+    let next_before_id = has_more
+        .then(|| events.first().map(|event| event.id))
+        .flatten();
+    Ok(Some(ConversationRunEvents {
+        events: events
+            .into_iter()
+            .map(conversation_event_data_from_fields)
+            .collect::<Result<Vec<_>>>()?,
+        has_more,
+        next_before_id,
+    }))
+}
+
+fn load_conversation_event_output(
+    path: &Path,
+    run_id: &str,
+    event_id: i64,
+    query: ConversationEventOutputQuery,
+) -> Result<Option<ConversationEventOutput>> {
+    let offset = query.offset.unwrap_or_default();
+    let limit = conversation_output_chunk_limit(query.limit);
+    let offset: i64 = offset.try_into().context("output offset is too large")?;
+    let limit: i64 = limit.try_into().expect("output chunk limit fits in i64");
+    let connection = open_db(path)?;
+    let output = connection
+        .query_row(
+            "SELECT substr(json_extract(event.payload, '$.output'), ?3, ?4),
+                    length(CAST(json_extract(event.payload, '$.output') AS BLOB)),
+                    length(json_extract(event.payload, '$.output'))
+             FROM agent_events event
+             JOIN agent_runs run ON run.id = event.run_id
+             WHERE event.run_id = ?1 AND event.id = ?2
+               AND run.kind IN ('main', 'continuation')
+               AND json_extract(event.payload, '$.output') IS NOT NULL",
+            params![run_id, event_id, offset.saturating_add(1), limit],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    output
+        .map(|(output, output_bytes, output_chars)| {
+            let output_chars_loaded = i64::try_from(output.chars().count())?;
+            let next_offset = if offset + output_chars_loaded < output_chars {
+                Some(usize::try_from(offset + output_chars_loaded)?)
+            } else {
+                None
+            };
+            Ok(ConversationEventOutput {
+                output,
+                output_bytes: usize::try_from(output_bytes)?,
+                next_offset,
+            })
+        })
+        .transpose()
 }
 
 async fn send_agent_event(
@@ -2439,7 +2825,7 @@ async fn send_agent_event(
         _ => {}
     }
     append_agent_event(db_path, sink.run_id, &event)?;
-    let _ = sink.sender.send(event).await;
+    let _ = sink.sender.send(agent_event_for_console(&event)).await;
     Ok(())
 }
 
@@ -2785,6 +3171,8 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON peers(machine_id) WHERE machine_id <> '';
          CREATE INDEX IF NOT EXISTS agent_runs_retry_due
          ON agent_runs(kind, status, next_retry_at);
+         CREATE INDEX IF NOT EXISTS agent_runs_user_message_id
+         ON agent_runs(user_message_id);
          CREATE INDEX IF NOT EXISTS command_runs_active_first
          ON command_runs(status, started_at DESC);",
     )?;
@@ -4222,15 +4610,52 @@ fn browser_agent_context(state: &AppState) -> BrowserAgentContext {
 async fn conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ConversationQuery>,
 ) -> ApiResult<ConversationState> {
     identity(&state, &headers).await?;
-    let conversation = load_conversation_state(&state.db_path).map_err(|_| {
+    let conversation = load_conversation_page(&state.db_path, query).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot read conversation",
         )
     })?;
     Ok(Json(conversation))
+}
+
+async fn conversation_run_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+    Query(query): Query<ConversationRunEventsQuery>,
+) -> ApiResult<ConversationRunEvents> {
+    identity(&state, &headers).await?;
+    let events = load_conversation_run_events(&state.db_path, &run_id, query)
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read conversation run",
+            )
+        })?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "conversation run not found"))?;
+    Ok(Json(events))
+}
+
+async fn conversation_event_output(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((run_id, event_id)): AxumPath<(String, i64)>,
+    Query(query): Query<ConversationEventOutputQuery>,
+) -> ApiResult<ConversationEventOutput> {
+    identity(&state, &headers).await?;
+    let output = load_conversation_event_output(&state.db_path, &run_id, event_id, query)
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read event output",
+            )
+        })?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "event output not found"))?;
+    Ok(Json(output))
 }
 
 fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
@@ -8058,10 +8483,15 @@ mod tests {
         assert_eq!(run.retry_attempt, 0);
         assert_eq!(run.next_retry_at, None);
         assert_eq!(*attempts.lock().await, 3);
+        let events =
+            load_conversation_run_events(&db, "retry-run", ConversationRunEventsQuery::default())
+                .unwrap()
+                .unwrap();
         assert_eq!(
-            run.events
+            events
+                .events
                 .iter()
-                .filter(|event| matches!(event, AgentEvent::Error { .. }))
+                .filter(|event| matches!(event.event, ConversationEventData::Error { .. }))
                 .count(),
             2
         );
@@ -9357,7 +9787,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_state_restores_persisted_agent_events() {
+    fn conversation_pages_history_and_loads_event_output_on_demand() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
@@ -9393,7 +9823,7 @@ mod tests {
                 name: "read_file".to_owned(),
                 added_lines: None,
                 deleted_lines: None,
-                output: Some("README contents".to_owned()),
+                output: Some("README contents for the lazy reader".to_owned()),
                 finished_at: None,
             },
         )
@@ -9403,10 +9833,38 @@ mod tests {
         assert_eq!(state.runs.len(), 1);
         assert_eq!(state.runs[0].user_message_id, user.id);
         assert_eq!(state.runs[0].status, "running");
+        assert_eq!(state.runs[0].event_count, 2);
+        let events =
+            load_conversation_run_events(&db, "run_1", ConversationRunEventsQuery::default())
+                .unwrap()
+                .unwrap();
+        assert_eq!(events.events.len(), 2);
         assert!(matches!(
-            state.runs[0].events[1],
-            AgentEvent::ToolResult { ref name, .. } if name == "read_file"
+            events.events[1].event,
+            ConversationEventData::ToolResult { ref name, output_bytes: Some(_), .. } if name == "read_file"
         ));
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("README contents for the lazy reader")
+        );
+        let output = load_conversation_event_output(
+            &db,
+            "run_1",
+            events.events[1].id,
+            ConversationEventOutputQuery {
+                offset: Some(7),
+                limit: Some(4),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(output.output, "cont");
+        assert_eq!(
+            output.output_bytes,
+            "README contents for the lazy reader".len()
+        );
+        assert_eq!(output.next_offset, Some(11));
         append_conversation_for_run(
             &db,
             &ChatMessage {
@@ -9428,9 +9886,69 @@ mod tests {
         assert!(
             assistant
                 .content
-                .contains("Tool result read_file: README contents")
+                .contains("Tool result read_file: README contents for the lazy reader")
         );
         assert!(assistant.content.contains("The README was inspected."));
+    }
+
+    #[test]
+    fn conversation_page_uses_a_cursor_without_loading_prior_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        for index in 0..=CONVERSATION_PAGE_DEFAULT {
+            append_conversation(
+                &db,
+                &ChatMessage {
+                    role: "user".to_owned(),
+                    content: Value::String(format!("message {index}")),
+                    images: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                None,
+            )
+            .unwrap();
+        }
+        let newest = load_conversation_page(&db, ConversationQuery::default()).unwrap();
+        assert_eq!(newest.messages.len(), CONVERSATION_PAGE_DEFAULT);
+        assert!(newest.has_more);
+        assert_eq!(newest.messages.first().unwrap().content, "message 1");
+        let oldest = load_conversation_page(
+            &db,
+            ConversationQuery {
+                before: newest.next_before_id,
+                limit: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(oldest.messages.len(), 1);
+        assert_eq!(oldest.messages[0].content, "message 0");
+        assert!(!oldest.has_more);
+    }
+
+    #[test]
+    fn live_console_events_omit_persisted_tool_output() {
+        let persisted = AgentEvent::ToolResult {
+            call_id: "call_1".to_owned(),
+            name: "run_bash".to_owned(),
+            added_lines: None,
+            deleted_lines: None,
+            output: Some("x".repeat(1024 * 1024)),
+            finished_at: Some("2026-08-11T00:00:00Z".to_owned()),
+        };
+        let streamed = agent_event_for_console(&persisted);
+        assert!(matches!(
+            persisted,
+            AgentEvent::ToolResult {
+                output: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            streamed,
+            AgentEvent::ToolResult { output: None, .. }
+        ));
     }
 
     #[test]
@@ -9936,7 +10454,7 @@ mod tests {
         let request = tokio::spawn(async move {
             execute_local_tool(
                 "run_bash",
-                json!({"command":"sleep 1; printf detached"}),
+                json!({"command":"sleep 0.2; printf detached"}),
                 &db_for_request,
                 watch::channel(false).1,
             )
@@ -9946,7 +10464,7 @@ mod tests {
         assert_eq!(load_command_runs(&db).unwrap()[0].status, "running");
         request.abort();
         let _ = request.await;
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
         let commands = load_command_runs(&db).unwrap();
         assert_eq!(commands[0].status, "complete");
         assert_eq!(commands[0].exit_code, Some(0));
