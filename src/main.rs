@@ -4414,7 +4414,7 @@ async fn register_executor(
                id, name, base_url, device_token, machine_id, hostname, deployment_role,
                filesystem_enabled, bash_enabled, created_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(machine_id) DO UPDATE SET
+             ON CONFLICT(machine_id) WHERE machine_id <> '' DO UPDATE SET
                id = excluded.id,
                name = excluded.name,
                base_url = excluded.base_url,
@@ -8923,6 +8923,44 @@ mod tests {
         let routes = format!("{:?}", app(test_state(db)));
         assert!(routes.contains("/api/executors/register"));
         assert!(!routes.contains("/api/device-tokens"));
+    }
+
+    #[test]
+    fn executor_registration_upsert_matches_the_partial_machine_id_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        let registration = |id: &str, base_url: &str| {
+            connection.execute(
+                "INSERT INTO peers (
+                   id, name, base_url, device_token, machine_id, hostname, deployment_role,
+                   filesystem_enabled, bash_enabled, created_at
+                 ) VALUES (?1, 'MacMini', ?2, 'token', 'machine-mac', 'MacMini', 'executor', 1, 1, 'now')
+                 ON CONFLICT(machine_id) WHERE machine_id <> '' DO UPDATE SET
+                   id = excluded.id,
+                   name = excluded.name,
+                   base_url = excluded.base_url,
+                   device_token = excluded.device_token,
+                   hostname = excluded.hostname,
+                   deployment_role = excluded.deployment_role,
+                   filesystem_enabled = excluded.filesystem_enabled,
+                   bash_enabled = excluded.bash_enabled",
+                params![id, base_url],
+            )
+        };
+        registration("first", "https://m1.zccz14.com").unwrap();
+        registration("second", "https://m1-next.zccz14.com").unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT id, base_url FROM peers WHERE machine_id = 'machine-mac'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap(),
+            ("second".to_owned(), "https://m1-next.zccz14.com".to_owned()),
+        );
     }
 
     #[tokio::test]
