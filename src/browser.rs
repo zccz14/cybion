@@ -494,7 +494,7 @@ impl BrowserSession {
 impl BrowserRunner {
     async fn launch(client: &reqwest::Client, id: &str) -> Result<Self> {
         let executable = browser_executable()?;
-        let profile_dir = std::env::temp_dir().join(format!("mobius-browser-{id}"));
+        let profile_dir = std::env::temp_dir().join(format!("cybion-browser-{id}"));
         std::fs::create_dir_all(&profile_dir)?;
         let port = available_port()?;
         let mut child = Command::new(executable)
@@ -692,7 +692,7 @@ impl BrowserRunner {
     }
 
     async fn snapshot(&mut self) -> Result<Vec<Value>> {
-        let expression = r#"(() => Array.from(document.querySelectorAll('a,button,input,textarea,select,[role="button"],[role="link"]')).slice(0, 200).map((element, index) => { const token = `mobius-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`; element.setAttribute('data-mobius-ref', token); return { token, tag: element.tagName.toLowerCase(), text: (element.innerText || element.value || element.getAttribute('aria-label') || element.getAttribute('placeholder') || '').trim().slice(0, 240), type: element.getAttribute('type') || '', href: element.getAttribute('href') || '' }; }))()"#;
+        let expression = r#"(() => Array.from(document.querySelectorAll('a,button,input,textarea,select,[role="button"],[role="link"]')).slice(0, 200).map((element, index) => { const token = `cybion-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`; element.setAttribute('data-cybion-ref', token); return { token, tag: element.tagName.toLowerCase(), text: (element.innerText || element.value || element.getAttribute('aria-label') || element.getAttribute('placeholder') || '').trim().slice(0, 240), type: element.getAttribute('type') || '', href: element.getAttribute('href') || '' }; }))()"#;
         self.evaluate(expression)
             .await?
             .as_array()
@@ -703,7 +703,7 @@ impl BrowserRunner {
     async fn click_requires_approval(&mut self, token: &str) -> Result<bool> {
         self.evaluate(&format!(
             r#"(() => {{ const element = document.querySelector({}); if (!element) throw new Error('element disappeared'); return element.matches('button[type="submit"], input[type="submit"], input[type="image"], a[href^="mailto:"], a[href^="tel:"]'); }})()"#,
-            serde_json::to_string(&format!("[data-mobius-ref=\"{token}\"]"))?
+            serde_json::to_string(&format!("[data-cybion-ref=\"{token}\"]"))?
         ))
         .await?
         .as_bool()
@@ -713,7 +713,7 @@ impl BrowserRunner {
     async fn element_is_sensitive(&mut self, token: &str) -> Result<bool> {
         self.evaluate(&format!(
             r#"(() => {{ const element = document.querySelector({}); if (!element) throw new Error('element disappeared'); const type = (element.getAttribute('type') || '').toLowerCase(); return ['password','file','hidden'].includes(type) || element.autocomplete.includes('cc-') || element.autocomplete.includes('one-time-code'); }})()"#,
-            serde_json::to_string(&format!("[data-mobius-ref=\"{token}\"]"))?
+            serde_json::to_string(&format!("[data-cybion-ref=\"{token}\"]"))?
         ))
         .await?
         .as_bool()
@@ -723,7 +723,7 @@ impl BrowserRunner {
     async fn focus(&mut self, token: &str) -> Result<()> {
         self.evaluate(&format!(
             r#"(() => {{ const element = document.querySelector({}); if (!element) throw new Error('element disappeared'); element.focus(); return true; }})()"#,
-            serde_json::to_string(&format!("[data-mobius-ref=\"{token}\"]"))?
+            serde_json::to_string(&format!("[data-cybion-ref=\"{token}\"]"))?
         ))
         .await?;
         Ok(())
@@ -732,7 +732,7 @@ impl BrowserRunner {
     async fn click(&mut self, token: &str) -> Result<()> {
         self.evaluate(&format!(
             r#"(() => {{ const element = document.querySelector({}); if (!element) throw new Error('element disappeared'); element.click(); return true; }})()"#,
-            serde_json::to_string(&format!("[data-mobius-ref=\"{token}\"]"))?
+            serde_json::to_string(&format!("[data-cybion-ref=\"{token}\"]"))?
         ))
         .await?;
         Ok(())
@@ -1190,7 +1190,7 @@ mod tests {
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request).await.unwrap();
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 71\r\nConnection: close\r\n\r\n<!doctype html><title>Mobius browser test</title><button>Ready</button>")
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 71\r\nConnection: close\r\n\r\n<!doctype html><title>Cybion browser test</title><button>Ready</button>")
                 .await
                 .unwrap();
         });

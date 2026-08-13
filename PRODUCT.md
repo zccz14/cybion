@@ -16,7 +16,7 @@ and remote Linux hosts, and need an accurate view of which machine will act.
 
 ## Product Purpose
 
-Mobius turns OpenAI-compatible models into an unrestricted operational harness.
+Cybion turns OpenAI-compatible models into an unrestricted operational harness.
 It connects a human, an AI, and every enrolled machine through one web console.
 Success is a user reaching a real machine-wide outcome without manually managing
 project roots, sandboxes, or a collection of separate agent sessions.
@@ -33,7 +33,7 @@ control room: it makes powerful scope explicit without theatrical danger styling
 ## Anti-references
 
 Avoid generic chat SaaS dashboards, cute autonomous-agent mascots, fake terminal
-chrome, and permission-theater that suggests constraints Mobius does not have.
+chrome, and permission-theater that suggests constraints Cybion does not have.
 
 ## Design Principles
 

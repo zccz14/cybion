@@ -1,12 +1,12 @@
 [package]
-name = "mobius"
+name = "cybion"
 version = "0.1.52"
 edition = "2024"
 license = "MIT"
 description = "An unrestricted, multi-machine AI harness."
 
 [[bin]]
-name = "mobius"
+name = "cybion"
 path = "src/main.rs"
 
 [dependencies]
