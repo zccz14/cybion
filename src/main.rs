@@ -109,7 +109,9 @@ struct Jwk {
 }
 
 #[derive(Clone)]
-struct Identity;
+struct Identity {
+    access_token: String,
+}
 
 #[derive(Debug, Serialize)]
 struct ApiError {
@@ -226,13 +228,6 @@ struct Peer {
     created_at: String,
 }
 
-#[derive(Deserialize)]
-struct CreatePeer {
-    name: String,
-    base_url: String,
-    device_token: String,
-}
-
 #[derive(Serialize, Deserialize)]
 struct RemoteStatus {
     machine_id: String,
@@ -264,27 +259,12 @@ struct DeviceGrant {
     bash_enabled: bool,
 }
 
-#[derive(Serialize)]
-struct DeviceToken {
-    id: String,
-    label: String,
-    filesystem_enabled: bool,
-    bash_enabled: bool,
-    created_at: String,
-}
-
-#[derive(Deserialize)]
-struct CreateDeviceToken {
-    label: String,
-    filesystem_enabled: bool,
-    bash_enabled: bool,
-}
-
-#[derive(Serialize)]
-struct CreatedDeviceToken {
-    #[serde(flatten)]
-    token: DeviceToken,
-    secret: String,
+#[derive(Deserialize, Serialize)]
+struct ExecutorRegistration {
+    base_url: String,
+    machine_id: String,
+    hostname: String,
+    access_token: String,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -691,6 +671,12 @@ struct SettingsResponse {
     openai_base_url: String,
     openai_api_key: String,
     deployment_role: String,
+    controller_url: String,
+}
+
+struct SavedSettings {
+    settings: SettingsResponse,
+    executor_access_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -704,6 +690,8 @@ struct UpdateSettings {
     openai_base_url: String,
     openai_api_key: String,
     deployment_role: String,
+    #[serde(default)]
+    controller_url: String,
 }
 
 #[derive(Serialize)]
@@ -762,6 +750,8 @@ struct SetupInput {
     openai_base_url: String,
     #[serde(default = "default_deployment_role")]
     deployment_role: String,
+    #[serde(default)]
+    controller_url: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1198,14 +1188,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/audio/voice-script", post(voice_script))
         .route("/api/audio/speech", post(speech))
-        .route("/api/peers", get(list_peers).post(create_peer))
+        .route("/api/peers", get(list_peers))
         .route("/api/peers/{id}", delete(delete_peer))
         .route("/api/peers/{id}/status", get(peer_status))
-        .route(
-            "/api/device-tokens",
-            get(list_device_tokens).post(create_device_token),
-        )
-        .route("/api/device-tokens/{id}", delete(delete_device_token))
+        .route("/api/executors/register", post(register_executor))
         .route("/api/remote/status", get(remote_status))
         .route("/api/remote/tools/execute", post(remote_execute_tool))
         .route(
@@ -3225,6 +3211,11 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [],
     )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('controller_url', '')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
     Ok(())
 }
 
@@ -3234,6 +3225,40 @@ fn default_openai_url() -> String {
 
 fn default_deployment_role() -> String {
     "controller".to_owned()
+}
+
+fn controller_url(value: &str) -> std::result::Result<String, (StatusCode, Json<ApiError>)> {
+    let value = value.trim().trim_end_matches('/');
+    let url = Url::parse(value).map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "controller_url must be an absolute URL",
+        )
+    })?;
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if url.scheme() != "https" && !loopback {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "controller_url must use HTTPS except on loopback",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn public_base_url(
+    headers: &HeaderMap,
+) -> std::result::Result<String, (StatusCode, Json<ApiError>)> {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "request has no host"))?;
+    let parsed = Url::parse(&format!("http://{host}"))
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "request host is invalid"))?;
+    let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    Ok(format!(
+        "{}://{host}",
+        if loopback { "http" } else { "https" }
+    ))
 }
 
 #[derive(Clone)]
@@ -3249,6 +3274,7 @@ struct Config {
     edge_tts_en_voice: String,
     machine_id: String,
     deployment_role: String,
+    controller_url: String,
 }
 
 fn load_config(path: &Path) -> Result<Config> {
@@ -3277,6 +3303,7 @@ fn load_config(path: &Path) -> Result<Config> {
         edge_tts_en_voice: required("edge_tts_en_voice")?,
         machine_id: required("machine_id")?,
         deployment_role: required("deployment_role")?,
+        controller_url: required("controller_url")?,
     })
 }
 
@@ -3288,6 +3315,14 @@ fn load_subthread_model(path: &Path) -> Result<String> {
             |row| row.get(0),
         )
         .map_err(Into::into)
+}
+
+fn executor_access_token() -> String {
+    format!(
+        "cybion_{}_{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -3408,7 +3443,70 @@ async fn identity(
             "Cybion is restricted to its configured root user",
         ));
     }
-    Ok(Identity)
+    Ok(Identity {
+        access_token: token,
+    })
+}
+
+async fn executor_registration_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    executor_url: &str,
+) -> std::result::Result<Identity, (StatusCode, Json<ApiError>)> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "missing bearer token"))?
+        .to_owned();
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid server configuration",
+        )
+    })?;
+    let audience = Url::parse(executor_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "executor URL is invalid"))?;
+    let header =
+        decode_header(&token).map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWT header"))?;
+    let kid = header
+        .kid
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no key id"))?;
+    let keys = cached_keys(state, &config.auth_url)
+        .await
+        .map_err(|_| error(StatusCode::UNAUTHORIZED, "cannot load Auth Mini JWKS"))?;
+    let jwk = keys
+        .iter()
+        .find(|key| {
+            key.kid == kid && key.kty == "OKP" && key.crv == "Ed25519" && key.alg == "EdDSA"
+        })
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT signing key is not trusted"))?;
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.set_issuer(&[&config.auth_url]);
+    validation.set_audience(&[audience]);
+    let claims = decode::<Value>(
+        &token,
+        &DecodingKey::from_ed_components(&jwk.x)
+            .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWKS key"))?,
+        &validation,
+    )
+    .map_err(|_| error(StatusCode::UNAUTHORIZED, "JWT verification failed"))?
+    .claims;
+    let user_id = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no subject"))?;
+    if user_id != config.root_user_id {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Cybion is restricted to its configured root user",
+        ));
+    }
+    Ok(Identity {
+        access_token: token,
+    })
 }
 
 fn token_hash(token: &str) -> String {
@@ -3524,6 +3622,11 @@ async fn setup(
             "openai_api_key cannot be empty",
         ));
     }
+    let controller_url = if input.deployment_role == "executor" {
+        controller_url(&input.controller_url)?
+    } else {
+        String::new()
+    };
     let root_user_id = bootstrap_subject(&state, &headers, &auth_url).await?;
     let connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
@@ -3536,6 +3639,7 @@ async fn setup(
         ),
         ("openai_api_key", input.openai_api_key.as_str()),
         ("deployment_role", input.deployment_role.as_str()),
+        ("controller_url", controller_url.as_str()),
     ] {
         connection.execute("INSERT INTO app_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])
             .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot persist initial configuration"))?;
@@ -3699,6 +3803,7 @@ async fn settings(
         openai_base_url: config.openai_base_url,
         openai_api_key: config.openai_api_key,
         deployment_role: config.deployment_role,
+        controller_url: config.controller_url,
     }))
 }
 
@@ -3707,7 +3812,25 @@ async fn update_settings(
     headers: HeaderMap,
     Json(input): Json<UpdateSettings>,
 ) -> ApiResult<SettingsResponse> {
-    identity(&state, &headers).await?;
+    let identity = identity(&state, &headers).await?;
+    let saved = save_settings(&state, input)?;
+    if let Some(access_token) = saved.executor_access_token.as_deref() {
+        register_executor_with_controller(
+            &state,
+            &headers,
+            &identity,
+            &saved.settings,
+            access_token,
+        )
+        .await?;
+    }
+    Ok(Json(saved.settings))
+}
+
+fn save_settings(
+    state: &AppState,
+    input: UpdateSettings,
+) -> std::result::Result<SavedSettings, (StatusCode, Json<ApiError>)> {
     let default_model = input.default_model.trim();
     if default_model.is_empty() {
         return Err(error(
@@ -3771,6 +3894,16 @@ async fn update_settings(
             "openai_api_key cannot be empty",
         ));
     }
+    let controller_url = if input.deployment_role == "executor" {
+        controller_url(&input.controller_url)?
+    } else {
+        String::new()
+    };
+    let executor_access_token = if input.deployment_role == "executor" {
+        Some(executor_access_token())
+    } else {
+        None
+    };
     let mut connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
     let transaction = connection
@@ -3827,6 +3960,41 @@ async fn update_settings(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     transaction
         .execute(
+            "INSERT INTO app_meta (key, value) VALUES ('controller_url', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&controller_url],
+        )
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
+    transaction
+        .execute("DELETE FROM device_tokens", [])
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot replace executor access",
+            )
+        })?;
+    if let Some(access_token) = executor_access_token.as_deref() {
+        transaction
+            .execute(
+                "INSERT INTO device_tokens (
+                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
+                 ) VALUES (?1, ?2, ?3, 1, 1, ?4)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    "controller",
+                    token_hash(access_token),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|_| {
+                error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cannot save executor access",
+                )
+            })?;
+    }
+    transaction
+        .execute(
             "INSERT INTO app_meta (key, value) VALUES ('openai_base_url', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [openai_base_url],
@@ -3842,7 +4010,8 @@ async fn update_settings(
     transaction
         .commit()
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
-    Ok(Json(SettingsResponse {
+    drop(connection);
+    let settings = SettingsResponse {
         default_model: default_model.to_owned(),
         subthread_model: subthread_model.to_owned(),
         voice_script_model: voice_script_model.to_owned(),
@@ -3852,7 +4021,58 @@ async fn update_settings(
         openai_base_url: openai_base_url.to_owned(),
         openai_api_key: openai_api_key.to_owned(),
         deployment_role: input.deployment_role,
-    }))
+        controller_url,
+    };
+    Ok(SavedSettings {
+        settings,
+        executor_access_token,
+    })
+}
+
+async fn register_executor_with_controller(
+    state: &AppState,
+    headers: &HeaderMap,
+    identity: &Identity,
+    settings: &SettingsResponse,
+    access_token: &str,
+) -> std::result::Result<(), (StatusCode, Json<ApiError>)> {
+    let registration = ExecutorRegistration {
+        base_url: public_base_url(headers)?,
+        machine_id: load_config(&state.db_path)
+            .map_err(|_| {
+                error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cannot read configuration",
+                )
+            })?
+            .machine_id,
+        hostname: hostname(),
+        access_token: access_token.to_owned(),
+    };
+    state
+        .client
+        .post(format!(
+            "{}/api/executors/register",
+            settings.controller_url
+        ))
+        .bearer_auth(&identity.access_token)
+        .json(&registration)
+        .send()
+        .await
+        .map_err(|cause| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                format!("controller registration failed: {cause}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|cause| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                format!("controller rejected executor: {cause}"),
+            )
+        })?;
+    Ok(())
 }
 
 async fn tools(
@@ -4073,17 +4293,16 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok(Json(peers))
 }
 
-async fn create_peer(
+async fn register_executor(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<CreatePeer>,
+    Json(input): Json<ExecutorRegistration>,
 ) -> ApiResult<Peer> {
-    identity(&state, &headers).await?;
     let base_url = input.base_url.trim_end_matches('/');
     let remote_url = Url::parse(base_url).map_err(|_| {
         error(
             StatusCode::BAD_REQUEST,
-            "peer base_url must be an absolute URL",
+            "executor base_url must be an absolute URL",
         )
     })?;
     let loopback = matches!(
@@ -4093,55 +4312,35 @@ async fn create_peer(
     if remote_url.scheme() != "https" && !loopback {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "remote Cybion URLs must use HTTPS except on loopback",
+            "executor URLs must use HTTPS except on loopback",
         ));
     }
-    if input.device_token.trim().is_empty() {
+    executor_registration_identity(&state, &headers, base_url).await?;
+    if input.access_token.trim().is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "device_token cannot be empty",
+            "access_token cannot be empty",
         ));
     }
-    let remote = state
-        .client
-        .get(format!("{base_url}/api/remote/status"))
-        .bearer_auth(input.device_token.trim())
-        .send()
-        .await
-        .map_err(|cause| {
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("remote machine is unreachable: {cause}"),
-            )
-        })?
-        .error_for_status()
-        .map_err(|cause| {
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("remote machine rejected its device token: {cause}"),
-            )
-        })?
-        .json::<RemoteStatus>()
-        .await
-        .map_err(|_| {
-            error(
-                StatusCode::BAD_GATEWAY,
-                "remote machine returned invalid status",
-            )
-        })?;
     let local = load_config(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot read configuration",
         )
     })?;
-    if remote.auth_url != local.auth_url || remote.root_user_id != local.root_user_id {
+    if local.deployment_role != "controller" {
         return Err(error(
-            StatusCode::FORBIDDEN,
-            "remote machine must use the same Auth Mini issuer and root user",
+            StatusCode::CONFLICT,
+            "only a controller Cybion can register tool executors",
         ));
     }
-    if remote.machine_id == local.machine_id {
+    if input.machine_id.trim().is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "executor machine_id cannot be empty",
+        ));
+    }
+    if input.machine_id == local.machine_id {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "cannot enroll this Cybion machine as its own remote executor",
@@ -4149,17 +4348,20 @@ async fn create_peer(
     }
     let peer = Peer {
         id: Uuid::new_v4().to_string(),
-        name: input.name.trim().to_owned(),
+        name: input.hostname.clone(),
         base_url: base_url.to_owned(),
-        machine_id: remote.machine_id,
-        hostname: remote.hostname,
-        deployment_role: remote.deployment_role,
-        filesystem_enabled: remote.filesystem_enabled,
-        bash_enabled: remote.bash_enabled,
+        machine_id: input.machine_id,
+        hostname: input.hostname,
+        deployment_role: "executor".to_owned(),
+        filesystem_enabled: true,
+        bash_enabled: true,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    if peer.name.is_empty() {
-        return Err(error(StatusCode::BAD_REQUEST, "peer name cannot be empty"));
+    if peer.name.trim().is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "executor hostname cannot be empty",
+        ));
     }
     let connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
@@ -4168,12 +4370,21 @@ async fn create_peer(
             "INSERT INTO peers (
                id, name, base_url, device_token, machine_id, hostname, deployment_role,
                filesystem_enabled, bash_enabled, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(machine_id) DO UPDATE SET
+               id = excluded.id,
+               name = excluded.name,
+               base_url = excluded.base_url,
+               device_token = excluded.device_token,
+               hostname = excluded.hostname,
+               deployment_role = excluded.deployment_role,
+               filesystem_enabled = excluded.filesystem_enabled,
+               bash_enabled = excluded.bash_enabled",
             params![
                 peer.id,
                 peer.name,
                 peer.base_url,
-                input.device_token.trim(),
+                input.access_token.trim(),
                 peer.machine_id,
                 peer.hostname,
                 peer.deployment_role,
@@ -4278,131 +4489,6 @@ async fn peer_status(
     Ok(Json(
         serde_json::to_value(response).expect("remote status is serializable"),
     ))
-}
-
-async fn list_device_tokens(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> ApiResult<Vec<DeviceToken>> {
-    identity(&state, &headers).await?;
-    let connection = open_db(&state.db_path)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    let tokens = connection
-        .prepare(
-            "SELECT id, label, filesystem_enabled, bash_enabled, created_at
-             FROM device_tokens ORDER BY created_at DESC",
-        )
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot read device tokens",
-            )
-        })?
-        .query_map([], |row| {
-            Ok(DeviceToken {
-                id: row.get(0)?,
-                label: row.get(1)?,
-                filesystem_enabled: row.get(2)?,
-                bash_enabled: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot read device tokens",
-            )
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot decode device tokens",
-            )
-        })?;
-    Ok(Json(tokens))
-}
-
-async fn create_device_token(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<CreateDeviceToken>,
-) -> ApiResult<CreatedDeviceToken> {
-    identity(&state, &headers).await?;
-    let label = input.label.trim();
-    if label.is_empty() {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "token label cannot be empty",
-        ));
-    }
-    if !input.filesystem_enabled && !input.bash_enabled {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "a device token must grant at least one tool capability",
-        ));
-    }
-    let id = Uuid::new_v4().to_string();
-    let secret = format!(
-        "cybion_{}_{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    );
-    let token = DeviceToken {
-        id: id.clone(),
-        label: label.to_owned(),
-        filesystem_enabled: input.filesystem_enabled,
-        bash_enabled: input.bash_enabled,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    open_db(&state.db_path)
-        .and_then(|connection| {
-            connection.execute(
-                "INSERT INTO device_tokens (
-                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    token.id,
-                    token.label,
-                    token_hash(&secret),
-                    token.filesystem_enabled,
-                    token.bash_enabled,
-                    token.created_at,
-                ],
-            )?;
-            Ok(())
-        })
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot create device token",
-            )
-        })?;
-    Ok(Json(CreatedDeviceToken { token, secret }))
-}
-
-async fn delete_device_token(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult<Value> {
-    identity(&state, &headers).await?;
-    let deleted = open_db(&state.db_path)
-        .and_then(|connection| {
-            connection
-                .execute("DELETE FROM device_tokens WHERE id = ?1", [id])
-                .map_err(Into::into)
-        })
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot revoke device token",
-            )
-        })?;
-    if deleted == 0 {
-        return Err(error(StatusCode::NOT_FOUND, "device token does not exist"));
-    }
-    Ok(Json(json!({ "deleted": true })))
 }
 
 async fn remote_status(
@@ -8742,6 +8828,60 @@ mod tests {
         assert!(!digest.contains(secret));
     }
 
+    #[test]
+    fn executor_access_tokens_are_unique_and_not_persisted_as_plaintext() {
+        let first = executor_access_token();
+        let second = executor_access_token();
+        assert_ne!(first, second);
+        assert!(first.starts_with("cybion_"));
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO device_tokens (
+                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
+                 ) VALUES ('controller', 'controller', ?1, 1, 1, 'now')",
+                [token_hash(&first)],
+            )
+            .unwrap();
+        let stored: String = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT token_hash FROM device_tokens WHERE id = 'controller'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, token_hash(&first));
+        assert_ne!(stored, first);
+    }
+
+    #[test]
+    fn controller_url_requires_https_except_for_loopback() {
+        assert_eq!(
+            controller_url("https://controller.example/").unwrap(),
+            "https://controller.example"
+        );
+        assert_eq!(
+            controller_url("http://127.0.0.1:1858").unwrap(),
+            "http://127.0.0.1:1858"
+        );
+        assert!(controller_url("http://controller.example").is_err());
+    }
+
+    #[test]
+    fn executor_registration_endpoint_is_the_only_machine_enrollment_write_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, "https://openai.example.com/v1");
+        let routes = format!("{:?}", app(test_state(db)));
+        assert!(routes.contains("/api/executors/register"));
+        assert!(!routes.contains("/api/device-tokens"));
+    }
+
     #[tokio::test]
     async fn remote_executor_enforces_the_device_token_capability_scope() {
         let temp = tempfile::tempdir().unwrap();
@@ -8916,6 +9056,7 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
+            controller_url: String::new(),
         };
         let (events, mut received) = mpsc::channel(4);
         let result = run_agent_items(
@@ -9099,6 +9240,7 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
+            controller_url: String::new(),
         };
         let (events, _) = mpsc::channel(4);
         let result = run_agent_items(
@@ -9196,6 +9338,7 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
+            controller_url: String::new(),
         };
         let source = "## 部署结果\n\n```sh\nmake deploy\n```\n\n| 状态 | 完成 |";
         let script = create_voice_script(&reqwest::Client::new(), &config, source)
@@ -9304,6 +9447,7 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
+            controller_url: String::new(),
         };
         let audio = create_edge_speech(&config, "Cybion Edge TTS verification.", "en")
             .await
@@ -9325,6 +9469,7 @@ mod tests {
             edge_tts_en_voice: "en-US-GuyNeural".to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
+            controller_url: String::new(),
         };
         assert_eq!(edge_tts_voice(&config, "zh").unwrap(), "zh-CN-YunxiNeural");
         assert_eq!(edge_tts_voice(&config, "en").unwrap(), "en-US-GuyNeural");
@@ -10735,6 +10880,7 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
+            controller_url: String::new(),
         };
         let db = tempfile::tempdir().unwrap();
         let db_path = db.path().join("default.sqlite3");
