@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
-const RELEASE_URL: &str = "https://api.github.com/repos/zccz14/mobius/releases/latest";
+const RELEASE_URL: &str = "https://api.github.com/repos/zccz14/cybion/releases/latest";
 const UPDATE_HELPER_FLAG: &str = "--apply-update";
 const STARTUP_WAIT: Duration = Duration::from_secs(10);
 const SUPERVISOR_STARTUP_WAIT: Duration = Duration::from_secs(2);
@@ -139,7 +139,7 @@ async fn download_latest_inner(
                 asset_name
             )
         })?;
-    let candidate = update_directory(database_path, &release.tag_name).join("mobius");
+    let candidate = update_directory(database_path, &release.tag_name).join("cybion");
     if !candidate.is_file() {
         let archive = client
             .get(&asset.browser_download_url)
@@ -182,11 +182,11 @@ pub fn restart(database_path: &Path) -> Result<()> {
         .ok_or_else(|| anyhow!("downloaded update has no version"))?;
     if !is_newer(&candidate_version, &current_version()) {
         return Err(anyhow!(
-            "downloaded update is not newer than this Mobius version"
+            "downloaded update is not newer than this Cybion version"
         ));
     }
     let current =
-        std::env::current_exe().context("cannot resolve the current Mobius executable")?;
+        std::env::current_exe().context("cannot resolve the current Cybion executable")?;
     let installed = installed_binary_path(database_path)?;
     seed_installation(&current, &installed)?;
     Command::new(&current)
@@ -205,12 +205,12 @@ pub fn restart(database_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Starts the binary from Mobius's fixed installation location. Release archives and
+/// Starts the binary from Cybion's fixed installation location. Release archives and
 /// development builds are only migration sources; the long-running server always uses
-/// `~/.mobius/bin/mobius`.
+/// `~/.cybion/bin/cybion`.
 pub fn launch_installed_binary(database_path: &Path) -> Result<bool> {
     let current =
-        std::env::current_exe().context("cannot resolve the current Mobius executable")?;
+        std::env::current_exe().context("cannot resolve the current Cybion executable")?;
     let installed = installed_binary_path(database_path)?;
     if current == installed {
         return Ok(false);
@@ -221,7 +221,7 @@ pub fn launch_installed_binary(database_path: &Path) -> Result<bool> {
         use std::os::unix::process::CommandExt;
 
         let cause = Command::new(installed).exec();
-        return Err(cause).context("cannot start the installed Mobius binary");
+        return Err(cause).context("cannot start the installed Cybion binary");
     }
     #[allow(unreachable_code)]
     Err(anyhow!(
@@ -314,8 +314,8 @@ fn apply_update(
     restore_previous_binary(installed, &previous)?;
     Command::new(installed)
         .spawn()
-        .context("cannot restart the previous Mobius version")?;
-    Err(anyhow!("updated Mobius did not confirm startup"))
+        .context("cannot restart the previous Cybion version")?;
+    Err(anyhow!("updated Cybion did not confirm startup"))
 }
 
 fn updated_binary_started(
@@ -328,7 +328,7 @@ fn updated_binary_started(
     }
     let mut child = Command::new(installed)
         .spawn()
-        .context("cannot start updated Mobius")?;
+        .context("cannot start updated Cybion")?;
     match wait_for_startup(&mut child, database_path, expected_version) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
@@ -340,7 +340,7 @@ fn updated_binary_started(
     }
     let _ = child.kill();
     let _ = child.wait();
-    Err(anyhow!("updated Mobius did not confirm startup"))
+    Err(anyhow!("updated Cybion did not confirm startup"))
 }
 
 fn wait_for_supervisor_startup(database_path: &Path, expected_version: &str) -> Result<bool> {
@@ -358,7 +358,7 @@ fn wait_for_process_exit(parent_pid: u32) -> Result<()> {
     let deadline = std::time::Instant::now() + STARTUP_WAIT;
     while process_is_alive(parent_pid)? {
         if std::time::Instant::now() >= deadline {
-            return Err(anyhow!("previous Mobius process did not exit"));
+            return Err(anyhow!("previous Cybion process did not exit"));
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -369,7 +369,7 @@ fn process_is_alive(pid: u32) -> Result<bool> {
     Ok(Command::new("kill")
         .args(["-0", &pid.to_string()])
         .status()
-        .context("cannot inspect the previous Mobius process")?
+        .context("cannot inspect the previous Cybion process")?
         .success())
 }
 
@@ -395,7 +395,7 @@ fn installed_binary_path(database_path: &Path) -> Result<PathBuf> {
     Ok(database_path
         .parent()
         .context("database path has no parent")?
-        .join("bin/mobius"))
+        .join("bin/cybion"))
 }
 
 fn startup_marker_path(database_path: &Path) -> Result<PathBuf> {
@@ -417,11 +417,11 @@ fn replace_installed_binary(candidate: &Path, installed: &Path) -> Result<PathBu
     let previous = installed.with_extension("previous");
     copy_binary(candidate, &staging)?;
     if previous.exists() {
-        fs::remove_file(&previous).context("cannot clear the previous Mobius backup")?;
+        fs::remove_file(&previous).context("cannot clear the previous Cybion backup")?;
     }
-    fs::rename(installed, &previous).context("cannot preserve the previous Mobius binary")?;
+    fs::rename(installed, &previous).context("cannot preserve the previous Cybion binary")?;
     if let Err(cause) = fs::rename(&staging, installed) {
-        fs::rename(&previous, installed).context("cannot restore the previous Mobius binary")?;
+        fs::rename(&previous, installed).context("cannot restore the previous Cybion binary")?;
         return Err(cause.into());
     }
     Ok(previous)
@@ -430,17 +430,17 @@ fn replace_installed_binary(candidate: &Path, installed: &Path) -> Result<PathBu
 fn restore_previous_binary(installed: &Path, previous: &Path) -> Result<()> {
     let failed = installed.with_extension("failed");
     if failed.exists() {
-        fs::remove_file(&failed).context("cannot clear the failed Mobius backup")?;
+        fs::remove_file(&failed).context("cannot clear the failed Cybion backup")?;
     }
-    fs::rename(installed, failed).context("cannot preserve the failed Mobius binary")?;
-    fs::rename(previous, installed).context("cannot restore the previous Mobius binary")?;
+    fs::rename(installed, failed).context("cannot preserve the failed Cybion binary")?;
+    fs::rename(previous, installed).context("cannot restore the previous Cybion binary")?;
     Ok(())
 }
 
 fn copy_binary(source: &Path, destination: &Path) -> Result<()> {
     let directory = destination
         .parent()
-        .expect("Mobius binary path has a parent directory");
+        .expect("Cybion binary path has a parent directory");
     fs::create_dir_all(directory)?;
     fs::copy(source, destination)?;
     #[cfg(unix)]
@@ -501,15 +501,15 @@ fn current_version() -> String {
 fn release_asset_name() -> Result<&'static str> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        return Ok("mobius-linux-x86_64.tar.gz");
+        return Ok("cybion-linux-x86_64.tar.gz");
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        return Ok("mobius-linux-aarch64.tar.gz");
+        return Ok("cybion-linux-aarch64.tar.gz");
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        return Ok("mobius-macos-aarch64.tar.gz");
+        return Ok("cybion-macos-aarch64.tar.gz");
     }
     #[allow(unreachable_code)]
     Err(anyhow!(
@@ -530,7 +530,7 @@ fn version_parts(version: &str) -> Vec<u64> {
 fn update_directory(database_path: &Path, tag: &str) -> PathBuf {
     database_path
         .parent()
-        .expect("Mobius database has a parent")
+        .expect("Cybion database has a parent")
         .join("updates")
         .join(tag)
 }
@@ -553,8 +553,8 @@ fn unpack_binary(bytes: &[u8], directory: &Path) -> Result<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?;
-        if path.file_name().and_then(|name| name.to_str()) == Some("mobius") {
-            let candidate = directory.join("mobius");
+        if path.file_name().and_then(|name| name.to_str()) == Some("cybion") {
+            let candidate = directory.join("cybion");
             entry.unpack(&candidate)?;
             #[cfg(unix)]
             {
@@ -564,7 +564,7 @@ fn unpack_binary(bytes: &[u8], directory: &Path) -> Result<()> {
             return Ok(());
         }
     }
-    Err(anyhow!("release archive has no Mobius executable"))
+    Err(anyhow!("release archive has no Cybion executable"))
 }
 
 fn persist_status(
@@ -662,22 +662,22 @@ mod tests {
 
     #[test]
     fn rejects_a_bad_checksum() {
-        assert!(verify_checksum(b"mobius", "deadbeef mobius.tar.gz").is_err());
+        assert!(verify_checksum(b"cybion", "deadbeef cybion.tar.gz").is_err());
     }
 
     #[test]
     fn installation_path_is_separate_from_the_database_and_source_tree() {
-        let database = Path::new("/tmp/mobius/default.sqlite3");
+        let database = Path::new("/tmp/cybion/default.sqlite3");
         assert_eq!(
             installed_binary_path(database).unwrap(),
-            PathBuf::from("/tmp/mobius/bin/mobius")
+            PathBuf::from("/tmp/cybion/bin/cybion")
         );
     }
 
     #[test]
     fn replacement_preserves_the_previous_binary() {
         let directory = tempfile::tempdir().unwrap();
-        let installed = directory.path().join("bin/mobius");
+        let installed = directory.path().join("bin/cybion");
         let candidate = directory.path().join("candidate");
         copy_binary_bytes(&installed, b"old");
         copy_binary_bytes(&candidate, b"new");
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn replacement_replaces_an_old_backup_with_the_current_binary() {
         let directory = tempfile::tempdir().unwrap();
-        let installed = directory.path().join("bin/mobius");
+        let installed = directory.path().join("bin/cybion");
         let candidate = directory.path().join("candidate");
         copy_binary_bytes(&installed, b"current");
         copy_binary_bytes(&candidate, b"next");
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn failed_check_clears_a_stale_candidate() {
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("mobius.sqlite3");
+        let database = directory.path().join("cybion.sqlite3");
         let connection = Connection::open(&database).unwrap();
         connection
             .execute_batch("CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn installed_candidate_is_not_shown_as_ready() {
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("mobius.sqlite3");
+        let database = directory.path().join("cybion.sqlite3");
         let connection = Connection::open(&database).unwrap();
         connection
             .execute_batch("CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")

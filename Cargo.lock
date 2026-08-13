@@ -245,6 +245,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "cybion"
+version = "0.1.52"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "directories",
+ "flate2",
+ "futures-util",
+ "hostname",
+ "jsonwebtoken",
+ "notify",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "similar",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -932,39 +965,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mobius"
-version = "0.1.52"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "chrono",
- "directories",
- "flate2",
- "futures-util",
- "hostname",
- "jsonwebtoken",
- "notify",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "similar",
- "sysinfo",
- "tar",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
-# Mobius
+# Cybion
 
-**Mobius 是面向多台设备、可长期使用的 AI Harness**。它以用户可见的一条持续对话
+**Cybion 是面向多台设备、可长期使用的 AI Harness**。它以用户可见的一条持续对话
 作为主线，将工具和可接入的机器组织为连续的操作界面，而不要求人管理项目和会话。
 
-Mobius 适合已经拥有本机、家用主机、云服务器等多种设备，并希望让 AI 在这些真实
+Cybion 适合已经拥有本机、家用主机、云服务器等多种设备，并希望让 AI 在这些真实
 机器上持续协作的个人操作员。它是实验性、高信任度的软件；授权后的 Agent 可以使用
 文件系统和 Shell，因此只应部署在你愿意授予该权限的机器上。
 
@@ -16,7 +16,7 @@ Mobius 适合已经拥有本机、家用主机、云服务器等多种设备，�
 ## 为什么还要做一个 Harness？
 
 Claude Code、ChatGPT（Codex）、Pi、OpenCode、OpenClaw、Hermes 等产品已经证明了
-Agent Harness 的价值。Mobius 的出发点不是再复制一个终端代理，而是围绕三个核心对象
+Agent Harness 的价值。Cybion 的出发点不是再复制一个终端代理，而是围绕三个核心对象
 组织产品：**对话系统、用户入口和设备**。对话系统承载用户持续推进的思考，入口让用户
 能在合适的时刻介入，设备则是 Agent 实际可以操作的世界。
 
@@ -35,7 +35,7 @@ Agent Harness 的价值。Mobius 的出发点不是再复制一个终端代理�
 因此变得别扭。对话不应成为用户需要管理的对象；系统应当围绕用户持续推进的思考来
 组织信息。
 
-Mobius 将用户界面收敛为**单一会话**：所有沟通都在这里发生，记录会持久化。它不只是
+Cybion 将用户界面收敛为**单一会话**：所有沟通都在这里发生，记录会持久化。它不只是
 “持续对话”，而是以人能够连续思考和判断为中心的交互边界。系统负责维护这条主线和
 上下文，用户不需要判断何时结束一段 Session，也不需要自行恢复跨会话的背景。
 
@@ -45,7 +45,7 @@ Mobius 将用户界面收敛为**单一会话**：所有沟通都在这里发生
 读取文件、运行工具、观察环境和拿到中间结果之后，才知道接下来最有价值的动作是什么。
 把尚未发生的过程过早固化，只会让系统花费精力维护猜测，而不是解决眼前的问题。
 
-Mobius 的迭代哲学是 **one more step**：依据当前对话、已有产物、工具反馈和可验证证据，
+Cybion 的迭代哲学是 **one more step**：依据当前对话、已有产物、工具反馈和可验证证据，
 选择并完成下一个有用步骤；结果返回后，把新事实合并回主线程，再重新判断下一步。每一步
 都应推动真实结果向前，同时保留用户随时介入、改变方向或停止的空间。长期工作因此来自
 连续而可追溯的迭代，而不是要求 AI 在一开始就知道完整路径。
@@ -96,8 +96,8 @@ flowchart LR
 C_t = f(H_t)
 ```
 
-用户会持续使用 Mobius，`H_t` 会不断增长，而推理模型的上下文窗口始终有限。两者的
-矛盾需要通过上下文自动压缩解决；这是 Harness 的经典做法，Mobius 保留这一做法，而不
+用户会持续使用 Cybion，`H_t` 会不断增长，而推理模型的上下文窗口始终有限。两者的
+矛盾需要通过上下文自动压缩解决；这是 Harness 的经典做法，Cybion 保留这一做法，而不
 把压缩后的上下文当作独立于历史记录的另一份真相。只要关键信息仍在上下文窗口之外，
 模型就无法在一次推理中完整利用它，最终仍需通过多轮检索从历史记录、文件、工具和
 设备中重新获取。
@@ -127,7 +127,7 @@ K_(c+1) = distill(K_c, H_(c+1) ... H_t)
 C_retry = map(K_(c+1))
 ```
 
-Mobius 因此具备面向无限长历史的上下文管理能力：每条主线程消息都有递增 ID，原文和
+Cybion 因此具备面向无限长历史的上下文管理能力：每条主线程消息都有递增 ID，原文和
 工具执行记录永久保留；checkpoint 记录其覆盖的 ID 区间、前序 checkpoint 和一棵平衡的
 历史范围索引。`get_checkpoint` 可以按 checkpoint ID 取得摘要，也可以按消息 ID 在索引中
 以对数级跳数定位到对应的原文范围；`read_thread_history` 再分页读取该范围的原始证据。
@@ -150,10 +150,10 @@ Token、密码、API key、Cookie 或其他密钥写入这个索引，也不会�
 
 易用性不只是移动端适配，而是让用户在合适的时刻以合适的方式回到同一条主线程：在
 桌面上输入和查看执行过程，在手机或平板上随时查看进展、补充目标，或直接用语音表达
-意图。语音输入是 Mobius 的一等交互方式，而不是桌面键盘输入的附属功能。
+意图。语音输入是 Cybion 的一等交互方式，而不是桌面键盘输入的附属功能。
 
 移动端必须存在，因为用户的工作和判断不会只发生在电脑前。Web GUI 让手机、平板或
-任意浏览器都能回到同一条对话；它不把移动端限定为某个桌面应用的附属能力。Mobius
+任意浏览器都能回到同一条对话；它不把移动端限定为某个桌面应用的附属能力。Cybion
 使用 Rust HTTP Server 承载嵌入式控制台，通过 Auth Mini 处理身份验证，并使用
 OpenAI-compatible Responses API 连接模型上游。
 
@@ -167,7 +167,7 @@ OpenAI-compatible Responses API 连接模型上游。
 ### 6. 设备是可远程调用的执行环境
 
 个人可控制的计算环境天然是多样的：Mac、Linux、Windows、云服务器和家中的主机各自
-拥有文件、进程、网络与工具。Mobius 将它们视为可由远程工具调用的执行环境，而不是
+拥有文件、进程、网络与工具。Cybion 将它们视为可由远程工具调用的执行环境，而不是
 必须各自运行 AI 推理的孤立工作区。
 
 推理集中在控制设备 A：A 上的主线程向配置在 A 上的 Responses API 上游发起请求，并把
@@ -204,7 +204,7 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
 
 ### 7. 部署不应限制控制范围
 
-控制家里的机器不应以拥有公网 IP 为前提。每台设备只需运行一个 Mobius 二进制；没有
+控制家里的机器不应以拥有公网 IP 为前提。每台设备只需运行一个 Cybion 二进制；没有
 公网 IP 的设备也可以通过 frp、cloudflared 或同类出站隧道建立可访问地址，再由同一
 身份体系验证操作者。这样，用户可以从任意已登录的浏览器介入自己的设备，而不必先将
 家用网络改造成公开服务器。
@@ -248,27 +248,27 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
   SSE 请求前检查 access token 有效期，临近过期时刷新，并在 401 后刷新重试一次。
 - 设备 Token、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备无需 Responses API
   上游，设备只在单次工具调用中被选择。
-- 机器登记、远程状态探测、资源监控，以及完整的自更新流程：正式运行二进制固定在 `~/.mobius/bin/mobius`；启动后和每六小时检查 Release、校验并下载候选版本、在设置页展示状态，并由操作者确认重启安装。一次性更新助手会先原子替换安装文件，再等待旧 PID 退出；系统服务重新拉起的新进程或助手启动的新进程会以预期版本写入启动标记，确认失败则恢复并重启旧二进制。
+- 机器登记、远程状态探测、资源监控，以及完整的自更新流程：正式运行二进制固定在 `~/.cybion/bin/cybion`；启动后和每六小时检查 Release、校验并下载候选版本、在设置页展示状态，并由操作者确认重启安装。一次性更新助手会先原子替换安装文件，再等待旧 PID 退出；系统服务重新拉起的新进程或助手启动的新进程会以预期版本写入启动标记，确认失败则恢复并重启旧二进制。
 - Rust 单二进制部署：控制台资源嵌入二进制，运行时无需命令行参数或环境变量。
 
-如果通过系统服务启动 Mobius，服务的 `Program` 必须是 `~/.mobius/bin/mobius`；不要指向
+如果通过系统服务启动 Cybion，服务的 `Program` 必须是 `~/.cybion/bin/cybion`；不要指向
 `target/release` 或 Release 解压目录。它们只用于首次迁移，运行中的更新不依赖常驻守护进程。
 
 ## 架构与边界
 
-Mobius 不采用“每个目录一个项目”的隔离模型。主线程和子线程始终运行在控制设备本机，
+Cybion 不采用“每个目录一个项目”的隔离模型。主线程和子线程始终运行在控制设备本机，
 每次文件或 Bash 工具调用以 `target_device` 选择本机或远程执行边界，并以身份和设备 Token
 作为访问边界。一旦设备被初始化并授权，Agent 可以使用获准的文件与 Shell 工具。因此，
 设备的选择、网络暴露方式和上游 API 凭据都属于操作者的安全责任。
 
 ```mermaid
 flowchart TB
-  B["Browser"] -->|"JWT"| S["Mobius Rust Server"]
+  B["Browser"] -->|"JWT"| S["Cybion Rust Server"]
   S -->|"verify JWT / JWKS"| AM["Auth Mini"]
   S -->|"/responses"| O["OpenAI-compatible upstream"]
-  S --> DB[("~/.mobius/default.sqlite3")]
+  S --> DB[("~/.cybion/default.sqlite3")]
   S --> T["本机文件系统与 Bash 工具"]
-  S -->|"device-token"| P["远程 Mobius 工具执行设备"]
+  S -->|"device-token"| P["远程 Cybion 工具执行设备"]
   P --> PT["远程文件系统与 Bash 工具"]
 ```
 
@@ -278,7 +278,7 @@ flowchart TB
   请求 host 对应的 audience，以及与 `root_user_id` 一致的 subject。`/api/remote/*` 只接受
   单独创建设备 Token，不接受或转发浏览器 JWT。
 - 浏览器使用 Auth Mini 的 SDK 持久保存会话，并在 API 与 SSE 请求前主动刷新即将过期的
-  access token；遇到 401 时只刷新重试一次。Mobius 服务端只缓存用于验证的 JWKS，不读取
+  access token；遇到 401 时只刷新重试一次。Cybion 服务端只缓存用于验证的 JWKS，不读取
   浏览器 refresh token。
 - Browser Control 只在控制设备上运行：它以空环境变量、临时 user-data directory、禁用扩展和
   loopback-only CDP 启动 headless Chrome/Chromium。Agent 可访问任意 HTTP(S) 网页；页面文字、
@@ -293,30 +293,30 @@ flowchart TB
 
 前置条件：一个可用的 Auth Mini 服务和 OpenAI-compatible Responses API 上游。
 
-若要使用 Browser Control，控制设备还需要安装 Google Chrome 或 Chromium。Mobius 不使用或
+若要使用 Browser Control，控制设备还需要安装 Google Chrome 或 Chromium。Cybion 不使用或
 修改用户的日常浏览器 profile；Computer Use 还要求当前配置的 Responses 上游与模型支持
 `computer` 工具。
 
 ### 优先：安装 Release
 
-从 [GitHub Releases](https://github.com/zccz14/mobius/releases/latest) 下载与你的设备
+从 [GitHub Releases](https://github.com/zccz14/cybion/releases/latest) 下载与你的设备
 匹配的归档和同名 `.sha256` 文件：
 
 | 平台 | 归档 |
 | --- | --- |
-| macOS Apple Silicon | `mobius-macos-aarch64.tar.gz` |
-| Linux x86_64 | `mobius-linux-x86_64.tar.gz` |
-| Linux arm64 | `mobius-linux-aarch64.tar.gz` |
+| macOS Apple Silicon | `cybion-macos-aarch64.tar.gz` |
+| Linux x86_64 | `cybion-linux-x86_64.tar.gz` |
+| Linux arm64 | `cybion-linux-aarch64.tar.gz` |
 
 校验下载后解压并运行二进制。例如，在 macOS Apple Silicon 上：
 
 ```bash
-shasum -a 256 -c mobius-macos-aarch64.tar.gz.sha256
-tar -xzf mobius-macos-aarch64.tar.gz
-./mobius-macos-aarch64/mobius
+shasum -a 256 -c cybion-macos-aarch64.tar.gz.sha256
+tar -xzf cybion-macos-aarch64.tar.gz
+./cybion-macos-aarch64/cybion
 ```
 
-Mobius 默认监听 `0.0.0.0:1858`，数据存储在 `~/.mobius/default.sqlite3`。
+Cybion 默认监听 `0.0.0.0:1858`，数据存储在 `~/.cybion/default.sqlite3`。
 
 ### 后备：从源码构建
 
@@ -345,7 +345,7 @@ cargo run --release
    地址；只有精确 loopback 地址可使用 HTTP。
 2. 在执行设备的 **Machines** 页面创建仅含必要能力的设备 Token，立即复制只显示一次的
    密钥。
-3. 在控制设备的 **Machines** 页面填写执行设备的 Mobius URL 和设备 Token。控制设备会
+3. 在控制设备的 **Machines** 页面填写执行设备的 Cybion URL 和设备 Token。控制设备会
    调用远端状态接口，验证双方的 issuer、`root_user_id`、机器 ID 和获准能力后再保存。
 4. 之后主线程或子线程调用文件系统与 Bash 工具时，可以填写 `target_device` 为该设备 ID；
    省略该字段则在控制设备本机执行。执行设备不会发起 Responses API 请求。
@@ -373,5 +373,5 @@ x86_64 和 Linux aarch64 的发布归档与 SHA-256 校验和。
 - 在不暴露 Session 管理的前提下，增强跨机器任务的设备建议、可达性诊断和结果证据视图。
 - 继续保持部署、初始化与权限管理可通过 Web API 和 GUI 完成。
 
-Mobius 的目标不是让人维护更多的 Project、Session 或机器列表，而是让这些对象退到
+Cybion 的目标不是让人维护更多的 Project、Session 或机器列表，而是让这些对象退到
 系统内部，让用户专注于自己要完成的事情。
