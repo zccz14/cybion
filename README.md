@@ -9,7 +9,7 @@ Cybion 适合已经拥有本机、家用主机、云服务器等多种设备，�
 
 > 当前版本已提供持久化主线程、可回收子线程、上下文 checkpoint 与稳定前缀编译、
 > Web GUI、Auth Mini 身份验证、OpenAI-compatible Responses API 上游、本机与远程文件
-> 和 Shell 工具、设备 Token、控制/执行设备角色，以及浏览器中的连续语音输入和主动
+> 和 Shell 工具、控制/执行设备角色，以及浏览器中的连续语音输入和主动
 > 播报。控制设备还可启动严格隔离的 Browser Control 会话；启用 Computer Use 时，模型的
 > 视觉操作在高影响动作前必须由操作者批准。AI 音箱、车载智能等专用交互设备仍是产品方向。
 
@@ -176,18 +176,20 @@ OpenAI-compatible Responses API 连接模型上游。
 继续同一条主线程的推理。B 不发起 AI 推理请求，因此作为纯执行设备时不需要配置
 OpenAI Responses 上游。
 
-远程调用需要独立于用户登录的设备授权。B 在允许 A 访问时创建设备访问 Token，A 将该
-Token 保存在本机；之后 A 对 B 的工具请求携带 `Authorization: Bearer <device-token>`。
-该 Token 用于识别并限制 A 对 B 的调用权限。与此同时，所有设备必须使用同一个 Auth
-Mini issuer 初始化，并以同一个用户的 `sub` 作为 `root_user_id`；共享 root 身份证明它们
-属于同一操作者，设备 Token 则授权具体的设备间调用。
+执行设备 B 在设置中选择“工具执行设备”并填写控制设备 A 的 Cybion URL 后，会主动向 A
+登记自己的公开 URL、机器 ID、主机名和新生成的 Access Token。B 只保存该 Token 的
+SHA-256 哈希，A 为调用 B 保存明文 Token；之后 A 的工具请求携带
+`Authorization: Bearer <access-token>`。所有设备仍必须使用同一个 Auth Mini issuer 和同一
+用户的 `sub` 作为 `root_user_id`。注册请求携带一个 audience 为 B 公开 URL 的 Auth Mini JWT，
+因此 A 可以在保存 Token 前验证发起注册的用户和设备身份。
 
 ```mermaid
 flowchart LR
   U["操作者"] --> A["设备 A：主线程与 Agent 运行时"]
   A -->|"Responses API 请求"| M["模型上游：仅 A 配置"]
   M -->|"工具调用"| A
-  A -->|"HTTP 远程工具调用<br/>Authorization: Bearer device-token"| B["设备 B：工具执行环境"]
+  B -->|"携带自身 JWT、公开 URL、机器信息和 Access Token 注册"| A
+  A -->|"HTTP 远程工具调用<br/>Authorization: Bearer access-token"| B["设备 B：工具执行环境"]
   B --> F["文件、Shell 与本地工具"]
   B -->|"工具结果"| A
   A --- R["同一 Auth Mini issuer<br/>同一 root_user_id"]
@@ -195,12 +197,10 @@ flowchart LR
 ```
 
 当前版本已经实现这条调用路径：执行设备可以在初始化或设置页选择“工具执行设备”角色，
-无需配置模型上游；它由 root user 创建只显示一次、只保存 SHA-256 哈希的设备 Token，
-并分别授权文件系统和 Bash。控制设备使用该 Token 接入远端时，会验证双方使用同一个
-Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能力提供给 Agent。主线程
-和子线程使用同一组文件系统与 Bash 工具：省略可选的 `target_device` 或将它填为空字符串时，
-在控制设备本机执行；填写已接入的设备 ID 时只把这一次工具调用转发到对应设备。Goal 达成或受阻后的
-终态结果仍会自动回收到同一条主线程。
+填写控制设备 URL 后直接注册，无需配置模型上游、创建 Token 或在控制端手动添加机器。每次保存执行设备
+设置都会替换其 Access Token 和控制端登记；控制端只向已注册的机器 ID 提供远程工具。主线程和子线程
+使用同一组文件系统与 Bash 工具：省略可选的 `target_device` 或将它填为空字符串时，在控制设备本机执行；
+填写已接入的设备 ID 时只把这一次工具调用转发到对应设备。Goal 达成或受阻后的终态结果仍会自动回收到同一条主线程。
 
 ### 7. 部署不应限制控制范围
 
@@ -246,8 +246,8 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
   关键词筛选并分页浏览，正在运行的命令固定排在前面。
 - Auth Mini JWT 验证，以首次初始化时绑定的 root user 作为操作边界；浏览器在每次 API 或
   SSE 请求前检查 access token 有效期，临近过期时刷新，并在 401 后刷新重试一次。
-- 设备 Token、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备无需 Responses API
-  上游，设备只在单次工具调用中被选择。
+- 自动注册的执行设备、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备无需
+  Responses API 上游，设备只在单次工具调用中被选择。
 - 机器登记、远程状态探测、资源监控，以及完整的自更新流程：正式运行二进制固定在 `~/.cybion/bin/cybion`；启动后和每六小时检查 Release、校验并下载候选版本、在设置页展示状态，并由操作者确认重启安装。一次性更新助手会先原子替换安装文件，再等待旧 PID 退出；系统服务重新拉起的新进程或助手启动的新进程会以预期版本写入启动标记，确认失败则恢复并重启旧二进制。
 - Rust 单二进制部署：控制台资源嵌入二进制，运行时无需命令行参数或环境变量。
 
@@ -257,7 +257,7 @@ Auth Mini issuer 和 `root_user_id`，并只把设备 ID、可达性和获准能
 ## 架构与边界
 
 Cybion 不采用“每个目录一个项目”的隔离模型。主线程和子线程始终运行在控制设备本机，
-每次文件或 Bash 工具调用以 `target_device` 选择本机或远程执行边界，并以身份和设备 Token
+每次文件或 Bash 工具调用以 `target_device` 选择本机或远程执行边界，并以身份和 Access Token
 作为访问边界。一旦设备被初始化并授权，Agent 可以使用获准的文件与 Shell 工具。因此，
 设备的选择、网络暴露方式和上游 API 凭据都属于操作者的安全责任。
 
@@ -268,24 +268,25 @@ flowchart TB
   S -->|"/responses"| O["OpenAI-compatible upstream"]
   S --> DB[("~/.cybion/default.sqlite3")]
   S --> T["本机文件系统与 Bash 工具"]
-  S -->|"device-token"| P["远程 Cybion 工具执行设备"]
+  S -->|"access-token"| P["远程 Cybion 工具执行设备"]
   P --> PT["远程文件系统与 Bash 工具"]
 ```
 
 安全模型的关键事实：
 
 - 操作者使用的 `/api/*` 请求必须携带有效的 Auth Mini EdDSA JWT；服务端校验 issuer、
-  请求 host 对应的 audience，以及与 `root_user_id` 一致的 subject。`/api/remote/*` 只接受
-  单独创建设备 Token，不接受或转发浏览器 JWT。
+  请求 host 对应的 audience，以及与 `root_user_id` 一致的 subject。执行设备注册时，控制端
+  以执行设备公开 URL 为 audience 验证该 JWT；`/api/remote/*` 只接受注册产生的 Access Token，
+  不接受或转发浏览器 JWT。
 - 浏览器使用 Auth Mini 的 SDK 持久保存会话，并在 API 与 SSE 请求前主动刷新即将过期的
   access token；遇到 401 时只刷新重试一次。Cybion 服务端只缓存用于验证的 JWKS，不读取
   浏览器 refresh token。
 - Browser Control 只在控制设备上运行：它以空环境变量、临时 user-data directory、禁用扩展和
   loopback-only CDP 启动 headless Chrome/Chromium。Agent 可访问任意 HTTP(S) 网页；页面文字、
   邮件、PDF 和网页内提示都是不可信内容，不能构成操作授权。
-- 设备 Token 的明文只在创建时显示一次；执行设备只保存 SHA-256 哈希。控制设备为调用
-  远端而在自己的 SQLite 中保存明文 Token。Token 可分别限制文件系统和 Bash，并可随时
-  撤销。
+- 执行设备每次注册都会生成新的 Access Token；执行设备只保存 SHA-256 哈希，控制设备为调用
+  远端在自己的 SQLite 中保存明文 Token。再次保存执行设备设置会轮换 Token；从控制设备移除
+  机器会立即收回该控制端的调用能力。
 - 健康检查与嵌入式 Web 资源是公开路由。将远程控制台公开到互联网前，必须放在 HTTPS
   反向代理之后；Auth Mini 只允许精确的 loopback host 使用纯 HTTP 回调。
 
@@ -340,13 +341,11 @@ cargo run --release
 
 ### 接入另一台工具执行设备
 
-1. 在另一台设备上重复安装，使用同一个 Auth Mini issuer 和同一用户初始化，并选择
-   **工具执行设备**。没有公网 IP 时，可通过 frp、cloudflared 或同类出站隧道建立 HTTPS
-   地址；只有精确 loopback 地址可使用 HTTP。
-2. 在执行设备的 **Machines** 页面创建仅含必要能力的设备 Token，立即复制只显示一次的
-   密钥。
-3. 在控制设备的 **Machines** 页面填写执行设备的 Cybion URL 和设备 Token。控制设备会
-   调用远端状态接口，验证双方的 issuer、`root_user_id`、机器 ID 和获准能力后再保存。
+1. 在另一台设备上重复安装，使用同一个 Auth Mini issuer 和同一用户初始化。没有公网 IP 时，
+   先通过 frp、cloudflared 或同类出站隧道建立 HTTPS 地址；只有精确 loopback 地址可使用 HTTP。
+2. 打开执行设备的【设置】，选择 **工具执行设备**，填入控制设备的 Cybion URL，然后保存。
+   执行设备会主动向控制端注册自己的 URL、机器信息和新 Access Token。
+3. 控制设备的【机器】页会立即显示已注册的执行设备；无需复制 Token 或手动添加机器。
 4. 之后主线程或子线程调用文件系统与 Bash 工具时，可以填写 `target_device` 为该设备 ID；
    省略该字段则在控制设备本机执行。执行设备不会发起 Responses API 请求。
 
