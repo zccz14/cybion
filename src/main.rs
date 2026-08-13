@@ -3627,22 +3627,57 @@ async fn setup(
     } else {
         String::new()
     };
+    let executor_access_token = (input.deployment_role == "executor").then(executor_access_token);
     let root_user_id = bootstrap_subject(&state, &headers, &auth_url).await?;
-    let connection = open_db(&state.db_path)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    for (key, value) in [
-        ("root_user_id", root_user_id.as_str()),
-        ("auth_url", auth_url.as_str()),
-        (
-            "openai_base_url",
-            input.openai_base_url.trim_end_matches('/'),
-        ),
-        ("openai_api_key", input.openai_api_key.as_str()),
-        ("deployment_role", input.deployment_role.as_str()),
-        ("controller_url", controller_url.as_str()),
-    ] {
-        connection.execute("INSERT INTO app_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])
-            .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot persist initial configuration"))?;
+    {
+        let mut connection = open_db(&state.db_path)
+            .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+        let transaction = connection.transaction().map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot persist initial configuration",
+            )
+        })?;
+        for (key, value) in [
+            ("root_user_id", root_user_id.as_str()),
+            ("auth_url", auth_url.as_str()),
+            (
+                "openai_base_url",
+                input.openai_base_url.trim_end_matches('/'),
+            ),
+            ("openai_api_key", input.openai_api_key.as_str()),
+            ("deployment_role", input.deployment_role.as_str()),
+            ("controller_url", controller_url.as_str()),
+        ] {
+            transaction.execute("INSERT INTO app_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])
+                .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot persist initial configuration"))?;
+        }
+        if let Some(access_token) = executor_access_token.as_deref() {
+            transaction
+                .execute(
+                    "INSERT INTO device_tokens (
+                       id, label, token_hash, filesystem_enabled, bash_enabled, created_at
+                     ) VALUES (?1, ?2, ?3, 1, 1, ?4)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        "controller",
+                        token_hash(access_token),
+                        chrono::Utc::now().to_rfc3339(),
+                    ],
+                )
+                .map_err(|_| {
+                    error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "cannot persist executor access",
+                    )
+                })?;
+        }
+        transaction.commit().map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot persist initial configuration",
+            )
+        })?;
     }
     let config = load_config(&state.db_path).map_err(|_| {
         error(
@@ -3650,6 +3685,17 @@ async fn setup(
             "cannot read initial configuration",
         )
     })?;
+    if let Some(access_token) = executor_access_token.as_deref() {
+        let identity = identity(&state, &headers).await?;
+        register_executor_with_controller(
+            &state,
+            &headers,
+            &identity,
+            &config.controller_url,
+            access_token,
+        )
+        .await?;
+    }
     Ok(Json(StatusResponse {
         machine_id: config.machine_id,
         hostname: hostname(),
@@ -3819,7 +3865,7 @@ async fn update_settings(
             &state,
             &headers,
             &identity,
-            &saved.settings,
+            &saved.settings.controller_url,
             access_token,
         )
         .await?;
@@ -4033,7 +4079,7 @@ async fn register_executor_with_controller(
     state: &AppState,
     headers: &HeaderMap,
     identity: &Identity,
-    settings: &SettingsResponse,
+    controller_url: &str,
     access_token: &str,
 ) -> std::result::Result<(), (StatusCode, Json<ApiError>)> {
     let registration = ExecutorRegistration {
@@ -4051,10 +4097,7 @@ async fn register_executor_with_controller(
     };
     state
         .client
-        .post(format!(
-            "{}/api/executors/register",
-            settings.controller_url
-        ))
+        .post(format!("{controller_url}/api/executors/register"))
         .bearer_auth(&identity.access_token)
         .json(&registration)
         .send()
