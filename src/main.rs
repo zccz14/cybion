@@ -6,6 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
     fmt,
+    io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, RwLock as StdRwLock, mpsc as std_mpsc},
@@ -25,6 +26,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures_util::SinkExt;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use notify::{RecursiveMode, Watcher};
@@ -34,7 +36,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_tungstenite::{
     connect_async,
@@ -71,6 +73,9 @@ const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
 const FILE_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FILE_READS: usize = 2;
 const MAX_FILE_READ_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_EXECUTOR_RESULT_BYTES: usize = 16 * 1024 * 1024;
+const EXECUTOR_RESULT_GZIP_THRESHOLD: usize = 4 * 1024;
+const EXECUTOR_RESULT_TIMEOUT: Duration = Duration::from_secs(75);
 
 static FILE_READS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_FILE_READS)));
@@ -85,8 +90,26 @@ struct AppState {
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     active_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     active_subthreads: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    executor_tunnels: ExecutorTunnels,
     main_thread: Arc<Mutex<()>>,
     browser_sessions: browser::BrowserSessions,
+}
+
+#[derive(Clone, Default)]
+struct ExecutorTunnels {
+    sessions: Arc<Mutex<HashMap<String, ExecutorSession>>>,
+    results: Arc<Mutex<HashMap<String, PendingExecutorResult>>>,
+}
+
+#[derive(Clone)]
+struct ExecutorSession {
+    id: String,
+    sender: mpsc::Sender<ExecutorToolCall>,
+}
+
+struct PendingExecutorResult {
+    machine_id: String,
+    sender: oneshot::Sender<ExecutorToolResult>,
 }
 
 struct CachedJwks {
@@ -219,49 +242,34 @@ struct WriteFile {
 struct Peer {
     id: String,
     name: String,
-    base_url: String,
     machine_id: String,
     hostname: String,
     deployment_role: String,
     filesystem_enabled: bool,
     bash_enabled: bool,
     created_at: String,
+    last_seen_at: Option<String>,
+    online: bool,
 }
 
-#[derive(Serialize, Deserialize)]
-struct RemoteStatus {
-    machine_id: String,
-    hostname: String,
-    root_user_id: String,
-    auth_url: String,
-    deployment_role: String,
-    filesystem_enabled: bool,
-    bash_enabled: bool,
-}
-
-#[derive(Deserialize)]
-struct RemoteToolRequest {
+#[derive(Deserialize, Serialize, Clone)]
+struct ExecutorToolCall {
+    call_id: String,
     name: String,
     #[serde(default)]
     arguments: Value,
 }
 
-#[derive(Deserialize, Serialize)]
-struct RemoteToolResponse {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct ExecutorToolResult {
+    call_id: String,
     output: String,
     added_lines: Option<usize>,
     deleted_lines: Option<usize>,
 }
 
-#[derive(Clone)]
-struct DeviceGrant {
-    filesystem_enabled: bool,
-    bash_enabled: bool,
-}
-
 #[derive(Deserialize, Serialize)]
 struct ExecutorRegistration {
-    base_url: String,
     machine_id: String,
     hostname: String,
     access_token: String,
@@ -835,6 +843,7 @@ async fn main() -> Result<()> {
         ))),
         active_runs: Arc::new(Mutex::new(HashMap::new())),
         active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+        executor_tunnels: ExecutorTunnels::default(),
         main_thread: Arc::new(Mutex::new(())),
         browser_sessions: browser::sessions(),
     };
@@ -842,6 +851,7 @@ async fn main() -> Result<()> {
     schedule_main_retries(state.clone());
     schedule_subthreads(state.clone());
     schedule_auto_update(state.clone());
+    schedule_executor_tunnel(state.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     info!(%addr, "cybion server listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1029,6 +1039,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                 &state.active_subthreads,
                 ContextCheckpointTarget::Subthread { id: job.id.clone() },
                 Some(browser_agent_context(&state)),
+                &state.executor_tunnels,
             )
             .await
         }
@@ -1190,10 +1201,13 @@ fn app(state: AppState) -> Router {
         .route("/api/audio/speech", post(speech))
         .route("/api/peers", get(list_peers))
         .route("/api/peers/{id}", delete(delete_peer))
-        .route("/api/peers/{id}/status", get(peer_status))
         .route("/api/executors/register", post(register_executor))
-        .route("/api/remote/status", get(remote_status))
-        .route("/api/remote/tools/execute", post(remote_execute_tool))
+        .route("/api/executors/tunnel", get(executor_tunnel))
+        .route(
+            "/api/executors/tunnel/results",
+            post(executor_tunnel_result),
+        )
+        .layer(DefaultBodyLimit::max(MAX_EXECUTOR_RESULT_BYTES))
         .route(
             "/api/browser/sessions",
             get(list_browser_sessions).post(create_browser_session),
@@ -3023,24 +3037,30 @@ fn ensure_context_checkpoint_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_peer_columns(connection: &Connection) -> Result<()> {
+fn migrate_peer_schema(connection: &Connection) -> Result<()> {
     let columns = connection
         .prepare("PRAGMA table_info(peers)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    for (name, definition) in [
-        ("device_token", "TEXT NOT NULL DEFAULT ''"),
-        ("machine_id", "TEXT NOT NULL DEFAULT ''"),
-        ("hostname", "TEXT NOT NULL DEFAULT ''"),
-        ("deployment_role", "TEXT NOT NULL DEFAULT 'controller'"),
-        ("filesystem_enabled", "INTEGER NOT NULL DEFAULT 0"),
-        ("bash_enabled", "INTEGER NOT NULL DEFAULT 0"),
-    ] {
-        if !columns.iter().any(|column| column == name) {
-            connection
-                .execute_batch(&format!("ALTER TABLE peers ADD COLUMN {name} {definition}"))?;
-        }
+    if columns.iter().any(|column| column == "access_token_hash") {
+        return Ok(());
     }
+    connection.execute_batch(
+        "ALTER TABLE peers RENAME TO peers_legacy;
+         CREATE TABLE peers (
+           id TEXT PRIMARY KEY,
+           name TEXT NOT NULL,
+           machine_id TEXT NOT NULL UNIQUE,
+           hostname TEXT NOT NULL,
+           access_token_hash TEXT NOT NULL UNIQUE,
+           deployment_role TEXT NOT NULL DEFAULT 'executor',
+           filesystem_enabled INTEGER NOT NULL DEFAULT 0,
+           bash_enabled INTEGER NOT NULL DEFAULT 0,
+           created_at TEXT NOT NULL,
+           last_seen_at TEXT
+         );",
+    )?;
+    connection.execute_batch("DROP TABLE peers_legacy;")?;
     Ok(())
 }
 
@@ -3057,14 +3077,14 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          CREATE TABLE IF NOT EXISTS peers (
            id TEXT PRIMARY KEY,
            name TEXT NOT NULL,
-           base_url TEXT NOT NULL UNIQUE,
-           device_token TEXT NOT NULL DEFAULT '',
-           machine_id TEXT NOT NULL DEFAULT '',
+           machine_id TEXT NOT NULL UNIQUE,
            hostname TEXT NOT NULL DEFAULT '',
+           access_token_hash TEXT NOT NULL UNIQUE,
            deployment_role TEXT NOT NULL DEFAULT 'controller',
            filesystem_enabled INTEGER NOT NULL DEFAULT 0,
            bash_enabled INTEGER NOT NULL DEFAULT 0,
-           created_at TEXT NOT NULL
+           created_at TEXT NOT NULL,
+           last_seen_at TEXT
          );
          CREATE TABLE IF NOT EXISTS conversation_messages (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3126,14 +3146,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            updated_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);
-         CREATE TABLE IF NOT EXISTS device_tokens (
-           id TEXT PRIMARY KEY,
-           label TEXT NOT NULL,
-           token_hash TEXT NOT NULL UNIQUE,
-           filesystem_enabled INTEGER NOT NULL,
-           bash_enabled INTEGER NOT NULL,
-           created_at TEXT NOT NULL
-         );
          CREATE TABLE IF NOT EXISTS command_runs (
            id TEXT PRIMARY KEY,
            command TEXT NOT NULL,
@@ -3144,6 +3156,14 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            result TEXT,
            exit_code INTEGER,
            status TEXT NOT NULL CHECK(status IN ('running', 'cancelled', 'complete'))
+         );
+         CREATE TABLE IF NOT EXISTS executor_tool_calls (
+           call_id TEXT PRIMARY KEY,
+           output TEXT,
+           added_lines INTEGER,
+           deleted_lines INTEGER,
+           status TEXT NOT NULL CHECK(status IN ('running', 'complete', 'unknown')),
+           completed_at TEXT
          );",
     )?;
     ensure_conversation_metadata_columns(&connection)?;
@@ -3151,11 +3171,14 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     ensure_agent_event_schema(&connection)?;
     ensure_context_checkpoint_schema(&connection)?;
     ensure_subthread_columns(&connection)?;
-    ensure_peer_columns(&connection)?;
+    migrate_peer_schema(&connection)?;
+    connection.execute(
+        "UPDATE executor_tool_calls SET status = 'unknown', completed_at = ?1
+         WHERE status = 'running'",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
     connection.execute_batch(
-        "CREATE UNIQUE INDEX IF NOT EXISTS peers_machine_id
-         ON peers(machine_id) WHERE machine_id <> '';
-         CREATE INDEX IF NOT EXISTS agent_runs_retry_due
+        "CREATE INDEX IF NOT EXISTS agent_runs_retry_due
          ON agent_runs(kind, status, next_retry_at);
          CREATE INDEX IF NOT EXISTS agent_runs_user_message_id
          ON agent_runs(user_message_id);
@@ -3243,22 +3266,6 @@ fn controller_url(value: &str) -> std::result::Result<String, (StatusCode, Json<
         ));
     }
     Ok(value.to_owned())
-}
-
-fn public_base_url(
-    headers: &HeaderMap,
-) -> std::result::Result<String, (StatusCode, Json<ApiError>)> {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "request has no host"))?;
-    let parsed = Url::parse(&format!("http://{host}"))
-        .map_err(|_| error(StatusCode::BAD_REQUEST, "request host is invalid"))?;
-    let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-    Ok(format!(
-        "{}://{host}",
-        if loopback { "http" } else { "https" }
-    ))
 }
 
 #[derive(Clone)]
@@ -3451,7 +3458,6 @@ async fn identity(
 async fn executor_registration_identity(
     state: &AppState,
     headers: &HeaderMap,
-    executor_url: &str,
 ) -> std::result::Result<Identity, (StatusCode, Json<ApiError>)> {
     let token = headers
         .get(header::AUTHORIZATION)
@@ -3465,10 +3471,6 @@ async fn executor_registration_identity(
             "invalid server configuration",
         )
     })?;
-    let audience = Url::parse(executor_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "executor URL is invalid"))?;
     let header =
         decode_header(&token).map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWT header"))?;
     let kid = header
@@ -3485,7 +3487,7 @@ async fn executor_registration_identity(
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT signing key is not trusted"))?;
     let mut validation = Validation::new(Algorithm::EdDSA);
     validation.set_issuer(&[&config.auth_url]);
-    validation.set_audience(&[audience]);
+    validation.validate_aud = false;
     let claims = decode::<Value>(
         &token,
         &DecodingKey::from_ed_components(&jwk.x)
@@ -3516,10 +3518,10 @@ fn token_hash(token: &str) -> String {
         .collect()
 }
 
-fn device_identity(
+fn executor_machine_id(
     state: &AppState,
     headers: &HeaderMap,
-) -> std::result::Result<DeviceGrant, (StatusCode, Json<ApiError>)> {
+) -> std::result::Result<String, (StatusCode, Json<ApiError>)> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -3529,23 +3531,18 @@ fn device_identity(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
     connection
         .query_row(
-            "SELECT filesystem_enabled, bash_enabled FROM device_tokens WHERE token_hash = ?1",
+            "SELECT machine_id FROM peers WHERE access_token_hash = ?1",
             [token_hash(token)],
-            |row| {
-                Ok(DeviceGrant {
-                    filesystem_enabled: row.get(0)?,
-                    bash_enabled: row.get(1)?,
-                })
-            },
+            |row| row.get(0),
         )
         .optional()
         .map_err(|_| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot validate device token",
+                "cannot validate executor token",
             )
         })?
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "invalid device token"))
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "invalid executor token"))
 }
 
 async fn cached_keys(state: &AppState, auth_url: &str) -> Result<Vec<Jwk>> {
@@ -3655,15 +3652,9 @@ async fn setup(
         if let Some(access_token) = executor_access_token.as_deref() {
             transaction
                 .execute(
-                    "INSERT INTO device_tokens (
-                       id, label, token_hash, filesystem_enabled, bash_enabled, created_at
-                     ) VALUES (?1, ?2, ?3, 1, 1, ?4)",
-                    params![
-                        Uuid::new_v4().to_string(),
-                        "controller",
-                        token_hash(access_token),
-                        chrono::Utc::now().to_rfc3339(),
-                    ],
+                    "INSERT INTO app_meta (key, value) VALUES ('executor_access_token', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [access_token],
                 )
                 .map_err(|_| {
                     error(
@@ -3687,14 +3678,8 @@ async fn setup(
     })?;
     if let Some(access_token) = executor_access_token.as_deref() {
         let identity = identity(&state, &headers).await?;
-        register_executor_with_controller(
-            &state,
-            &headers,
-            &identity,
-            &config.controller_url,
-            access_token,
-        )
-        .await?;
+        register_executor_with_controller(&state, &identity, &config.controller_url, access_token)
+            .await?;
     }
     Ok(Json(StatusResponse {
         machine_id: config.machine_id,
@@ -3863,7 +3848,6 @@ async fn update_settings(
     if let Some(access_token) = saved.executor_access_token.as_deref() {
         register_executor_with_controller(
             &state,
-            &headers,
             &identity,
             &saved.settings.controller_url,
             access_token,
@@ -4012,7 +3996,10 @@ fn save_settings(
         )
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     transaction
-        .execute("DELETE FROM device_tokens", [])
+        .execute(
+            "DELETE FROM app_meta WHERE key = 'executor_access_token'",
+            [],
+        )
         .map_err(|_| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4022,15 +4009,9 @@ fn save_settings(
     if let Some(access_token) = executor_access_token.as_deref() {
         transaction
             .execute(
-                "INSERT INTO device_tokens (
-                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
-                 ) VALUES (?1, ?2, ?3, 1, 1, ?4)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    "controller",
-                    token_hash(access_token),
-                    chrono::Utc::now().to_rfc3339(),
-                ],
+                "INSERT INTO app_meta (key, value) VALUES ('executor_access_token', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [access_token],
             )
             .map_err(|_| {
                 error(
@@ -4077,13 +4058,11 @@ fn save_settings(
 
 async fn register_executor_with_controller(
     state: &AppState,
-    headers: &HeaderMap,
     identity: &Identity,
     controller_url: &str,
     access_token: &str,
 ) -> std::result::Result<(), (StatusCode, Json<ApiError>)> {
     let registration = ExecutorRegistration {
-        base_url: public_base_url(headers)?,
         machine_id: load_config(&state.db_path)
             .map_err(|_| {
                 error(
@@ -4307,8 +4286,8 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
     let peers = connection
         .prepare(
-            "SELECT id, name, base_url, machine_id, hostname, deployment_role,
-                    filesystem_enabled, bash_enabled, created_at
+            "SELECT id, name, machine_id, hostname, deployment_role,
+                    filesystem_enabled, bash_enabled, created_at, last_seen_at
              FROM peers ORDER BY name",
         )
         .map_err(|_| {
@@ -4321,18 +4300,27 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
             Ok(Peer {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                base_url: row.get(2)?,
-                machine_id: row.get(3)?,
-                hostname: row.get(4)?,
-                deployment_role: row.get(5)?,
-                filesystem_enabled: row.get(6)?,
-                bash_enabled: row.get(7)?,
-                created_at: row.get(8)?,
+                machine_id: row.get(2)?,
+                hostname: row.get(3)?,
+                deployment_role: row.get(4)?,
+                filesystem_enabled: row.get(5)?,
+                bash_enabled: row.get(6)?,
+                created_at: row.get(7)?,
+                last_seen_at: row.get(8)?,
+                online: false,
             })
         })
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read peers"))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot decode peers"))?;
+    let sessions = state.executor_tunnels.sessions.lock().await;
+    let peers = peers
+        .into_iter()
+        .map(|mut peer| {
+            peer.online = sessions.contains_key(&peer.machine_id);
+            peer
+        })
+        .collect();
     Ok(Json(peers))
 }
 
@@ -4341,24 +4329,7 @@ async fn register_executor(
     headers: HeaderMap,
     Json(input): Json<ExecutorRegistration>,
 ) -> ApiResult<Peer> {
-    let base_url = input.base_url.trim_end_matches('/');
-    let remote_url = Url::parse(base_url).map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "executor base_url must be an absolute URL",
-        )
-    })?;
-    let loopback = matches!(
-        remote_url.host_str(),
-        Some("localhost" | "127.0.0.1" | "::1")
-    );
-    if remote_url.scheme() != "https" && !loopback {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "executor URLs must use HTTPS except on loopback",
-        ));
-    }
-    executor_registration_identity(&state, &headers, base_url).await?;
+    executor_registration_identity(&state, &headers).await?;
     if input.access_token.trim().is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -4392,13 +4363,14 @@ async fn register_executor(
     let peer = Peer {
         id: Uuid::new_v4().to_string(),
         name: input.hostname.clone(),
-        base_url: base_url.to_owned(),
         machine_id: input.machine_id,
         hostname: input.hostname,
         deployment_role: "executor".to_owned(),
         filesystem_enabled: true,
         bash_enabled: true,
         created_at: chrono::Utc::now().to_rfc3339(),
+        last_seen_at: None,
+        online: false,
     };
     if peer.name.trim().is_empty() {
         return Err(error(
@@ -4411,25 +4383,24 @@ async fn register_executor(
     connection
         .execute(
             "INSERT INTO peers (
-               id, name, base_url, device_token, machine_id, hostname, deployment_role,
-               filesystem_enabled, bash_enabled, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(machine_id) WHERE machine_id <> '' DO UPDATE SET
+               id, name, machine_id, hostname, access_token_hash, deployment_role,
+               filesystem_enabled, bash_enabled, created_at, last_seen_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
+             ON CONFLICT(machine_id) DO UPDATE SET
                id = excluded.id,
                name = excluded.name,
-               base_url = excluded.base_url,
-               device_token = excluded.device_token,
                hostname = excluded.hostname,
+               access_token_hash = excluded.access_token_hash,
                deployment_role = excluded.deployment_role,
                filesystem_enabled = excluded.filesystem_enabled,
-               bash_enabled = excluded.bash_enabled",
+               bash_enabled = excluded.bash_enabled,
+               last_seen_at = NULL",
             params![
                 peer.id,
                 peer.name,
-                peer.base_url,
-                input.access_token.trim(),
                 peer.machine_id,
                 peer.hostname,
+                token_hash(input.access_token.trim()),
                 peer.deployment_role,
                 peer.filesystem_enabled,
                 peer.bash_enabled,
@@ -4448,152 +4419,180 @@ async fn delete_peer(
     identity(&state, &headers).await?;
     let connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    let machine_id: Option<String> = connection
+        .query_row("SELECT machine_id FROM peers WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read peer"))?;
     let deleted = connection
-        .execute("DELETE FROM peers WHERE id = ?1", [id])
+        .execute("DELETE FROM peers WHERE id = ?1", [&id])
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot delete peer"))?;
     if deleted == 0 {
         return Err(error(StatusCode::NOT_FOUND, "peer does not exist"));
     }
+    if let Some(machine_id) = machine_id {
+        state
+            .executor_tunnels
+            .sessions
+            .lock()
+            .await
+            .remove(&machine_id);
+    }
     Ok(Json(json!({"deleted": true})))
 }
 
-async fn peer_status(
+async fn executor_tunnel(
     State(state): State<AppState>,
     headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult<Value> {
-    identity(&state, &headers).await?;
-    let connection = open_db(&state.db_path)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    let peer: Option<(String, String)> = connection
-        .query_row(
-            "SELECT base_url, device_token FROM peers WHERE id = ?1",
-            [&id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read peer"))?;
-    let (base_url, device_token) =
-        peer.ok_or_else(|| error(StatusCode::NOT_FOUND, "peer does not exist"))?;
-    if device_token.is_empty() {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "peer must be re-enrolled with a device token",
-        ));
-    }
-    let response = state
-        .client
-        .get(format!("{base_url}/api/remote/status"))
-        .bearer_auth(device_token)
-        .send()
-        .await
-        .map_err(|cause| {
+) -> std::result::Result<
+    Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>,
+    (StatusCode, Json<ApiError>),
+> {
+    let machine_id = executor_machine_id(&state, &headers)?;
+    let session_id = Uuid::new_v4().to_string();
+    let (sender, receiver) = mpsc::channel(16);
+    state.executor_tunnels.sessions.lock().await.insert(
+        machine_id.clone(),
+        ExecutorSession {
+            id: session_id.clone(),
+            sender: sender.clone(),
+        },
+    );
+    let tunnels = state.executor_tunnels.clone();
+    let cleanup_machine_id = machine_id.clone();
+    tokio::spawn(async move {
+        sender.closed().await;
+        let mut sessions = tunnels.sessions.lock().await;
+        if sessions
+            .get(&cleanup_machine_id)
+            .is_some_and(|session| session.id == session_id)
+        {
+            sessions.remove(&cleanup_machine_id);
+        }
+    });
+    open_db(&state.db_path)
+        .and_then(|connection| {
+            connection
+                .execute(
+                    "UPDATE peers SET last_seen_at = ?1 WHERE machine_id = ?2",
+                    params![chrono::Utc::now().to_rfc3339(), machine_id],
+                )
+                .map_err(Into::into)
+        })
+        .map_err(|_| {
             error(
-                StatusCode::BAD_GATEWAY,
-                format!("peer request failed: {cause}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot update executor status",
             )
-        })?
-        .error_for_status()
-        .map_err(|cause| {
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("peer rejected request: {cause}"),
-            )
-        })?
-        .json::<RemoteStatus>()
-        .await
-        .map_err(|_| error(StatusCode::BAD_GATEWAY, "peer returned invalid JSON"))?;
-    let local = load_config(&state.db_path).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot read configuration",
-        )
-    })?;
-    if response.auth_url != local.auth_url || response.root_user_id != local.root_user_id {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "remote machine no longer shares this controller's issuer and root user",
-        ));
-    }
-    connection
-        .execute(
-            "UPDATE peers SET hostname = ?1, deployment_role = ?2,
-                              filesystem_enabled = ?3, bash_enabled = ?4
-             WHERE id = ?5",
-            params![
-                response.hostname,
-                response.deployment_role,
-                response.filesystem_enabled,
-                response.bash_enabled,
-                id,
-            ],
-        )
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot refresh peer"))?;
-    Ok(Json(
-        serde_json::to_value(response).expect("remote status is serializable"),
+        })?;
+    let stream = ReceiverStream::new(receiver).map(move |call| {
+        Ok(Event::default()
+            .event("tool_call")
+            .json_data(call)
+            .expect("tool call is serializable"))
+    });
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
     ))
 }
 
-async fn remote_status(
+async fn executor_tunnel_result(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> ApiResult<RemoteStatus> {
-    let grant = device_identity(&state, &headers)?;
-    let config = load_config(&state.db_path).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot read configuration",
-        )
-    })?;
-    Ok(Json(RemoteStatus {
-        machine_id: config.machine_id,
-        hostname: hostname(),
-        root_user_id: config.root_user_id,
-        auth_url: config.auth_url,
-        deployment_role: config.deployment_role,
-        filesystem_enabled: grant.filesystem_enabled,
-        bash_enabled: grant.bash_enabled,
-    }))
+    body: Bytes,
+) -> ApiResult<Value> {
+    let machine_id = executor_machine_id(&state, &headers)?;
+    let result = decode_executor_result(&headers, &body)?;
+    let pending = state
+        .executor_tunnels
+        .results
+        .lock()
+        .await
+        .remove(&result.call_id);
+    let Some(pending) = pending else {
+        return Ok(Json(json!({"accepted": true})));
+    };
+    if pending.machine_id != machine_id {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "result belongs to another executor",
+        ));
+    }
+    let _ = pending.sender.send(result);
+    Ok(Json(json!({"accepted": true})))
 }
 
-async fn remote_execute_tool(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<RemoteToolRequest>,
-) -> ApiResult<RemoteToolResponse> {
-    let grant = device_identity(&state, &headers)?;
-    let execution = match input.name.as_str() {
-        "list_files" | "read_file" | "write_file" | "edit_file" if grant.filesystem_enabled => {
-            execute_local_tool(
-                &input.name,
-                input.arguments,
-                &state.db_path,
-                watch::channel(false).1,
-            )
-            .await
-        }
-        "run_bash" if grant.bash_enabled => {
-            execute_local_tool(
-                &input.name,
-                input.arguments,
-                &state.db_path,
-                watch::channel(false).1,
-            )
-            .await
-        }
-        "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
+fn decode_executor_result(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> std::result::Result<ExecutorToolResult, (StatusCode, Json<ApiError>)> {
+    let body = if headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        == Some("gzip")
+    {
+        let mut decoder = GzDecoder::new(body);
+        let mut decoded = Vec::new();
+        decoder
+            .read_to_end(&mut decoded)
+            .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid gzip result"))?;
+        if decoded.len() > MAX_EXECUTOR_RESULT_BYTES {
             return Err(error(
-                StatusCode::FORBIDDEN,
-                "device token does not grant this tool capability",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "executor result exceeds the limit",
             ));
         }
-        _ => return Err(error(StatusCode::BAD_REQUEST, "unsupported remote tool")),
+        decoded
+    } else {
+        body.to_vec()
     };
-    Ok(Json(RemoteToolResponse {
-        output: execution.output,
-        added_lines: execution.added_lines,
-        deleted_lines: execution.deleted_lines,
-    }))
+    serde_json::from_slice(&body)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid executor result"))
+}
+
+fn executor_call_result_from_db(path: &Path, call_id: &str) -> Result<Option<ExecutorToolResult>> {
+    open_db(path)?
+        .query_row(
+            "SELECT output, added_lines, deleted_lines FROM executor_tool_calls
+             WHERE call_id = ?1 AND status = 'complete'",
+            [call_id],
+            |row| {
+                Ok(ExecutorToolResult {
+                    call_id: call_id.to_owned(),
+                    output: row.get(0)?,
+                    added_lines: row.get(1)?,
+                    deleted_lines: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn claim_executor_call(path: &Path, call_id: &str) -> Result<bool> {
+    Ok(open_db(path)?.execute(
+        "INSERT INTO executor_tool_calls (call_id, status) VALUES (?1, 'running')
+         ON CONFLICT(call_id) DO NOTHING",
+        [call_id],
+    )? == 1)
+}
+
+fn complete_executor_call(path: &Path, result: &ExecutorToolResult) -> Result<()> {
+    open_db(path)?.execute(
+        "UPDATE executor_tool_calls SET output = ?2, added_lines = ?3, deleted_lines = ?4,
+             status = 'complete', completed_at = ?5 WHERE call_id = ?1",
+        params![
+            result.call_id,
+            result.output,
+            result.added_lines,
+            result.deleted_lines,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
 }
 
 async fn list_browser_sessions(
@@ -5932,6 +5931,7 @@ async fn process_main_run(
                                     through_message_id: context.through_message_id,
                                 },
                                 Some(browser_agent_context(&state)),
+                                &state.executor_tunnels,
                             )
                             .await
                         }
@@ -6053,6 +6053,7 @@ async fn run_agent(
             through_message_id: 0,
         },
         None,
+        &ExecutorTunnels::default(),
     )
     .await
 }
@@ -6070,6 +6071,7 @@ async fn run_agent_items(
     active_subthreads: &Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     checkpoint_target: ContextCheckpointTarget,
     mut browser: Option<BrowserAgentContext>,
+    executor_tunnels: &ExecutorTunnels,
 ) -> Result<AgentResult> {
     let mut input_tokens = 0;
     let mut output_tokens = 0;
@@ -6270,6 +6272,7 @@ async fn run_agent_items(
                 active_subthreads,
                 cancellation.clone(),
                 browser.as_mut(),
+                executor_tunnels,
             )
             .await;
             send_agent_event(
@@ -6471,8 +6474,7 @@ fn remote_machine_context(path: &Path) -> Result<String> {
         .prepare(
             "SELECT machine_id, name, hostname, deployment_role, filesystem_enabled, bash_enabled
              FROM peers
-             WHERE machine_id <> '' AND device_token <> ''
-               AND (filesystem_enabled OR bash_enabled)
+             WHERE filesystem_enabled OR bash_enabled
              ORDER BY name",
         )?
         .query_map([], |row| {
@@ -7012,6 +7014,7 @@ async fn execute_tool(
     active_subthreads: &Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     cancellation: watch::Receiver<bool>,
     browser_context: Option<&mut BrowserAgentContext>,
+    executor_tunnels: &ExecutorTunnels,
 ) -> ToolExecution {
     match name {
         "browser_list_sessions" => match browser_context {
@@ -7057,7 +7060,7 @@ async fn execute_tool(
         "read_thread_history" => read_thread_history_tool(db_path, args),
         "search_thread_memory" => search_thread_memory_tool(db_path, args),
         "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
-            execute_device_tool(name, args, db_path, client, cancellation).await
+            execute_device_tool(name, args, db_path, executor_tunnels, cancellation).await
         }
         "list_subthreads" if scope == AgentScope::Main => load_subthreads(db_path)
             .and_then(|threads| serde_json::to_string(&threads).map_err(Into::into))
@@ -7119,7 +7122,7 @@ async fn execute_device_tool(
     name: &str,
     mut args: Value,
     db_path: &Path,
-    client: &reqwest::Client,
+    tunnels: &ExecutorTunnels,
     cancellation: watch::Receiver<bool>,
 ) -> ToolExecution {
     let target_device = match args.get("target_device") {
@@ -7134,9 +7137,9 @@ async fn execute_device_tool(
             arguments.remove("target_device");
         }
         if name == "run_bash" {
-            return execute_remote_bash(client, db_path, &target_device, args, cancellation).await;
+            return execute_remote_bash(tunnels, db_path, &target_device, args, cancellation).await;
         }
-        return execute_remote_device(client, db_path, &target_device, name, args, cancellation)
+        return execute_remote_device(tunnels, db_path, &target_device, name, args, cancellation)
             .await;
     }
     execute_local_tool(name, args, db_path, cancellation).await
@@ -7222,7 +7225,7 @@ async fn execute_local_bash(
 }
 
 async fn execute_remote_bash(
-    client: &reqwest::Client,
+    tunnels: &ExecutorTunnels,
     db_path: &Path,
     target_device: &str,
     args: Value,
@@ -7242,7 +7245,7 @@ async fn execute_remote_bash(
         Err(cause) => return tool_execution(format!("error: cannot record command: {cause}")),
     };
     let execution = execute_remote_device(
-        client,
+        tunnels,
         db_path,
         target_device,
         "run_bash",
@@ -7258,7 +7261,7 @@ async fn execute_remote_bash(
 }
 
 async fn execute_remote_device(
-    client: &reqwest::Client,
+    tunnels: &ExecutorTunnels,
     db_path: &Path,
     target_device: &str,
     tool: &str,
@@ -7268,39 +7271,214 @@ async fn execute_remote_device(
     let peer = open_db(db_path).and_then(|connection| {
         connection
             .query_row(
-                "SELECT base_url, device_token FROM peers WHERE machine_id = ?1",
+                "SELECT 1 FROM peers WHERE machine_id = ?1",
                 [target_device],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |_| Ok(()),
             )
             .optional()
             .map_err(Into::into)
     });
-    let (base_url, device_token) = match peer {
-        Ok(Some(peer)) if !peer.1.is_empty() => peer,
-        Ok(Some(_)) => return tool_execution("error: remote device has no device token"),
+    match peer {
+        Ok(Some(())) => {}
         Ok(None) => return tool_execution("error: unknown target device"),
         Err(cause) => return tool_execution(format!("error: cannot read target device: {cause}")),
+    }
+    let call_id = Uuid::new_v4().to_string();
+    let (sender, receiver) = oneshot::channel();
+    let online = tunnels.sessions.lock().await.contains_key(target_device);
+    if !online {
+        return tool_execution("error: remote executor is offline");
+    }
+    tunnels.results.lock().await.insert(
+        call_id.clone(),
+        PendingExecutorResult {
+            machine_id: target_device.to_owned(),
+            sender,
+        },
+    );
+    let call = ExecutorToolCall {
+        call_id: call_id.clone(),
+        name: tool.to_owned(),
+        arguments,
     };
-    let request = client
-        .post(format!("{base_url}/api/remote/tools/execute"))
-        .bearer_auth(device_token)
-        .json(&json!({ "name": tool, "arguments": arguments }));
-    let response = tokio::select! {
-        response = request.send() => response,
-        _ = wait_for_cancellation(&mut cancellation) => return tool_execution("error: agent stopped"),
-    };
-    let response = match response.and_then(reqwest::Response::error_for_status) {
-        Ok(response) => response,
-        Err(cause) => return tool_execution(format!("error: remote tool request failed: {cause}")),
-    };
-    match response.json::<RemoteToolResponse>().await {
+    let response =
+        wait_for_executor_result(tunnels, target_device, &call, receiver, &mut cancellation).await;
+    tunnels.results.lock().await.remove(&call_id);
+    match response {
         Ok(response) => ToolExecution {
             output: response.output,
             added_lines: response.added_lines,
             deleted_lines: response.deleted_lines,
         },
-        Err(cause) => tool_execution(format!("error: invalid remote tool response: {cause}")),
+        Err(_) => tool_execution("error: remote executor disconnected before returning a result"),
     }
+}
+
+async fn wait_for_executor_result(
+    tunnels: &ExecutorTunnels,
+    machine_id: &str,
+    call: &ExecutorToolCall,
+    mut receiver: oneshot::Receiver<ExecutorToolResult>,
+    cancellation: &mut watch::Receiver<bool>,
+) -> std::result::Result<ExecutorToolResult, &'static str> {
+    let deadline = Instant::now() + EXECUTOR_RESULT_TIMEOUT;
+    loop {
+        let session = tunnels.sessions.lock().await.get(machine_id).cloned();
+        let Some(session) = session else {
+            return Err("remote executor is offline");
+        };
+        if session.sender.send(call.clone()).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::select! {
+            response = &mut receiver => return response.map_err(|_| "remote executor disconnected before returning a result"),
+            _ = wait_for_cancellation(cancellation) => return Err("agent stopped"),
+            _ = tokio::time::sleep(remaining) => return Err("remote executor result timed out"),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => continue,
+        }
+    }
+}
+
+fn executor_access_token_from_db(path: &Path) -> Result<Option<String>> {
+    open_db(path)?
+        .query_row(
+            "SELECT value FROM app_meta WHERE key = 'executor_access_token'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn schedule_executor_tunnel(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(cause) = run_executor_tunnel(&state).await {
+                tracing::warn!(%cause, "executor tunnel disconnected");
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
+async fn run_executor_tunnel(state: &AppState) -> Result<()> {
+    let config = load_config(&state.db_path)?;
+    if config.deployment_role != "executor" || config.controller_url.is_empty() {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        return Ok(());
+    }
+    let token = executor_access_token_from_db(&state.db_path)?
+        .context("executor access token is missing")?;
+    let response = state
+        .client
+        .get(format!("{}/api/executors/tunnel", config.controller_url))
+        .bearer_auth(&token)
+        .header(header::ACCEPT, "text/event-stream")
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut stream = response.bytes_stream();
+    let mut pending = String::new();
+    loop {
+        {
+            let chunk = futures_util::StreamExt::next(&mut stream).await;
+            let chunk = chunk.context("executor tunnel stream ended")??;
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some((boundary, separator_len)) = sse_event_boundary(&pending) {
+                let event = pending[..boundary].to_owned();
+                pending.drain(..boundary + separator_len);
+                if let Some(call) = parse_executor_tool_call(&event)? {
+                    let result = execute_executor_tool_call(&state.db_path, call).await;
+                    send_executor_result(&state.client, &config.controller_url, &token, &result)
+                        .await?;
+                }
+            }
+        }
+    }
+}
+
+fn parse_executor_tool_call(event: &str) -> Result<Option<ExecutorToolCall>> {
+    let mut event_name = None;
+    let mut data = None;
+    for line in event.lines() {
+        if let Some(value) = line.strip_prefix("event: ") {
+            event_name = Some(value);
+        }
+        if let Some(value) = line.strip_prefix("data: ") {
+            data = Some(value);
+        }
+    }
+    if event_name == Some("tool_call") {
+        Ok(Some(serde_json::from_str(
+            data.context("tool call has no data")?,
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn execute_executor_tool_call(db_path: &Path, call: ExecutorToolCall) -> ExecutorToolResult {
+    if let Ok(Some(result)) = executor_call_result_from_db(db_path, &call.call_id) {
+        return result;
+    }
+    if !matches!(claim_executor_call(db_path, &call.call_id), Ok(true)) {
+        return ExecutorToolResult {
+            call_id: call.call_id,
+            output: "error: remote call outcome is unknown; refusing to execute it again"
+                .to_owned(),
+            added_lines: None,
+            deleted_lines: None,
+        };
+    }
+    let execution = match call.name.as_str() {
+        "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
+            execute_local_tool(&call.name, call.arguments, db_path, watch::channel(false).1).await
+        }
+        _ => tool_execution("error: unsupported remote tool"),
+    };
+    let result = ExecutorToolResult {
+        call_id: call.call_id,
+        output: execution.output,
+        added_lines: execution.added_lines,
+        deleted_lines: execution.deleted_lines,
+    };
+    let _ = complete_executor_call(db_path, &result);
+    result
+}
+
+async fn send_executor_result(
+    client: &reqwest::Client,
+    controller_url: &str,
+    token: &str,
+    result: &ExecutorToolResult,
+) -> Result<()> {
+    let payload = serde_json::to_vec(result)?;
+    let request = client
+        .post(format!("{controller_url}/api/executors/tunnel/results"))
+        .bearer_auth(token);
+    let request = if payload.len() >= EXECUTOR_RESULT_GZIP_THRESHOLD {
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&payload)?;
+        request
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_ENCODING, "gzip")
+            .body(gzip.finish()?)
+    } else {
+        request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(payload)
+    };
+    request.send().await?.error_for_status()?;
+    Ok(())
+}
+
+fn sse_event_boundary(source: &str) -> Option<(usize, usize)> {
+    source
+        .find("\r\n\r\n")
+        .map(|index| (index, 4))
+        .or_else(|| source.find("\n\n").map(|index| (index, 2)))
 }
 
 fn execute_write_file(path: &str, content: &str) -> ToolExecution {
@@ -7354,37 +7532,58 @@ async fn run_bash(command: &str, mut cancellation: watch::Receiver<bool>) -> Bas
             status: "cancelled",
         };
     }
-    let output = Command::new("bash")
+    let child = Command::new("bash")
         .args(["-lc", command])
-        .kill_on_drop(true)
-        .output();
-    tokio::select! {
-        result = output => match result {
-            Ok(output) => BashResult {
-                output: json!({
-                    "stdout": String::from_utf8_lossy(&output.stdout),
-                    "stderr": String::from_utf8_lossy(&output.stderr),
-                    "exit_code": output.status.code(),
-                }).to_string(),
-                exit_code: output.status.code(),
-                status: "complete",
-            },
-            Err(error) => BashResult {
+        .process_group(0)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            return BashResult {
                 output: format!("error: cannot run bash: {error}"),
                 exit_code: None,
                 status: "complete",
-            },
+            };
+        }
+    };
+    let pid = child.id().expect("spawned bash has a process id") as i32;
+    tokio::select! {
+        result = child.wait_with_output() => bash_output(result),
+        _ = wait_for_cancellation(&mut cancellation) => cancelled_bash_group(pid, "error: command cancelled"),
+        _ = tokio::time::sleep(Duration::from_secs(60)) => cancelled_bash_group(pid, "error: command timed out after 60 seconds"),
+    }
+}
+
+fn bash_output(result: std::io::Result<std::process::Output>) -> BashResult {
+    match result {
+        Ok(output) => BashResult {
+            output: json!({
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+                "exit_code": output.status.code(),
+            })
+            .to_string(),
+            exit_code: output.status.code(),
+            status: "complete",
         },
-        _ = wait_for_cancellation(&mut cancellation) => BashResult {
-            output: "error: command cancelled".to_owned(),
+        Err(error) => BashResult {
+            output: format!("error: cannot collect bash output: {error}"),
             exit_code: None,
-            status: "cancelled",
+            status: "complete",
         },
-        _ = tokio::time::sleep(Duration::from_secs(60)) => BashResult {
-            output: "error: command timed out after 60 seconds".to_owned(),
-            exit_code: None,
-            status: "cancelled",
-        },
+    }
+}
+
+fn cancelled_bash_group(pid: i32, output: &str) -> BashResult {
+    // INVARIANT: process_group(0) creates a group headed by the bash PID, so this reaches every
+    // child started by the command instead of leaving detached work running after cancellation.
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    BashResult {
+        output: output.to_owned(),
+        exit_code: None,
+        status: "cancelled",
     }
 }
 
@@ -7629,6 +7828,7 @@ mod tests {
             jwks: Arc::new(RwLock::new(None)),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+            executor_tunnels: ExecutorTunnels::default(),
             main_thread: Arc::new(Mutex::new(())),
             browser_sessions: browser::sessions(),
         }
@@ -8638,22 +8838,20 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO peers (
-               id, name, base_url, device_token, machine_id, hostname, deployment_role,
+               id, name, machine_id, hostname, access_token_hash, deployment_role,
                filesystem_enabled, bash_enabled, created_at
-             ) VALUES ('peer', 'Build host', 'https://build.example', 'secret-token',
-                       'machine-build', 'build-1', 'executor', 1, 0, 'now')",
-                [],
+             ) VALUES ('peer', 'Build host', 'machine-build', 'build-1', ?1, 'executor', 1, 0, 'now')",
+                [token_hash("secret-token")],
             )
             .unwrap();
         open_db(&db)
             .unwrap()
             .execute(
                 "INSERT INTO peers (
-                   id, name, base_url, device_token, machine_id, hostname, deployment_role,
+                   id, name, machine_id, hostname, access_token_hash, deployment_role,
                    filesystem_enabled, bash_enabled, created_at
-                 ) VALUES ('unavailable', 'Unavailable host', 'https://unavailable.example', '',
-                           'machine-unavailable', 'unavailable-1', 'executor', 1, 0, 'now')",
-                [],
+                 ) VALUES ('unavailable', 'Unavailable host', 'machine-unavailable', 'unavailable-1', ?1, 'executor', 1, 0, 'now')",
+                [token_hash("unavailable-token")],
             )
             .unwrap();
         let main = scoped_responses_request_body(
@@ -8719,7 +8917,7 @@ mod tests {
         assert!(instructions.contains("target_device"));
         assert!(instructions.contains("an empty string also executes locally"));
         assert!(instructions.contains("Use direct tools for brief, localized checks or edits"));
-        assert!(!instructions.contains("machine-unavailable"));
+        assert!(instructions.contains("machine-unavailable"));
         assert!(!instructions.contains("secret-token"));
     }
 
@@ -8760,40 +8958,6 @@ mod tests {
 
     #[tokio::test]
     async fn target_device_routes_only_that_tool_call_to_the_remote_executor() {
-        async fn capture_remote_tool(
-            State(captured): State<Arc<Mutex<Vec<Value>>>>,
-            headers: HeaderMap,
-            Json(request): Json<Value>,
-        ) -> Json<RemoteToolResponse> {
-            captured.lock().await.push(json!({
-                "authorization": headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok()),
-                "request": request,
-            }));
-            Json(RemoteToolResponse {
-                output: "remote evidence".to_owned(),
-                added_lines: None,
-                deleted_lines: None,
-            })
-        }
-
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn({
-            let captured = captured.clone();
-            async move {
-                axum::serve(
-                    listener,
-                    Router::new()
-                        .route("/api/remote/tools/execute", post(capture_remote_tool))
-                        .with_state(captured),
-                )
-                .await
-                .unwrap();
-            }
-        });
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
@@ -8801,20 +8965,28 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO peers (
-                   id, name, base_url, device_token, machine_id, hostname, deployment_role,
+                   id, name, machine_id, hostname, access_token_hash, deployment_role,
                    filesystem_enabled, bash_enabled, created_at
-                 ) VALUES ('peer', 'Build host', ?1, 'secret-token',
-                           'machine-build', 'build-1', 'executor', 1, 0, 'now')",
-                [format!("http://{address}")],
+                 ) VALUES ('peer', 'Build host', 'machine-build', 'build-1', ?1, 'executor', 1, 0, 'now')",
+                [token_hash("secret-token")],
             )
             .unwrap();
+        let tunnels = ExecutorTunnels::default();
+        let (sender, mut receiver) = mpsc::channel(1);
+        tunnels.sessions.lock().await.insert(
+            "machine-build".to_owned(),
+            ExecutorSession {
+                id: "test".to_owned(),
+                sender,
+            },
+        );
         let local_file = temp.path().join("local.txt");
         std::fs::write(&local_file, "local evidence").unwrap();
         let local = execute_device_tool(
             "read_file",
             json!({"path": local_file}),
             &db,
-            &reqwest::Client::new(),
+            &tunnels,
             watch::channel(false).1,
         )
         .await;
@@ -8823,7 +8995,7 @@ mod tests {
             "read_file",
             json!({"path": local_file, "target_device": null}),
             &db,
-            &reqwest::Client::new(),
+            &tunnels,
             watch::channel(false).1,
         )
         .await;
@@ -8835,31 +9007,37 @@ mod tests {
             "read_file",
             json!({"path": local_file, "target_device": ""}),
             &db,
-            &reqwest::Client::new(),
+            &tunnels,
             watch::channel(false).1,
         )
         .await;
         assert_eq!(empty_target.output, "local evidence");
-        let remote = execute_device_tool(
-            "read_file",
-            json!({"path":"/remote/evidence.txt","target_device":"machine-build"}),
-            &db,
-            &reqwest::Client::new(),
-            watch::channel(false).1,
-        )
-        .await;
-        server.abort();
+        let tunnels_for_result = tunnels.clone();
+        let remote = tokio::spawn(async move {
+            execute_device_tool(
+                "read_file",
+                json!({"path":"/remote/evidence.txt","target_device":"machine-build"}),
+                &db,
+                &tunnels_for_result,
+                watch::channel(false).1,
+            )
+            .await
+        });
+        let call = receiver.recv().await.unwrap();
+        let pending = tunnels.results.lock().await.remove(&call.call_id).unwrap();
+        pending
+            .sender
+            .send(ExecutorToolResult {
+                call_id: call.call_id,
+                output: "remote evidence".to_owned(),
+                added_lines: None,
+                deleted_lines: None,
+            })
+            .unwrap();
+        let remote = remote.await.unwrap();
         assert_eq!(remote.output, "remote evidence");
-        assert_eq!(
-            captured.lock().await.as_slice(),
-            &[json!({
-                "authorization": "Bearer secret-token",
-                "request": {
-                    "name": "read_file",
-                    "arguments": {"path": "/remote/evidence.txt"},
-                },
-            })]
-        );
+        assert_eq!(call.name, "read_file");
+        assert_eq!(call.arguments, json!({"path": "/remote/evidence.txt"}));
     }
 
     #[test]
@@ -8872,7 +9050,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_access_tokens_are_unique_and_not_persisted_as_plaintext() {
+    fn executor_access_tokens_are_unique_and_persisted_for_automatic_reconnect() {
         let first = executor_access_token();
         let second = executor_access_token();
         assert_ne!(first, second);
@@ -8883,22 +9061,66 @@ mod tests {
         open_db(&db)
             .unwrap()
             .execute(
-                "INSERT INTO device_tokens (
-                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
-                 ) VALUES ('controller', 'controller', ?1, 1, 1, 'now')",
-                [token_hash(&first)],
+                "INSERT INTO app_meta (key, value) VALUES ('executor_access_token', ?1)",
+                [&first],
             )
             .unwrap();
-        let stored: String = open_db(&db)
+        assert_eq!(executor_access_token_from_db(&db).unwrap(), Some(first));
+    }
+
+    #[test]
+    fn completed_executor_calls_are_deduplicated_and_running_calls_become_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        assert!(claim_executor_call(&db, "call-complete").unwrap());
+        let result = ExecutorToolResult {
+            call_id: "call-complete".to_owned(),
+            output: "evidence".to_owned(),
+            added_lines: Some(2),
+            deleted_lines: Some(1),
+        };
+        complete_executor_call(&db, &result).unwrap();
+        assert_eq!(
+            executor_call_result_from_db(&db, "call-complete")
+                .unwrap()
+                .unwrap()
+                .output,
+            "evidence"
+        );
+        assert!(!claim_executor_call(&db, "call-complete").unwrap());
+        assert!(claim_executor_call(&db, "call-running").unwrap());
+        bootstrap_database(&db).unwrap();
+        let status: String = open_db(&db)
             .unwrap()
             .query_row(
-                "SELECT token_hash FROM device_tokens WHERE id = 'controller'",
+                "SELECT status FROM executor_tool_calls WHERE call_id = 'call-running'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stored, token_hash(&first));
-        assert_ne!(stored, first);
+        assert_eq!(status, "unknown");
+    }
+
+    #[test]
+    fn gzip_executor_results_are_decoded_with_a_size_limit() {
+        let result = ExecutorToolResult {
+            call_id: "call-gzip".to_owned(),
+            output: "x".repeat(EXECUTOR_RESULT_GZIP_THRESHOLD),
+            added_lines: None,
+            deleted_lines: None,
+        };
+        let payload = serde_json::to_vec(&result).unwrap();
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&payload).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        assert_eq!(
+            decode_executor_result(&headers, &gzip.finish().unwrap())
+                .unwrap()
+                .call_id,
+            "call-gzip"
+        );
     }
 
     #[test]
@@ -8926,89 +9148,40 @@ mod tests {
     }
 
     #[test]
-    fn executor_registration_upsert_matches_the_partial_machine_id_index() {
+    fn executor_registration_upsert_replaces_the_token_hash() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
         let connection = open_db(&db).unwrap();
-        let registration = |id: &str, base_url: &str| {
+        let registration = |id: &str, token: &str| {
             connection.execute(
                 "INSERT INTO peers (
-                   id, name, base_url, device_token, machine_id, hostname, deployment_role,
+                   id, name, machine_id, hostname, access_token_hash, deployment_role,
                    filesystem_enabled, bash_enabled, created_at
-                 ) VALUES (?1, 'MacMini', ?2, 'token', 'machine-mac', 'MacMini', 'executor', 1, 1, 'now')
-                 ON CONFLICT(machine_id) WHERE machine_id <> '' DO UPDATE SET
+                 ) VALUES (?1, 'MacMini', 'machine-mac', 'MacMini', ?2, 'executor', 1, 1, 'now')
+                 ON CONFLICT(machine_id) DO UPDATE SET
                    id = excluded.id,
                    name = excluded.name,
-                   base_url = excluded.base_url,
-                   device_token = excluded.device_token,
                    hostname = excluded.hostname,
+                   access_token_hash = excluded.access_token_hash,
                    deployment_role = excluded.deployment_role,
                    filesystem_enabled = excluded.filesystem_enabled,
                    bash_enabled = excluded.bash_enabled",
-                params![id, base_url],
+                params![id, token_hash(token)],
             )
         };
-        registration("first", "https://m1.zccz14.com").unwrap();
-        registration("second", "https://m1-next.zccz14.com").unwrap();
+        registration("first", "one").unwrap();
+        registration("second", "two").unwrap();
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT id, base_url FROM peers WHERE machine_id = 'machine-mac'",
+                    "SELECT id, access_token_hash FROM peers WHERE machine_id = 'machine-mac'",
                     [],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .unwrap(),
-            ("second".to_owned(), "https://m1-next.zccz14.com".to_owned()),
+            ("second".to_owned(), token_hash("two")),
         );
-    }
-
-    #[tokio::test]
-    async fn remote_executor_enforces_the_device_token_capability_scope() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        configure_test_database(&db, "https://openai.example.com/v1");
-        let secret = "cybion_remote_test_secret";
-        open_db(&db)
-            .unwrap()
-            .execute(
-                "INSERT INTO device_tokens (
-                   id, label, token_hash, filesystem_enabled, bash_enabled, created_at
-                 ) VALUES ('token', 'controller', ?1, 1, 0, 'now')",
-                [token_hash(secret)],
-            )
-            .unwrap();
-        let file = temp.path().join("evidence.txt");
-        std::fs::write(&file, "remote evidence").unwrap();
-        let state = test_state(db);
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
-        );
-        let response = remote_execute_tool(
-            State(state.clone()),
-            headers.clone(),
-            Json(RemoteToolRequest {
-                name: "read_file".to_owned(),
-                arguments: json!({"path": file}),
-            }),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(response.output, "remote evidence");
-        let denied = remote_execute_tool(
-            State(state),
-            headers,
-            Json(RemoteToolRequest {
-                name: "run_bash".to_owned(),
-                arguments: json!({"command":"printf forbidden"}),
-            }),
-        )
-        .await;
-        assert!(matches!(denied, Err((StatusCode::FORBIDDEN, _))));
     }
 
     #[tokio::test]
@@ -9157,6 +9330,7 @@ mod tests {
                 through_message_id: context.through_message_id,
             },
             None,
+            &ExecutorTunnels::default(),
         )
         .await
         .unwrap();
@@ -9341,6 +9515,7 @@ mod tests {
                 id: "child".to_owned(),
             },
             None,
+            &ExecutorTunnels::default(),
         )
         .await
         .unwrap();

@@ -246,8 +246,8 @@ flowchart LR
   关键词筛选并分页浏览，正在运行的命令固定排在前面。
 - Auth Mini JWT 验证，以首次初始化时绑定的 root user 作为操作边界；浏览器在每次 API 或
   SSE 请求前检查 access token 有效期，临近过期时刷新，并在 401 后刷新重试一次。
-- 自动注册的执行设备、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备无需
-  Responses API 上游，设备只在单次工具调用中被选择。
+- 自动注册的执行设备、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备通过它主动建立的
+  SSE 回连接收调用，并以 HTTP 回传结果，不需要公网地址或模型上游。
 - 机器登记、远程状态探测、资源监控，以及完整的自更新流程：正式运行二进制固定在 `~/.cybion/bin/cybion`；启动后和每六小时检查 Release、校验并下载候选版本、在设置页展示状态，并由操作者确认重启安装。一次性更新助手会先原子替换安装文件，再等待旧 PID 退出；系统服务重新拉起的新进程或助手启动的新进程会以预期版本写入启动标记，确认失败则恢复并重启旧二进制。
 - Rust 单二进制部署：控制台资源嵌入二进制，运行时无需命令行参数或环境变量。
 
@@ -268,15 +268,16 @@ flowchart TB
   S -->|"/responses"| O["OpenAI-compatible upstream"]
   S --> DB[("~/.cybion/default.sqlite3")]
   S --> T["本机文件系统与 Bash 工具"]
-  S -->|"access-token"| P["远程 Cybion 工具执行设备"]
+  P -->|"SSE（Bearer Token）"| S
+  P -->|"HTTP 结果回传（Bearer Token）"| S
   P --> PT["远程文件系统与 Bash 工具"]
 ```
 
 安全模型的关键事实：
 
 - 操作者使用的 `/api/*` 请求必须携带有效的 Auth Mini EdDSA JWT；服务端校验 issuer、
-  请求 host 对应的 audience，以及与 `root_user_id` 一致的 subject。执行设备注册时，控制端
-  以执行设备公开 URL 为 audience 验证该 JWT；`/api/remote/*` 只接受注册产生的 Access Token，
+  请求 host 对应的 audience，以及与 `root_user_id` 一致的 subject。执行设备注册时，控制端验证
+  Auth Mini 签名、issuer 与 root user；回连 SSE 和结果回传只接受注册产生的 Access Token，
   不接受或转发浏览器 JWT。
 - 浏览器使用 Auth Mini 的 SDK 持久保存会话，并在 API 与 SSE 请求前主动刷新即将过期的
   access token；遇到 401 时只刷新重试一次。Cybion 服务端只缓存用于验证的 JWKS，不读取
@@ -284,9 +285,9 @@ flowchart TB
 - Browser Control 只在控制设备上运行：它以空环境变量、临时 user-data directory、禁用扩展和
   loopback-only CDP 启动 headless Chrome/Chromium。Agent 可访问任意 HTTP(S) 网页；页面文字、
   邮件、PDF 和网页内提示都是不可信内容，不能构成操作授权。
-- 执行设备每次注册都会生成新的 Access Token；执行设备只保存 SHA-256 哈希，控制设备为调用
-  远端在自己的 SQLite 中保存明文 Token。再次保存执行设备设置会轮换 Token；从控制设备移除
-  机器会立即收回该控制端的调用能力。
+- 执行设备每次注册都会生成新的 Access Token，并在本机 SQLite 明文保存以便无值守重连；控制设备
+  仅保存 SHA-256 哈希。再次保存执行设备设置会轮换 Token；从控制设备移除机器会立即收回该控制端的
+  调用能力。调用由 `call_id` 去重；执行设备只重传已完成结果，绝不重复执行未完成的调用。
 - 健康检查与嵌入式 Web 资源是公开路由。将远程控制台公开到互联网前，必须放在 HTTPS
   反向代理之后；Auth Mini 只允许精确的 loopback host 使用纯 HTTP 回调。
 
@@ -341,10 +342,10 @@ cargo run --release
 
 ### 接入另一台工具执行设备
 
-1. 在另一台设备上重复安装，使用同一个 Auth Mini issuer 和同一用户初始化。没有公网 IP 时，
-   先通过 frp、cloudflared 或同类出站隧道建立 HTTPS 地址；只有精确 loopback 地址可使用 HTTP。
+1. 在另一台设备上重复安装，使用同一个 Auth Mini issuer 和同一用户初始化。执行设备不需要公网
+   IP、端口映射、FRP 或 Cloudflare Tunnel；只需能够以 HTTPS 访问控制设备。
 2. 打开执行设备的【设置】，选择 **工具执行设备**，填入控制设备的 Cybion URL，然后保存。
-   执行设备会主动向控制端注册自己的 URL、机器信息和新 Access Token。
+   执行设备会主动向控制端注册机器信息和新 Access Token，并持续建立 SSE 回连。
 3. 控制设备的【机器】页会立即显示已注册的执行设备；无需复制 Token 或手动添加机器。
 4. 之后主线程或子线程调用文件系统与 Bash 工具时，可以填写 `target_device` 为该设备 ID；
    省略该字段则在控制设备本机执行。执行设备不会发起 Responses API 请求。
