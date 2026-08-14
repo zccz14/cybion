@@ -26,6 +26,10 @@ jobs:
             target: aarch64-apple-darwin
             artifact: cybion-macos-aarch64
             cross: false
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            artifact: cybion-macos-x86_64
+            cross: false
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
