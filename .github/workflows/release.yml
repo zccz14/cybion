@@ -26,7 +26,7 @@ jobs:
             target: aarch64-apple-darwin
             artifact: cybion-macos-aarch64
             cross: false
-          - runner: macos-13
+          - runner: macos-14
             target: x86_64-apple-darwin
             artifact: cybion-macos-x86_64
             cross: false
