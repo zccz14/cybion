@@ -7380,14 +7380,14 @@ async fn run_executor_tunnel(state: &AppState) -> Result<()> {
         .await?
         .error_for_status()?;
     let mut stream = response.bytes_stream();
-    let mut pending = String::new();
+    let mut pending = Vec::new();
     loop {
         {
             let chunk = futures_util::StreamExt::next(&mut stream).await;
             let chunk = chunk.context("executor tunnel stream ended")??;
-            pending.push_str(&String::from_utf8_lossy(&chunk));
+            pending.extend_from_slice(&chunk);
             while let Some((boundary, separator_len)) = sse_event_boundary(&pending) {
-                let event = pending[..boundary].to_owned();
+                let event = std::str::from_utf8(&pending[..boundary])?.to_owned();
                 pending.drain(..boundary + separator_len);
                 if let Some(call) = parse_executor_tool_call(&event)? {
                     let result = execute_executor_tool_call(&state.db_path, call).await;
@@ -7474,11 +7474,17 @@ async fn send_executor_result(
     Ok(())
 }
 
-fn sse_event_boundary(source: &str) -> Option<(usize, usize)> {
+fn sse_event_boundary(source: &[u8]) -> Option<(usize, usize)> {
     source
-        .find("\r\n\r\n")
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
         .map(|index| (index, 4))
-        .or_else(|| source.find("\n\n").map(|index| (index, 2)))
+        .or_else(|| {
+            source
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|index| (index, 2))
+        })
 }
 
 fn execute_write_file(path: &str, content: &str) -> ToolExecution {
@@ -9121,6 +9127,12 @@ mod tests {
                 .call_id,
             "call-gzip"
         );
+    }
+
+    #[test]
+    fn sse_event_boundaries_are_found_without_decoding_partial_utf8() {
+        let bytes = b"event: tool_call\ndata: {\"arguments\":\"\xe4\xbd\xa0\xe5\xa5\xbd\"}\r\n\r\n";
+        assert_eq!(sse_event_boundary(bytes), Some((bytes.len() - 4, 4)));
     }
 
     #[test]
