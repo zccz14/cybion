@@ -6434,10 +6434,7 @@ async fn run_agent_items(
                 browser.as_ref(),
             ));
         let response = match send_responses_request(request, &mut cancellation).await {
-            Ok(response) => {
-                reset_agent_retry_after_success(db_path, events.run_id)?;
-                response
-            }
+            Ok(response) => response,
             // RECOVERY: A structured upstream context-length error means the current context
             // can be replaced by a distilled checkpoint and retried once without replaying tools.
             Err(cause) if is_context_overflow(&cause) && !retried_after_context_overflow => {
@@ -6480,6 +6477,7 @@ async fn run_agent_items(
             .and_then(Value::as_array)
             .cloned()
             .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
+        reset_agent_retry_after_success(db_path, events.run_id)?;
         images.extend(generated_images(&output));
         emit_response_process_events(&output, db_path, &events).await?;
         let calls = output
@@ -9910,6 +9908,65 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn incomplete_sse_responses_keep_exponential_main_retry_backoff() {
+        async fn responses() -> String {
+            let item = json!({
+                "type": "message",
+                "content": [{"type": "output_text", "text": "partial"}],
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/responses", post(responses)))
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("retry incomplete stream".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "incomplete-sse-retry", user.id).unwrap();
+        let state = test_state(db.clone());
+
+        for expected_attempt in [1, 2] {
+            let (events, receiver) = mpsc::channel(1);
+            drop(receiver);
+            process_main_run(
+                state.clone(),
+                "incomplete-sse-retry".to_owned(),
+                user.id,
+                MainRunReason::UserMessage,
+                events,
+                watch::channel(false).1,
+            )
+            .await;
+            let run = load_conversation_state(&db).unwrap().runs.remove(0);
+            assert_eq!(run.retry_attempt, expected_attempt);
+            assert!(run.next_retry_at.is_some());
+            claim_main_retry_now(&db, "incomplete-sse-retry").unwrap();
+        }
+        server.abort();
     }
 
     #[test]
