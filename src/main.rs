@@ -76,6 +76,8 @@ const MAX_FILE_READ_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXECUTOR_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const EXECUTOR_RESULT_GZIP_THRESHOLD: usize = 4 * 1024;
 const EXECUTOR_RESULT_TIMEOUT: Duration = Duration::from_secs(75);
+const EXECUTOR_PAIRING_TTL: chrono::Duration = chrono::Duration::minutes(15);
+const EXECUTOR_PAIRING_HEADER: &str = "x-cybion-pairing-token";
 
 static FILE_READS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_FILE_READS)));
@@ -93,6 +95,12 @@ struct AppState {
     executor_tunnels: ExecutorTunnels,
     main_thread: Arc<Mutex<()>>,
     browser_sessions: browser::BrowserSessions,
+}
+
+#[derive(Clone)]
+struct ExecutorRuntime {
+    db_path: PathBuf,
+    client: reqwest::Client,
 }
 
 #[derive(Clone, Default)]
@@ -132,9 +140,7 @@ struct Jwk {
 }
 
 #[derive(Clone)]
-struct Identity {
-    access_token: String,
-}
+struct Identity {}
 
 #[derive(Debug, Serialize)]
 struct ApiError {
@@ -269,10 +275,16 @@ struct ExecutorToolResult {
 }
 
 #[derive(Deserialize, Serialize)]
-struct ExecutorRegistration {
+struct ExecutorPairRequest {
     machine_id: String,
     hostname: String,
     access_token: String,
+}
+
+#[derive(Serialize)]
+struct ExecutorPairing {
+    pairing_url: String,
+    expires_at: String,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -678,13 +690,6 @@ struct SettingsResponse {
     edge_tts_en_voice: String,
     openai_base_url: String,
     openai_api_key: String,
-    deployment_role: String,
-    controller_url: String,
-}
-
-struct SavedSettings {
-    settings: SettingsResponse,
-    executor_access_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -697,9 +702,6 @@ struct UpdateSettings {
     edge_tts_en_voice: String,
     openai_base_url: String,
     openai_api_key: String,
-    deployment_role: String,
-    #[serde(default)]
-    controller_url: String,
 }
 
 #[derive(Serialize)]
@@ -756,10 +758,6 @@ struct SetupInput {
     openai_api_key: String,
     #[serde(default = "default_openai_url")]
     openai_base_url: String,
-    #[serde(default = "default_deployment_role")]
-    deployment_role: String,
-    #[serde(default)]
-    controller_url: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -827,6 +825,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     bootstrap_database(&db_path)?;
+    if let Some(pairing_url) = pairing_argument()? {
+        pair_local_executor(&db_path, &pairing_url).await?;
+        return run_executor_daemon(db_path).await;
+    }
+    if is_executor(&db_path)? {
+        return run_executor_daemon(db_path).await;
+    }
     let skills_directory = default_skills_directory();
     let skills = Arc::new(StdRwLock::new(load_skills(&skills_directory)));
     watch_skills(skills_directory.clone(), skills.clone())?;
@@ -850,8 +855,7 @@ async fn main() -> Result<()> {
     schedule_recovered_main_runs(state.clone());
     schedule_main_retries(state.clone());
     schedule_subthreads(state.clone());
-    schedule_auto_update(state.clone());
-    schedule_executor_tunnel(state.clone());
+    schedule_auto_update(state.client.clone(), state.db_path.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     info!(%addr, "cybion server listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -860,10 +864,40 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn schedule_auto_update(state: AppState) {
+fn pairing_argument() -> Result<Option<String>> {
+    let mut arguments = std::env::args().skip(1);
+    let Some(flag) = arguments.next() else {
+        return Ok(None);
+    };
+    if flag != "--pair" {
+        return Err(anyhow!("unknown argument: {flag}"));
+    }
+    let pairing_url = arguments
+        .next()
+        .ok_or_else(|| anyhow!("--pair requires a pairing URL"))?;
+    if arguments.next().is_some() {
+        return Err(anyhow!("--pair accepts exactly one pairing URL"));
+    }
+    Ok(Some(pairing_url))
+}
+
+async fn run_executor_daemon(db_path: PathBuf) -> Result<()> {
+    let runtime = ExecutorRuntime {
+        client: reqwest::Client::builder()
+            .user_agent(format!("cybion/{}", env!("CARGO_PKG_VERSION")))
+            .build()?,
+        db_path: db_path.clone(),
+    };
+    schedule_auto_update(runtime.client.clone(), runtime.db_path.clone());
+    schedule_executor_tunnel(runtime);
+    update::record_startup(&db_path)?;
+    std::future::pending::<()>().await;
+    Ok(())
+}
+fn schedule_auto_update(client: reqwest::Client, db_path: PathBuf) {
     tokio::spawn(async move {
         loop {
-            if let Err(cause) = update::download_latest(&state.client, &state.db_path).await {
+            if let Err(cause) = update::download_latest(&client, &db_path).await {
                 tracing::warn!(%cause, "Cybion automatic update check failed");
             }
             tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
@@ -1201,7 +1235,8 @@ fn app(state: AppState) -> Router {
         .route("/api/audio/speech", post(speech))
         .route("/api/peers", get(list_peers))
         .route("/api/peers/{id}", delete(delete_peer))
-        .route("/api/executors/register", post(register_executor))
+        .route("/api/executors/pairings", post(create_executor_pairing))
+        .route("/api/executors/pair", post(pair_executor))
         .route("/api/executors/tunnel", get(executor_tunnel))
         .route(
             "/api/executors/tunnel/results",
@@ -3086,6 +3121,10 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            created_at TEXT NOT NULL,
            last_seen_at TEXT
          );
+         CREATE TABLE IF NOT EXISTS executor_pairings (
+           token_hash TEXT PRIMARY KEY,
+           expires_at TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS conversation_messages (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
@@ -3204,6 +3243,24 @@ fn bootstrap_database(db: &Path) -> Result<()> {
         [Uuid::new_v4().to_string()],
     )?;
     connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('deployment_role', 'controller')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('controller_url', '')
+         ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
+    let deployment_role: String = connection.query_row(
+        "SELECT value FROM app_meta WHERE key = 'deployment_role'",
+        [],
+        |row| row.get(0),
+    )?;
+    if deployment_role == "executor" {
+        return Ok(());
+    }
+    connection.execute(
         "INSERT INTO app_meta (key, value) VALUES ('default_model', ?1)
          ON CONFLICT(key) DO NOTHING",
         [DEFAULT_MODEL_ID],
@@ -3229,16 +3286,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [DEFAULT_VOICE_SCRIPT_MAX_CHARS.to_string()],
     )?;
-    connection.execute(
-        "INSERT INTO app_meta (key, value) VALUES ('deployment_role', 'controller')
-         ON CONFLICT(key) DO NOTHING",
-        [],
-    )?;
-    connection.execute(
-        "INSERT INTO app_meta (key, value) VALUES ('controller_url', '')
-         ON CONFLICT(key) DO NOTHING",
-        [],
-    )?;
     Ok(())
 }
 
@@ -3246,26 +3293,100 @@ fn default_openai_url() -> String {
     DEFAULT_OPENAI_URL.to_owned()
 }
 
-fn default_deployment_role() -> String {
-    "controller".to_owned()
-}
-
-fn controller_url(value: &str) -> std::result::Result<String, (StatusCode, Json<ApiError>)> {
+fn normalize_controller_url(value: &str) -> Result<String> {
     let value = value.trim().trim_end_matches('/');
-    let url = Url::parse(value).map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "controller_url must be an absolute URL",
-        )
-    })?;
+    let url = Url::parse(value).map_err(|_| anyhow!("controller_url must be an absolute URL"))?;
     let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
     if url.scheme() != "https" && !loopback {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "controller_url must use HTTPS except on loopback",
-        ));
+        return Err(anyhow!("controller_url must use HTTPS except on loopback"));
     }
     Ok(value.to_owned())
+}
+
+fn is_executor(path: &Path) -> Result<bool> {
+    Ok(open_db(path)?.query_row(
+        "SELECT value FROM app_meta WHERE key = 'deployment_role'",
+        [],
+        |row| row.get::<_, String>(0),
+    )? == "executor")
+}
+
+fn executor_pairing_token() -> String {
+    format!(
+        "cybion_pair_{}_{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
+}
+
+struct PairingTarget {
+    controller_url: String,
+    pairing_token: String,
+}
+
+fn pairing_target(value: &str) -> Result<PairingTarget> {
+    let mut url = Url::parse(value).context("pairing URL must be absolute")?;
+    let pairing_token = url
+        .fragment()
+        .and_then(|fragment| fragment.strip_prefix("cybion-pair="))
+        .filter(|token| token.starts_with("cybion_pair_") && token.len() >= 32)
+        .context("pairing URL has no valid cybion-pair fragment")?
+        .to_owned();
+    url.set_fragment(None);
+    url.set_query(None);
+    let controller_url = normalize_controller_url(url.as_str())?;
+    Ok(PairingTarget {
+        controller_url,
+        pairing_token,
+    })
+}
+
+async fn pair_local_executor(db_path: &Path, pairing_url: &str) -> Result<()> {
+    let target = pairing_target(pairing_url)?;
+    let machine_id: String = open_db(db_path)?.query_row(
+        "SELECT value FROM app_meta WHERE key = 'machine_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    let access_token = executor_access_token();
+    let client = reqwest::Client::builder()
+        .user_agent(format!("cybion/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    client
+        .post(format!("{}/api/executors/pair", target.controller_url))
+        .header(EXECUTOR_PAIRING_HEADER, target.pairing_token)
+        .json(&ExecutorPairRequest {
+            machine_id,
+            hostname: hostname(),
+            access_token: access_token.clone(),
+        })
+        .send()
+        .await?
+        .error_for_status()?;
+    let connection = open_db(db_path)?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "DELETE FROM app_meta WHERE key IN (
+           'root_user_id', 'auth_url', 'openai_base_url', 'openai_api_key',
+           'default_model', 'subthread_model', 'voice_script_model',
+           'voice_script_max_chars', 'edge_tts_zh_voice', 'edge_tts_en_voice'
+         )",
+        [],
+    )?;
+    for (key, value) in [
+        ("deployment_role", "executor"),
+        ("controller_url", target.controller_url.as_str()),
+        ("executor_access_token", access_token.as_str()),
+    ] {
+        transaction.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+    }
+    transaction.commit()?;
+    println!("paired executor with {}", target.controller_url);
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -3281,7 +3402,12 @@ struct Config {
     edge_tts_en_voice: String,
     machine_id: String,
     deployment_role: String,
+}
+
+struct ExecutorConfig {
+    machine_id: String,
     controller_url: String,
+    access_token: String,
 }
 
 fn load_config(path: &Path) -> Result<Config> {
@@ -3310,7 +3436,29 @@ fn load_config(path: &Path) -> Result<Config> {
         edge_tts_en_voice: required("edge_tts_en_voice")?,
         machine_id: required("machine_id")?,
         deployment_role: required("deployment_role")?,
-        controller_url: required("controller_url")?,
+    })
+}
+
+fn load_executor_config(path: &Path) -> Result<ExecutorConfig> {
+    let connection = open_db(path)?;
+    let values: HashMap<String, String> = connection
+        .prepare("SELECT key, value FROM app_meta")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let required = |key: &str| {
+        values
+            .get(key)
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("missing {key} in executor configuration"))
+    };
+    if required("deployment_role")? != "executor" {
+        return Err(anyhow!("Cybion is not configured as a tool executor"));
+    }
+    Ok(ExecutorConfig {
+        machine_id: required("machine_id")?,
+        controller_url: normalize_controller_url(&required("controller_url")?)?,
+        access_token: required("executor_access_token")?,
     })
 }
 
@@ -3450,65 +3598,7 @@ async fn identity(
             "Cybion is restricted to its configured root user",
         ));
     }
-    Ok(Identity {
-        access_token: token,
-    })
-}
-
-async fn executor_registration_identity(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> std::result::Result<Identity, (StatusCode, Json<ApiError>)> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "missing bearer token"))?
-        .to_owned();
-    let config = load_config(&state.db_path).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "invalid server configuration",
-        )
-    })?;
-    let header =
-        decode_header(&token).map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWT header"))?;
-    let kid = header
-        .kid
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no key id"))?;
-    let keys = cached_keys(state, &config.auth_url)
-        .await
-        .map_err(|_| error(StatusCode::UNAUTHORIZED, "cannot load Auth Mini JWKS"))?;
-    let jwk = keys
-        .iter()
-        .find(|key| {
-            key.kid == kid && key.kty == "OKP" && key.crv == "Ed25519" && key.alg == "EdDSA"
-        })
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT signing key is not trusted"))?;
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&[&config.auth_url]);
-    validation.validate_aud = false;
-    let claims = decode::<Value>(
-        &token,
-        &DecodingKey::from_ed_components(&jwk.x)
-            .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWKS key"))?,
-        &validation,
-    )
-    .map_err(|_| error(StatusCode::UNAUTHORIZED, "JWT verification failed"))?
-    .claims;
-    let user_id = claims
-        .get("sub")
-        .and_then(Value::as_str)
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no subject"))?;
-    if user_id != config.root_user_id {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "Cybion is restricted to its configured root user",
-        ));
-    }
-    Ok(Identity {
-        access_token: token,
-    })
+    Ok(Identity {})
 }
 
 fn token_hash(token: &str) -> String {
@@ -3599,32 +3689,18 @@ async fn setup(
     let auth_url = input.auth_url.trim_end_matches('/').to_owned();
     Url::parse(&auth_url)
         .map_err(|_| error(StatusCode::BAD_REQUEST, "auth_url must be an absolute URL"))?;
-    if !matches!(input.deployment_role.as_str(), "controller" | "executor") {
-        return Err(error(
+    Url::parse(&input.openai_base_url).map_err(|_| {
+        error(
             StatusCode::BAD_REQUEST,
-            "deployment_role must be controller or executor",
-        ));
-    }
-    if input.deployment_role == "controller" {
-        Url::parse(&input.openai_base_url).map_err(|_| {
-            error(
-                StatusCode::BAD_REQUEST,
-                "openai_base_url must be an absolute URL",
-            )
-        })?;
-    }
-    if input.deployment_role == "controller" && input.openai_api_key.trim().is_empty() {
+            "openai_base_url must be an absolute URL",
+        )
+    })?;
+    if input.openai_api_key.trim().is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "openai_api_key cannot be empty",
         ));
     }
-    let controller_url = if input.deployment_role == "executor" {
-        controller_url(&input.controller_url)?
-    } else {
-        String::new()
-    };
-    let executor_access_token = (input.deployment_role == "executor").then(executor_access_token);
     let root_user_id = bootstrap_subject(&state, &headers, &auth_url).await?;
     {
         let mut connection = open_db(&state.db_path)
@@ -3643,25 +3719,11 @@ async fn setup(
                 input.openai_base_url.trim_end_matches('/'),
             ),
             ("openai_api_key", input.openai_api_key.as_str()),
-            ("deployment_role", input.deployment_role.as_str()),
-            ("controller_url", controller_url.as_str()),
+            ("deployment_role", "controller"),
+            ("controller_url", ""),
         ] {
             transaction.execute("INSERT INTO app_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])
                 .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot persist initial configuration"))?;
-        }
-        if let Some(access_token) = executor_access_token.as_deref() {
-            transaction
-                .execute(
-                    "INSERT INTO app_meta (key, value) VALUES ('executor_access_token', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    [access_token],
-                )
-                .map_err(|_| {
-                    error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "cannot persist executor access",
-                    )
-                })?;
         }
         transaction.commit().map_err(|_| {
             error(
@@ -3676,11 +3738,6 @@ async fn setup(
             "cannot read initial configuration",
         )
     })?;
-    if let Some(access_token) = executor_access_token.as_deref() {
-        let identity = identity(&state, &headers).await?;
-        register_executor_with_controller(&state, &identity, &config.controller_url, access_token)
-            .await?;
-    }
     Ok(Json(StatusResponse {
         machine_id: config.machine_id,
         hostname: hostname(),
@@ -3833,8 +3890,6 @@ async fn settings(
         edge_tts_en_voice: config.edge_tts_en_voice,
         openai_base_url: config.openai_base_url,
         openai_api_key: config.openai_api_key,
-        deployment_role: config.deployment_role,
-        controller_url: config.controller_url,
     }))
 }
 
@@ -3843,24 +3898,14 @@ async fn update_settings(
     headers: HeaderMap,
     Json(input): Json<UpdateSettings>,
 ) -> ApiResult<SettingsResponse> {
-    let identity = identity(&state, &headers).await?;
-    let saved = save_settings(&state, input)?;
-    if let Some(access_token) = saved.executor_access_token.as_deref() {
-        register_executor_with_controller(
-            &state,
-            &identity,
-            &saved.settings.controller_url,
-            access_token,
-        )
-        .await?;
-    }
-    Ok(Json(saved.settings))
+    identity(&state, &headers).await?;
+    Ok(Json(save_settings(&state, input)?))
 }
 
 fn save_settings(
     state: &AppState,
     input: UpdateSettings,
-) -> std::result::Result<SavedSettings, (StatusCode, Json<ApiError>)> {
+) -> std::result::Result<SettingsResponse, (StatusCode, Json<ApiError>)> {
     let default_model = input.default_model.trim();
     if default_model.is_empty() {
         return Err(error(
@@ -3903,37 +3948,19 @@ fn save_settings(
         ));
     }
     let openai_base_url = input.openai_base_url.trim().trim_end_matches('/');
-    if !matches!(input.deployment_role.as_str(), "controller" | "executor") {
-        return Err(error(
+    Url::parse(openai_base_url).map_err(|_| {
+        error(
             StatusCode::BAD_REQUEST,
-            "deployment_role must be controller or executor",
-        ));
-    }
-    if input.deployment_role == "controller" {
-        Url::parse(openai_base_url).map_err(|_| {
-            error(
-                StatusCode::BAD_REQUEST,
-                "openai_base_url must be an absolute URL",
-            )
-        })?;
-    }
+            "openai_base_url must be an absolute URL",
+        )
+    })?;
     let openai_api_key = input.openai_api_key.trim();
-    if input.deployment_role == "controller" && openai_api_key.is_empty() {
+    if openai_api_key.is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "openai_api_key cannot be empty",
         ));
     }
-    let controller_url = if input.deployment_role == "executor" {
-        controller_url(&input.controller_url)?
-    } else {
-        String::new()
-    };
-    let executor_access_token = if input.deployment_role == "executor" {
-        Some(executor_access_token())
-    } else {
-        None
-    };
     let mut connection = open_db(&state.db_path)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
     let transaction = connection
@@ -3983,45 +4010,6 @@ fn save_settings(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
     transaction
         .execute(
-            "INSERT INTO app_meta (key, value) VALUES ('deployment_role', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [&input.deployment_role],
-        )
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
-    transaction
-        .execute(
-            "INSERT INTO app_meta (key, value) VALUES ('controller_url', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [&controller_url],
-        )
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
-    transaction
-        .execute(
-            "DELETE FROM app_meta WHERE key = 'executor_access_token'",
-            [],
-        )
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot replace executor access",
-            )
-        })?;
-    if let Some(access_token) = executor_access_token.as_deref() {
-        transaction
-            .execute(
-                "INSERT INTO app_meta (key, value) VALUES ('executor_access_token', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [access_token],
-            )
-            .map_err(|_| {
-                error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "cannot save executor access",
-                )
-            })?;
-    }
-    transaction
-        .execute(
             "INSERT INTO app_meta (key, value) VALUES ('openai_base_url', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [openai_base_url],
@@ -4047,54 +4035,8 @@ fn save_settings(
         edge_tts_en_voice: edge_tts_en_voice.to_owned(),
         openai_base_url: openai_base_url.to_owned(),
         openai_api_key: openai_api_key.to_owned(),
-        deployment_role: input.deployment_role,
-        controller_url,
     };
-    Ok(SavedSettings {
-        settings,
-        executor_access_token,
-    })
-}
-
-async fn register_executor_with_controller(
-    state: &AppState,
-    identity: &Identity,
-    controller_url: &str,
-    access_token: &str,
-) -> std::result::Result<(), (StatusCode, Json<ApiError>)> {
-    let registration = ExecutorRegistration {
-        machine_id: load_config(&state.db_path)
-            .map_err(|_| {
-                error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "cannot read configuration",
-                )
-            })?
-            .machine_id,
-        hostname: hostname(),
-        access_token: access_token.to_owned(),
-    };
-    state
-        .client
-        .post(format!("{controller_url}/api/executors/register"))
-        .bearer_auth(&identity.access_token)
-        .json(&registration)
-        .send()
-        .await
-        .map_err(|cause| {
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("controller registration failed: {cause}"),
-            )
-        })?
-        .error_for_status()
-        .map_err(|cause| {
-            error(
-                StatusCode::BAD_GATEWAY,
-                format!("controller rejected executor: {cause}"),
-            )
-        })?;
-    Ok(())
+    Ok(settings)
 }
 
 async fn tools(
@@ -4324,18 +4266,11 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok(Json(peers))
 }
 
-async fn register_executor(
+async fn create_executor_pairing(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<ExecutorRegistration>,
-) -> ApiResult<Peer> {
-    executor_registration_identity(&state, &headers).await?;
-    if input.access_token.trim().is_empty() {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "access_token cannot be empty",
-        ));
-    }
+) -> ApiResult<ExecutorPairing> {
+    identity(&state, &headers).await?;
     let local = load_config(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4345,26 +4280,78 @@ async fn register_executor(
     if local.deployment_role != "controller" {
         return Err(error(
             StatusCode::CONFLICT,
-            "only a controller Cybion can register tool executors",
+            "only a controller Cybion can create executor pairings",
         ));
     }
-    if input.machine_id.trim().is_empty() {
+    let controller_url = controller_origin(&headers)?;
+    let pairing_token = executor_pairing_token();
+    let expires_at = (chrono::Utc::now() + EXECUTOR_PAIRING_TTL).to_rfc3339();
+    store_executor_pairing(&state.db_path, &pairing_token, &expires_at).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot create executor pairing",
+        )
+    })?;
+    Ok(Json(ExecutorPairing {
+        pairing_url: format!("{controller_url}/#cybion-pair={pairing_token}"),
+        expires_at,
+    }))
+}
+
+async fn pair_executor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ExecutorPairRequest>,
+) -> ApiResult<Peer> {
+    let pairing_token = headers
+        .get(EXECUTOR_PAIRING_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|token| token.starts_with("cybion_pair_") && token.len() >= 32)
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "missing pairing token"))?;
+    let local = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    if local.deployment_role != "controller" {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "only a controller Cybion can pair tool executors",
+        ));
+    }
+    let machine_id = input.machine_id.trim();
+    if machine_id.is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "executor machine_id cannot be empty",
         ));
     }
-    if input.machine_id == local.machine_id {
+    if machine_id == local.machine_id {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "cannot enroll this Cybion machine as its own remote executor",
         ));
     }
+    let hostname = input.hostname.trim();
+    if hostname.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "executor hostname cannot be empty",
+        ));
+    }
+    let access_token = input.access_token.trim();
+    if access_token.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "access_token cannot be empty",
+        ));
+    }
     let peer = Peer {
         id: Uuid::new_v4().to_string(),
-        name: input.hostname.clone(),
-        machine_id: input.machine_id,
-        hostname: input.hostname,
+        name: hostname.to_owned(),
+        machine_id: machine_id.to_owned(),
+        hostname: hostname.to_owned(),
         deployment_role: "executor".to_owned(),
         filesystem_enabled: true,
         bash_enabled: true,
@@ -4372,43 +4359,103 @@ async fn register_executor(
         last_seen_at: None,
         online: false,
     };
-    if peer.name.trim().is_empty() {
+    let paired = consume_executor_pairing(&state.db_path, pairing_token, &peer, access_token)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot pair executor"))?;
+    if !paired {
         return Err(error(
-            StatusCode::BAD_REQUEST,
-            "executor hostname cannot be empty",
+            StatusCode::UNAUTHORIZED,
+            "pairing token is invalid or expired",
         ));
     }
-    let connection = open_db(&state.db_path)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
-    connection
-        .execute(
-            "INSERT INTO peers (
-               id, name, machine_id, hostname, access_token_hash, deployment_role,
-               filesystem_enabled, bash_enabled, created_at, last_seen_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
-             ON CONFLICT(machine_id) DO UPDATE SET
-               id = excluded.id,
-               name = excluded.name,
-               hostname = excluded.hostname,
-               access_token_hash = excluded.access_token_hash,
-               deployment_role = excluded.deployment_role,
-               filesystem_enabled = excluded.filesystem_enabled,
-               bash_enabled = excluded.bash_enabled,
-               last_seen_at = NULL",
-            params![
-                peer.id,
-                peer.name,
-                peer.machine_id,
-                peer.hostname,
-                token_hash(input.access_token.trim()),
-                peer.deployment_role,
-                peer.filesystem_enabled,
-                peer.bash_enabled,
-                peer.created_at,
-            ],
-        )
-        .map_err(|cause| error(StatusCode::CONFLICT, format!("cannot add peer: {cause}")))?;
     Ok(Json(peer))
+}
+
+fn controller_origin(
+    headers: &HeaderMap,
+) -> std::result::Result<String, (StatusCode, Json<ApiError>)> {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "pairing request has no host"))?;
+    let host_url = Url::parse(&format!("http://{host}"))
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "pairing request host is invalid"))?;
+    let loopback = matches!(host_url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let forwarded_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|value| value.trim() == "https")
+        });
+    let scheme = if loopback && !forwarded_https {
+        "http"
+    } else {
+        "https"
+    };
+    normalize_controller_url(&format!("{scheme}://{host}"))
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))
+}
+
+fn store_executor_pairing(path: &Path, pairing_token: &str, expires_at: &str) -> Result<()> {
+    let connection = open_db(path)?;
+    connection.execute(
+        "DELETE FROM executor_pairings WHERE expires_at <= ?1",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    connection.execute(
+        "INSERT INTO executor_pairings (token_hash, expires_at) VALUES (?1, ?2)",
+        params![token_hash(pairing_token), expires_at],
+    )?;
+    Ok(())
+}
+
+fn consume_executor_pairing(
+    path: &Path,
+    pairing_token: &str,
+    peer: &Peer,
+    access_token: &str,
+) -> Result<bool> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let consumed = transaction.execute(
+        "DELETE FROM executor_pairings
+         WHERE token_hash = ?1 AND expires_at > ?2",
+        params![token_hash(pairing_token), chrono::Utc::now().to_rfc3339()],
+    )?;
+    if consumed == 0 {
+        return Ok(false);
+    }
+    transaction.execute(
+        "INSERT INTO peers (
+           id, name, machine_id, hostname, access_token_hash, deployment_role,
+           filesystem_enabled, bash_enabled, created_at, last_seen_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
+         ON CONFLICT(machine_id) DO UPDATE SET
+           id = excluded.id,
+           name = excluded.name,
+           hostname = excluded.hostname,
+           access_token_hash = excluded.access_token_hash,
+           deployment_role = excluded.deployment_role,
+           filesystem_enabled = excluded.filesystem_enabled,
+           bash_enabled = excluded.bash_enabled,
+           last_seen_at = NULL",
+        params![
+            peer.id,
+            peer.name,
+            peer.machine_id,
+            peer.hostname,
+            token_hash(access_token),
+            peer.deployment_role,
+            peer.filesystem_enabled,
+            peer.bash_enabled,
+            peer.created_at,
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(true)
 }
 
 async fn delete_peer(
@@ -7341,21 +7388,10 @@ async fn wait_for_executor_result(
     }
 }
 
-fn executor_access_token_from_db(path: &Path) -> Result<Option<String>> {
-    open_db(path)?
-        .query_row(
-            "SELECT value FROM app_meta WHERE key = 'executor_access_token'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
-}
-
-fn schedule_executor_tunnel(state: AppState) {
+fn schedule_executor_tunnel(runtime: ExecutorRuntime) {
     tokio::spawn(async move {
         loop {
-            if let Err(cause) = run_executor_tunnel(&state).await {
+            if let Err(cause) = run_executor_tunnel(&runtime).await {
                 tracing::warn!(%cause, "executor tunnel disconnected");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -7363,18 +7399,13 @@ fn schedule_executor_tunnel(state: AppState) {
     });
 }
 
-async fn run_executor_tunnel(state: &AppState) -> Result<()> {
-    let config = load_config(&state.db_path)?;
-    if config.deployment_role != "executor" || config.controller_url.is_empty() {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        return Ok(());
-    }
-    let token = executor_access_token_from_db(&state.db_path)?
-        .context("executor access token is missing")?;
-    let response = state
+async fn run_executor_tunnel(runtime: &ExecutorRuntime) -> Result<()> {
+    let config = load_executor_config(&runtime.db_path)?;
+    info!(machine_id = %config.machine_id, controller = %config.controller_url, "executor tunnel connecting");
+    let response = runtime
         .client
         .get(format!("{}/api/executors/tunnel", config.controller_url))
-        .bearer_auth(&token)
+        .bearer_auth(&config.access_token)
         .header(header::ACCEPT, "text/event-stream")
         .send()
         .await?
@@ -7390,9 +7421,14 @@ async fn run_executor_tunnel(state: &AppState) -> Result<()> {
                 let event = std::str::from_utf8(&pending[..boundary])?.to_owned();
                 pending.drain(..boundary + separator_len);
                 if let Some(call) = parse_executor_tool_call(&event)? {
-                    let result = execute_executor_tool_call(&state.db_path, call).await;
-                    send_executor_result(&state.client, &config.controller_url, &token, &result)
-                        .await?;
+                    let result = execute_executor_tool_call(&runtime.db_path, call).await;
+                    send_executor_result(
+                        &runtime.client,
+                        &config.controller_url,
+                        &config.access_token,
+                        &result,
+                    )
+                    .await?;
                 }
             }
         }
@@ -9056,7 +9092,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_access_tokens_are_unique_and_persisted_for_automatic_reconnect() {
+    fn executor_pairing_tokens_are_hashed_and_single_use() {
         let first = executor_access_token();
         let second = executor_access_token();
         assert_ne!(first, second);
@@ -9064,14 +9100,44 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
-        open_db(&db)
+        let pairing_token = executor_pairing_token();
+        store_executor_pairing(
+            &db,
+            &pairing_token,
+            &(chrono::Utc::now() + EXECUTOR_PAIRING_TTL).to_rfc3339(),
+        )
+        .unwrap();
+        let stored_hash: String = open_db(&db)
             .unwrap()
-            .execute(
-                "INSERT INTO app_meta (key, value) VALUES ('executor_access_token', ?1)",
-                [&first],
+            .query_row("SELECT token_hash FROM executor_pairings", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_hash, token_hash(&pairing_token));
+        assert_ne!(stored_hash, pairing_token);
+        let peer = Peer {
+            id: "paired".to_owned(),
+            name: "MacMini".to_owned(),
+            machine_id: "machine-mac".to_owned(),
+            hostname: "MacMini".to_owned(),
+            deployment_role: "executor".to_owned(),
+            filesystem_enabled: true,
+            bash_enabled: true,
+            created_at: "now".to_owned(),
+            last_seen_at: None,
+            online: false,
+        };
+        assert!(consume_executor_pairing(&db, &pairing_token, &peer, &first).unwrap());
+        assert!(!consume_executor_pairing(&db, &pairing_token, &peer, &second).unwrap());
+        let access_token_hash: String = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT access_token_hash FROM peers WHERE machine_id = 'machine-mac'",
+                [],
+                |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(executor_access_token_from_db(&db).unwrap(), Some(first));
+        assert_eq!(access_token_hash, token_hash(&first));
     }
 
     #[test]
@@ -9138,54 +9204,90 @@ mod tests {
     #[test]
     fn controller_url_requires_https_except_for_loopback() {
         assert_eq!(
-            controller_url("https://controller.example/").unwrap(),
+            normalize_controller_url("https://controller.example/").unwrap(),
             "https://controller.example"
         );
         assert_eq!(
-            controller_url("http://127.0.0.1:1858").unwrap(),
+            normalize_controller_url("http://127.0.0.1:1858").unwrap(),
             "http://127.0.0.1:1858"
         );
-        assert!(controller_url("http://controller.example").is_err());
+        assert!(normalize_controller_url("http://controller.example").is_err());
     }
 
     #[test]
-    fn executor_registration_endpoint_is_the_only_machine_enrollment_write_route() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        configure_test_database(&db, "https://openai.example.com/v1");
-        let routes = format!("{:?}", app(test_state(db)));
-        assert!(routes.contains("/api/executors/register"));
-        assert!(!routes.contains("/api/device-tokens"));
+    fn pairing_url_carries_its_token_only_in_the_fragment() {
+        let token = executor_pairing_token();
+        let target =
+            pairing_target(&format!("https://controller.example/#cybion-pair={token}")).unwrap();
+        assert_eq!(target.controller_url, "https://controller.example");
+        assert_eq!(target.pairing_token, token);
+        assert!(pairing_target("https://controller.example/?cybion-pair=token").is_err());
     }
 
     #[test]
-    fn executor_registration_upsert_replaces_the_token_hash() {
+    fn expired_executor_pairings_are_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
-        let connection = open_db(&db).unwrap();
-        let registration = |id: &str, token: &str| {
-            connection.execute(
-                "INSERT INTO peers (
-                   id, name, machine_id, hostname, access_token_hash, deployment_role,
-                   filesystem_enabled, bash_enabled, created_at
-                 ) VALUES (?1, 'MacMini', 'machine-mac', 'MacMini', ?2, 'executor', 1, 1, 'now')
-                 ON CONFLICT(machine_id) DO UPDATE SET
-                   id = excluded.id,
-                   name = excluded.name,
-                   hostname = excluded.hostname,
-                   access_token_hash = excluded.access_token_hash,
-                   deployment_role = excluded.deployment_role,
-                   filesystem_enabled = excluded.filesystem_enabled,
-                   bash_enabled = excluded.bash_enabled",
-                params![id, token_hash(token)],
-            )
+        let pairing_token = executor_pairing_token();
+        store_executor_pairing(
+            &db,
+            &pairing_token,
+            &(chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+        )
+        .unwrap();
+        let peer = Peer {
+            id: "expired".to_owned(),
+            name: "MacMini".to_owned(),
+            machine_id: "machine-mac".to_owned(),
+            hostname: "MacMini".to_owned(),
+            deployment_role: "executor".to_owned(),
+            filesystem_enabled: true,
+            bash_enabled: true,
+            created_at: "now".to_owned(),
+            last_seen_at: None,
+            online: false,
         };
-        registration("first", "one").unwrap();
-        registration("second", "two").unwrap();
+        assert!(!consume_executor_pairing(&db, &pairing_token, &peer, "token").unwrap());
+        let count: i64 = open_db(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM peers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn executor_pairing_upsert_rotates_the_access_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let peer = |id: &str| Peer {
+            id: id.to_owned(),
+            name: "MacMini".to_owned(),
+            machine_id: "machine-mac".to_owned(),
+            hostname: "MacMini".to_owned(),
+            deployment_role: "executor".to_owned(),
+            filesystem_enabled: true,
+            bash_enabled: true,
+            created_at: "now".to_owned(),
+            last_seen_at: None,
+            online: false,
+        };
+        for (id, access_token) in [("first", "one"), ("second", "two")] {
+            let pairing_token = executor_pairing_token();
+            store_executor_pairing(
+                &db,
+                &pairing_token,
+                &(chrono::Utc::now() + EXECUTOR_PAIRING_TTL).to_rfc3339(),
+            )
+            .unwrap();
+            assert!(
+                consume_executor_pairing(&db, &pairing_token, &peer(id), access_token).unwrap()
+            );
+        }
         assert_eq!(
-            connection
+            open_db(&db)
+                .unwrap()
                 .query_row(
                     "SELECT id, access_token_hash FROM peers WHERE machine_id = 'machine-mac'",
                     [],
@@ -9194,6 +9296,68 @@ mod tests {
                 .unwrap(),
             ("second".to_owned(), token_hash("two")),
         );
+    }
+
+    #[test]
+    fn executor_configuration_needs_no_controller_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        connection
+            .execute(
+                "DELETE FROM app_meta WHERE key IN (
+                   'root_user_id', 'auth_url', 'openai_base_url', 'openai_api_key',
+                   'default_model', 'subthread_model', 'voice_script_model',
+                   'voice_script_max_chars', 'edge_tts_zh_voice', 'edge_tts_en_voice'
+                 )",
+                [],
+            )
+            .unwrap();
+        for (key, value) in [
+            ("deployment_role", "executor"),
+            ("controller_url", "https://controller.example"),
+            ("executor_access_token", "cybion_executor_token"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        bootstrap_database(&db).unwrap();
+        assert!(load_config(&db).is_err());
+        let executor = load_executor_config(&db).unwrap();
+        assert_eq!(executor.controller_url, "https://controller.example");
+        assert_eq!(executor.access_token, "cybion_executor_token");
+        assert!(
+            open_db(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM app_meta WHERE key = 'default_model'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn executor_pairing_routes_replace_the_old_registration_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, "https://openai.example.com/v1");
+        let routes = format!("{:?}", app(test_state(db)));
+        assert!(routes.contains("/api/executors/pairings"));
+        assert!(routes.contains("/api/executors/pair"));
+        assert!(!routes.contains("/api/executors/register"));
+        assert!(!routes.contains("/api/device-tokens"));
     }
 
     #[tokio::test]
@@ -9322,7 +9486,6 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
-            controller_url: String::new(),
         };
         let (events, mut received) = mpsc::channel(4);
         let result = run_agent_items(
@@ -9507,7 +9670,6 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
-            controller_url: String::new(),
         };
         let (events, _) = mpsc::channel(4);
         let result = run_agent_items(
@@ -9606,7 +9768,6 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
-            controller_url: String::new(),
         };
         let source = "## 部署结果\n\n```sh\nmake deploy\n```\n\n| 状态 | 完成 |";
         let script = create_voice_script(&reqwest::Client::new(), &config, source)
@@ -9715,7 +9876,6 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
-            controller_url: String::new(),
         };
         let audio = create_edge_speech(&config, "Cybion Edge TTS verification.", "en")
             .await
@@ -9737,7 +9897,6 @@ mod tests {
             edge_tts_en_voice: "en-US-GuyNeural".to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
-            controller_url: String::new(),
         };
         assert_eq!(edge_tts_voice(&config, "zh").unwrap(), "zh-CN-YunxiNeural");
         assert_eq!(edge_tts_voice(&config, "en").unwrap(), "en-US-GuyNeural");
@@ -11148,7 +11307,6 @@ mod tests {
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
-            controller_url: String::new(),
         };
         let db = tempfile::tempdir().unwrap();
         let db_path = db.path().join("default.sqlite3");

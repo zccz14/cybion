@@ -171,43 +171,38 @@ OpenAI-compatible Responses API 连接模型上游。
 必须各自运行 AI 推理的孤立工作区。
 
 推理集中在控制设备 A：A 上的主线程向配置在 A 上的 Responses API 上游发起请求，并把
-远程设备 B 的能力作为可调用工具提供给该次推理。当模型选择该工具时，A 的 Agent 运行时
-向 B 发起 HTTP 请求，B 执行文件、Shell 或其他本地工具并返回结果；工具结果回到 A，
-继续同一条主线程的推理。B 不发起 AI 推理请求，因此作为纯执行设备时不需要配置
-OpenAI Responses 上游。
+远程设备 B 的能力作为可调用工具提供给该次推理。当模型选择该工具时，A 将调用送入 B
+主动保持的 SSE 连接；B 执行文件、Shell 或其他本地工具后，以 HTTP 回传结果。结果回到 A，
+继续同一条主线程的推理。B 不发起 AI 推理请求，也不需要配置 OpenAI Responses 上游。
 
-执行设备 B 在设置中选择“工具执行设备”并填写控制设备 A 的 Cybion URL 后，会主动向 A
-登记自己的公开 URL、机器 ID、主机名和新生成的 Access Token。B 只保存该 Token 的
-SHA-256 哈希，A 为调用 B 保存明文 Token；之后 A 的工具请求携带
-`Authorization: Bearer <access-token>`。所有设备仍必须使用同一个 Auth Mini issuer 和同一
-用户的 `sub` 作为 `root_user_id`。注册请求携带一个 audience 为 B 公开 URL 的 Auth Mini JWT，
-因此 A 可以在保存 Token 前验证发起注册的用户和设备身份。
+操作者在 A 的【机器】页创建一次性配对命令。命令中的 Token 只位于 URL fragment，控制端仅
+保存其 SHA-256 哈希，15 分钟内只能使用一次。B 运行 `cybion --pair '<pairing-url>'` 时自行生成
+Access Token，并携带机器 ID、主机名和 Token 向 A 注册；A 只保存 Access Token 哈希。配对后 B
+只持久化控制端 URL、自己的 Access Token 与机器 ID，立刻进入只出站的守护进程：不监听 HTTP、
+不启动 Web 控制台、不登录或验证 Auth Mini，也不保存模型上游凭据。
 
 ```mermaid
 flowchart LR
   U["操作者"] --> A["设备 A：主线程与 Agent 运行时"]
   A -->|"Responses API 请求"| M["模型上游：仅 A 配置"]
   M -->|"工具调用"| A
-  B -->|"携带自身 JWT、公开 URL、机器信息和 Access Token 注册"| A
-  A -->|"HTTP 远程工具调用<br/>Authorization: Bearer access-token"| B["设备 B：工具执行环境"]
+  U -->|"一次性配对 URL"| B["设备 B：工具执行环境"]
+  B -->|"机器信息和 Access Token 注册"| A
+  B -->|"SSE：Bearer Access Token"| A
+  B -->|"HTTP 工具结果回传"| A
   B --> F["文件、Shell 与本地工具"]
-  B -->|"工具结果"| A
-  A --- R["同一 Auth Mini issuer<br/>同一 root_user_id"]
-  B --- R
+  A --- R["Auth Mini：仅主控 UI"]
 ```
 
-当前版本已经实现这条调用路径：执行设备可以在初始化或设置页选择“工具执行设备”角色，
-填写控制设备 URL 后直接注册，无需配置模型上游、创建 Token 或在控制端手动添加机器。每次保存执行设备
-设置都会替换其 Access Token 和控制端登记；控制端只向已注册的机器 ID 提供远程工具。主线程和子线程
-使用同一组文件系统与 Bash 工具：省略可选的 `target_device` 或将它填为空字符串时，在控制设备本机执行；
-填写已接入的设备 ID 时只把这一次工具调用转发到对应设备。Goal 达成或受阻后的终态结果仍会自动回收到同一条主线程。
+主线程和子线程使用同一组文件系统与 Bash 工具：省略可选的 `target_device` 或将它填为空字符串时，
+在控制设备本机执行；填写已接入的设备 ID 时只把这一次工具调用转发到对应设备。Goal 达成或受阻后的
+终态结果仍会自动回收到同一条主线程。
 
 ### 7. 部署不应限制控制范围
 
-控制家里的机器不应以拥有公网 IP 为前提。每台设备只需运行一个 Cybion 二进制；没有
-公网 IP 的设备也可以通过 frp、cloudflared 或同类出站隧道建立可访问地址，再由同一
-身份体系验证操作者。这样，用户可以从任意已登录的浏览器介入自己的设备，而不必先将
-家用网络改造成公开服务器。
+控制家里的机器不应以拥有公网 IP 为前提。每台执行设备只需能够以 HTTPS 访问控制设备；
+它不需要端口映射、FRP、Cloudflare Tunnel 或任何可公开访问的地址。这样，用户可以从
+控制端的已登录浏览器管理所有设备，而不必先将家用网络改造成公开服务器。
 
 远程控制台仍应经 HTTPS 暴露，并只部署在你愿意授予文件系统和 Shell 权限的机器上。
 网络连通解决访问问题；操作者 API 由 Auth Mini JWT 保护，远程工具调用由设备 Token
@@ -246,8 +241,8 @@ flowchart LR
   关键词筛选并分页浏览，正在运行的命令固定排在前面。
 - Auth Mini JWT 验证，以首次初始化时绑定的 root user 作为操作边界；浏览器在每次 API 或
   SSE 请求前检查 access token 有效期，临近过期时刷新，并在 401 后刷新重试一次。
-- 自动注册的执行设备、远程文件与 Shell 工具，以及控制/执行设备角色；执行设备通过它主动建立的
-  SSE 回连接收调用，并以 HTTP 回传结果，不需要公网地址或模型上游。
+- 一次性 URL 配对的执行设备、远程文件与 Shell 工具；执行设备通过它主动建立的 SSE 回连接收调用，
+  并以 HTTP 回传结果，不需要公网地址、Web 控制台、Auth Mini 登录或模型上游。
 - 机器登记、远程状态探测、资源监控，以及完整的自更新流程：正式运行二进制固定在 `~/.cybion/bin/cybion`；启动后和每六小时检查 Release、校验并下载候选版本、在设置页展示状态，并由操作者确认重启安装。一次性更新助手会先原子替换安装文件，再等待旧 PID 退出；系统服务重新拉起的新进程或助手启动的新进程会以预期版本写入启动标记，确认失败则恢复并重启旧二进制。
 - Rust 单二进制部署：控制台资源嵌入二进制，运行时无需命令行参数或环境变量。
 
@@ -257,9 +252,9 @@ flowchart LR
 ## 架构与边界
 
 Cybion 不采用“每个目录一个项目”的隔离模型。主线程和子线程始终运行在控制设备本机，
-每次文件或 Bash 工具调用以 `target_device` 选择本机或远程执行边界，并以身份和 Access Token
-作为访问边界。一旦设备被初始化并授权，Agent 可以使用获准的文件与 Shell 工具。因此，
-设备的选择、网络暴露方式和上游 API 凭据都属于操作者的安全责任。
+每次文件或 Bash 工具调用以 `target_device` 选择本机或远程执行边界。控制端的浏览器 API
+由 Auth Mini JWT 保护，远程设备通道由配对后生成的 Access Token 保护。一旦设备被配对，
+Agent 可以使用该设备的文件与 Shell 工具；设备选择仍是操作者的安全责任。
 
 ```mermaid
 flowchart TB
@@ -268,26 +263,26 @@ flowchart TB
   S -->|"/responses"| O["OpenAI-compatible upstream"]
   S --> DB[("~/.cybion/default.sqlite3")]
   S --> T["本机文件系统与 Bash 工具"]
-  P -->|"SSE（Bearer Token）"| S
-  P -->|"HTTP 结果回传（Bearer Token）"| S
+  P["执行设备"] -->|"SSE（Bearer Token）"| S
+  P -->|"HTTP 工具结果（Bearer Token）"| S
   P --> PT["远程文件系统与 Bash 工具"]
 ```
 
 安全模型的关键事实：
 
-- 操作者使用的 `/api/*` 请求必须携带有效的 Auth Mini EdDSA JWT；服务端校验 issuer、
-  请求 host 对应的 audience，以及与 `root_user_id` 一致的 subject。执行设备注册时，控制端验证
-  Auth Mini 签名、issuer 与 root user；回连 SSE 和结果回传只接受注册产生的 Access Token，
-  不接受或转发浏览器 JWT。
+- 操作者使用的主控 `/api/*` 请求必须携带有效的 Auth Mini EdDSA JWT；服务端校验 issuer、
+  请求 host 对应的 audience，以及与 `root_user_id` 一致的 subject。创建配对 URL 同样需要该 JWT。
+  执行设备不接触 Auth Mini；其配对请求只可消费一次性 Token，回连 SSE 和结果回传只接受配对产生的
+  Access Token，绝不接受或转发浏览器 JWT。
 - 浏览器使用 Auth Mini 的 SDK 持久保存会话，并在 API 与 SSE 请求前主动刷新即将过期的
   access token；遇到 401 时只刷新重试一次。Cybion 服务端只缓存用于验证的 JWKS，不读取
   浏览器 refresh token。
 - Browser Control 只在控制设备上运行：它以空环境变量、临时 user-data directory、禁用扩展和
   loopback-only CDP 启动 headless Chrome/Chromium。Agent 可访问任意 HTTP(S) 网页；页面文字、
   邮件、PDF 和网页内提示都是不可信内容，不能构成操作授权。
-- 执行设备每次注册都会生成新的 Access Token，并在本机 SQLite 明文保存以便无值守重连；控制设备
-  仅保存 SHA-256 哈希。再次保存执行设备设置会轮换 Token；从控制设备移除机器会立即收回该控制端的
-  调用能力。调用由 `call_id` 去重；执行设备只重传已完成结果，绝不重复执行未完成的调用。
+- 配对 Token 只保存 SHA-256 哈希，15 分钟后失效且成功消费即删除。执行设备在本机 SQLite 明文保存
+  Access Token 以便无值守重连；控制设备仅保存其 SHA-256 哈希。重新配对会轮换 Token；从控制端移除
+  机器会立即收回调用能力。调用由 `call_id` 去重；执行设备只重传已完成结果，绝不重复执行未完成的调用。
 - 健康检查与嵌入式 Web 资源是公开路由。将远程控制台公开到互联网前，必须放在 HTTPS
   反向代理之后；Auth Mini 只允许精确的 loopback host 使用纯 HTTP 回调。
 
@@ -318,7 +313,7 @@ tar -xzf cybion-macos-aarch64.tar.gz
 ./cybion-macos-aarch64/cybion
 ```
 
-Cybion 默认监听 `0.0.0.0:1858`，数据存储在 `~/.cybion/default.sqlite3`。
+Cybion 作为控制设备时监听 `0.0.0.0:1858`，数据存储在 `~/.cybion/default.sqlite3`。
 
 ### 后备：从源码构建
 
@@ -334,21 +329,26 @@ cargo run --release
 
 1. 打开 `http://localhost:1858`。
 2. 确认 Auth Mini issuer：默认是 `https://auth.ntnl.io`，然后完成登录。
-3. 选择部署角色。控制设备输入 API key 和默认模型；模型上游 Base URL 默认是
-   `https://openai.ntnl.io/v1`。工具执行设备不需要模型上游。
+3. 输入控制设备的 API key 和默认模型；模型上游 Base URL 默认是
+   `https://openai.ntnl.io/v1`。
 
 首次初始化会将已验证的 Auth Mini `sub` 写为 `app_meta.root_user_id`，并永久关闭初始化
 接口。之后，只有该 root user 的有效 JWT 可以访问 API。
 
 ### 接入另一台工具执行设备
 
-1. 在另一台设备上重复安装，使用同一个 Auth Mini issuer 和同一用户初始化。执行设备不需要公网
-   IP、端口映射、FRP 或 Cloudflare Tunnel；只需能够以 HTTPS 访问控制设备。
-2. 打开执行设备的【设置】，选择 **工具执行设备**，填入控制设备的 Cybion URL，然后保存。
-   执行设备会主动向控制端注册机器信息和新 Access Token，并持续建立 SSE 回连。
-3. 控制设备的【机器】页会立即显示已注册的执行设备；无需复制 Token 或手动添加机器。
-4. 之后主线程或子线程调用文件系统与 Bash 工具时，可以填写 `target_device` 为该设备 ID；
-   省略该字段则在控制设备本机执行。执行设备不会发起 Responses API 请求。
+1. 在控制设备的【机器】页点击 **配对执行设备**，复制生成的命令。该命令 15 分钟有效且只能使用一次。
+2. 在另一台已安装 Cybion 的设备上执行该命令，例如：
+
+   ```bash
+   cybion --pair 'https://cybion.example/#cybion-pair=cybion_pair_...'
+   ```
+
+   执行设备只需能以 HTTPS 访问控制设备；不需要公网 IP、端口映射、FRP、Cloudflare Tunnel、Auth Mini
+   登录或模型上游。命令成功后立即进入只出站守护进程，不启动 HTTP listener 或 Web 控制台。
+3. 控制设备的【机器】页会显示已注册且在线的执行设备；无需复制 Access Token 或在执行设备打开设置页。
+4. 之后主线程或子线程调用文件系统与 Bash 工具时，可以填写 `target_device` 为该设备 ID；省略该字段
+   则在控制设备本机执行。
 
 ## 开发
 

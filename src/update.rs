@@ -220,7 +220,9 @@ pub fn launch_installed_binary(database_path: &Path) -> Result<bool> {
     {
         use std::os::unix::process::CommandExt;
 
-        let cause = Command::new(installed).exec();
+        let cause = Command::new(installed)
+            .args(std::env::args_os().skip(1))
+            .exec();
         return Err(cause).context("cannot start the installed Cybion binary");
     }
     #[allow(unreachable_code)]
