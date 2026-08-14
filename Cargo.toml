@@ -19,8 +19,9 @@ flate2 = "1.1.2"
 futures-util = { version = "0.3.31", features = ["sink"] }
 hostname = "0.4.1"
 jsonwebtoken = { version = "9.3.1", features = ["use_pem"] }
+libc = "0.2"
 notify = "8.0.0"
-reqwest = { version = "0.12.22", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
@@ -28,7 +29,7 @@ sha2 = "0.10.9"
 similar = "2.7.0"
 sysinfo = { version = "0.38.4", default-features = false, features = ["disk", "network", "system"] }
 tar = "0.4.44"
-tokio = { version = "1.47.1", features = ["fs", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1.17"
 tokio-tungstenite = { version = "0.27.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tower-http = { version = "0.6.6", features = ["cors", "trace"] }
