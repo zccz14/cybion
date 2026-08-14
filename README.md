@@ -175,6 +175,13 @@ OpenAI-compatible Responses API 连接模型上游。
 主动保持的 SSE 连接；B 执行文件、Shell 或其他本地工具后，以 HTTP 回传结果。结果回到 A，
 继续同一条主线程的推理。B 不发起 AI 推理请求，也不需要配置 OpenAI Responses 上游。
 
+`copy_files` 复用这条纯出站通道：源设备将压缩 tar 包以 Bearer HTTP 分块上传到 A，A 校验
+总大小、顺序与 SHA-256 后再让目标设备取回分块并安全解包。文件内容不会进入模型上下文或
+普通工具结果接口；tar 条目禁止绝对路径、`..`、符号链接及其他非常规类型，目标目录在校验
+通过后才原子替换。目标可为另一台执行设备，也可以是仅写入 A 的 `~/.agents/skills` 的受限
+`skill-store`。这不会给执行设备引入“拥有技能”的概念：技能目录、启用权和渐进式读取始终
+属于控制端。
+
 操作者在 A 的【机器】页创建一次性配对命令。命令中的 Token 只位于 URL fragment，控制端仅
 保存其 SHA-256 哈希，15 分钟内只能使用一次。B 运行 `cybion --pair '<pairing-url>'` 时自行生成
 Access Token，并携带机器 ID、主机名和 Token 向 A 注册；A 只保存 Access Token 哈希。配对后 B
@@ -190,6 +197,7 @@ flowchart LR
   B -->|"机器信息和 Access Token 注册"| A
   B -->|"SSE：Bearer Access Token"| A
   B -->|"HTTP 工具结果回传"| A
+  B -->|"HTTP 文件分块上传或下载"| A
   B --> F["文件、Shell 与本地工具"]
   A --- R["Auth Mini：仅主控 UI"]
 ```
@@ -236,6 +244,10 @@ flowchart LR
   扩展和主机环境变量。
 - 可配置的文件系统、Bash 与网页搜索工具集；`list_files`、`read_file`、`write_file`、
   `edit_file` 和 `run_bash` 都接受可选的 `target_device`，省略或填空字符串时在控制设备本机执行。
+  `copy_files` 通过主控中继复制一个文件或目录：可从控制端或指定执行设备复制到指定执行设备；
+  也可复制到受限的 `skill-store`，将源目录原子安装为控制端 `~/.agents/skills/<目录名>`。
+  `load_skill` 与 `read_skill_resource` 只允许读取这个主控技能根目录内的已安装技能及相对资源，
+  保留 SKILL 的渐进式披露而不要求推理环境拥有通用文件系统权限。
   每次 Bash 调用会在开始时持久化记录命令、目标机器和 `running` 状态，并在【命令】页以可展开的
   列表展示返回结果、退出码、结束时间和 `complete` 或 `cancelled` 终态；可按状态、目标机器和
   关键词筛选并分页浏览，正在运行的命令固定排在前面。
@@ -302,6 +314,7 @@ flowchart TB
 | 平台 | 归档 |
 | --- | --- |
 | macOS Apple Silicon | `cybion-macos-aarch64.tar.gz` |
+| macOS Intel | `cybion-macos-x86_64.tar.gz` |
 | Linux x86_64 | `cybion-linux-x86_64.tar.gz` |
 | Linux arm64 | `cybion-linux-aarch64.tar.gz` |
 
@@ -361,8 +374,8 @@ cargo test
 ```
 
 Rust 二进制会通过 `include_bytes!` 嵌入 `web/dist`，因此在全新克隆中执行 Rust 检查前
-需要先构建 Web 应用。推送 `v*` Git tag 会触发 GitHub Actions，构建 macOS arm64、Linux
-x86_64 和 Linux aarch64 的发布归档与 SHA-256 校验和。
+需要先构建 Web 应用。推送 `v*` Git tag 会触发 GitHub Actions，构建 macOS Apple Silicon、
+macOS Intel、Linux x86_64 和 Linux aarch64 的发布归档与 SHA-256 校验和。
 
 ## 路线图
 
