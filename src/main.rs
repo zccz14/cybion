@@ -6902,28 +6902,89 @@ fn skill_instructions(skills: &SkillCatalog) -> String {
 
 fn completed_response_from_sse(body: &str) -> Result<Value> {
     let mut output = Vec::new();
-    for data in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
-        let event: Value = serde_json::from_str(data)?;
-        if event.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
-            output.push(
+    let mut saw_done = false;
+    let normalized = body.replace("\r\n", "\n");
+    for block in normalized.split("\n\n") {
+        let Some((event_name, data)) = sse_event_data(block) else {
+            continue;
+        };
+        if data == "[DONE]" {
+            saw_done = true;
+            continue;
+        }
+        let event: Value = serde_json::from_str(&data)?;
+        let event_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .or(event_name)
+            .unwrap_or_default();
+        match event_type {
+            "response.output_item.done" => output.push(
                 event
                     .get("item")
                     .cloned()
                     .ok_or_else(|| anyhow!("completed output item event has no item"))?,
-            );
-        }
-        if event.get("type").and_then(Value::as_str) == Some("response.completed") {
-            let mut response = event
-                .get("response")
-                .cloned()
-                .ok_or_else(|| anyhow!("completed response event has no response"))?;
-            response["output"] = Value::Array(output);
-            return Ok(response);
+            ),
+            "response.completed" => {
+                let mut response = event
+                    .get("response")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("completed response event has no response"))?;
+                response["output"] = Value::Array(output);
+                return Ok(response);
+            }
+            "error" | "response.failed" | "response.incomplete" => {
+                return Err(upstream_sse_failure(event_type, &event));
+            }
+            _ => {}
         }
     }
-    Err(anyhow!(
-        "upstream stream ended without a completed response"
-    ))
+    if saw_done {
+        Err(anyhow!(
+            "upstream stream sent [DONE] without a Responses completion event"
+        ))
+    } else {
+        Err(anyhow!(
+            "upstream stream ended without a completed response"
+        ))
+    }
+}
+
+fn sse_event_data(block: &str) -> Option<(Option<&str>, String)> {
+    let mut event_name = None;
+    let mut data = Vec::new();
+    for line in block.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.starts_with(':') {
+            continue;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "event" => event_name = Some(value),
+            "data" => data.push(value),
+            _ => {}
+        }
+    }
+    (!data.is_empty()).then(|| (event_name, data.join("\n")))
+}
+
+fn upstream_sse_failure(event_type: &str, event: &Value) -> anyhow::Error {
+    let code = event
+        .pointer("/error/code")
+        .or_else(|| event.pointer("/response/error/code"))
+        .and_then(Value::as_str);
+    let detail = event
+        .pointer("/error/message")
+        .or_else(|| event.pointer("/response/error/message"))
+        .or_else(|| event.pointer("/response/incomplete_details/reason"))
+        .or_else(|| event.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("no error details");
+    match code {
+        Some(code) => anyhow!("upstream {event_type} ({code}): {detail}"),
+        None => anyhow!("upstream {event_type}: {detail}"),
+    }
 }
 
 fn output_text(output: &[Value]) -> String {
@@ -8868,6 +8929,51 @@ fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn responses_sse_accepts_standard_data_without_a_space() {
+        let item = json!({
+            "type": "message",
+            "content": [{"type": "output_text", "text": "complete"}],
+        });
+        let body = format!(
+            "event: response.output_item.done\r\ndata:{}\r\n\r\nevent: response.completed\r\ndata:{}\r\n\r\n",
+            json!({"type":"response.output_item.done","item":item}),
+            json!({"type":"response.completed","response":{"output":[]}}),
+        );
+
+        let response = completed_response_from_sse(&body).unwrap();
+        assert_eq!(
+            output_text(response["output"].as_array().unwrap()),
+            "complete"
+        );
+    }
+
+    #[test]
+    fn responses_sse_surfaces_failed_terminal_details() {
+        let error = completed_response_from_sse(
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_request\",\"message\":\"unsupported input item\"}}}\n\n",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "upstream response.failed (invalid_request): unsupported input item"
+        );
+    }
+
+    #[test]
+    fn responses_sse_surfaces_incomplete_terminal_details() {
+        let error = completed_response_from_sse(
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "upstream response.incomplete: max_output_tokens"
+        );
+    }
 
     #[test]
     fn browser_preview_frames_use_a_length_delimited_binary_multipart_payload() {
