@@ -6433,10 +6433,13 @@ async fn run_agent_items(
                 db_path,
                 browser.as_ref(),
             ));
-        let response = match send_responses_request(request, &mut cancellation).await {
-            Ok(response) => response,
+        let response = match send_responses_request(request, &mut cancellation)
+            .await
+            .and_then(|body| completed_response_from_sse(&body))
+        {
             // RECOVERY: A structured upstream context-length error means the current context
             // can be replaced by a distilled checkpoint and retried once without replaying tools.
+            // This applies whether the upstream reports it as an HTTP error or a terminal SSE event.
             Err(cause) if is_context_overflow(&cause) && !retried_after_context_overflow => {
                 items = compact_context_after_overflow(
                     client,
@@ -6452,8 +6455,8 @@ async fn run_agent_items(
                 continue;
             }
             Err(cause) => return Err(cause),
+            Ok(response) => response,
         };
-        let response = completed_response_from_sse(&response)?;
         if let Some(response_input_tokens) = response
             .pointer("/usage/input_tokens")
             .and_then(Value::as_u64)
@@ -6981,6 +6984,15 @@ fn upstream_sse_failure(event_type: &str, event: &Value) -> anyhow::Error {
         .or_else(|| event.get("message"))
         .and_then(Value::as_str)
         .unwrap_or("no error details");
+    if matches!(
+        code,
+        Some("context_length_exceeded" | "context_window_exceeded")
+    ) {
+        return ContextOverflow {
+            detail: detail.to_owned(),
+        }
+        .into();
+    }
     match code {
         Some(code) => anyhow!("upstream {event_type} ({code}): {detail}"),
         None => anyhow!("upstream {event_type}: {detail}"),
@@ -8963,6 +8975,20 @@ mod tests {
     }
 
     #[test]
+    fn responses_sse_context_overflow_enters_the_recovery_path() {
+        let error = completed_response_from_sse(
+            "data: {\"type\":\"error\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"input exceeds the model context window\"}}\n\n",
+        )
+        .unwrap_err();
+
+        assert!(is_context_overflow(&error));
+        assert_eq!(
+            error.to_string(),
+            "upstream context length exceeded: input exceeds the model context window"
+        );
+    }
+
+    #[test]
     fn responses_sse_surfaces_incomplete_terminal_details() {
         let error = completed_response_from_sse(
             "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
@@ -10576,16 +10602,17 @@ mod tests {
                 requests.len()
             };
             if request_number == 1 {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
+                return format!(
+                    "event: error\ndata: {}\n\n",
+                    json!({
+                        "type": "error",
                         "error": {
                             "code": "context_length_exceeded",
                             "message": "input exceeds the model context window"
                         }
-                    })),
+                    })
                 )
-                    .into_response();
+                .into_response();
             }
             let text = if request_number == 2 {
                 "# Checkpoint\nGoal: ship the context-overflow recovery. Completed: inspected the old history.\n\n## Long-term memory\n```json\n[{\"key\":\"project.release_evidence\",\"value\":\"Deployment evidence was inspected.\",\"status\":\"current\",\"source_message_ids\":[1]}]\n```"
