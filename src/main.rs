@@ -454,8 +454,13 @@ struct CompiledMainContext {
 
 #[derive(Clone)]
 enum ContextCheckpointTarget {
-    Main { through_message_id: i64 },
-    Subthread { id: String },
+    Main {
+        through_message_id: i64,
+        current_message_id: Option<i64>,
+    },
+    Subthread {
+        id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -2151,82 +2156,40 @@ async fn compact_context_after_overflow(
         events,
         AgentEvent::Status {
             stage: "checkpointing".to_owned(),
-            message: "Context limit reached; distilling the complete context".to_owned(),
+            message: "Context limit reached; distilling completed history".to_owned(),
         },
     )
     .await?;
+    if let ContextCheckpointTarget::Main {
+        current_message_id: Some(current_message_id),
+        ..
+    } = target
+    {
+        let items = compact_main_history_after_overflow(
+            client,
+            config,
+            db_path,
+            events,
+            cancellation,
+            *current_message_id,
+        )
+        .await?;
+        reset_agent_retry_after_success(db_path, events.run_id)?;
+        return Ok(items);
+    }
     let source_message_count = items.len();
     let distilled = summarize_context(client, config, items, cancellation).await?;
     reset_agent_retry_after_success(db_path, events.run_id)?;
     match target {
-        ContextCheckpointTarget::Main { through_message_id } => {
-            let created_at = chrono::Utc::now().to_rfc3339();
-            let connection = open_db(db_path)?;
-            let previous = load_latest_checkpoint(&connection, i64::MAX)?;
-            let first_message_id = previous
-                .as_ref()
-                .map(|checkpoint| checkpoint.first_message_id)
-                .or_else(|| first_history_message_id(&connection).ok().flatten())
-                .unwrap_or(*through_message_id);
-            let suffix_first_message_id = previous
-                .as_ref()
-                .map(|checkpoint| checkpoint.through_message_id + 1)
-                .unwrap_or(first_message_id);
-            let previous_index_root = load_checkpoint_history_root(&connection, previous.as_ref())?;
-            let history_index_root = if suffix_first_message_id <= *through_message_id {
-                let leaf = create_history_index_leaf(
-                    &connection,
-                    suffix_first_message_id,
-                    *through_message_id,
-                )?;
-                Some(join_history_index(&connection, previous_index_root, leaf)?)
-            } else {
-                previous_index_root
-            };
-            let level = history_index_root
-                .map(|id| load_history_index_node(&connection, id).map(|node| node.height))
-                .transpose()?
-                .unwrap_or(0);
-            connection.execute(
-                "INSERT INTO context_checkpoints (
-                   first_message_id, through_message_id, source_message_count,
-                   level, previous_checkpoint_id, history_index_root_id, summary, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    first_message_id,
-                    through_message_id,
-                    source_message_count,
-                    level,
-                    previous.as_ref().map(|checkpoint| checkpoint.id),
-                    history_index_root,
-                    &distilled.summary,
-                    created_at
-                ],
-            )?;
-            let checkpoint = ContextCheckpoint {
-                id: connection.last_insert_rowid(),
-                first_message_id,
-                through_message_id: *through_message_id,
-                source_message_count,
-                level,
-                previous_checkpoint_id: previous.as_ref().map(|checkpoint| checkpoint.id),
-                summary: distilled.summary,
-                created_at,
-            };
-            merge_memory_facts(
-                &connection,
-                checkpoint.id,
-                checkpoint.first_message_id,
-                checkpoint.through_message_id,
-                distilled.facts,
-            )?;
-            send_agent_event(
+        ContextCheckpointTarget::Main {
+            through_message_id, ..
+        } => {
+            let checkpoint = persist_main_checkpoint(
                 db_path,
                 events,
-                AgentEvent::Checkpoint {
-                    id: checkpoint.id,
-                    through_message_id: checkpoint.through_message_id,
-                },
+                *through_message_id,
+                source_message_count,
+                distilled,
             )
             .await?;
             Ok(vec![main_checkpoint_item(&checkpoint)])
@@ -2256,6 +2219,141 @@ async fn compact_context_after_overflow(
             Ok(checkpoint)
         }
     }
+}
+
+async fn compact_main_history_after_overflow(
+    client: &reqwest::Client,
+    config: &Config,
+    db_path: &Path,
+    events: &AgentEventSink<'_>,
+    cancellation: watch::Receiver<bool>,
+    current_message_id: i64,
+) -> Result<Vec<Value>> {
+    let connection = open_db(db_path)?;
+    let previous = load_latest_checkpoint(&connection, current_message_id)?;
+    let first_uncheckpointed_message_id = previous
+        .as_ref()
+        .map(|checkpoint| checkpoint.through_message_id + 1)
+        .or_else(|| first_history_message_id(&connection).ok().flatten())
+        .ok_or_else(|| anyhow!("main-thread context has no history to checkpoint"))?;
+    let history = load_history_for_run(db_path, current_message_id)?;
+    let current_index = history
+        .iter()
+        .position(|message| message.id == current_message_id)
+        .ok_or_else(|| anyhow!("current main-thread message is missing from history"))?;
+    let first_uncheckpointed_index = history
+        .iter()
+        .position(|message| message.id == first_uncheckpointed_message_id)
+        .ok_or_else(|| anyhow!("checkpoint boundary is missing from history"))?;
+    if first_uncheckpointed_index >= current_index {
+        return Err(anyhow!(
+            "context overflow cannot checkpoint the current main-thread message"
+        ));
+    }
+    let mut candidate_index = current_index - 1;
+    loop {
+        let summary_input = context_items(previous.as_ref(), &history[..=candidate_index]);
+        let source_message_count = summary_input.len();
+        match summarize_context(client, config, summary_input, cancellation.clone()).await {
+            Ok(distilled) => {
+                let checkpoint = persist_main_checkpoint(
+                    db_path,
+                    events,
+                    history[candidate_index].id,
+                    source_message_count,
+                    distilled,
+                )
+                .await?;
+                let memory = load_context_memory_root(&open_db(db_path)?)?;
+                let mut retry_items = vec![context_memory_index_item(&memory)];
+                retry_items.extend(context_items(Some(&checkpoint), &history));
+                return Ok(retry_items);
+            }
+            Err(cause)
+                if is_context_overflow(&cause) && candidate_index > first_uncheckpointed_index =>
+            {
+                candidate_index -= 1;
+            }
+            Err(cause) => return Err(cause),
+        }
+    }
+}
+
+async fn persist_main_checkpoint(
+    db_path: &Path,
+    events: &AgentEventSink<'_>,
+    through_message_id: i64,
+    source_message_count: usize,
+    distilled: DistilledContext,
+) -> Result<ContextCheckpoint> {
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let connection = open_db(db_path)?;
+    let previous = load_latest_checkpoint(&connection, through_message_id)?;
+    let first_message_id = previous
+        .as_ref()
+        .map(|checkpoint| checkpoint.first_message_id)
+        .or_else(|| first_history_message_id(&connection).ok().flatten())
+        .unwrap_or(through_message_id);
+    let suffix_first_message_id = previous
+        .as_ref()
+        .map(|checkpoint| checkpoint.through_message_id + 1)
+        .unwrap_or(first_message_id);
+    let previous_index_root = load_checkpoint_history_root(&connection, previous.as_ref())?;
+    let history_index_root = if suffix_first_message_id <= through_message_id {
+        let leaf =
+            create_history_index_leaf(&connection, suffix_first_message_id, through_message_id)?;
+        Some(join_history_index(&connection, previous_index_root, leaf)?)
+    } else {
+        previous_index_root
+    };
+    let level = history_index_root
+        .map(|id| load_history_index_node(&connection, id).map(|node| node.height))
+        .transpose()?
+        .unwrap_or(0);
+    let DistilledContext { summary, facts } = distilled;
+    connection.execute(
+        "INSERT INTO context_checkpoints (
+           first_message_id, through_message_id, source_message_count,
+           level, previous_checkpoint_id, history_index_root_id, summary, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            first_message_id,
+            through_message_id,
+            source_message_count,
+            level,
+            previous.as_ref().map(|checkpoint| checkpoint.id),
+            history_index_root,
+            &summary,
+            created_at
+        ],
+    )?;
+    let checkpoint = ContextCheckpoint {
+        id: connection.last_insert_rowid(),
+        first_message_id,
+        through_message_id,
+        source_message_count,
+        level,
+        previous_checkpoint_id: previous.as_ref().map(|checkpoint| checkpoint.id),
+        summary,
+        created_at,
+    };
+    merge_memory_facts(
+        &connection,
+        checkpoint.id,
+        checkpoint.first_message_id,
+        checkpoint.through_message_id,
+        facts,
+    )?;
+    send_agent_event(
+        db_path,
+        events,
+        AgentEvent::Checkpoint {
+            id: checkpoint.id,
+            through_message_id: checkpoint.through_message_id,
+        },
+    )
+    .await?;
+    Ok(checkpoint)
 }
 
 async fn create_voice_script(
@@ -6410,6 +6508,8 @@ async fn process_main_run(
                                 &state.active_subthreads,
                                 ContextCheckpointTarget::Main {
                                     through_message_id: context.through_message_id,
+                                    current_message_id: (reason == MainRunReason::UserMessage)
+                                        .then_some(user_message_id),
                                 },
                                 Some(browser_agent_context(&state)),
                                 &state.executor_tunnels,
@@ -6532,6 +6632,7 @@ async fn run_agent(
         &Arc::new(Mutex::new(HashMap::new())),
         ContextCheckpointTarget::Main {
             through_message_id: 0,
+            current_message_id: None,
         },
         None,
         &ExecutorTunnels::default(),
@@ -6557,6 +6658,13 @@ async fn run_agent_items(
     let mut input_tokens = 0;
     let mut output_tokens = 0;
     let mut images = Vec::new();
+    let adaptive_main_checkpointing = matches!(
+        &checkpoint_target,
+        ContextCheckpointTarget::Main {
+            current_message_id: Some(_),
+            ..
+        }
+    );
     let mut retried_after_context_overflow = false;
     loop {
         if *cancellation.borrow() {
@@ -6583,7 +6691,10 @@ async fn run_agent_items(
             // RECOVERY: A structured upstream context-length error means the current context
             // can be replaced by a distilled checkpoint and retried once without replaying tools.
             // This applies whether the upstream reports it as an HTTP error or a terminal SSE event.
-            Err(cause) if is_context_overflow(&cause) && !retried_after_context_overflow => {
+            Err(cause)
+                if is_context_overflow(&cause)
+                    && (!retried_after_context_overflow || adaptive_main_checkpointing) =>
+            {
                 items = compact_context_after_overflow(
                     client,
                     config,
@@ -11054,6 +11165,7 @@ mod tests {
             &Arc::new(Mutex::new(HashMap::new())),
             ContextCheckpointTarget::Main {
                 through_message_id: context.through_message_id,
+                current_message_id: Some(current.id),
             },
             None,
             &ExecutorTunnels::default(),
@@ -11067,8 +11179,8 @@ mod tests {
         let checkpoint = load_latest_checkpoint(&open_db(&db).unwrap(), i64::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(checkpoint.through_message_id, current.id);
-        assert_eq!(checkpoint.source_message_count, original_context.len());
+        assert_eq!(checkpoint.through_message_id, current.id - 1);
+        assert_eq!(checkpoint.source_message_count, 2);
         assert!(checkpoint.summary.contains("context-overflow recovery"));
         let facts = load_memory_facts(
             &open_db(&db).unwrap(),
@@ -11091,7 +11203,10 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0]["input"], Value::Array(original_context.clone()));
         assert!(requests[0].get("tools").is_some());
-        assert_eq!(requests[1]["input"], Value::Array(original_context.clone()));
+        assert_eq!(
+            requests[1]["input"],
+            Value::Array(original_context[1..3].to_vec())
+        );
         assert!(requests[1].get("tools").is_none());
         assert!(
             requests[1]["instructions"]
@@ -11117,12 +11232,211 @@ mod tests {
                 .unwrap()
                 .contains("next_checkpoint_id")
         );
-        assert_eq!(requests[2]["input"].as_array().unwrap().len(), 1);
+        assert_eq!(requests[2]["input"].as_array().unwrap().len(), 3);
         assert!(
-            requests[2]["input"][0]["content"]
+            requests[2]["input"][1]["content"]
                 .as_str()
                 .unwrap()
                 .contains("context-overflow recovery")
+        );
+        assert!(
+            requests[2]["input"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("Finish the recovery.")
+        );
+    }
+
+    #[tokio::test]
+    async fn context_overflow_shortens_the_compaction_suffix_and_replays_its_tail() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            let request_number = {
+                let mut requests = requests.lock().await;
+                requests.push(request);
+                requests.len()
+            };
+            if matches!(request_number, 1 | 2 | 4) {
+                return format!(
+                    "event: error\ndata: {}\n\n",
+                    json!({
+                        "type": "error",
+                        "error": {
+                            "code": "context_length_exceeded",
+                            "message": "input exceeds the model context window"
+                        }
+                    })
+                )
+                .into_response();
+            }
+            let text = match request_number {
+                3 => "# Checkpoint\nThe first completed turn is durable evidence.",
+                5 => "# Checkpoint\nThe second completed turn is durable evidence.",
+                _ => "Context recovery completed.",
+            };
+            let item = json!({
+                "type": "message",
+                "content": [{"type": "output_text", "text": text}]
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+            .into_response()
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        for (role, content) in [
+            ("user", "First request."),
+            ("assistant", "First completed reply."),
+            ("assistant", "Second completed reply."),
+            ("user", "Current request."),
+        ] {
+            append_conversation(
+                &db,
+                &ChatMessage {
+                    role: role.to_owned(),
+                    content: Value::String(content.to_owned()),
+                    images: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                None,
+            )
+            .unwrap();
+        }
+        let current = load_conversation(&db).unwrap().pop().unwrap();
+        create_agent_run(&db, "checkpoint-tail-run", current.id).unwrap();
+        let context = compile_main_context(&db, current.id).unwrap();
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            openai_api_key: "test".to_owned(),
+            default_model: DEFAULT_MODEL_ID.to_owned(),
+            voice_script_model: DEFAULT_VOICE_SCRIPT_MODEL_ID.to_owned(),
+            voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        };
+        let (events, _) = mpsc::channel(4);
+        let result = run_agent_items(
+            &reqwest::Client::new(),
+            &config,
+            context.items.clone(),
+            &db,
+            &Arc::new(StdRwLock::new(SkillCatalog::default())),
+            AgentEventSink {
+                run_id: "checkpoint-tail-run",
+                sender: &events,
+            },
+            watch::channel(false).1,
+            AgentScope::Main,
+            &Arc::new(Mutex::new(HashMap::new())),
+            ContextCheckpointTarget::Main {
+                through_message_id: context.through_message_id,
+                current_message_id: Some(current.id),
+            },
+            None,
+            &ExecutorTunnels::default(),
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(result.message.content, "Context recovery completed.");
+        let checkpoint_through = open_db(&db)
+            .unwrap()
+            .prepare("SELECT through_message_id FROM context_checkpoints ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(checkpoint_through, vec![2, 3]);
+
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 6);
+        assert_eq!(requests[0]["input"], Value::Array(context.items));
+        assert_eq!(requests[1]["input"].as_array().unwrap().len(), 3);
+        assert!(requests[1]["input"].as_array().unwrap().iter().all(|item| {
+            !item["content"]
+                .as_str()
+                .unwrap()
+                .contains("Current request.")
+        }));
+        assert_eq!(requests[2]["input"].as_array().unwrap().len(), 2);
+        assert!(requests[2]["input"].as_array().unwrap().iter().all(|item| {
+            !item["content"]
+                .as_str()
+                .unwrap()
+                .contains("Second completed reply.")
+        }));
+        assert_eq!(requests[3]["input"].as_array().unwrap().len(), 4);
+        assert!(
+            requests[3]["input"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("messages #1 through #2")
+        );
+        assert!(
+            requests[3]["input"][2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Second completed reply.")
+        );
+        assert!(
+            requests[3]["input"][3]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Current request.")
+        );
+        assert_eq!(requests[4]["input"].as_array().unwrap().len(), 2);
+        assert!(
+            requests[4]["input"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("messages #1 through #2")
+        );
+        assert!(
+            requests[4]["input"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Second completed reply.")
+        );
+        assert_eq!(requests[5]["input"].as_array().unwrap().len(), 3);
+        assert!(
+            requests[5]["input"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("messages #1 through #3")
+        );
+        assert!(
+            requests[5]["input"][2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Current request.")
         );
     }
 
