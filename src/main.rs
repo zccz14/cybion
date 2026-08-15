@@ -6626,17 +6626,12 @@ async fn run_agent_items(
         reset_agent_retry_after_success(db_path, events.run_id)?;
         images.extend(generated_images(&output));
         emit_response_process_events(&output, db_path, &events).await?;
-        let calls = output
-            .iter()
-            .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
-            .cloned()
-            .collect::<Vec<_>>();
-        let computer_calls = output
-            .iter()
-            .filter(|item| item.get("type").and_then(Value::as_str) == Some("computer_call"))
-            .cloned()
-            .collect::<Vec<_>>();
-        if calls.is_empty() && computer_calls.is_empty() {
+        if !output.iter().any(|item| {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call" | "computer_call")
+            )
+        }) {
             return Ok(AgentResult {
                 message: ChatMessage {
                     role: "assistant".to_owned(),
@@ -6649,76 +6644,82 @@ async fn run_agent_items(
                 output_tokens,
             });
         }
-        items.extend(response_output_for_input(output));
-        for call in computer_calls {
-            let call_id = call
-                .get("call_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("computer call has no call_id"))?;
-            let actions = call
-                .get("actions")
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("computer call has no actions"))?;
-            send_agent_event(
-                db_path,
-                &events,
-                AgentEvent::ToolCall {
-                    call_id: call_id.to_owned(),
-                    name: "computer".to_owned(),
-                    arguments: json!({"actions":audit_computer_actions(actions)}),
-                    started_at: None,
-                },
-            )
-            .await?;
-            let screenshot = match browser
-                .as_ref()
-                .and_then(|context| context.computer_session.as_ref())
-            {
-                Some(computer_session) => {
-                    let browser = browser
-                        .as_ref()
-                        .expect("computer session has browser context");
-                    browser::execute_computer_call(
-                        &browser.sessions,
-                        computer_session,
-                        actions,
-                        cancellation.clone(),
-                    )
-                    .await
-                }
-                None => Err(anyhow!(
-                    "Computer Use requires the agent to focus a Computer Use browser session"
-                )),
-            };
-            let output = match screenshot {
-                Ok(screenshot) => json!({
-                    "type":"input_image",
-                    "image_url":format!("data:image/png;base64,{screenshot}"),
-                }),
-                Err(cause) => {
-                    json!({"type":"input_text","text":format!("Computer action failed: {cause}")})
-                }
-            };
-            send_agent_event(
-                db_path,
-                &events,
-                AgentEvent::ToolResult {
-                    call_id: call_id.to_owned(),
-                    name: "computer".to_owned(),
-                    added_lines: None,
-                    deleted_lines: None,
-                    output: Some("computer action batch completed".to_owned()),
-                    finished_at: None,
-                },
-            )
-            .await?;
-            items.push(json!({
-                "type":"computer_call_output",
-                "call_id":call_id,
-                "output":output,
-            }));
-        }
-        for call in calls {
+        for call in output {
+            let call_type = call.get("type").and_then(Value::as_str);
+            if call_type != Some("function_call") && call_type != Some("computer_call") {
+                items.extend(response_output_for_input(vec![call]));
+                continue;
+            }
+            items.extend(response_output_for_input(vec![call.clone()]));
+            if call_type == Some("computer_call") {
+                let call_id = call
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("computer call has no call_id"))?;
+                let actions = call
+                    .get("actions")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| anyhow!("computer call has no actions"))?;
+                send_agent_event(
+                    db_path,
+                    &events,
+                    AgentEvent::ToolCall {
+                        call_id: call_id.to_owned(),
+                        name: "computer".to_owned(),
+                        arguments: json!({"actions":audit_computer_actions(actions)}),
+                        started_at: None,
+                    },
+                )
+                .await?;
+                let screenshot = match browser
+                    .as_ref()
+                    .and_then(|context| context.computer_session.as_ref())
+                {
+                    Some(computer_session) => {
+                        let browser = browser
+                            .as_ref()
+                            .expect("computer session has browser context");
+                        browser::execute_computer_call(
+                            &browser.sessions,
+                            computer_session,
+                            actions,
+                            cancellation.clone(),
+                        )
+                        .await
+                    }
+                    None => Err(anyhow!(
+                        "Computer Use requires the agent to focus a Computer Use browser session"
+                    )),
+                };
+                let output = match screenshot {
+                    Ok(screenshot) => json!({
+                        "type":"input_image",
+                        "image_url":format!("data:image/png;base64,{screenshot}"),
+                    }),
+                    Err(cause) => {
+                        json!({"type":"input_text","text":format!("Computer action failed: {cause}")})
+                    }
+                };
+                send_agent_event(
+                    db_path,
+                    &events,
+                    AgentEvent::ToolResult {
+                        call_id: call_id.to_owned(),
+                        name: "computer".to_owned(),
+                        added_lines: None,
+                        deleted_lines: None,
+                        output: Some("computer action batch completed".to_owned()),
+                        finished_at: None,
+                    },
+                )
+                .await?;
+                items.push(json!({
+                    "type":"computer_call_output",
+                    "call_id":call_id,
+                    "output":output,
+                }));
+                continue;
+            }
             let call_id = call
                 .get("call_id")
                 .and_then(Value::as_str)
@@ -13061,7 +13062,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_uses_responses_endpoint_and_returns_function_outputs() {
+    async fn agent_interleaves_each_function_call_with_its_output() {
         type TestState = (
             Arc<tokio::sync::Mutex<Vec<Value>>>,
             Arc<StdRwLock<SkillCatalog>>,
@@ -13078,7 +13079,9 @@ mod tests {
                 json!({"output":[
                     {"type":"image_generation_call","id":"image_1","status":"completed","action":{"type":"generate"},"size":"1254x1254","background":"transparent","output_format":"png","quality":"medium","result":"aW1hZ2U=","revised_prompt":"A Cybion logo."},
                     {"type":"web_search_call","id":"web_1","status":"completed","action":{"type":"search","query":"Cybion"}},
-                    {"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"}
+                    {"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\"/\"}"},
+                    {"type":"reasoning","id":"reasoning_1","summary":[]},
+                    {"type":"function_call","call_id":"call_2","name":"list_files","arguments":"{\"path\":\"/tmp\"}"}
                 ]})
             } else {
                 json!({"output":[{"type":"message","content":[{"type":"output_text","text":"complete"}]}]})
@@ -13152,7 +13155,7 @@ mod tests {
         )
         .unwrap();
         create_agent_run(&db_path, "run_1", user.id).unwrap();
-        let (events, mut received_events) = mpsc::channel(6);
+        let (events, mut received_events) = mpsc::channel(10);
         let reply = run_agent(
             &reqwest::Client::new(),
             &config,
@@ -13197,7 +13200,23 @@ mod tests {
         ));
         assert!(matches!(
             received_events.recv().await,
+            Some(AgentEvent::ToolCall { name, .. }) if name == "reasoning"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolResult { name, added_lines: None, deleted_lines: None, .. }) if name == "reasoning"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
             Some(AgentEvent::ToolCall { name, arguments, .. }) if name == "list_files" && arguments["path"] == "/"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolResult { name, added_lines: None, deleted_lines: None, .. }) if name == "list_files"
+        ));
+        assert!(matches!(
+            received_events.recv().await,
+            Some(AgentEvent::ToolCall { name, arguments, .. }) if name == "list_files" && arguments["path"] == "/tmp"
         ));
         assert!(matches!(
             received_events.recv().await,
@@ -13217,20 +13236,23 @@ mod tests {
             requests[0].get("stream").and_then(Value::as_bool),
             Some(true)
         );
-        assert!(
-            requests[1]
-                .get("input")
-                .and_then(Value::as_array)
-                .unwrap()
+        let continuation_input = requests[1].get("input").and_then(Value::as_array).unwrap();
+        for call_id in ["call_1", "call_2"] {
+            let call_index = continuation_input
                 .iter()
-                .any(
-                    |item| item.get("type").and_then(Value::as_str) == Some("function_call_output")
-                )
-        );
-        let web_search_call = requests[1]
-            .get("input")
-            .and_then(Value::as_array)
-            .unwrap()
+                .position(|item| {
+                    item.get("type").and_then(Value::as_str) == Some("function_call")
+                        && item.get("call_id").and_then(Value::as_str) == Some(call_id)
+                })
+                .unwrap();
+            let output = continuation_input.get(call_index + 1).unwrap();
+            assert_eq!(
+                output.get("type").and_then(Value::as_str),
+                Some("function_call_output")
+            );
+            assert_eq!(output.get("call_id").and_then(Value::as_str), Some(call_id));
+        }
+        let web_search_call = continuation_input
             .iter()
             .find(|item| item.get("type").and_then(Value::as_str) == Some("web_search_call"))
             .unwrap();
@@ -13239,10 +13261,7 @@ mod tests {
             Some("web_1")
         );
         assert!(web_search_call.get("action").is_none());
-        let image_generation_call = requests[1]
-            .get("input")
-            .and_then(Value::as_array)
-            .unwrap()
+        let image_generation_call = continuation_input
             .iter()
             .find(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
             .unwrap();
