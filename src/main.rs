@@ -80,6 +80,7 @@ const FILE_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FILE_READS: usize = 2;
 const MAX_FILE_READ_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
+const MAX_CONTEXT_MESSAGE_TRACE_CHARS: usize = 128 * 1024;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
 const MAX_EXECUTOR_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const EXECUTOR_RESULT_GZIP_THRESHOLD: usize = 4 * 1024;
@@ -7373,7 +7374,15 @@ fn tool_execution(output: impl Into<String>) -> ToolExecution {
 }
 
 fn context_tool_output(output: &str) -> String {
-    let Some((offset, _)) = output.char_indices().nth(MAX_CONTEXT_TOOL_OUTPUT_CHARS) else {
+    context_output(output, MAX_CONTEXT_TOOL_OUTPUT_CHARS)
+}
+
+fn context_message_trace(trace: &str) -> String {
+    context_output(trace, MAX_CONTEXT_MESSAGE_TRACE_CHARS)
+}
+
+fn context_output(output: &str, limit: usize) -> String {
+    let Some((offset, _)) = output.char_indices().nth(limit) else {
         return output.to_owned();
     };
     let mut truncated = String::with_capacity(offset + TOOL_OUTPUT_TRUNCATED_NOTICE.len());
@@ -7525,11 +7534,11 @@ fn attach_execution_trace(connection: &Connection, message: &mut HistoryMessage)
             _ => None,
         })
         .collect::<Vec<_>>();
+    let trace = context_message_trace(&trace.join("\n"));
     if !trace.is_empty() {
         message.content = format!(
             "[Durable execution trace]\n{}\n[/Durable execution trace]\n\n{}",
-            trace.join("\n"),
-            message.content
+            trace, message.content
         );
     }
     Ok(())
@@ -12419,6 +12428,72 @@ mod tests {
             } => assert_eq!(output, original),
             _ => panic!("persisted event is not a tool result"),
         }
+    }
+
+    #[test]
+    fn compiled_context_bounds_the_complete_execution_trace() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("inspect the archive".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "run-many-outputs", user.id).unwrap();
+        for index in 0..3 {
+            append_agent_event(
+                &db,
+                "run-many-outputs",
+                &AgentEvent::ToolResult {
+                    call_id: format!("call-{index}"),
+                    name: "read_file".to_owned(),
+                    added_lines: None,
+                    deleted_lines: None,
+                    output: Some("x".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS)),
+                    finished_at: None,
+                },
+            )
+            .unwrap();
+        }
+        append_conversation_for_run(
+            &db,
+            &ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String("The archive was inspected.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+            Some("run-many-outputs"),
+        )
+        .unwrap();
+
+        let history = load_history_for_run(&db, user.id).unwrap();
+        let assistant = history
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        let trace = assistant
+            .content
+            .strip_prefix("[Durable execution trace]\n")
+            .unwrap()
+            .split_once("\n[/Durable execution trace]\n\n")
+            .unwrap()
+            .0;
+        assert_eq!(
+            trace.chars().count(),
+            MAX_CONTEXT_MESSAGE_TRACE_CHARS + TOOL_OUTPUT_TRUNCATED_NOTICE.chars().count()
+        );
+        assert!(trace.ends_with(TOOL_OUTPUT_TRUNCATED_NOTICE));
     }
 
     #[test]
