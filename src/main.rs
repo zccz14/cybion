@@ -2001,7 +2001,7 @@ async fn summarize_context(
     let mut batches = context_summary_batches(items);
     for _ in 0..CONTEXT_SUMMARY_MAX_ROUNDS {
         if batches.len() == 1 {
-            return summarize_context_batch(
+            return summarize_context_once(
                 client,
                 config,
                 batches.pop().expect("one summary batch exists"),
@@ -2013,7 +2013,7 @@ async fn summarize_context(
         let mut summaries = Vec::with_capacity(batches.len());
         for batch in batches {
             let distilled =
-                summarize_context_batch(client, config, batch, cancellation.clone()).await?;
+                summarize_context_once(client, config, batch, cancellation.clone()).await?;
             summaries.push(distilled_checkpoint_item(&distilled.summary));
         }
         let summary_bytes = context_summary_bytes(std::slice::from_ref(&summaries));
@@ -2032,7 +2032,7 @@ async fn summarize_context(
     ))
 }
 
-async fn summarize_context_batch(
+async fn summarize_context_once(
     client: &reqwest::Client,
     config: &Config,
     items: Vec<Value>,
@@ -2254,7 +2254,7 @@ async fn compact_main_history_after_overflow(
     loop {
         let summary_input = context_items(previous.as_ref(), &history[..=candidate_index]);
         let source_message_count = summary_input.len();
-        match summarize_context(client, config, summary_input, cancellation.clone()).await {
+        match summarize_context_once(client, config, summary_input, cancellation.clone()).await {
             Ok(distilled) => {
                 let checkpoint = persist_main_checkpoint(
                     db_path,
@@ -11305,17 +11305,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
+        let oversized_reply = format!(
+            "Second completed reply. {}",
+            "x".repeat(CONTEXT_SUMMARY_SEGMENT_BYTES * 2)
+        );
         for (role, content) in [
-            ("user", "First request."),
-            ("assistant", "First completed reply."),
-            ("assistant", "Second completed reply."),
-            ("user", "Current request."),
+            ("user", "First request.".to_owned()),
+            ("assistant", "First completed reply.".to_owned()),
+            ("assistant", oversized_reply.clone()),
+            ("user", "Current request.".to_owned()),
         ] {
             append_conversation(
                 &db,
                 &ChatMessage {
                     role: role.to_owned(),
-                    content: Value::String(content.to_owned()),
+                    content: Value::String(content),
                     images: None,
                     tool_call_id: None,
                     tool_calls: None,
@@ -11380,6 +11384,18 @@ mod tests {
         assert_eq!(requests.len(), 6);
         assert_eq!(requests[0]["input"], Value::Array(context.items));
         assert_eq!(requests[1]["input"].as_array().unwrap().len(), 3);
+        assert!(
+            requests[1]["input"][2]["content"]
+                .as_str()
+                .unwrap()
+                .contains(&oversized_reply)
+        );
+        assert!(
+            !requests[1]["input"][2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("[Cybion context segment")
+        );
         assert!(requests[1]["input"].as_array().unwrap().iter().all(|item| {
             !item["content"]
                 .as_str()
