@@ -73,6 +73,8 @@ const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
 const FILE_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FILE_READS: usize = 2;
 const MAX_FILE_READ_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
+const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
 const MAX_EXECUTOR_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const EXECUTOR_RESULT_GZIP_THRESHOLD: usize = 4 * 1024;
 const EXECUTOR_RESULT_TIMEOUT: Duration = Duration::from_secs(75);
@@ -6628,11 +6630,7 @@ async fn run_agent_items(
                 },
             )
             .await?;
-            items.push(json!({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": execution.output,
-            }));
+            items.push(function_call_output(call_id, &execution.output));
         }
     }
 }
@@ -7121,6 +7119,24 @@ fn tool_execution(output: impl Into<String>) -> ToolExecution {
     }
 }
 
+fn context_tool_output(output: &str) -> String {
+    let Some((offset, _)) = output.char_indices().nth(MAX_CONTEXT_TOOL_OUTPUT_CHARS) else {
+        return output.to_owned();
+    };
+    let mut truncated = String::with_capacity(offset + TOOL_OUTPUT_TRUNCATED_NOTICE.len());
+    truncated.push_str(&output[..offset]);
+    truncated.push_str(TOOL_OUTPUT_TRUNCATED_NOTICE);
+    truncated
+}
+
+fn function_call_output(call_id: &str, output: &str) -> Value {
+    json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": context_tool_output(output),
+    })
+}
+
 fn checkpoint_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextCheckpoint> {
     Ok(ContextCheckpoint {
         id: row.get(0)?,
@@ -7249,7 +7265,10 @@ fn attach_execution_trace(connection: &Connection, message: &mut HistoryMessage)
                 name,
                 output: Some(output),
                 ..
-            } => Some(format!("Tool result {name}: {output}")),
+            } => Some(format!(
+                "Tool result {name}: {}",
+                context_tool_output(&output)
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -11698,6 +11717,80 @@ mod tests {
     }
 
     #[test]
+    fn compiled_context_truncates_persisted_tool_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("inspect the archive".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "run-large-output", user.id).unwrap();
+        let original = "x".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS + 1);
+        append_agent_event(
+            &db,
+            "run-large-output",
+            &AgentEvent::ToolResult {
+                call_id: "call-large-output".to_owned(),
+                name: "read_file".to_owned(),
+                added_lines: None,
+                deleted_lines: None,
+                output: Some(original.clone()),
+                finished_at: None,
+            },
+        )
+        .unwrap();
+        append_conversation_for_run(
+            &db,
+            &ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String("The archive was inspected.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+            Some("run-large-output"),
+        )
+        .unwrap();
+
+        let history = load_history_for_run(&db, user.id).unwrap();
+        let assistant = history
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        assert!(assistant.content.contains(&format!(
+            "Tool result read_file: {}",
+            context_tool_output(&original)
+        )));
+        assert!(!assistant.content.contains(&original));
+
+        let payload: String = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT payload FROM agent_events WHERE run_id = 'run-large-output'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        match serde_json::from_str::<AgentEvent>(&payload).unwrap() {
+            AgentEvent::ToolResult {
+                output: Some(output),
+                ..
+            } => assert_eq!(output, original),
+            _ => panic!("persisted event is not a tool result"),
+        }
+    }
+
+    #[test]
     fn conversation_page_uses_a_cursor_without_loading_prior_messages() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -12112,6 +12205,20 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "read_thread_history")
+        );
+    }
+
+    #[test]
+    fn function_call_output_limits_tool_output_by_characters() {
+        let output = format!("{}终", "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS));
+        let bounded = function_call_output("call-1", &output);
+        let bounded = bounded["output"].as_str().unwrap();
+
+        assert!(bounded.starts_with(&"文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS)));
+        assert!(bounded.ends_with(TOOL_OUTPUT_TRUNCATED_NOTICE));
+        assert_eq!(
+            bounded.chars().count(),
+            MAX_CONTEXT_TOOL_OUTPUT_CHARS + TOOL_OUTPUT_TRUNCATED_NOTICE.chars().count()
         );
     }
 
