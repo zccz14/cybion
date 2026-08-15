@@ -67,6 +67,8 @@ const CONVERSATION_EVENT_PAGE_DEFAULT: usize = 100;
 const CONVERSATION_EVENT_PAGE_MAX: usize = 200;
 const CONVERSATION_OUTPUT_CHUNK_DEFAULT: usize = 16 * 1024;
 const CONVERSATION_OUTPUT_CHUNK_MAX: usize = 64 * 1024;
+const CONTEXT_SUMMARY_INPUT_BYTES: usize = 64 * 1024;
+const CONTEXT_SUMMARY_SEGMENT_BYTES: usize = 48 * 1024;
 const COMMAND_RUNS_PAGE_DEFAULT: i64 = 20;
 const COMMAND_RUNS_PAGE_MAX: i64 = 100;
 const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
@@ -1968,6 +1970,33 @@ async fn summarize_context(
     client: &reqwest::Client,
     config: &Config,
     items: Vec<Value>,
+    cancellation: watch::Receiver<bool>,
+) -> Result<DistilledContext> {
+    let mut batches = context_summary_batches(items);
+    loop {
+        if batches.len() == 1 {
+            return summarize_context_batch(
+                client,
+                config,
+                batches.pop().expect("one summary batch exists"),
+                cancellation,
+            )
+            .await;
+        }
+        let mut summaries = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let distilled =
+                summarize_context_batch(client, config, batch, cancellation.clone()).await?;
+            summaries.push(distilled_checkpoint_item(&distilled.summary));
+        }
+        batches = context_summary_batches(summaries);
+    }
+}
+
+async fn summarize_context_batch(
+    client: &reqwest::Client,
+    config: &Config,
+    items: Vec<Value>,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<DistilledContext> {
     let request = client
@@ -1994,6 +2023,70 @@ async fn summarize_context(
         facts: extract_memory_fact_candidates(&summary),
         summary,
     })
+}
+
+fn context_summary_batches(items: Vec<Value>) -> Vec<Vec<Value>> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut bytes = 0;
+    for item in items.into_iter().flat_map(context_summary_segments) {
+        let item_bytes = serde_json::to_vec(&item)
+            .expect("context summary item is serializable")
+            .len();
+        if !batch.is_empty() && bytes + item_bytes > CONTEXT_SUMMARY_INPUT_BYTES {
+            batches.push(std::mem::take(&mut batch));
+            bytes = 0;
+        }
+        bytes += item_bytes;
+        batch.push(item);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
+
+fn context_summary_segments(item: Value) -> Vec<Value> {
+    let serialized = serde_json::to_string(&item).expect("context item is serializable");
+    if serialized.len() <= CONTEXT_SUMMARY_SEGMENT_BYTES {
+        return vec![item];
+    }
+    let segments = split_utf8_by_bytes(&serialized, CONTEXT_SUMMARY_SEGMENT_BYTES);
+    let count = segments.len();
+    segments
+        .into_iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            json!({
+                "role": "developer",
+                "content": format!(
+                    "[Cybion context segment {}/{}; preserve it as evidence and combine every segment before summarizing.]\n{}",
+                    index + 1,
+                    count,
+                    segment,
+                )
+            })
+        })
+        .collect()
+}
+
+fn split_utf8_by_bytes(value: &str, limit: usize) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, character) in value.char_indices() {
+        let width = character.len_utf8();
+        if bytes + width > limit && start < index {
+            segments.push(&value[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes += width;
+    }
+    if start < value.len() {
+        segments.push(&value[start..]);
+    }
+    segments
 }
 
 async fn compact_context_after_overflow(
@@ -9021,6 +9114,86 @@ mod tests {
     }
 
     #[test]
+    fn context_summary_segments_preserve_utf8_boundaries() {
+        let content = "你".repeat(CONTEXT_SUMMARY_SEGMENT_BYTES);
+        let segments = split_utf8_by_bytes(&content, CONTEXT_SUMMARY_SEGMENT_BYTES);
+
+        assert!(
+            segments
+                .iter()
+                .all(|segment| segment.len() <= CONTEXT_SUMMARY_SEGMENT_BYTES)
+        );
+        assert_eq!(segments.concat(), content);
+    }
+
+    #[tokio::test]
+    async fn context_summary_merges_chunked_input_before_returning_a_checkpoint() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> String {
+            requests.lock().await.push(request);
+            let item = json!({
+                "type": "message",
+                "content": [{"type": "output_text", "text": "chunk checkpoint"}],
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}}),
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let config = Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            openai_api_key: "test-key".to_owned(),
+            default_model: "test-model".to_owned(),
+            voice_script_model: "voice-model".to_owned(),
+            voice_script_max_chars: 150,
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        };
+
+        let result = summarize_context(
+            &reqwest::Client::new(),
+            &config,
+            vec![json!({
+                "role": "user",
+                "content": "x".repeat(CONTEXT_SUMMARY_SEGMENT_BYTES * 2),
+            })],
+            watch::channel(false).1,
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(result.summary, "chunk checkpoint");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| {
+            serde_json::to_vec(&request["input"]).unwrap().len() <= CONTEXT_SUMMARY_INPUT_BYTES
+        }));
+    }
+
+    #[test]
     fn browser_preview_frames_use_a_length_delimited_binary_multipart_payload() {
         let payload = multipart_browser_frame(&[0xff, 0xd8, 0xff]);
         assert_eq!(
@@ -10671,7 +10844,7 @@ mod tests {
             &db,
             &ChatMessage {
                 role: "user".to_owned(),
-                content: Value::String(format!("Keep deployment evidence. {}", "x".repeat(50_000))),
+                content: Value::String(format!("Keep deployment evidence. {}", "x".repeat(10_000))),
                 images: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -10685,7 +10858,7 @@ mod tests {
                 role: "assistant".to_owned(),
                 content: Value::String(format!(
                     "I inspected the deployment evidence. {}",
-                    "y".repeat(50_000)
+                    "y".repeat(20_000)
                 )),
                 images: None,
                 tool_call_id: None,
@@ -10722,7 +10895,7 @@ mod tests {
                 .filter_map(|item| item["content"].as_str())
                 .map(str::len)
                 .sum::<usize>()
-                > 96_000
+                > 25_000
         );
         let config = Config {
             root_user_id: "root".to_owned(),
