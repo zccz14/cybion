@@ -9,7 +9,11 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock, RwLock as StdRwLock, mpsc as std_mpsc},
+    sync::{
+        Arc, LazyLock, RwLock as StdRwLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc as std_mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -111,6 +115,8 @@ struct AppState {
     active_subthreads: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     executor_tunnels: ExecutorTunnels,
     main_thread: Arc<Mutex<()>>,
+    checkpoint_write_gate: Arc<RwLock<()>>,
+    checkpoint_write_pending: Arc<AtomicBool>,
     browser_sessions: browser::BrowserSessions,
 }
 
@@ -449,7 +455,8 @@ struct CompiledMainContext {
 enum ContextCheckpointTarget {
     Main {
         current_message_id: Option<i64>,
-        snapshot_last_entry_id: i64,
+        checkpoint_write_gate: Arc<RwLock<()>>,
+        checkpoint_write_pending: Arc<AtomicBool>,
     },
     Subthread {
         id: String,
@@ -901,6 +908,8 @@ async fn main() -> Result<()> {
         active_subthreads: Arc::new(Mutex::new(HashMap::new())),
         executor_tunnels: ExecutorTunnels::default(),
         main_thread: Arc::new(Mutex::new(())),
+        checkpoint_write_gate: Arc::new(RwLock::new(())),
+        checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
         browser_sessions: browser::sessions(),
     };
     schedule_recovered_main_runs(state.clone());
@@ -1957,19 +1966,35 @@ async fn compact_context_after_overflow(
         },
     )
     .await?;
-    let distilled = summarize_context(client, config, items, cancellation).await?;
-    reset_agent_retry_after_success(db_path, events.run_id)?;
     match target {
         ContextCheckpointTarget::Main {
-            snapshot_last_entry_id,
+            checkpoint_write_gate,
+            checkpoint_write_pending,
             ..
         } => {
-            let checkpoint =
-                persist_main_checkpoint(db_path, events, *snapshot_last_entry_id, distilled)
-                    .await?;
-            Ok(vec![main_checkpoint_item(&checkpoint)])
+            checkpoint_write_pending.store(true, Ordering::Release);
+            let result = async {
+                let _checkpoint_writer = checkpoint_write_gate.write().await;
+                let snapshot = compile_main_context(db_path, i64::MAX)?;
+                let distilled =
+                    summarize_context(client, config, snapshot.items, cancellation).await?;
+                reset_agent_retry_after_success(db_path, events.run_id)?;
+                let checkpoint = persist_main_checkpoint(
+                    db_path,
+                    events,
+                    snapshot.snapshot_last_entry_id,
+                    distilled,
+                )
+                .await?;
+                Ok(vec![main_checkpoint_item(&checkpoint)])
+            }
+            .await;
+            checkpoint_write_pending.store(false, Ordering::Release);
+            result
         }
         ContextCheckpointTarget::Subthread { id } => {
+            let distilled = summarize_context(client, config, items, cancellation).await?;
+            reset_agent_retry_after_success(db_path, events.run_id)?;
             let checkpoint = vec![distilled_checkpoint_item(&distilled.summary)];
             let changed = open_db(db_path)?.execute(
                 "UPDATE subthreads SET context_json = ?1, updated_at = ?2 WHERE id = ?3",
@@ -5880,6 +5905,25 @@ async fn agent_turn(
             "this Cybion machine is configured as a tool executor and has no model upstream",
         ));
     }
+    if state.checkpoint_write_pending.load(Ordering::Acquire) {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "main-thread checkpoint is in progress; retry your message shortly",
+        ));
+    }
+    let checkpoint_message_permit = state.checkpoint_write_gate.try_read().map_err(|_| {
+        error(
+            StatusCode::CONFLICT,
+            "main-thread checkpoint is in progress; retry your message shortly",
+        )
+    })?;
+    if state.checkpoint_write_pending.load(Ordering::Acquire) {
+        drop(checkpoint_message_permit);
+        return Err(error(
+            StatusCode::CONFLICT,
+            "main-thread checkpoint is in progress; retry your message shortly",
+        ));
+    }
     let user_message = append_conversation(&state.db_path, &input.message, None).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -5894,6 +5938,7 @@ async fn agent_turn(
         MainRunReason::UserMessage,
     )
     .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
+    drop(checkpoint_message_permit);
     let run_id = input.run_id.clone();
     let (cancel, cancellation) = watch::channel(false);
     state
@@ -6183,7 +6228,10 @@ async fn process_main_run(
                                 ContextCheckpointTarget::Main {
                                     current_message_id: (reason == MainRunReason::UserMessage)
                                         .then_some(user_message_id),
-                                    snapshot_last_entry_id: context.snapshot_last_entry_id,
+                                    checkpoint_write_gate: state.checkpoint_write_gate.clone(),
+                                    checkpoint_write_pending: state
+                                        .checkpoint_write_pending
+                                        .clone(),
                                 },
                                 Some(browser_agent_context(&state)),
                                 &state.executor_tunnels,
@@ -6306,11 +6354,8 @@ async fn run_agent(
         &Arc::new(Mutex::new(HashMap::new())),
         ContextCheckpointTarget::Main {
             current_message_id: None,
-            snapshot_last_entry_id: open_db(db_path)?
-                .query_row("SELECT MAX(id) FROM conversation_messages", [], |row| {
-                    row.get::<_, Option<i64>>(0)
-                })?
-                .unwrap_or_default(),
+            checkpoint_write_gate: Arc::new(RwLock::new(())),
+            checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
         },
         None,
         &ExecutorTunnels::default(),
@@ -9160,6 +9205,8 @@ mod tests {
             active_subthreads: Arc::new(Mutex::new(HashMap::new())),
             executor_tunnels: ExecutorTunnels::default(),
             main_thread: Arc::new(Mutex::new(())),
+            checkpoint_write_gate: Arc::new(RwLock::new(())),
+            checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             browser_sessions: browser::sessions(),
         }
     }
@@ -9468,6 +9515,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(checkpoints, 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writer_gate_rejects_new_main_messages_until_release() {
+        let gate = Arc::new(RwLock::new(()));
+        let checkpoint_writer = gate.write().await;
+        assert!(gate.try_read().is_err());
+        drop(checkpoint_writer);
+        assert!(gate.try_read().is_ok());
     }
 
     #[test]
@@ -10945,7 +11001,8 @@ mod tests {
             &Arc::new(Mutex::new(HashMap::new())),
             ContextCheckpointTarget::Main {
                 current_message_id: Some(current.id),
-                snapshot_last_entry_id: context.snapshot_last_entry_id,
+                checkpoint_write_gate: Arc::new(RwLock::new(())),
+                checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             },
             None,
             &ExecutorTunnels::default(),
@@ -11136,7 +11193,8 @@ mod tests {
             &Arc::new(Mutex::new(HashMap::new())),
             ContextCheckpointTarget::Main {
                 current_message_id: Some(current.id),
-                snapshot_last_entry_id: context.snapshot_last_entry_id,
+                checkpoint_write_gate: Arc::new(RwLock::new(())),
+                checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             },
             None,
             &ExecutorTunnels::default(),
