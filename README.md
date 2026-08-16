@@ -58,8 +58,9 @@ Cybion 的迭代哲学是 **one more step**：依据当前对话、已有产物�
 
 每个持久 **Goal** 都由一个**子线程 (Subthread)** 执行。它的 `title` 是简短名称，`task`
 是持久目标，并且必须在创建时声明可验证的完成条件。用户可以直接在 Goals 页面创建、
-查看、编辑和删除 Goal；从主线程 fork 的 Goal 会携带已编译的 checkpoint，直接创建的
-Goal 则从它明确的目标与完成条件开始。子线程不接收用户 prompt，也不形成第二套 Session。
+查看、编辑和删除 Goal；从主线程 fork 时，系统将 fork 点记为 `from_record_id`，子线程据此
+回放该点及之前所需的主线程记录。直接创建的 Goal 也会留下明确的主线程 fork 点，并以目标和
+完成条件作为子线程的首条输入。用户始终只向主线程输入，不形成第二套 Session。
 
 Goal 不以一次自然语言回复为完成。每一轮执行后，系统把回复作为进展持久化并将同一个
 子线程重新排队；它一直循环，直到子线程明确调用 `achieve_goal` 并提供证据，或调用
@@ -86,60 +87,110 @@ flowchart LR
   G -->|"达成 + 证据，或受阻 + 原因"| M
 ```
 
-### 4. 上下文是历史记录的函数
+### 4. 协议历史与上下文编译
 
-主线程的完整历史记录是上下文的事实来源。理想情况下，推理模型应当看到全部主线程
-对话记录；如果用 `H_t` 表示从会话开始到时刻 `t` 的全部历史，用 `C_t` 表示传给模型的
-上下文参数，那么目标是：
+**`history_records` 是唯一的对话与运行历史表。** 每一条记录保存一个可回放的协议项，
+上下文由这些记录按确定的线程边界和 checkpoint 规则编译；控制台进展也写入同一张表，
+但不会进入模型输入。
 
-```text
-C_t = f(H_t)
+```sql
+history_records (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id  TEXT NULL,  -- NULL 为主线程；子线程使用自己的 ID
+  run_id     TEXT NULL,
+  kind       TEXT NOT NULL,
+  payload    TEXT NOT NULL, -- JSON 协议项
+  created_at TEXT NOT NULL
+)
 ```
 
-用户会持续使用 Cybion，`H_t` 会不断增长，而推理模型的上下文窗口始终有限。两者的
-矛盾需要通过上下文自动压缩解决；这是 Harness 的经典做法，Cybion 保留这一做法，而不
-把压缩后的上下文当作独立于历史记录的另一份真相。只要关键信息仍在上下文窗口之外，
-模型就无法在一次推理中完整利用它，最终仍需通过多轮检索从历史记录、文件、工具和
-设备中重新获取。
+常规运行中，记录按全局 `id` 追加且不可更新或删除；只有用户明确清空对话时，系统才会在
+受控的重置事务中删除历史。`kind` 决定 `payload` 的用途：
 
-完整历史的“可见”不等于把所有 token 永远放入一次推理。每条原始消息和工具记录都永久
-保存；`search_thread_history` 对完整主线程消息做全文关键词检索，返回命中片段和消息 ID，
-再由 `read_thread_history` 分页展开原始证据。因此 checkpoint 永远不能成为历史的唯一入口。
+| `kind` | `payload` | 是否编译到模型输入 |
+| --- | --- | --- |
+| `input` | 用户输入或系统生成的 Goal 输入项 | 是 |
+| `response_output` | 上游 Responses `output[]` 中的一个原始输出项，例如 `message`、`function_call` 或 `computer_call` | 是 |
+| `tool_output` | 工具输出项，例如 `function_call_output` 或 `computer_call_output` | 是 |
+| `checkpoint` | 以 `developer` 角色保存的当前状态 | 是 |
+| `activity` | 控制台和运行状态，例如工具开始、进展、错误和 token 统计 | 否 |
 
-每个 **checkpoint** 是一个小的、不可变的**当前状态**快照，而不是尽可能完整的历史摘要。以下是产品的硬约束，而不是可替换的实现策略：
+完整工具输出以协议项持久化；为满足单次模型上下文的长度限制，编译 `function_call_output`
+时会沿用输出长度上限，保存的原始 `payload` 不会被截断。`response_output` 与
+`tool_output` 在下一轮作为 Responses `input` 的协议项回放，而不是转换成文本执行轨迹。
 
-- Cybion 只有一条全局、按 `id` 严格追加的对话记录序列；不存在 `conversation_id` 分区。
-- 原始消息和 checkpoint 共用这条序列，分别以 `type = message` 和 `type = checkpoint` 标识。
-- checkpoint `#c` 语义上覆盖且只覆盖序列中 `id < c` 的全部记录；它不保存 `covered_through_id` 之类的第二边界。
-- checkpoint 生成优先于主线程新消息：它先取得全局记录写入闸门；闸门持有期间，新消息立即被拒绝写入并要求重试。checkpoint 在闸门内重新读取完整快照、生成并追加，随后才释放消息写入。因此任何新记录都不能穿插在 checkpoint 的输入快照与其追加之间。
+固定的 Agent 指令不使用 Responses 的 `instructions` 字段。每次请求的第一个 `input` 项都是
+稳定的 Markdown `developer` 消息，按本次作用域组合技能目录、线程角色、可用远程设备和
+Browser Control 规则；之后依次追加编译出的协议历史。这个布局既把固定前缀与会变化的
+历史分开，也使用户刚提交的 `input` 保持其原始协议角色。
 
-因此，下一次主线程推理只需取最新 checkpoint 和其后的原始消息：
-
-```text
-S_c = state(objective, active constraints, open work, evidence routes)
-C_t = map(S_c, H_(c+1) ... H_t), where c = latest checkpoint id
+```mermaid
+flowchart LR
+  D["稳定 Markdown developer 指令"] --> R["Responses input"]
+  C["checkpoint developer 项"] --> R
+  H["input / response_output / tool_output"] --> R
+  A["activity"] -. "不编译" .-> R
+  R --> U["Responses API"]
 ```
 
-它只保留当前目标、有效决策与约束、未完成工作、已验证环境状态、下一步，以及精确的
-消息 ID 与检索关键词。已解决或无关的叙事不应继续占据 checkpoint；需要时从全文历史重新
-检索。主线程遇到结构化上下文窗口溢出时，只根据前一状态和可容纳的近期证据写出下一个
-状态快照，然后自动重试，而不再把完整历史当作必须递归压缩的对象。
+#### 主线程的 checkpoint 与查询边界
 
-checkpoint 和它的前驱边均为 append-only。每个新节点在同一 SQLite 事务内写入多条指向
-前序状态的跳边；旧节点和旧边禁止更新、删除或重连。跳边服务于状态谱系的审计和定位，
-不构成平衡树，也没有 rebalance：原始历史的定位由全文搜索和消息 ID 读取承担。
+设本次请求允许看到的主线程上界为 `requested_through_record_id`。主线程编译时先取得：
 
-长期记忆是附带来源的事实修订索引：它只收录明确表达或稳定验证的协作偏好、项目和权威
-数据路径、持久配置、设备或服务状态；每项都保存消息 ID、checkpoint 引用和
-`current`、`superseded` 或 `uncertain` 状态。新的同 key 事实会合并为新修订而保留旧来源，
-Agent 可以通过 `search_thread_memory` 检索，再按引用展开 checkpoint 或原文。系统不会把
-Token、密码、API key、Cookie 或其他密钥写入这个索引，也不会根据对话推断人格特征。
+```text
+compile_through_record_id = min(requested_through_record_id, max(main-thread record id))
+latest_checkpoint_id = max(id | thread_id IS NULL, kind = checkpoint,
+                             id <= compile_through_record_id)
+```
 
-这并不表示任何模型的单次请求能容纳无限 token。单次推理只接收有限的当前状态、最近
-原文和记忆目录；需要旧细节时，先按关键词发现历史，再按消息 ID 逐步取回可审计证据。
-状态 checkpoint 不是第二份事实来源。控制台会显示当前 checkpoint、历史消息数与长期
-记忆目录。服务重启时只恢复尚未开始执行的输入；已经开始调用工具的运行会明确标记失败
-而不会自动重放，以免重复产生副作用。
+如果尚无 checkpoint，则从记录 `1` 开始。否则查询主线程中
+`id >= latest_checkpoint_id AND id <= compile_through_record_id` 的 `input`、
+`response_output`、`tool_output` 和 `checkpoint`，按 `id` 升序回放。**checkpoint 本身包含
+在结果中。** 这使 checkpoint 成为当前状态的起点，而不会遗漏它之后或与它同一位置的协议项。
+
+上下文窗口溢出时，Cybion 将已编译的上下文蒸馏为新的不可变 checkpoint 后重试。写入前会在
+SQLite 事务中确认主线程最新记录仍等于这次编译的上界，避免把发生变化的历史标记为已覆盖。
+
+#### 子线程的 fork 与查询边界
+
+每个子线程在 `subthreads.from_record_id` 保存它从主线程分出的记录 ID。子线程有自己的
+`history_records.thread_id`，因此多个子线程可以并发追加全局记录 ID，而不会相互进入对方的
+上下文。
+
+```mermaid
+flowchart TB
+  M["主线程 records"] --> F["from_record_id"]
+  F --> S["子线程自己的 records"]
+  M --> MC["主线程最新 checkpoint（不晚于 fork 点）"]
+  MC --> S
+  SC["子线程最新 checkpoint"] --> S
+```
+
+子线程的 `latest_checkpoint_id` 按以下顺序确定：
+
+1. 先在该子线程中，取 `id <= max(该子线程 record id)` 的最新 checkpoint。存在时，只回放该
+   子线程从该 checkpoint（包含）到自身上界的记录。
+2. 若子线程没有 checkpoint，则在主线程中取 `id <= from_record_id` 的最新 checkpoint；从该
+   checkpoint（包含）回放主线程至 `from_record_id`，再回放该子线程自身的全部记录。
+3. 若该主线程范围也没有 checkpoint，主线程部分从记录 `1` 开始。
+
+所有查询都以 `thread_id IS NULL` 或精确的子线程 `thread_id` 过滤。全局 `id` 的并发交错只决定
+持久化次序；它不能使一个兄弟子线程的记录出现在另一个子线程的上下文中。
+
+#### 历史读取与长期记忆
+
+`search_thread_history` 按关键词或短语查询完整主线程的非 `activity` 记录，并返回
+`record_id`、`kind` 和原始 `payload`；`read_thread_history` 按包含两端的记录 ID 区间分页读取
+同样的协议 records。`get_checkpoint` 读取一个主线程 checkpoint 及该 checkpoint 创建的事实
+修订。它们让 Agent 按需取得较早的历史，而不要求一次请求容纳全部记录。
+
+长期记忆是带来源的事实修订索引，只收录明确表达或稳定验证的协作偏好、项目和权威数据
+路径、持久配置、设备或服务状态。每项保存来源记录 ID、checkpoint ID 与 `current`、
+`superseded` 或 `uncertain` 状态；`search_thread_memory` 可检索该索引。系统不会把 Token、
+密码、API key、Cookie 或其他密钥写入索引，也不会根据对话推断人格特征。
+
+服务重启时只恢复尚未开始执行的输入；已经开始调用工具的运行会明确标记失败而不会自动
+重放，以免重复产生副作用。
 
 ### 5. 易用性：从任意入口随时介入
 
@@ -219,10 +270,10 @@ flowchart LR
   重新判断方向，并允许用户在任意一次结果后介入或改变方向。
 - 持久化的 MIMO 主线程：连续输入会立即入库并按顺序执行，一次输入可以依次产生已接收、
   上下文编译、工具进展和完成结果；刷新浏览器不会丢失已接受的输入。
-- 溢出驱动的 append-only 当前状态 checkpoint 图、长期保留的原文和工具记录、原始历史
-  全文检索与带来源的长期事实修订；Agent 可用 `get_checkpoint`、`search_thread_history`、
-  `read_thread_history` 和 `search_thread_memory` 按需重建证据。
-- 从主线程 fork 的后台子线程即持久 Goal；每个 Goal 固化名称、目标、完成条件与模型，并在
+- 溢出驱动的 append-only checkpoint、完整的协议历史与运行 activity、按关键词读取的主线程
+  records，以及带来源的长期事实修订；Agent 可用 `get_checkpoint`、`search_thread_history`、
+  `read_thread_history` 和 `search_thread_memory` 按需读取较早记录。
+- 从主线程 fork 的后台子线程即持久 Goal；fork 点以 `from_record_id` 固化；每个 Goal 固化名称、目标、完成条件与模型，并在
   非终态回复后记录进展、继续循环。只有 `achieve_goal` 记录可验证证据或 `block_goal` 记录
   具体受阻原因才能结束循环；取消会形成 `cancelled` 终态。Goals 页面将主线程固定置顶，并保留
   所有 Goal 的状态和模型；可直接新建、编辑或删除 Goal。编辑会清除旧终态并按新目标重新排队，
@@ -322,6 +373,12 @@ tar -xzf cybion-macos-aarch64.tar.gz
 ```
 
 Cybion 作为控制设备时监听 `0.0.0.0:1858`，数据存储在 `~/.cybion/default.sqlite3`。
+
+### 历史存储切换
+
+`v0.1.80` 起，历史存储统一为 `history_records`。该切换不迁移旧的对话、事件、checkpoint
+和长期记忆表：首次启动检测到旧历史 schema 时，会清理这些旧历史数据后创建新表；应用元数据和
+已配对设备配置会保留。升级前如需保留旧对话，请先自行导出或备份 SQLite 数据库。
 
 ### 后备：从源码构建
 
