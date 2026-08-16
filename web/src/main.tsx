@@ -28,7 +28,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import './styles.css'
-import 'auth-mini-react-components/styles.css'
 
 declare global { interface Window { __CYBION_AUTH_URL: string | null } }
 
