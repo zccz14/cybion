@@ -3,6 +3,7 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 @plugin "@tailwindcss/typography";
+@source "../node_modules/auth-mini-react-components/dist";
 
 @custom-variant dark (&:is(.dark *));
 

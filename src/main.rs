@@ -18,6 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use auth_mini_axum::{AuthMiniError, AuthMiniPrincipal, AuthMiniVerifier, JwksCachePolicy};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -32,7 +33,6 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures_util::SinkExt;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use notify::{Event as NotifyEvent, EventKind as NotifyEventKind, RecursiveMode, Watcher};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,6 @@ const EDGE_TTS_GEC_VERSION: &str = "1-143.0.3650.75";
 const EDGE_TTS_MAX_TEXT_BYTES: usize = 4_096;
 const EDGE_TTS_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const VOICE_TURN_MAX_CHARS: usize = 4_000;
-const JWKS_TTL: Duration = Duration::from_secs(300);
 const HISTORY_PAGE_DEFAULT: usize = 100;
 const HISTORY_PAGE_MAX: usize = 500;
 const CONVERSATION_PAGE_DEFAULT: usize = 50;
@@ -111,7 +110,7 @@ struct AppState {
     skills_directory: PathBuf,
     skills: Arc<StdRwLock<SkillCatalog>>,
     client: reqwest::Client,
-    jwks: Arc<RwLock<Option<CachedJwks>>>,
+    auth_verifier: Arc<Mutex<Option<CachedAuthVerifier>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     active_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     active_subthreads: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
@@ -170,23 +169,10 @@ struct PendingExecutorResult {
     sender: oneshot::Sender<ExecutorToolResult>,
 }
 
-struct CachedJwks {
-    fetched_at: Instant,
-    keys: Vec<Jwk>,
-}
-
-#[derive(Clone, Deserialize)]
-struct Jwks {
-    keys: Vec<Jwk>,
-}
-
-#[derive(Clone, Deserialize)]
-struct Jwk {
-    kid: String,
-    kty: String,
-    crv: String,
-    x: String,
-    alg: String,
+struct CachedAuthVerifier {
+    issuer: String,
+    audience: String,
+    verifier: AuthMiniVerifier,
 }
 
 #[derive(Clone)]
@@ -944,7 +930,7 @@ async fn main() -> Result<()> {
         client: reqwest::Client::builder()
             .user_agent(format!("cybion/{}", env!("CARGO_PKG_VERSION")))
             .build()?,
-        jwks: Arc::new(RwLock::new(None)),
+        auth_verifier: Arc::new(Mutex::new(None)),
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(
             default_db_path(),
         ))),
@@ -3658,56 +3644,67 @@ async fn identity(
     state: &AppState,
     headers: &HeaderMap,
 ) -> std::result::Result<Identity, (StatusCode, Json<ApiError>)> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "missing bearer token"))?
-        .to_owned();
     let config = load_config(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "invalid server configuration",
         )
     })?;
-    let header =
-        decode_header(&token).map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWT header"))?;
-    let kid = header
-        .kid
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no key id"))?;
-    let keys = cached_keys(state, &config.auth_url)
-        .await
-        .map_err(|_| error(StatusCode::UNAUTHORIZED, "cannot load Auth Mini JWKS"))?;
-    let jwk = keys
-        .iter()
-        .find(|key| {
-            key.kid == kid && key.kty == "OKP" && key.crv == "Ed25519" && key.alg == "EdDSA"
-        })
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT signing key is not trusted"))?;
-    let audience = request_audience(headers)
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "request has no host audience"))?;
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&[&config.auth_url]);
-    validation.set_audience(&[audience]);
-    let claims = decode::<Value>(
-        &token,
-        &DecodingKey::from_ed_components(&jwk.x)
-            .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWKS key"))?,
-        &validation,
-    )
-    .map_err(|_| error(StatusCode::UNAUTHORIZED, "JWT verification failed"))?
-    .claims;
-    let user_id = claims
-        .get("sub")
-        .and_then(Value::as_str)
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no subject"))?;
-    if user_id != config.root_user_id {
+    let principal = authenticated_principal(state, headers, &config.auth_url).await?;
+    if principal.subject != config.root_user_id {
         return Err(error(
             StatusCode::FORBIDDEN,
             "Cybion is restricted to its configured root user",
         ));
     }
     Ok(Identity {})
+}
+
+fn auth_mini_error(cause: AuthMiniError) -> (StatusCode, Json<ApiError>) {
+    match cause {
+        AuthMiniError::JwksUnavailable => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Auth Mini JWKS is unavailable",
+        ),
+        AuthMiniError::InvalidIssuer => error(StatusCode::UNAUTHORIZED, "invalid Auth Mini issuer"),
+        AuthMiniError::InvalidToken => error(StatusCode::UNAUTHORIZED, "JWT verification failed"),
+    }
+}
+
+async fn authenticated_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+    issuer: &str,
+) -> std::result::Result<AuthMiniPrincipal, (StatusCode, Json<ApiError>)> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
+    let audience = request_audience(headers)
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "request has no host audience"))?;
+    let verifier = {
+        let mut cached = state.auth_verifier.lock().await;
+        if let Some(cached) = cached.as_ref()
+            && cached.issuer == issuer
+            && cached.audience == audience
+        {
+            cached.verifier.clone()
+        } else {
+            let verifier =
+                AuthMiniVerifier::from_issuer(issuer, audience.clone(), JwksCachePolicy::default())
+                    .await
+                    .map_err(auth_mini_error)?;
+            *cached = Some(CachedAuthVerifier {
+                issuer: issuer.to_owned(),
+                audience,
+                verifier: verifier.clone(),
+            });
+            verifier
+        }
+    };
+    verifier.verify(token).await.map_err(auth_mini_error)
 }
 
 fn token_hash(token: &str) -> String {
@@ -3742,27 +3739,6 @@ fn executor_machine_id(
             )
         })?
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "invalid executor token"))
-}
-
-async fn cached_keys(state: &AppState, auth_url: &str) -> Result<Vec<Jwk>> {
-    if let Some(cached) = state.jwks.read().await.as_ref()
-        && cached.fetched_at.elapsed() < JWKS_TTL
-    {
-        return Ok(cached.keys.clone());
-    }
-    let jwks = state
-        .client
-        .get(format!("{auth_url}/jwks"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Jwks>()
-        .await?;
-    *state.jwks.write().await = Some(CachedJwks {
-        fetched_at: Instant::now(),
-        keys: jwks.keys.clone(),
-    });
-    Ok(jwks.keys)
 }
 
 fn request_audience(headers: &HeaderMap) -> Option<String> {
@@ -3862,48 +3838,9 @@ async fn bootstrap_subject(
     headers: &HeaderMap,
     auth_url: &str,
 ) -> std::result::Result<String, (StatusCode, Json<ApiError>)> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            error(
-                StatusCode::UNAUTHORIZED,
-                "sign in with Auth Mini before initializing Cybion",
-            )
-        })?;
-    let header =
-        decode_header(token).map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWT header"))?;
-    let kid = header
-        .kid
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no key id"))?;
-    let keys = cached_keys(state, auth_url)
+    authenticated_principal(state, headers, auth_url)
         .await
-        .map_err(|_| error(StatusCode::UNAUTHORIZED, "cannot load Auth Mini JWKS"))?;
-    let key = keys
-        .iter()
-        .find(|key| {
-            key.kid == kid && key.kty == "OKP" && key.crv == "Ed25519" && key.alg == "EdDSA"
-        })
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT signing key is not trusted"))?;
-    let audience = request_audience(headers)
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "request has no host audience"))?;
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&[auth_url]);
-    validation.set_audience(&[audience]);
-    let claims = decode::<Value>(
-        token,
-        &DecodingKey::from_ed_components(&key.x)
-            .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid JWKS key"))?,
-        &validation,
-    )
-    .map_err(|_| error(StatusCode::UNAUTHORIZED, "JWT verification failed"))?
-    .claims;
-    claims
-        .get("sub")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "JWT has no subject"))
+        .map(|principal| principal.subject)
 }
 
 async fn index() -> Response {
@@ -9191,6 +9128,11 @@ fn hostname() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use ed25519_dalek::{Signer, SigningKey};
+
     use super::*;
 
     #[test]
@@ -9450,7 +9392,7 @@ mod tests {
             skills_directory,
             skills: Arc::new(StdRwLock::new(SkillCatalog::default())),
             client: reqwest::Client::new(),
-            jwks: Arc::new(RwLock::new(None)),
+            auth_verifier: Arc::new(Mutex::new(None)),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             active_subthreads: Arc::new(Mutex::new(HashMap::new())),
             conversation_mutations: Arc::new(Mutex::new(())),
@@ -9460,6 +9402,104 @@ mod tests {
             checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             browser_sessions: browser::sessions(),
         }
+    }
+
+    async fn test_auth_mini_issuer(key: &SigningKey) -> String {
+        let jwks = json!({
+            "keys": [{
+                "kid": "test-key",
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "alg": "EdDSA",
+                "use": "sig",
+                "x": URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes()),
+            }],
+        });
+        let app = Router::new().route(
+            "/jwks",
+            get(move || {
+                let jwks = jwks.clone();
+                async move { Json(jwks) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        issuer
+    }
+
+    fn signed_auth_mini_token(
+        key: &SigningKey,
+        issuer: &str,
+        audience: &str,
+        subject: &str,
+    ) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let header =
+            URL_SAFE_NO_PAD.encode(json!({ "alg": "EdDSA", "kid": "test-key" }).to_string());
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "sub": subject,
+                "sid": "session-1",
+                "iss": issuer,
+                "aud": audience,
+                "amr": ["webauthn"],
+                "typ": "access",
+                "iat": now,
+                "exp": now + 900,
+            })
+            .to_string(),
+        );
+        let signing_input = format!("{header}.{payload}");
+        let signature = URL_SAFE_NO_PAD.encode(key.sign(signing_input.as_bytes()).to_bytes());
+        format!("{signing_input}.{signature}")
+    }
+
+    fn auth_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("cybion.example.com"));
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn identity_uses_auth_mini_verifier_and_preserves_root_user_authorization() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, "https://openai.example.com/v1");
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let issuer = test_auth_mini_issuer(&key).await;
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "UPDATE app_meta SET value = ?1 WHERE key = 'auth_url'",
+                [issuer.as_str()],
+            )
+            .unwrap();
+        let state = test_state(db);
+        let valid = signed_auth_mini_token(&key, &issuer, "cybion.example.com", "root");
+        assert!(identity(&state, &auth_headers(&valid)).await.is_ok());
+
+        let other_user = signed_auth_mini_token(&key, &issuer, "cybion.example.com", "other");
+        let error = identity(&state, &auth_headers(&other_user))
+            .await
+            .err()
+            .expect("non-root token is rejected");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let wrong_audience = signed_auth_mini_token(&key, &issuer, "other.example.com", "root");
+        let error = identity(&state, &auth_headers(&wrong_audience))
+            .await
+            .err()
+            .expect("wrong audience is rejected");
+        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

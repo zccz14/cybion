@@ -1,6 +1,6 @@
 [package]
 name = "cybion"
-version = "0.1.76"
+version = "0.1.77"
 edition = "2024"
 license = "MIT"
 description = "An unrestricted, multi-machine AI harness."
@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.98"
+auth-mini-axum = "0.1.1"
 axum = { version = "0.8.4", features = ["macros", "multipart"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.41", features = ["serde"] }
@@ -18,7 +19,6 @@ directories = "6.0.0"
 flate2 = "1.1.2"
 futures-util = { version = "0.3.31", features = ["sink"] }
 hostname = "0.4.1"
-jsonwebtoken = { version = "9.3.1", features = ["use_pem"] }
 libc = "0.2"
 notify = "8.0.0"
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
@@ -39,4 +39,5 @@ url = "2.5.4"
 uuid = { version = "1.17.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
+ed25519-dalek = "2.2.0"
 tempfile = "3.21.0"
