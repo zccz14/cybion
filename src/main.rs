@@ -115,6 +115,7 @@ struct AppState {
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     active_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     active_subthreads: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    conversation_mutations: Arc<Mutex<()>>,
     executor_tunnels: ExecutorTunnels,
     main_thread: Arc<Mutex<()>>,
     checkpoint_write_gate: Arc<RwLock<()>>,
@@ -768,6 +769,11 @@ struct AgentTurn {
 }
 
 #[derive(Deserialize)]
+struct ClearConversationInput {
+    confirmation: String,
+}
+
+#[derive(Deserialize)]
 struct CreateBrowserSession {}
 
 #[derive(Serialize)]
@@ -944,6 +950,7 @@ async fn main() -> Result<()> {
         ))),
         active_runs: Arc::new(Mutex::new(HashMap::new())),
         active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+        conversation_mutations: Arc::new(Mutex::new(())),
         executor_tunnels: ExecutorTunnels::default(),
         main_thread: Arc::new(Mutex::new(())),
         checkpoint_write_gate: Arc::new(RwLock::new(())),
@@ -1369,6 +1376,7 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/browser/sessions/{id}/input", post(browser_user_input))
         .route("/api/conversation", get(conversation))
+        .route("/api/conversation/clear", post(clear_conversation))
         .route(
             "/api/conversation/runs/{run_id}/events",
             get(conversation_run_events),
@@ -3130,17 +3138,24 @@ fn ensure_context_checkpoint_schema(connection: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS context_checkpoint_edges_predecessor
            ON context_checkpoint_edges(predecessor_id, checkpoint_id);
-         CREATE TRIGGER IF NOT EXISTS conversation_checkpoints_immutable_update
+         DROP TRIGGER IF EXISTS conversation_checkpoints_immutable_update;
+         DROP TRIGGER IF EXISTS conversation_checkpoints_immutable_delete;
+         DROP TRIGGER IF EXISTS context_checkpoint_edges_immutable_update;
+         DROP TRIGGER IF EXISTS context_checkpoint_edges_immutable_delete;
+         CREATE TRIGGER conversation_checkpoints_immutable_update
            BEFORE UPDATE ON conversation_messages WHEN OLD.type = 'checkpoint'
            BEGIN SELECT RAISE(ABORT, 'context checkpoints are append-only'); END;
-         CREATE TRIGGER IF NOT EXISTS conversation_checkpoints_immutable_delete
-           BEFORE DELETE ON conversation_messages WHEN OLD.type = 'checkpoint'
+         CREATE TRIGGER conversation_checkpoints_immutable_delete
+           BEFORE DELETE ON conversation_messages
+           WHEN OLD.type = 'checkpoint'
+             AND NOT EXISTS (SELECT 1 FROM app_meta WHERE key = 'conversation_reset_in_progress')
            BEGIN SELECT RAISE(ABORT, 'context checkpoints are append-only'); END;
-         CREATE TRIGGER IF NOT EXISTS context_checkpoint_edges_immutable_update
+         CREATE TRIGGER context_checkpoint_edges_immutable_update
            BEFORE UPDATE ON context_checkpoint_edges
            BEGIN SELECT RAISE(ABORT, 'checkpoint edges are append-only'); END;
-         CREATE TRIGGER IF NOT EXISTS context_checkpoint_edges_immutable_delete
+         CREATE TRIGGER context_checkpoint_edges_immutable_delete
            BEFORE DELETE ON context_checkpoint_edges
+           WHEN NOT EXISTS (SELECT 1 FROM app_meta WHERE key = 'conversation_reset_in_progress')
            BEGIN SELECT RAISE(ABORT, 'checkpoint edges are append-only'); END;
          CREATE TABLE IF NOT EXISTS context_memory_facts (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5620,6 +5635,81 @@ fn delete_user_goal(path: &Path, id: &str) -> Result<bool> {
     Ok(true)
 }
 
+fn clear_conversation_data(path: &Path) -> Result<()> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('conversation_reset_in_progress', '1')",
+        [],
+    )?;
+    transaction.execute("DELETE FROM context_memory_facts", [])?;
+    transaction.execute("DELETE FROM context_checkpoint_edges", [])?;
+    transaction.execute("DELETE FROM subthreads", [])?;
+    transaction.execute("DELETE FROM agent_runs", [])?;
+    transaction.execute("DELETE FROM conversation_messages", [])?;
+    transaction.execute(
+        "INSERT INTO conversation_history_search(conversation_history_search) VALUES ('rebuild')",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM app_meta WHERE key = 'conversation_reset_in_progress'",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+async fn cancel_active_conversation_work(state: &AppState) -> bool {
+    let main_runs = state
+        .active_runs
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let subthreads = state
+        .active_subthreads
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let active = !main_runs.is_empty() || !subthreads.is_empty();
+    for cancellation in main_runs.into_iter().chain(subthreads) {
+        let _ = cancellation.send(true);
+    }
+    active
+}
+
+async fn stop_active_conversation_work(state: &AppState) {
+    while cancel_active_conversation_work(state).await {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn clear_conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ClearConversationInput>,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    if input.confirmation != "clear-conversation" {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "conversation reset requires explicit confirmation",
+        ));
+    }
+    let _conversation = state.conversation_mutations.lock().await;
+    stop_active_conversation_work(&state).await;
+    clear_conversation_data(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot clear conversation",
+        )
+    })?;
+    Ok(Json(json!({ "cleared": true })))
+}
+
 fn execute_fork_subthread(
     path: &Path,
     parent_run_id: &str,
@@ -5752,6 +5842,7 @@ async fn create_goal(
     identity(&state, &headers).await?;
     let (title, task, completion_criteria) = normalize_goal_input(input)
         .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    let _conversation = state.conversation_mutations.lock().await;
     create_user_goal(&state.db_path, title, task, completion_criteria)
         .map(Json)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create Goal"))
@@ -5778,6 +5869,7 @@ async fn update_goal(
     identity(&state, &headers).await?;
     let (title, task, completion_criteria) = normalize_goal_input(input)
         .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    let _conversation = state.conversation_mutations.lock().await;
     let goal = update_user_goal(&state.db_path, &id, title, task, completion_criteria)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update Goal"))?
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "Goal not found"))?;
@@ -5857,6 +5949,7 @@ async fn delete_goal(
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Value> {
     identity(&state, &headers).await?;
+    let _conversation = state.conversation_mutations.lock().await;
     if let Some(cancel) = state.active_subthreads.lock().await.remove(&id) {
         let _ = cancel.send(true);
     }
@@ -6076,6 +6169,7 @@ async fn agent_turn(
             "main-thread checkpoint is in progress; retry your message shortly",
         ));
     }
+    let _conversation = state.conversation_mutations.lock().await;
     let user_message = append_conversation(&state.db_path, &input.message, None).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6452,8 +6546,10 @@ async fn retry_agent_turn(
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Value> {
     identity(&state, &headers).await?;
+    let _conversation = state.conversation_mutations.lock().await;
     let run = claim_main_retry_now(&state.db_path, &id)
         .map_err(|cause| error(StatusCode::CONFLICT, cause.to_string()))?;
+    drop(_conversation);
     spawn_main_run(state, run);
     Ok(Json(json!({ "retrying": true })))
 }
@@ -9357,6 +9453,7 @@ mod tests {
             jwks: Arc::new(RwLock::new(None)),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+            conversation_mutations: Arc::new(Mutex::new(())),
             executor_tunnels: ExecutorTunnels::default(),
             main_thread: Arc::new(Mutex::new(())),
             checkpoint_write_gate: Arc::new(RwLock::new(())),
@@ -12157,6 +12254,170 @@ mod tests {
             )
             .unwrap();
         assert_eq!(continuations, 0);
+    }
+
+    #[test]
+    fn clearing_conversation_preserves_machine_configuration_and_devices() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("remember this outcome".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let checkpoint_id = {
+            let connection = open_db(&db).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO conversation_messages (role, type, content, created_at, images)
+                     VALUES ('assistant', 'checkpoint', 'current state', ?1, '[]')",
+                    [&now],
+                )
+                .unwrap();
+            connection.last_insert_rowid()
+        };
+        let connection = open_db(&db).unwrap();
+        connection
+            .execute(
+                "INSERT INTO context_checkpoint_edges (checkpoint_id, hop, predecessor_id, created_at)
+                 VALUES (?1, 0, ?2, ?3)",
+                params![checkpoint_id, user.id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO context_memory_facts (
+                   fact_key, fact_value, status, first_seen_message_id, last_confirmed_message_id,
+                   source_message_ids, checkpoint_id, created_at
+                 ) VALUES ('project', 'cybion', 'current', ?1, ?1, '[1]', ?2, ?3)",
+                params![user.id, checkpoint_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
+                 VALUES ('main-run', ?1, 'completed', ?2, 'main')",
+                params![user.id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_events (run_id, event_type, payload, created_at)
+                 VALUES ('main-run', 'status', '{}', ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
+                 VALUES ('subthread-run', ?1, 'running', ?2, 'subthread')",
+                params![user.id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO subthreads (
+                   id, run_id, title, task, completion_criteria, goal_state, status, model, context_json,
+                   forked_from_message_id, created_at, updated_at
+                 ) VALUES ('goal', 'subthread-run', 'Goal', 'Task', 'Done', 'active', 'queued', 'model', '[]', ?1, ?2, ?2)",
+                params![user.id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO peers (
+                   id, name, machine_id, hostname, access_token_hash, deployment_role,
+                   filesystem_enabled, bash_enabled, created_at
+                 ) VALUES ('peer', 'Executor', 'machine', 'host', 'hash', 'executor', 1, 1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO executor_pairings (token_hash, expires_at) VALUES ('pairing', ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO command_runs (
+                   id, command, target_machine_id, target_machine_name, started_at, status
+                 ) VALUES ('command', 'pwd', '', 'local', ?1, 'complete')",
+                [&now],
+            )
+            .unwrap();
+        drop(connection);
+
+        clear_conversation_data(&db).unwrap();
+
+        let connection = open_db(&db).unwrap();
+        for table in [
+            "conversation_messages",
+            "agent_runs",
+            "agent_events",
+            "subthreads",
+            "context_checkpoint_edges",
+            "context_memory_facts",
+            "conversation_history_search",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} should be cleared");
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM app_meta WHERE key = 'default_model'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            DEFAULT_MODEL_ID
+        );
+        for table in ["peers", "executor_pairings", "command_runs"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table} should be preserved");
+        }
+        let reset_flag: Option<String> = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'conversation_reset_in_progress'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(reset_flag.is_none());
+        connection
+            .execute(
+                "INSERT INTO conversation_messages (role, type, content, created_at, images)
+                 VALUES ('assistant', 'checkpoint', 'new current state', ?1, '[]')",
+                [&now],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "DELETE FROM conversation_messages WHERE type = 'checkpoint'",
+                    []
+                )
+                .is_err()
+        );
     }
 
     #[test]
