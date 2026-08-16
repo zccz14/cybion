@@ -111,7 +111,7 @@ C_t = f(H_t)
 - Cybion 只有一条全局、按 `id` 严格追加的对话记录序列；不存在 `conversation_id` 分区。
 - 原始消息和 checkpoint 共用这条序列，分别以 `type = message` 和 `type = checkpoint` 标识。
 - checkpoint `#c` 语义上覆盖且只覆盖序列中 `id < c` 的全部记录；它不保存 `covered_through_id` 之类的第二边界。
-- 写入 checkpoint 时，全局记录写入必须串行化：任何新记录都不能穿插在 checkpoint 的输入快照与其追加之间。否则宁可不写 checkpoint，也不能写出覆盖语义不成立的 checkpoint。
+- checkpoint 生成优先于主线程新消息：它先取得全局记录写入闸门；闸门持有期间，新消息立即被拒绝写入并要求重试。checkpoint 在闸门内重新读取完整快照、生成并追加，随后才释放消息写入。因此任何新记录都不能穿插在 checkpoint 的输入快照与其追加之间。
 
 因此，下一次主线程推理只需取最新 checkpoint 和其后的原始消息：
 
