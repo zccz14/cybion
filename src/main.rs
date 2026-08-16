@@ -1560,7 +1560,10 @@ fn load_checkpoint_by_id(
         .transpose()
 }
 
-fn load_latest_checkpoint(connection: &Connection, before_id: i64) -> Result<Option<ContextCheckpoint>> {
+fn load_latest_checkpoint(
+    connection: &Connection,
+    before_id: i64,
+) -> Result<Option<ContextCheckpoint>> {
     let checkpoint = connection
         .query_row(
             "SELECT id, content, created_at FROM conversation_messages
@@ -1961,13 +1964,9 @@ async fn compact_context_after_overflow(
             snapshot_last_entry_id,
             ..
         } => {
-            let checkpoint = persist_main_checkpoint(
-                db_path,
-                events,
-                *snapshot_last_entry_id,
-                distilled,
-            )
-            .await?;
+            let checkpoint =
+                persist_main_checkpoint(db_path, events, *snapshot_last_entry_id, distilled)
+                    .await?;
             Ok(vec![main_checkpoint_item(&checkpoint)])
         }
         ContextCheckpointTarget::Subthread { id } => {
@@ -2009,11 +2008,10 @@ async fn persist_main_checkpoint(
     let DistilledContext { summary, facts } = distilled;
     let checkpoint_id = {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let latest_entry_id: Option<i64> = transaction.query_row(
-            "SELECT MAX(id) FROM conversation_messages",
-            [],
-            |row| row.get(0),
-        )?;
+        let latest_entry_id: Option<i64> =
+            transaction.query_row("SELECT MAX(id) FROM conversation_messages", [], |row| {
+                row.get(0)
+            })?;
         if latest_entry_id != Some(snapshot_last_entry_id) {
             return Err(anyhow!(
                 "checkpoint snapshot is stale; refusing to append a checkpoint with a false coverage boundary"
@@ -2049,19 +2047,11 @@ async fn persist_main_checkpoint(
     };
     let checkpoint = load_checkpoint_by_id(&connection, checkpoint_id)?
         .ok_or_else(|| anyhow!("new context checkpoint is missing"))?;
-    merge_memory_facts(
-        &connection,
-        checkpoint.id,
-        1,
-        checkpoint.id - 1,
-        facts,
-    )?;
+    merge_memory_facts(&connection, checkpoint.id, 1, checkpoint.id - 1, facts)?;
     send_agent_event(
         db_path,
         events,
-        AgentEvent::Checkpoint {
-            id: checkpoint.id,
-        },
+        AgentEvent::Checkpoint { id: checkpoint.id },
     )
     .await?;
     Ok(checkpoint)
@@ -2286,12 +2276,11 @@ fn compile_main_context(db_path: &Path, user_message_id: i64) -> Result<Compiled
     let connection = open_db(db_path)?;
     let checkpoint = load_latest_checkpoint(&connection, i64::MAX)?;
     let memory = load_context_memory_root(&connection)?;
-    let snapshot_last_entry_id = connection.query_row(
-        "SELECT MAX(id) FROM conversation_messages",
-        [],
-        |row| row.get::<_, Option<i64>>(0),
-    )?
-    .ok_or_else(|| anyhow!("main-thread context has no entries"))?;
+    let snapshot_last_entry_id = connection
+        .query_row("SELECT MAX(id) FROM conversation_messages", [], |row| {
+            row.get::<_, Option<i64>>(0)
+        })?
+        .ok_or_else(|| anyhow!("main-thread context has no entries"))?;
     let mut items = vec![context_memory_index_item(&memory)];
     items.extend(context_items(checkpoint.as_ref(), &history));
     Ok(CompiledMainContext {
@@ -2662,10 +2651,11 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
         messages.first().map(|message| message.id),
         messages.last().map(|message| message.id),
     )?;
-    let history_messages =
-        connection.query_row("SELECT COUNT(*) FROM conversation_messages WHERE type = 'message'", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
+    let history_messages = connection.query_row(
+        "SELECT COUNT(*) FROM conversation_messages WHERE type = 'message'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
     let checkpoint = load_latest_checkpoint(&connection, i64::MAX)?;
     Ok(ConversationState {
         context: ContextState {
@@ -2882,7 +2872,10 @@ fn ensure_conversation_metadata_columns(connection: &Connection) -> Result<()> {
         ("output_tokens", "INTEGER"),
         ("images", "TEXT"),
         ("source_run_id", "TEXT"),
-        ("type", "TEXT NOT NULL DEFAULT 'message' CHECK(type IN ('message', 'checkpoint'))"),
+        (
+            "type",
+            "TEXT NOT NULL DEFAULT 'message' CHECK(type IN ('message', 'checkpoint'))",
+        ),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute_batch(&format!(
@@ -6313,11 +6306,11 @@ async fn run_agent(
         &Arc::new(Mutex::new(HashMap::new())),
         ContextCheckpointTarget::Main {
             current_message_id: None,
-            snapshot_last_entry_id: open_db(db_path)?.query_row(
-                "SELECT MAX(id) FROM conversation_messages",
-                [],
-                |row| row.get::<_, Option<i64>>(0),
-            )?.unwrap_or_default(),
+            snapshot_last_entry_id: open_db(db_path)?
+                .query_row("SELECT MAX(id) FROM conversation_messages", [], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })?
+                .unwrap_or_default(),
         },
         None,
         &ExecutorTunnels::default(),
@@ -9506,9 +9499,19 @@ mod tests {
         drop(connection);
         bootstrap_database(&db).unwrap();
         let connection = open_db(&db).unwrap();
-        assert!(connection.prepare("SELECT COUNT(*) FROM context_checkpoints").is_err());
+        assert!(
+            connection
+                .prepare("SELECT COUNT(*) FROM context_checkpoints")
+                .is_err()
+        );
         assert_eq!(
-            connection.query_row("SELECT type FROM conversation_messages WHERE id = 1", [], |row| row.get::<_, String>(0)).unwrap(),
+            connection
+                .query_row(
+                    "SELECT type FROM conversation_messages WHERE id = 1",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
             "message"
         );
         assert_eq!(
@@ -11020,9 +11023,12 @@ mod tests {
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
         ) -> Response {
-            let is_checkpoint_request = request["instructions"]
-                .as_str()
-                .is_some_and(|instructions| instructions.contains("durable current-state checkpoint"));
+            let is_checkpoint_request =
+                request["instructions"]
+                    .as_str()
+                    .is_some_and(|instructions| {
+                        instructions.contains("durable current-state checkpoint")
+                    });
             let request_number = {
                 let mut requests = requests.lock().await;
                 requests.push(request);
@@ -11157,13 +11163,21 @@ mod tests {
         assert!(requests[1..requests.len() - 1].iter().all(|request| {
             request["instructions"]
                 .as_str()
-                .is_some_and(|instructions| instructions.contains("durable current-state checkpoint"))
+                .is_some_and(|instructions| {
+                    instructions.contains("durable current-state checkpoint")
+                })
         }));
-        assert!(requests.last().unwrap()["input"].as_array().unwrap().iter().any(|item| {
-            item["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("completed turns are durable evidence"))
-        }));
+        assert!(
+            requests.last().unwrap()["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["content"].as_str().is_some_and(|content| {
+                        content.contains("completed turns are durable evidence")
+                    })
+                })
+        );
     }
 
     #[tokio::test]
