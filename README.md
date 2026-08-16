@@ -106,11 +106,18 @@ C_t = f(H_t)
 保存；`search_thread_history` 对完整主线程消息做全文关键词检索，返回命中片段和消息 ID，
 再由 `read_thread_history` 分页展开原始证据。因此 checkpoint 永远不能成为历史的唯一入口。
 
-每个 **checkpoint** 是一个小的、不可变的**当前状态**快照，而不是尽可能完整的历史摘要：
+每个 **checkpoint** 是一个小的、不可变的**当前状态**快照，而不是尽可能完整的历史摘要。以下是产品的硬约束，而不是可替换的实现策略：
+
+- Cybion 只有一条全局、按 `id` 严格追加的对话记录序列；不存在 `conversation_id` 分区。
+- 原始消息和 checkpoint 共用这条序列，分别以 `type = message` 和 `type = checkpoint` 标识。
+- checkpoint `#c` 语义上覆盖且只覆盖序列中 `id < c` 的全部记录；它不保存 `covered_through_id` 之类的第二边界。
+- 写入 checkpoint 时，全局记录写入必须串行化：任何新记录都不能穿插在 checkpoint 的输入快照与其追加之间。否则宁可不写 checkpoint，也不能写出覆盖语义不成立的 checkpoint。
+
+因此，下一次主线程推理只需取最新 checkpoint 和其后的原始消息：
 
 ```text
 S_c = state(objective, active constraints, open work, evidence routes)
-C_t = map(S_c, H_(c+1) ... H_t)
+C_t = map(S_c, H_(c+1) ... H_t), where c = latest checkpoint id
 ```
 
 它只保留当前目标、有效决策与约束、未完成工作、已验证环境状态、下一步，以及精确的
@@ -119,9 +126,8 @@ C_t = map(S_c, H_(c+1) ... H_t)
 状态快照，然后自动重试，而不再把完整历史当作必须递归压缩的对象。
 
 checkpoint 和它的前驱边均为 append-only。每个新节点在同一 SQLite 事务内写入多条指向
-前序状态的跳边；旧节点和旧边禁止更新、删除或重连。首条边保持时间连续性，其余跳边把
-状态谱系压缩为指数跨度，以便审计旧状态时不会退化成单链回溯。这里没有应用层平衡树或
-rebalance：原始历史的定位由全文搜索和消息 ID 读取承担，图只服务于当前状态的谱系。
+前序状态的跳边；旧节点和旧边禁止更新、删除或重连。跳边服务于状态谱系的审计和定位，
+不构成平衡树，也没有 rebalance：原始历史的定位由全文搜索和消息 ID 读取承担。
 
 长期记忆是附带来源的事实修订索引：它只收录明确表达或稳定验证的协作偏好、项目和权威
 数据路径、持久配置、设备或服务状态；每项都保存消息 ID、checkpoint 引用和
