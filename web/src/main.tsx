@@ -33,7 +33,7 @@ declare global { interface Window { __CYBION_AUTH_URL: string | null } }
 
 type DeploymentRole = 'controller' | 'executor'
 type Status = { machine_id: string; hostname: string; root_user_id: string; auth_url: string; openai_base_url: string; deployment_role: DeploymentRole }
-type Settings = { default_model: string; subthread_model: string; voice_script_model: string; voice_script_max_chars: number; edge_tts_zh_voice: string; edge_tts_en_voice: string; openai_base_url: string; openai_api_key: string }
+type Settings = { default_model: string; subthread_model: string; voice_script_model: string; voice_turn_model: string; voice_script_max_chars: number; edge_tts_zh_voice: string; edge_tts_en_voice: string; openai_base_url: string; openai_api_key: string }
 type ExecutorPairing = { pairing_url: string; expires_at: string }
 type UpdateStatus = { current_version: string; latest_version: string | null; state: 'checking' | 'current' | 'ready' | 'failed'; detail: string }
 type Peer = { id: string; name: string; machine_id: string; hostname: string; deployment_role: DeploymentRole; filesystem_enabled: boolean; bash_enabled: boolean; created_at: string; last_seen_at: string | null; online: boolean }
@@ -43,6 +43,8 @@ type GeneratedImage = { id: string; data: string }
 type ChatMessage = { id?: number; role: string; content: string | null; images?: GeneratedImage[]; created_at?: string; duration_ms?: number; input_tokens?: number; output_tokens?: number }
 type Transcription = { text: string }
 type VoiceScript = { text: string }
+type VoiceTurnDecision = { action: 'continue' | 'submit' | 'discard' | 'confirm'; relation: 'new_command' | 'answer' | 'addendum' | 'correction' | 'filler' }
+type VoicePreview = { state: 'armed' | 'listening' | 'transcribing' | 'deciding' | 'confirm'; transcript: string }
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
 type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { type: 'checkpoint'; id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown>; started_at?: string } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string; output_bytes?: number; finished_at?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
@@ -77,24 +79,24 @@ const goalCopy = {
 const words = {
   en: {
     machine: 'Machine', console: 'Console', machines: 'Machines', files: 'Files', commands: 'Commands', resources: 'Resources', tools: 'Tools', skills: 'Skills', settings: 'Settings', connecting: 'Connecting…', loadingMachine: 'Loading machine', online: 'Online', light: 'Light', dark: 'Dark', language: 'Language',
-    consoleDescription: 'Agent activity is streamed as it happens.', context: 'Context', tokens: 'tokens', duration: 'Duration', seconds: 's', stop: 'Stop', startRecording: 'Start voice input', stopRecording: 'Stop voice input', transcribing: 'Transcribing…', agentWorking: 'Agent is working…', greeting: 'I am connected to this machine. Tell me the outcome you want to reach.', queued: 'Queued', completed: 'Completed', calling: 'Calling', listingFiles: 'Listing', listedFiles: 'Listed', readingFile: 'Reading', readFile: 'Read', writingFile: 'Editing', wroteFile: 'Edited', runningCommand: 'Running command', ranCommand: 'Ran command', searchingWeb: 'Searching the web', searchedWeb: 'Searched the web', reasoning: 'Reasoning', parameters: 'Parameters', generatingImage: 'Generating image', generatedImage: 'Generated image', addedLines: 'added', deletedLines: 'deleted', lines: 'lines', outcomePlaceholder: 'Describe the outcome you want…', queuedPlaceholder: 'Add a follow-up prompt to the queue…', composeHint: 'Enter to send · Shift+Enter for a new line · IME Enter confirms composition', queuedCount: 'queued',
+    consoleDescription: 'Agent activity is streamed as it happens.', context: 'Context', tokens: 'tokens', duration: 'Duration', seconds: 's', stop: 'Stop', startRecording: 'Start voice input', stopRecording: 'Stop voice input', transcribing: 'Transcribing…', voiceReady: 'Voice ready · start speaking', voiceListening: 'Listening', voiceUnderstanding: 'Understanding the turn…', voiceContinue: 'Keep speaking…', voiceConfirm: 'I heard this. Send it or keep listening?', voiceSend: 'Send', voiceDiscard: 'Discard', agentWorking: 'Agent is working…', greeting: 'I am connected to this machine. Tell me the outcome you want to reach.', queued: 'Queued', completed: 'Completed', calling: 'Calling', listingFiles: 'Listing', listedFiles: 'Listed', readingFile: 'Reading', readFile: 'Read', writingFile: 'Editing', wroteFile: 'Edited', runningCommand: 'Running command', ranCommand: 'Ran command', searchingWeb: 'Searching the web', searchedWeb: 'Searched the web', reasoning: 'Reasoning', parameters: 'Parameters', generatingImage: 'Generating image', generatedImage: 'Generated image', addedLines: 'added', deletedLines: 'deleted', lines: 'lines', outcomePlaceholder: 'Describe the outcome you want…', queuedPlaceholder: 'Add a follow-up prompt to the queue…', composeHint: 'Enter to send · Shift+Enter for a new line · IME Enter confirms composition', queuedCount: 'queued',
     machinesTitle: 'Machines', machinesDescription: 'Pair outbound-only tool executors with this controller.', enrolledMachines: 'Registered machines', noMachines: 'No remote machines registered.', pairExecutor: 'Pair executor', pairExecutorDescription: 'Create a one-time command for a device that has no public address, web console, or Auth Mini login.', pairingCommand: 'Run this on the executor', pairingExpires: 'Expires {time}', pairingOneTime: 'This URL is single-use. The executor stores only its controller URL and device access token.', copy: 'Copy', copied: 'Copied', remove: 'Remove', browser: 'Browser', browserTitle: 'Browser Control', browserDescription: 'Agents autonomously create and control disposable, isolated Chromium sessions.', browserCreateHint: 'Agents create unrestricted sessions when needed. Create one here only for manual takeover.', createBrowser: 'Create browser session', computerUse: 'Enable Computer Use', computerUseHint: 'Visual actions pause for explicit approval before clicks or typing.', noBrowserSessions: 'No browser sessions are active.', selectBrowser: 'Select browser session', noBrowser: 'No browser', closeBrowser: 'Close session', approveAction: 'Approve action', browserInput: 'Type into browser', sendBrowserInput: 'Send input', browserLiveView: 'Live browser view', browserClickHint: 'Click the preview to take over with direct pointer input. Scroll over it with a mouse or trackpad.',
     filesTitle: 'Files', filesDescription: 'Browse and edit the active machine.', refresh: 'Refresh', directory: 'Directory', selectFile: 'Select a file', save: 'Save',
     commandsTitle: 'Commands', commandsDescription: 'Every run_bash invocation is durably recorded. Running commands stay first.', noCommands: 'No commands have been run.', noCommandMatches: 'No commands match these filters.', command: 'Command', commandTarget: 'Target machine', commandStartedAt: 'Started', commandFinishedAt: 'Finished', commandResult: 'Result', commandExitCode: 'Exit code', commandRunning: 'Running', commandCancelled: 'Cancelled', commandComplete: 'Complete', commandSearch: 'Search commands', commandSearchPlaceholder: 'Command, machine, or output', commandAllStatuses: 'All statuses', commandAllMachines: 'All machines', commandClearFilters: 'Clear filters', commandViewResult: 'View result', commandStdout: 'Standard output', commandStderr: 'Standard error', commandNoResult: 'No result yet.', commandRange: '{from}–{to} of {total} commands', commandPage: 'Page {page} of {pages}', commandPreviousPage: 'Previous', commandNextPage: 'Next', commandPageSize: 'Per page',
     resourcesTitle: 'Resources', resourcesDescription: 'Live capacity and local database usage.', sampled: 'Sampled', cpu: 'CPU', memory: 'Memory', network: 'Network', disk: 'Disk', sqlite: 'SQLite database', load1m: '1m load', logicalCpus: 'Logical CPUs', processMemory: 'Cybion RSS', otherMemory: 'Other system usage', available: 'Available', swap: 'Swap', received: 'Received', transmitted: 'Transmitted', interfaces: 'Interfaces', mount: 'Mount', main: 'Main', wal: 'WAL', shm: 'SHM', reclaimable: 'Reclaimable', unavailable: 'Unavailable',
-    settingsTitle: 'Settings', settingsDescription: 'Configure this machine\'s agent upstream, thread models, and reply announcements.', defaultModel: 'Default model', defaultModelDescription: 'Used by the next agent turn.', modelId: 'Model ID', modelHint: 'Use a model supported by the configured upstream.', voiceScriptModel: 'Voice announcement model', voiceScriptModelHint: 'Rewrites final replies into natural speech before playback.', voiceScriptLength: 'Voice announcement length', voiceScriptLengthHint: 'Maximum characters in the generated script. 150 characters is usually about 30 seconds.', chineseVoice: 'Chinese Edge voice', englishVoice: 'English Edge voice', edgeVoiceHint: 'Use an Edge Neural voice name, for example {voice}.', baseUrlDescription: 'Used for the next agent turn.', apiKeyDescription: 'Used for the next agent turn.', saveChanges: 'Save changes', requestFailed: 'Request failed', initializeCybion: 'Initialize Cybion', initializeDescription: 'Bind this machine to your Auth Mini identity and OpenAI-compatible upstream.', authMiniUrl: 'Auth Mini URL', continueAuth: 'Continue with Auth Mini', apiKey: 'OpenAI API key', baseUrl: 'Base URL', initialize: 'Initialize', returnMachine: 'Return to the machine', signInDescription: 'Sign in through the configured Auth Mini server.', toolsTitle: 'Tools', toolsDescription: 'Every tool sent with a main-thread Responses request.', toolName: 'Tool', toolDescription: 'Description', toolParameters: 'Parameters', noTools: 'No tools are available.', status: 'Status',
+    settingsTitle: 'Settings', settingsDescription: 'Configure this machine\'s agent upstream, thread models, and reply announcements.', defaultModel: 'Default model', defaultModelDescription: 'Used by the next agent turn.', modelId: 'Model ID', modelHint: 'Use a model supported by the configured upstream.', voiceScriptModel: 'Voice announcement model', voiceScriptModelHint: 'Rewrites final replies into natural speech before playback.', voiceTurnModel: 'Voice turn model', voiceTurnModelHint: 'Decides whether a recognized voice segment should be sent or kept open.', voiceScriptLength: 'Voice announcement length', voiceScriptLengthHint: 'Maximum characters in the generated script. 150 characters is usually about 30 seconds.', chineseVoice: 'Chinese Edge voice', englishVoice: 'English Edge voice', edgeVoiceHint: 'Use an Edge Neural voice name, for example {voice}.', baseUrlDescription: 'Used for the next agent turn.', apiKeyDescription: 'Used for the next agent turn.', saveChanges: 'Save changes', requestFailed: 'Request failed', initializeCybion: 'Initialize Cybion', initializeDescription: 'Bind this machine to your Auth Mini identity and OpenAI-compatible upstream.', authMiniUrl: 'Auth Mini URL', continueAuth: 'Continue with Auth Mini', apiKey: 'OpenAI API key', baseUrl: 'Base URL', initialize: 'Initialize', returnMachine: 'Return to the machine', signInDescription: 'Sign in through the configured Auth Mini server.', toolsTitle: 'Tools', toolsDescription: 'Every tool sent with a main-thread Responses request.', toolName: 'Tool', toolDescription: 'Description', toolParameters: 'Parameters', noTools: 'No tools are available.', status: 'Status',
     updatesTitle: 'Updates', updatesDescription: 'Cybion checks GitHub Releases at startup and every six hours. Downloads are verified before installation.', currentVersion: 'Current version', latestVersion: 'Latest version', checkForUpdates: 'Check for updates', checkingForUpdates: 'Checking for updates…', updateChecking: 'Checking', updateCurrent: 'Up to date', updateReady: 'Ready to install', updateFailed: 'Check failed', restartToInstall: 'Restart and install', restartingToInstall: 'Restarting to install…',
     skillsTitle: 'Skills', skillsDescription: 'Installed skills are watched and applied to the next agent API request.', skillsDirectory: 'Skills directory', installedSkills: 'Installed skills', noSkills: 'No SKILL.md files found.', skillDirectory: 'Installation directory',
     controller: 'Controller', executor: 'Tool executor', deploymentRole: 'Deployment role', controllerDescription: 'Runs the main thread, model inference, and local or remote tools.', executorDescription: 'Connects its local tools back to one controller and does not require a model upstream.', controllerUrl: 'Controller Cybion URL', controllerUrlDescription: 'This executor registers and keeps an outbound SSE connection to the controller when settings are saved.', checkpoint: 'Checkpoint', fullHistory: 'full-history messages', memoryFacts: 'durable facts', activeInputs: 'active inputs', backgroundWork: 'background tasks', announceReplies: 'Automatic voice announcements', continuousVoice: 'Continuous voice', speakResult: 'Speak', preparingVoice: 'Preparing voice…', showParameters: 'Show parameters', hideParameters: 'Hide parameters', showRunActivity: 'Show activity', hideRunActivity: 'Hide activity', loadEarlierActivity: 'Load earlier activity', loadingActivity: 'Loading activity…', loadEarlierMessages: 'Load earlier messages', loadingEarlierMessages: 'Loading earlier messages…', loadOutput: 'Load output', loadMoreOutput: 'Load more output', loadingOutput: 'Loading output…', mainThreadQueued: 'Queued in the main thread', mainThreadRunning: 'Compiling context', checkpointing: 'Creating checkpoint', retrying: 'Retrying automatically', retryNow: 'Retry now', executorOnly: 'This machine is a tool executor. Use a controller Cybion to call its tools.', capabilities: 'Capabilities', verifyMachine: 'Registration verifies the shared issuer and root user.', threads: 'Threads', threadsTitle: 'Threads', threadsDescription: 'The main thread stays first, followed by live subthreads that have not been reaped.', noActiveThreads: 'No active subthreads.', thread: 'Thread', threadTask: 'Task', threadModel: 'Model', threadUpdated: 'Updated', threadDetails: 'Thread details', threadDetailsDescription: 'Read-only history and live events from this subthread.', backToThreads: 'Back to threads', events: 'Events', noThreadEvents: 'No events yet.', event: 'Event', time: 'Time', details: 'Details', threadQueued: 'Queued', threadRunning: 'Running', threadRetrying: 'Retrying', threadIdle: 'Idle', mainThread: 'Main thread', mainThreadDescription: 'The single user thread that accepts prompts.', mainThreadModel: 'Main thread model', subthreadModel: 'Subthread model', mainThreadModelHint: 'Used only by the main conversation.', subthreadModelHint: 'Captured when each subthread is forked.',
   },
   zh: {
     machine: '机器', console: '控制台', machines: '机器', files: '文件', commands: '命令', resources: '资源', tools: '工具', skills: '技能', settings: '设置', connecting: '正在连接…', loadingMachine: '正在加载机器', online: '在线', light: '亮色', dark: '深色', language: '语言',
-    consoleDescription: '实时展示 Agent 的执行过程。', context: '上下文', tokens: 'tokens', duration: '用时', seconds: '秒', stop: '停止', startRecording: '开始语音输入', stopRecording: '停止语音输入', transcribing: '正在转写…', agentWorking: 'Agent 正在执行…', greeting: '我已连接到这台机器。请告诉我你想要达成的结果。', queued: '排队中', completed: '已完成', calling: '正在调用', listingFiles: '正在列出', listedFiles: '已列出', readingFile: '正在读取', readFile: '已读取', writingFile: '正在编辑', wroteFile: '已编辑', runningCommand: '正在运行命令', ranCommand: '已运行命令', searchingWeb: '正在搜索网页', searchedWeb: '已搜索网页', reasoning: '推理', parameters: '参数', generatingImage: '正在生成图片', generatedImage: '已生成图片', addedLines: '增加', deletedLines: '删除', lines: '行', outcomePlaceholder: '描述你想要的结果…', queuedPlaceholder: '追加一条后续提示词…', composeHint: 'Enter 发送 · Shift+Enter 换行 · 输入法确认候选时不会发送', queuedCount: '条排队中',
+    consoleDescription: '实时展示 Agent 的执行过程。', context: '上下文', tokens: 'tokens', duration: '用时', seconds: '秒', stop: '停止', startRecording: '开始语音输入', stopRecording: '停止语音输入', transcribing: '正在转写…', voiceReady: '语音待命，说话即可', voiceListening: '正在听', voiceUnderstanding: '正在判断是否说完…', voiceContinue: '继续补充…', voiceConfirm: '我听到这段内容，要发送还是继续听？', voiceSend: '发送', voiceDiscard: '丢弃', agentWorking: 'Agent 正在执行…', greeting: '我已连接到这台机器。请告诉我你想要达成的结果。', queued: '排队中', completed: '已完成', calling: '正在调用', listingFiles: '正在列出', listedFiles: '已列出', readingFile: '正在读取', readFile: '已读取', writingFile: '正在编辑', wroteFile: '已编辑', runningCommand: '正在运行命令', ranCommand: '已运行命令', searchingWeb: '正在搜索网页', searchedWeb: '已搜索网页', reasoning: '推理', parameters: '参数', generatingImage: '正在生成图片', generatedImage: '已生成图片', addedLines: '增加', deletedLines: '删除', lines: '行', outcomePlaceholder: '描述你想要的结果…', queuedPlaceholder: '追加一条后续提示词…', composeHint: 'Enter 发送 · Shift+Enter 换行 · 输入法确认候选时不会发送', queuedCount: '条排队中',
     machinesTitle: '机器', machinesDescription: '为仅主动出站的工具执行设备配对。', enrolledMachines: '已注册机器', noMachines: '尚未注册远程机器。', pairExecutor: '配对执行设备', pairExecutorDescription: '为没有公网地址、Web 控制台或 Auth Mini 登录的设备生成一次性命令。', pairingCommand: '在执行设备上运行', pairingExpires: '有效期至 {time}', pairingOneTime: '此 URL 仅能使用一次。执行设备只保存主控地址和设备访问 Token。', copy: '复制', copied: '已复制', remove: '移除', browser: '浏览器', browserTitle: '浏览器控制', browserDescription: 'Agent 会自主创建并控制一次性的隔离 Chromium 会话。', browserCreateHint: 'Agent 会在需要时创建可访问任意网页的会话；仅在你要手动接管时在此创建。', createBrowser: '创建浏览器会话', computerUse: '启用 Computer Use', computerUseHint: '视觉操作在点击或输入前会暂停并请求明确批准。', noBrowserSessions: '当前没有浏览器会话。', selectBrowser: '选择浏览器会话', noBrowser: '不使用浏览器', closeBrowser: '关闭会话', approveAction: '批准操作', browserInput: '向浏览器输入', sendBrowserInput: '发送输入', browserLiveView: '浏览器实时视图', browserClickHint: '点击预览即可直接接管指针输入；可在预览上使用鼠标或触控板滚动。',
     filesTitle: '文件', filesDescription: '浏览并编辑当前机器。', refresh: '刷新', directory: '目录', selectFile: '选择文件', save: '保存',
     commandsTitle: '命令', commandsDescription: '每次 run_bash 调用都会持久化记录；正在运行的命令固定排在前面。', noCommands: '尚未运行任何命令。', noCommandMatches: '没有符合筛选条件的命令。', command: '命令', commandTarget: '目标机器', commandStartedAt: '开始时间', commandFinishedAt: '结束时间', commandResult: '返回结果', commandExitCode: '返回码', commandRunning: '运行中', commandCancelled: '已取消', commandComplete: '已完成', commandSearch: '搜索命令', commandSearchPlaceholder: '命令、机器或输出', commandAllStatuses: '全部状态', commandAllMachines: '全部机器', commandClearFilters: '清除筛选', commandViewResult: '查看返回结果', commandStdout: '标准输出', commandStderr: '标准错误', commandNoResult: '尚无返回结果。', commandRange: '第 {from}–{to} 条，共 {total} 条命令', commandPage: '第 {page} / {pages} 页', commandPreviousPage: '上一页', commandNextPage: '下一页', commandPageSize: '每页',
     resourcesTitle: '系统资源', resourcesDescription: '实时容量和本地数据库占用。', sampled: '采样时间', cpu: 'CPU', memory: '内存', network: '网络', disk: '磁盘', sqlite: 'SQLite 数据库', load1m: '1 分钟负载', logicalCpus: '逻辑核心', processMemory: 'Cybion RSS', otherMemory: '其他系统占用', available: '可用', swap: '交换分区', received: '接收', transmitted: '发送', interfaces: '网卡', mount: '挂载点', main: '主文件', wal: 'WAL', shm: 'SHM', reclaimable: '可回收', unavailable: '不可用',
-    settingsTitle: '设置', settingsDescription: '配置当前机器的 Agent 上游、线程模型和结果朗读。', defaultModel: '默认模型', defaultModelDescription: '用于下一轮 Agent 对话。', modelId: '模型 ID', modelHint: '请输入当前上游支持的模型。', voiceScriptModel: '朗读模型', voiceScriptModelHint: '播放前将最终回复改写为自然口语。', voiceScriptLength: '朗读字数', voiceScriptLengthHint: '生成语音稿的最大字数；150 字通常约为 30 秒。', chineseVoice: '中文 Edge 音色', englishVoice: '英文 Edge 音色', edgeVoiceHint: '使用 Edge Neural 音色名称，例如 {voice}。', baseUrlDescription: '用于下一轮 Agent 对话。', apiKeyDescription: '用于下一轮 Agent 对话。', saveChanges: '保存更改', requestFailed: '请求失败', initializeCybion: '初始化 Cybion', initializeDescription: '将此机器绑定到你的 Auth Mini 身份和 OpenAI 兼容上游。', authMiniUrl: 'Auth Mini 地址', continueAuth: '使用 Auth Mini 继续', apiKey: 'OpenAI API 密钥', baseUrl: '基础地址', initialize: '初始化', returnMachine: '返回机器', signInDescription: '通过已配置的 Auth Mini 服务登录。', toolsTitle: '工具', toolsDescription: '与主线程 Responses 请求一同发送的全部工具。', toolName: '工具', toolDescription: '说明', toolParameters: '参数格式', noTools: '暂时没有可用工具。', status: '状态',
+    settingsTitle: '设置', settingsDescription: '配置当前机器的 Agent 上游、线程模型和结果朗读。', defaultModel: '默认模型', defaultModelDescription: '用于下一轮 Agent 对话。', modelId: '模型 ID', modelHint: '请输入当前上游支持的模型。', voiceScriptModel: '朗读模型', voiceScriptModelHint: '播放前将最终回复改写为自然口语。', voiceTurnModel: '语音轮次模型', voiceTurnModelHint: '判断一段听写应发送给 Agent 还是继续等待补充。', voiceScriptLength: '朗读字数', voiceScriptLengthHint: '生成语音稿的最大字数；150 字通常约为 30 秒。', chineseVoice: '中文 Edge 音色', englishVoice: '英文 Edge 音色', edgeVoiceHint: '使用 Edge Neural 音色名称，例如 {voice}。', baseUrlDescription: '用于下一轮 Agent 对话。', apiKeyDescription: '用于下一轮 Agent 对话。', saveChanges: '保存更改', requestFailed: '请求失败', initializeCybion: '初始化 Cybion', initializeDescription: '将此机器绑定到你的 Auth Mini 身份和 OpenAI 兼容上游。', authMiniUrl: 'Auth Mini 地址', continueAuth: '使用 Auth Mini 继续', apiKey: 'OpenAI API 密钥', baseUrl: '基础地址', initialize: '初始化', returnMachine: '返回机器', signInDescription: '通过已配置的 Auth Mini 服务登录。', toolsTitle: '工具', toolsDescription: '与主线程 Responses 请求一同发送的全部工具。', toolName: '工具', toolDescription: '说明', toolParameters: '参数格式', noTools: '暂时没有可用工具。', status: '状态',
     updatesTitle: '版本更新', updatesDescription: 'Cybion 会在启动时及每六小时检查 GitHub Release。安装前会校验下载内容。', currentVersion: '当前版本', latestVersion: '最新版本', checkForUpdates: '检查更新', checkingForUpdates: '正在检查更新…', updateChecking: '检查中', updateCurrent: '已是最新', updateReady: '可以安装', updateFailed: '检查失败', restartToInstall: '重启并安装', restartingToInstall: '正在重启安装…',
     skillsTitle: '技能', skillsDescription: '已安装的技能目录会被监听，并在下一次 Agent API 请求时生效。', skillsDirectory: '技能目录', installedSkills: '已安装技能', noSkills: '未找到 SKILL.md 文件。', skillDirectory: '安装目录',
     controller: '控制设备', executor: '工具执行设备', deploymentRole: '部署角色', controllerDescription: '运行主线程和模型推理，并调用本机或远程工具。', executorDescription: '主动回连一个控制设备以执行本机工具，不需要公网入口或模型上游。', controllerUrl: '控制设备 Cybion URL', controllerUrlDescription: '保存设置时，这台执行设备会注册并持续以 SSE 主动连接控制设备。', checkpoint: '上下文检查点', fullHistory: '条完整历史', memoryFacts: '条长期事实', activeInputs: '条输入处理中', backgroundWork: '个后台任务', announceReplies: '自动语音播报', continuousVoice: '连续语音', speakResult: '播报', preparingVoice: '正在生成语音稿…', showParameters: '展开参数', hideParameters: '收起参数', showRunActivity: '查看执行过程', hideRunActivity: '收起执行过程', loadEarlierActivity: '加载更早执行记录', loadingActivity: '正在加载执行记录…', loadEarlierMessages: '加载更早消息', loadingEarlierMessages: '正在加载更早消息…', loadOutput: '加载输出', loadMoreOutput: '继续加载输出', loadingOutput: '正在加载输出…', mainThreadQueued: '已进入主线程队列', mainThreadRunning: '正在编译上下文', checkpointing: '正在创建检查点', retrying: '正在自动重试', retryNow: '立即重试', executorOnly: '这台机器是工具执行设备。请从控制设备上的 Cybion 调用它的工具。', deviceAccess: '设备访问授权', deviceAccessDescription: '为另一台 Cybion 控制设备创建权限受限的 Token；密钥只显示一次。', createDeviceToken: '创建设备 Token', tokenLabel: 'Token 名称', allowFilesystem: '允许文件系统', allowBash: '允许 Bash', tokenSecret: '请立即复制此密钥', revoke: '撤销', deviceToken: '设备 Token', capabilities: '能力', verifyMachine: '接入时会验证双方使用同一 issuer 和 root user。', threads: '线程', threadsTitle: '线程', threadsDescription: '主线程固定置顶，后面列出尚未回收的实时子线程。', noActiveThreads: '当前没有活动子线程。', thread: '线程', threadTask: '任务', threadModel: '模型', threadUpdated: '更新时间', threadDetails: '线程详情', threadDetailsDescription: '只读查看这个子线程的历史记录与实时事件。', backToThreads: '返回线程列表', events: '事件', noThreadEvents: '暂时没有事件。', event: '事件', time: '时间', details: '详情', threadQueued: '排队中', threadRunning: '运行中', threadRetrying: '正在重试', threadIdle: '空闲', mainThread: '主线程', mainThreadDescription: '唯一可以接收 prompt 的用户主线程。', mainThreadModel: '主线程模型', subthreadModel: '子线程模型', mainThreadModelHint: '仅用于主对话。', subthreadModelHint: '每个子线程在 fork 时固化该模型。',
@@ -190,6 +192,10 @@ async function transcribeAudio(sdk: AuthMiniApi, audio: Blob): Promise<Transcrip
   const response = await authenticatedFetch(sdk, '/api/audio/transcriptions', { method: 'POST', body: form })
   if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
   return response.json() as Promise<Transcription>
+}
+
+function decideVoiceTurn(sdk: AuthMiniApi, input: { transcript: string; latest_user_message: string; latest_assistant_message: string }) {
+  return api<VoiceTurnDecision>('/api/audio/turn-decision', sdk, { method: 'POST', body: JSON.stringify(input) })
 }
 
 function createVoiceScript(sdk: AuthMiniApi, content: string): Promise<VoiceScript> {
@@ -567,6 +573,18 @@ function EventOutput({ runId, eventId, outputBytes }: { runId: string; eventId: 
   return <div className="mt-2 flex flex-col gap-2 text-xs"><Button className="self-start" size="sm" variant="outline" disabled={loading} onClick={() => setOpened(true)}>{loading && <Spinner data-icon="inline-start" />}{opened ? `${bytes(outputBytes)} ${t('loadOutput')}` : `${t('loadOutput')} (${bytes(outputBytes)})`}</Button>{error && <ErrorAlert error={error} />}{chunks.map((chunk, index) => <pre key={index} className="max-h-80 overflow-auto rounded-md bg-muted p-3 font-mono whitespace-pre-wrap break-all"><code>{chunk}</code></pre>)}{nextOffset !== undefined && <Button className="self-start" size="sm" variant="outline" disabled={loading} onClick={() => void load(nextOffset)}>{loading && <Spinner data-icon="inline-start" />}{t('loadMoreOutput')}</Button>}</div>
 }
 
+function VoicePreviewPanel({ preview, onContinue, onDiscard, onSend }: { preview: VoicePreview; onContinue: () => void; onDiscard: () => void; onSend: () => void }) {
+  const { t } = useUi()
+  const label = preview.state === 'listening'
+    ? t('voiceListening')
+    : preview.state === 'transcribing' || preview.state === 'deciding'
+      ? t('voiceUnderstanding')
+      : preview.state === 'confirm'
+        ? t('voiceConfirm')
+        : preview.transcript ? t('voiceContinue') : t('voiceReady')
+  return <div aria-live="polite" className="mx-auto mb-2 flex max-w-4xl items-start gap-3 rounded-lg border bg-muted/30 px-3 py-2 text-sm"><MicIcon className="mt-0.5 size-4 shrink-0 text-primary" /><div className="min-w-0 flex-1"><Badge variant={preview.state === 'confirm' ? 'secondary' : 'outline'}>{label}</Badge>{preview.transcript && <p className="mt-1.5 whitespace-pre-wrap break-words text-foreground">{preview.transcript}</p>}</div>{preview.state === 'confirm' && <div className="flex shrink-0 flex-wrap gap-2"><Button type="button" size="sm" variant="ghost" onClick={onDiscard}>{t('voiceDiscard')}</Button><Button type="button" size="sm" variant="outline" onClick={onContinue}>{t('voiceContinue')}</Button><Button type="button" size="sm" onClick={onSend}>{t('voiceSend')}</Button></div>}</div>
+}
+
 function Console({ children, token }: { children: ReactNode; token: AuthMiniApi }) {
   const { language, t } = useUi()
   const location = useLocation()
@@ -580,6 +598,8 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const activeRef = useRef(new Map<string, AbortController>())
   const recorderRef = useRef<MediaRecorder | null>(null)
   const continuousVoiceRef = useRef(false)
+  const voiceTranscriptRef = useRef('')
+  const voiceAwaitingConfirmationRef = useRef(false)
   const announceRef = useRef(localStorage.getItem('cybion.announce_replies') === 'true')
   const announcementRef = useRef(0)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -592,6 +612,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
   const [continuousVoice, setContinuousVoice] = useState(continuousVoiceRef.current)
+  const [voicePreview, setVoicePreview] = useState<VoicePreview>({ state: 'armed', transcript: '' })
   const [announceReplies, setAnnounceReplies] = useState(announceRef.current)
   const [conversationInitialized, setConversationInitialized] = useState(false)
   const updateConversation = (next: ConversationItem[]) => { conversationRef.current = next; setConversation(next) }
@@ -736,16 +757,23 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     await queryClient.invalidateQueries({ queryKey: ['conversation'] })
   }
 
+  const voiceContext = () => {
+    const messages = conversationRef.current.filter((item): item is Extract<ConversationItem, { kind: 'message' }> => item.kind === 'message')
+    const latest = (role: string) => [...messages].reverse().find((item) => item.message.role === role)?.message.content ?? ''
+    return { latest_user_message: latest('user'), latest_assistant_message: latest('assistant') }
+  }
+
   const startRecording = async () => {
-    if (recorderRef.current) return
+    if (recorderRef.current || voiceAwaitingConfirmationRef.current) return
     let stream: MediaStream | null = null
     try {
-      const recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recordingStream = await navigator.mediaDevices.getUserMedia({ audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true } })
       stream = recordingStream
       const recorder = new MediaRecorder(recordingStream)
       const chunks: Blob[] = []
       let frame = 0
       let audioContext: AudioContext | null = null
+      let heardSpeech = false
       recorder.ondataavailable = (event) => { if (event.data.size > 0) chunks.push(event.data) }
       recorder.onstop = () => {
         if (recorderRef.current === recorder) recorderRef.current = null
@@ -754,17 +782,52 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
         recordingStream.getTracks().forEach((track) => track.stop())
         setRecording(false)
         const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
-        if (!audio.size) {
-          if (continuousVoiceRef.current) void startRecording()
+        if (!audio.size || (continuousVoiceRef.current && !heardSpeech)) {
+          if (continuousVoiceRef.current && !voiceAwaitingConfirmationRef.current) {
+            setVoicePreview({ state: 'armed', transcript: voiceTranscriptRef.current })
+            void startRecording()
+          }
           return
         }
         setTranscribing(true)
-        void transcribeAudio(token, audio).then(({ text }) => {
-          if (continuousVoiceRef.current) submitContent(text)
-          else if (draftRef.current) draftRef.current.value = text
-        }).catch((cause: unknown) => setError(message(cause))).finally(() => {
+        if (continuousVoiceRef.current) setVoicePreview({ state: 'transcribing', transcript: voiceTranscriptRef.current })
+        void transcribeAudio(token, audio).then(async ({ text }) => {
+          if (!continuousVoiceRef.current) {
+            if (draftRef.current) draftRef.current.value = text
+            return
+          }
+          const transcript = [voiceTranscriptRef.current, text.trim()].filter(Boolean).join(' ').trim()
+          if (!transcript) return
+          voiceTranscriptRef.current = transcript
+          setVoicePreview({ state: 'deciding', transcript })
+          const decision = await decideVoiceTurn(token, { transcript, ...voiceContext() })
+          if (!continuousVoiceRef.current) return
+          if (decision.action === 'submit') {
+            voiceTranscriptRef.current = ''
+            setVoicePreview({ state: 'armed', transcript: '' })
+            submitContent(transcript)
+            return
+          }
+          if (decision.action === 'discard') {
+            voiceTranscriptRef.current = ''
+            setVoicePreview({ state: 'armed', transcript: '' })
+            return
+          }
+          if (decision.action === 'confirm') {
+            voiceAwaitingConfirmationRef.current = true
+            setVoicePreview({ state: 'confirm', transcript })
+            return
+          }
+          setVoicePreview({ state: 'armed', transcript })
+        }).catch((cause: unknown) => {
+          if (continuousVoiceRef.current) {
+            voiceAwaitingConfirmationRef.current = true
+            setVoicePreview({ state: 'confirm', transcript: voiceTranscriptRef.current })
+          }
+          setError(message(cause))
+        }).finally(() => {
           setTranscribing(false)
-          if (continuousVoiceRef.current) void startRecording()
+          if (continuousVoiceRef.current && !voiceAwaitingConfirmationRef.current) void startRecording()
         })
       }
       recorderRef.current = recorder
@@ -772,21 +835,38 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
       setError('')
       setRecording(true)
       if (continuousVoiceRef.current) {
+        setVoicePreview({ state: 'armed', transcript: voiceTranscriptRef.current })
         audioContext = new AudioContext()
         const analyser = audioContext.createAnalyser()
         analyser.fftSize = 1024
         audioContext.createMediaStreamSource(recordingStream).connect(analyser)
         const samples = new Uint8Array(analyser.fftSize)
         const started = performance.now()
-        let heardSpeech = false
+        let noiseFloor = 0
+        let noiseSamples = 0
+        let speechStartedAt = 0
         let lastSpeech = started
         const detectSilence = () => {
           if (recorder.state === 'inactive') return
           analyser.getByteTimeDomainData(samples)
           const energy = Math.sqrt(samples.reduce((sum, value) => sum + ((value - 128) / 128) ** 2, 0) / samples.length)
           const now = performance.now()
-          if (energy > 0.035) { heardSpeech = true; lastSpeech = now }
-          if ((heardSpeech && now - lastSpeech > 1200) || now - started > 30000) recorder.stop()
+          if (!heardSpeech && now - started < 600) {
+            noiseFloor = (noiseFloor * noiseSamples + energy) / (noiseSamples + 1)
+            noiseSamples += 1
+          }
+          const speechThreshold = Math.max(0.018, noiseFloor * 3.2)
+          if (energy >= speechThreshold) {
+            if (!speechStartedAt) speechStartedAt = now
+            if (now - speechStartedAt >= 280) {
+              if (!heardSpeech) setVoicePreview({ state: 'listening', transcript: voiceTranscriptRef.current })
+              heardSpeech = true
+              lastSpeech = now
+            }
+          } else {
+            speechStartedAt = 0
+          }
+          if ((heardSpeech && now - lastSpeech > 2000) || (!heardSpeech && now - started > 30000)) recorder.stop()
           else frame = requestAnimationFrame(detectSilence)
         }
         frame = requestAnimationFrame(detectSilence)
@@ -813,8 +893,38 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const setContinuous = (enabled: boolean) => {
     continuousVoiceRef.current = enabled
     setContinuousVoice(enabled)
-    if (enabled) void startRecording()
-    else if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop()
+    if (enabled) {
+      voiceAwaitingConfirmationRef.current = false
+      setVoicePreview({ state: 'armed', transcript: voiceTranscriptRef.current })
+      void startRecording()
+    } else {
+      voiceAwaitingConfirmationRef.current = false
+      voiceTranscriptRef.current = ''
+      setVoicePreview({ state: 'armed', transcript: '' })
+      if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop()
+    }
+  }
+
+  const continueVoiceTurn = () => {
+    voiceAwaitingConfirmationRef.current = false
+    setVoicePreview({ state: 'armed', transcript: voiceTranscriptRef.current })
+    void startRecording()
+  }
+
+  const discardVoiceTurn = () => {
+    voiceTranscriptRef.current = ''
+    voiceAwaitingConfirmationRef.current = false
+    setVoicePreview({ state: 'armed', transcript: '' })
+    void startRecording()
+  }
+
+  const sendVoiceTurn = () => {
+    const transcript = voiceTranscriptRef.current
+    voiceTranscriptRef.current = ''
+    voiceAwaitingConfirmationRef.current = false
+    setVoicePreview({ state: 'armed', transcript: '' })
+    if (transcript) submitContent(transcript)
+    void startRecording()
   }
 
   const setAnnounce = (enabled: boolean) => {
@@ -859,7 +969,28 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const retryingMainRun = conversationState ? retryingRun(conversationState.runs) : undefined
   const mainThreadRunning = activeRuns.length > 0 || conversationState?.runs.some((run) => run.status === 'running' && run.next_retry_at === null) === true
   const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge>{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}<Badge variant="outline">{historyMessages} {t('fullHistory')}</Badge><Badge variant="outline">{memoryFacts} {t('memoryFacts')}</Badge>{activeRuns.length > 0 && <Badge variant="secondary">{activeRuns.length} {t('activeInputs')}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div>{activeSubthreads.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>}{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} hasMore={oldestPage?.has_more} loadingEarlier={loadingOlder} onLoadEarlier={() => void loadOlder()} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}{persistedError && <div className="px-4 pb-2"><Alert variant="destructive"><AlertTitle>{t('retrying')}</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><span>{persistedError}</span>{retryingMainRun && <Button size="sm" variant="outline" onClick={() => void retryNow(retryingMainRun.id)}><RefreshCwIcon data-icon="inline-start" />{t('retryNow')}</Button>}</AlertDescription></Alert></div>}</main>
-  return <><div className="min-h-0 flex-1 overflow-y-auto">{location.pathname === '/console' ? consoleSurface : children}</div>{error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}<form className="shrink-0 border-t p-3" onSubmit={submit}><InputGroup className="mx-auto max-w-4xl"><InputGroupTextarea ref={draftRef} disabled={unavailable} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} /><InputGroupAddon align="inline-end"><InputGroupButton aria-label={recording ? t('stopRecording') : t('startRecording')} disabled={unavailable || transcribing} onClick={toggleRecording} size="icon-sm" variant={recording ? 'destructive' : 'ghost'}>{recording ? <SquareIcon /> : <MicIcon />}</InputGroupButton><InputGroupButton disabled={unavailable} type="submit" variant="default" size="icon-sm"><SendIcon /><span className="sr-only">{t('mainThread')}</span></InputGroupButton></InputGroupAddon><InputGroupAddon align="block-end" className="border-t flex-col items-start sm:flex-row sm:items-center"><div className="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1"><Field className="w-auto gap-1.5" orientation="horizontal"><Switch id="continuous-voice" checked={continuousVoice} onCheckedChange={setContinuous} /><FieldLabel htmlFor="continuous-voice" className="gap-1.5 text-xs font-medium text-foreground"><MicIcon />{t('continuousVoice')}</FieldLabel></Field><Field className="w-auto gap-1.5" orientation="horizontal"><Switch id="announce-replies" checked={announceReplies} onCheckedChange={setAnnounce} /><FieldLabel htmlFor="announce-replies" className="gap-1.5 text-xs font-medium text-foreground"><Volume2Icon />{t('announceReplies')}</FieldLabel></Field></div><span className="whitespace-nowrap text-xs text-muted-foreground">{transcribing ? t('transcribing') : t('composeHint')}</span></InputGroupAddon></InputGroup><p className="sr-only">{t('mainThread')}</p></form></>
+  return <>
+    <div className="min-h-0 flex-1 overflow-y-auto">{location.pathname === '/console' ? consoleSurface : children}</div>
+    {error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}
+    <form className="shrink-0 border-t p-3" onSubmit={submit}>
+      {continuousVoice && <VoicePreviewPanel preview={voicePreview} onContinue={continueVoiceTurn} onDiscard={discardVoiceTurn} onSend={sendVoiceTurn} />}
+      <InputGroup className="mx-auto max-w-4xl">
+        <InputGroupTextarea ref={draftRef} disabled={unavailable} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} />
+        <InputGroupAddon align="inline-end">
+          <InputGroupButton aria-label={recording ? t('stopRecording') : t('startRecording')} disabled={unavailable || transcribing} onClick={toggleRecording} size="icon-sm" variant={recording ? 'destructive' : 'ghost'}>{recording ? <SquareIcon /> : <MicIcon />}</InputGroupButton>
+          <InputGroupButton disabled={unavailable} type="submit" variant="default" size="icon-sm"><SendIcon /><span className="sr-only">{t('mainThread')}</span></InputGroupButton>
+        </InputGroupAddon>
+        <InputGroupAddon align="block-end" className="border-t flex-col items-start sm:flex-row sm:items-center">
+          <div className="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1">
+            <Field className="w-auto gap-1.5" orientation="horizontal"><Switch id="continuous-voice" checked={continuousVoice} onCheckedChange={setContinuous} /><FieldLabel htmlFor="continuous-voice" className="gap-1.5 text-xs font-medium text-foreground"><MicIcon />{t('continuousVoice')}</FieldLabel></Field>
+            <Field className="w-auto gap-1.5" orientation="horizontal"><Switch id="announce-replies" checked={announceReplies} onCheckedChange={setAnnounce} /><FieldLabel htmlFor="announce-replies" className="gap-1.5 text-xs font-medium text-foreground"><Volume2Icon />{t('announceReplies')}</FieldLabel></Field>
+          </div>
+          <span className="whitespace-nowrap text-xs text-muted-foreground">{transcribing ? t('transcribing') : t('composeHint')}</span>
+        </InputGroupAddon>
+      </InputGroup>
+      <p className="sr-only">{t('mainThread')}</p>
+    </form>
+  </>
 }
 
 function BrowserPage({ token }: { token: AuthMiniApi }) {
@@ -1260,6 +1391,7 @@ function SettingsPage({ token }: { token: AuthMiniApi }) {
   const [model, setModel] = useState('')
   const [subthreadModel, setSubthreadModel] = useState('')
   const [voiceScriptModel, setVoiceScriptModel] = useState('')
+  const [voiceTurnModel, setVoiceTurnModel] = useState('')
   const [voiceScriptMaxChars, setVoiceScriptMaxChars] = useState(150)
   const [zhVoice, setZhVoice] = useState('')
   const [enVoice, setEnVoice] = useState('')
@@ -1272,6 +1404,7 @@ function SettingsPage({ token }: { token: AuthMiniApi }) {
     setModel(settings.data?.default_model ?? '')
     setSubthreadModel(settings.data?.subthread_model ?? '')
     setVoiceScriptModel(settings.data?.voice_script_model ?? '')
+    setVoiceTurnModel(settings.data?.voice_turn_model ?? '')
     setVoiceScriptMaxChars(settings.data?.voice_script_max_chars ?? 150)
     setZhVoice(settings.data?.edge_tts_zh_voice ?? '')
     setEnVoice(settings.data?.edge_tts_en_voice ?? '')
@@ -1285,7 +1418,7 @@ function SettingsPage({ token }: { token: AuthMiniApi }) {
     try {
       const saved = await api<Settings>('/api/settings', token, {
         method: 'PUT',
-        body: JSON.stringify({ default_model: model, subthread_model: subthreadModel, voice_script_model: voiceScriptModel, voice_script_max_chars: voiceScriptMaxChars, edge_tts_zh_voice: zhVoice, edge_tts_en_voice: enVoice, openai_base_url: baseUrl, openai_api_key: apiKey }),
+        body: JSON.stringify({ default_model: model, subthread_model: subthreadModel, voice_script_model: voiceScriptModel, voice_turn_model: voiceTurnModel, voice_script_max_chars: voiceScriptMaxChars, edge_tts_zh_voice: zhVoice, edge_tts_en_voice: enVoice, openai_base_url: baseUrl, openai_api_key: apiKey }),
       })
       queryClient.setQueryData(['settings'], saved)
       await queryClient.invalidateQueries({ queryKey: ['status'] })
@@ -1300,7 +1433,7 @@ function SettingsPage({ token }: { token: AuthMiniApi }) {
   if (settings.error) return <Page title={t('settingsTitle')} description={t('settingsDescription')}><ErrorAlert error={message(settings.error)} /></Page>
   if (!settings.data) return <Page title={t('settingsTitle')} description={t('settingsDescription')}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t('loadingMachine')}</CardContent></Card></Page>
 
-  return <Page title={t('settingsTitle')} description={t('settingsDescription')}><Card><CardHeader><CardTitle>{t('settingsTitle')}</CardTitle><CardDescription>{t('controllerDescription')}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-4" onSubmit={save}><FieldGroup><Field><FieldLabel htmlFor="model">{t('mainThreadModel')}</FieldLabel><Input id="model" value={model} onChange={(event) => setModel(event.target.value)} required /><FieldDescription>{t('mainThreadModelHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="subthread-model">{t('subthreadModel')}</FieldLabel><Input id="subthread-model" value={subthreadModel} onChange={(event) => setSubthreadModel(event.target.value)} required /><FieldDescription>{t('subthreadModelHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="voice-script-model">{t('voiceScriptModel')}</FieldLabel><Input id="voice-script-model" value={voiceScriptModel} onChange={(event) => setVoiceScriptModel(event.target.value)} required /><FieldDescription>{t('voiceScriptModelHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="voice-script-max-chars">{t('voiceScriptLength')}</FieldLabel><Input id="voice-script-max-chars" type="number" min={1} step={1} value={voiceScriptMaxChars} onChange={(event) => setVoiceScriptMaxChars(Number(event.target.value))} required /><FieldDescription>{t('voiceScriptLengthHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="edge-tts-zh-voice">{t('chineseVoice')}</FieldLabel><Input id="edge-tts-zh-voice" value={zhVoice} onChange={(event) => setZhVoice(event.target.value)} required /><FieldDescription>{t('edgeVoiceHint').replace('{voice}', 'zh-CN-XiaoxiaoNeural')}</FieldDescription></Field><Field><FieldLabel htmlFor="edge-tts-en-voice">{t('englishVoice')}</FieldLabel><Input id="edge-tts-en-voice" value={enVoice} onChange={(event) => setEnVoice(event.target.value)} required /><FieldDescription>{t('edgeVoiceHint').replace('{voice}', 'en-US-JennyNeural')}</FieldDescription></Field><Field><FieldLabel htmlFor="openai-base-url">{t('baseUrl')}</FieldLabel><Input id="openai-base-url" type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required /><FieldDescription>{t('baseUrlDescription')}</FieldDescription></Field><Field><FieldLabel htmlFor="openai-api-key">{t('apiKey')}</FieldLabel><Input id="openai-api-key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required /><FieldDescription>{t('apiKeyDescription')}</FieldDescription></Field></FieldGroup>{error && <ErrorAlert error={error} />}<Button disabled={saving}>{saving && <Spinner data-icon="inline-start" />}{t('saveChanges')}</Button></form></CardContent></Card><UpdatesCard token={token} /></Page>
+  return <Page title={t('settingsTitle')} description={t('settingsDescription')}><Card><CardHeader><CardTitle>{t('settingsTitle')}</CardTitle><CardDescription>{t('controllerDescription')}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-4" onSubmit={save}><FieldGroup><Field><FieldLabel htmlFor="model">{t('mainThreadModel')}</FieldLabel><Input id="model" value={model} onChange={(event) => setModel(event.target.value)} required /><FieldDescription>{t('mainThreadModelHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="subthread-model">{t('subthreadModel')}</FieldLabel><Input id="subthread-model" value={subthreadModel} onChange={(event) => setSubthreadModel(event.target.value)} required /><FieldDescription>{t('subthreadModelHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="voice-script-model">{t('voiceScriptModel')}</FieldLabel><Input id="voice-script-model" value={voiceScriptModel} onChange={(event) => setVoiceScriptModel(event.target.value)} required /><FieldDescription>{t('voiceScriptModelHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="voice-turn-model">{t('voiceTurnModel')}</FieldLabel><Input id="voice-turn-model" value={voiceTurnModel} onChange={(event) => setVoiceTurnModel(event.target.value)} required /><FieldDescription>{t('voiceTurnModelHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="voice-script-max-chars">{t('voiceScriptLength')}</FieldLabel><Input id="voice-script-max-chars" type="number" min={1} step={1} value={voiceScriptMaxChars} onChange={(event) => setVoiceScriptMaxChars(Number(event.target.value))} required /><FieldDescription>{t('voiceScriptLengthHint')}</FieldDescription></Field><Field><FieldLabel htmlFor="edge-tts-zh-voice">{t('chineseVoice')}</FieldLabel><Input id="edge-tts-zh-voice" value={zhVoice} onChange={(event) => setZhVoice(event.target.value)} required /><FieldDescription>{t('edgeVoiceHint').replace('{voice}', 'zh-CN-XiaoxiaoNeural')}</FieldDescription></Field><Field><FieldLabel htmlFor="edge-tts-en-voice">{t('englishVoice')}</FieldLabel><Input id="edge-tts-en-voice" value={enVoice} onChange={(event) => setEnVoice(event.target.value)} required /><FieldDescription>{t('edgeVoiceHint').replace('{voice}', 'en-US-JennyNeural')}</FieldDescription></Field><Field><FieldLabel htmlFor="openai-base-url">{t('baseUrl')}</FieldLabel><Input id="openai-base-url" type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required /><FieldDescription>{t('baseUrlDescription')}</FieldDescription></Field><Field><FieldLabel htmlFor="openai-api-key">{t('apiKey')}</FieldLabel><Input id="openai-api-key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required /><FieldDescription>{t('apiKeyDescription')}</FieldDescription></Field></FieldGroup>{error && <ErrorAlert error={error} />}<Button disabled={saving}>{saving && <Spinner data-icon="inline-start" />}{t('saveChanges')}</Button></form></CardContent></Card><UpdatesCard token={token} /></Page>
 }
 function Page({ title, description, children }: { title: string; description: string; children: ReactNode }) { return <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-4 md:p-6"><div><h1 className="font-heading text-2xl font-semibold">{title}</h1><p className="text-sm text-muted-foreground">{description}</p></div>{children}</main> }
 function ErrorAlert({ error }: { error: string }) { const { t } = useUi(); return <Alert variant="destructive"><AlertTitle>{t('requestFailed')}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> }
