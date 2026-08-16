@@ -899,6 +899,7 @@ enum MainRunReason {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_rustls_crypto_provider()?;
     tracing_subscriber::fmt()
         .with_env_filter("cybion=info,tower_http=info")
         .compact()
@@ -951,6 +952,12 @@ async fn main() -> Result<()> {
     update::record_startup(&db_path)?;
     axum::serve(listener, app(state)).await?;
     Ok(())
+}
+
+fn install_rustls_crypto_provider() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow!("cannot install Rustls ring crypto provider"))
 }
 
 fn pairing_argument() -> Result<Option<String>> {
@@ -11880,6 +11887,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires the public Edge Read Aloud service"]
     async fn edge_tts_live_service_returns_audio() {
+        install_rustls_crypto_provider().unwrap();
         let config = Config {
             root_user_id: "root".to_owned(),
             auth_url: "https://auth.example.com".to_owned(),

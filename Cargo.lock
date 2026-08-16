@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "cybion"
-version = "0.1.80"
+version = "0.1.81"
 dependencies = [
  "anyhow",
  "auth-mini-axum",
@@ -379,6 +379,7 @@ dependencies = [
  "notify",
  "reqwest 0.12.28",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

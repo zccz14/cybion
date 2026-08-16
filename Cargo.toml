@@ -1,6 +1,6 @@
 [package]
 name = "cybion"
-version = "0.1.80"
+version = "0.1.81"
 edition = "2024"
 license = "MIT"
 description = "An unrestricted, multi-machine AI harness."
@@ -22,6 +22,7 @@ hostname = "0.4.1"
 libc = "0.2"
 notify = "8.0.0"
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
