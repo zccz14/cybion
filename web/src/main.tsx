@@ -48,13 +48,9 @@ type VoicePreview = { state: 'armed' | 'listening' | 'transcribing' | 'deciding'
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
 type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { type: 'checkpoint'; id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown>; started_at?: string } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string; output_bytes?: number; finished_at?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
-type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'run'; id: string; run: ConversationRun } | { kind: 'status'; id: string; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; run_id?: string; event_id?: number; output_bytes?: number; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
-type ConversationRun = { id: string; user_message_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled'; retry_attempt: number; next_retry_at: number | null; event_count: number; latest_event_id?: number; latest_context_tokens?: number; last_error?: string }
+type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; run_id?: string; event_id?: number; output_bytes?: number; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
 type ContextCheckpoint = { id: number; predecessors: { hop: number; checkpoint_id: number }[]; summary: string; created_at: string }
-type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null }; has_more: boolean; focus_message_id?: number; next_before_id?: number }
-type ConversationEventSummary = Exclude<AgentEvent, { type: 'complete' }> | { type: 'complete' }
-type ConversationRunEvent = { id: number; event: ConversationEventSummary; created_at: string }
-type ConversationRunEventPage = { events: ConversationRunEvent[]; has_more: boolean; next_before_id?: number }
+type ConversationState = { messages: ChatMessage[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null }; has_more: boolean; focus_message_id?: number; next_before_id?: number }
 type ConversationEventOutput = { output: string; output_bytes: number; next_offset?: number }
 type GoalState = 'active' | 'achieved' | 'blocked' | 'cancelled'
 type Subthread = { id: string; title: string; task: string; completion_criteria: string; goal_state: GoalState; goal_evidence: string | null; blocked_reason: string | null; status: 'queued' | 'running' | 'retrying' | 'completed' | 'cancelled' | 'failed'; model: string; result: string | null; retry_attempt: number; next_retry_at: number | null; created_at: string; updated_at: string }
@@ -230,13 +226,13 @@ async function createSpeech(sdk: AuthMiniApi, text: string, language: Language):
   return audio
 }
 
-async function streamAgentTurn(sdk: AuthMiniApi, runId: string, message: ChatMessage, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
-  const response = await authenticatedFetch(sdk, '/api/agent/turn', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId, message }) })
+async function streamAgentTurn(sdk: AuthMiniApi, _runId: string, message: ChatMessage, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
+  const response = await authenticatedFetch(sdk, '/api/agent/turn', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message }) })
   return streamAgentEvents(response, onEvent)
 }
 
-async function streamResentAgentTurn(sdk: AuthMiniApi, runId: string, recordId: number, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
-  const response = await authenticatedFetch(sdk, `/api/conversation/messages/${recordId}/resend`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId }) })
+async function streamResentAgentTurn(sdk: AuthMiniApi, _runId: string, recordId: number, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
+  const response = await authenticatedFetch(sdk, `/api/conversation/messages/${recordId}/resend`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: '{}' })
   return streamAgentEvents(response, onEvent)
 }
 
@@ -332,42 +328,15 @@ function Workspace() {
 }
 
 function conversationItems(state: ConversationState): ConversationItem[] {
-  const runs = new Map<number, ConversationRun[]>()
-  state.runs.forEach((run) => runs.set(run.user_message_id, [...(runs.get(run.user_message_id) ?? []), run]))
-  return state.messages.flatMap((message) => {
-    const entries: ConversationItem[] = [{ kind: 'message', id: message.id?.toString() ?? crypto.randomUUID(), message, queued: false }]
-    if (message.role !== 'user' || message.id === undefined) return entries
-    runs.get(message.id)?.forEach((run) => entries.push({ kind: 'run', id: `${run.id}-activity`, run }))
-    return entries
-  })
-}
-
-function conversationRunItems(run: ConversationRun, events: ConversationRunEvent[]): ConversationItem[] {
-  const entries: ConversationItem[] = []
-  events.forEach(({ id, event }) => {
-    if (event.type === 'status') entries.push({ kind: 'status', id: `${run.id}-${id}`, stage: event.stage, message: event.message })
-    if (event.type === 'checkpoint') entries.push({ kind: 'status', id: `${run.id}-${id}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` })
-    if (event.type === 'tool_call') entries.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, run_id: run.id, started_at: event.started_at })
-    if (event.type === 'tool_result') {
-      const tool = entries.find((entry): entry is Extract<ConversationItem, { kind: 'tool' }> => entry.kind === 'tool' && entry.call_id === event.call_id)
-      if (tool) Object.assign(tool, { complete: true, event_id: id, output_bytes: event.output_bytes, finished_at: event.finished_at, added_lines: event.added_lines, deleted_lines: event.deleted_lines })
-    }
-  })
-  return entries
+  return state.messages.map((message) => ({ kind: 'message', id: message.id?.toString() ?? crypto.randomUUID(), message, queued: false }))
 }
 
 function mergeConversationPages(latest: ConversationState, older: ConversationState[]): ConversationState {
   const messageById = new Map<number, ChatMessage>()
-  const runById = new Map<string, ConversationRun>()
   ;[...older, latest].forEach((page) => {
     page.messages.forEach((item) => { if (item.id !== undefined) messageById.set(item.id, item) })
-    page.runs.forEach((run) => runById.set(run.id, run))
   })
-  return { ...latest, messages: [...messageById.values()].sort((left, right) => (left.id ?? 0) - (right.id ?? 0)), runs: [...runById.values()] }
-}
-
-function latestContextTokens(runs: ConversationRun[]) {
-  return [...runs].reverse().find((run) => run.latest_context_tokens !== undefined)?.latest_context_tokens ?? null
+  return { ...latest, messages: [...messageById.values()].sort((left, right) => (left.id ?? 0) - (right.id ?? 0)) }
 }
 
 function reasoningSummary(arguments_: Record<string, unknown>) {
@@ -378,14 +347,6 @@ function reasoningSummary(arguments_: Record<string, unknown>) {
     const text = (item as { text?: unknown }).text
     return typeof text === 'string' ? [text] : []
   }).join('\n')
-}
-
-function retryingRun(runs: ConversationRun[]) {
-  return [...runs].reverse().find((entry) => entry.status === 'running' && entry.retry_attempt > 0 && entry.next_retry_at !== null)
-}
-
-function runError(runs: ConversationRun[]) {
-  return retryingRun(runs)?.last_error ?? ''
 }
 
 function formatTimestamp(language: Language, value: string) {
@@ -405,8 +366,6 @@ function mainThreadStatusLabel(t: (key: TranslationKey) => string, status: MainT
 function subthreadConversationItems(thread: Subthread, events: SubthreadEvent[]): ConversationItem[] {
   const items: ConversationItem[] = [{ kind: 'message', id: `${thread.id}-task`, message: { role: 'user', content: `## Objective\n${thread.task}\n\n## Done when\n${thread.completion_criteria}`, created_at: thread.created_at }, queued: thread.goal_state === 'active' && thread.status === 'queued' }]
   events.forEach(({ id, event }) => {
-    if (event.type === 'status') items.push({ kind: 'status', id: `${thread.id}-${id}`, stage: event.stage, message: event.message })
-    if (event.type === 'checkpoint') items.push({ kind: 'status', id: `${thread.id}-${id}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` })
     if (event.type === 'tool_call') items.push({ kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, started_at: event.started_at })
     if (event.type === 'tool_result') {
       const tool = [...items].reverse().find((item): item is Extract<ConversationItem, { kind: 'tool' }> => item.kind === 'tool' && item.call_id === event.call_id)
@@ -557,35 +516,6 @@ function ThreadRunning() {
   return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /><Badge variant="secondary">{t('threadRunning')}</Badge><span>{t('agentWorking')}</span></div>
 }
 
-function RunActivity({ run, now, peers }: { run: ConversationRun; now: number; peers: Peer[] }) {
-  const token = useAuthToken()
-  const { t } = useUi()
-  const [open, setOpen] = useState(false)
-  const [events, setEvents] = useState<ConversationRunEvent[]>([])
-  const [nextBeforeId, setNextBeforeId] = useState<number | undefined>()
-  const [hasMore, setHasMore] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const load = async (before?: number) => {
-    setLoading(true)
-    setError('')
-    try {
-      const suffix = before === undefined ? '' : `?before=${before}`
-      const page = await api<ConversationRunEventPage>(`/api/conversation/runs/${run.id}/events${suffix}`, token)
-      setEvents((current) => before === undefined ? page.events : [...page.events, ...current])
-      setNextBeforeId(page.next_before_id)
-      setHasMore(page.has_more)
-    } catch (cause) {
-      setError(message(cause))
-    } finally {
-      setLoading(false)
-    }
-  }
-  useEffect(() => { if (open && events.length === 0 && !loading) void load() }, [open])
-  const activity = conversationRunItems(run, events)
-  return <div className="flex flex-col gap-2 py-1"><div className="flex flex-wrap items-center gap-2"><Button aria-expanded={open} size="sm" variant="ghost" onClick={() => setOpen((value) => !value)}>{open ? t('hideRunActivity') : t('showRunActivity')}</Button><Badge variant="outline">{run.event_count.toLocaleString()} {t('events')}</Badge></div>{open && <div className="flex flex-col gap-2 border-l pl-3">{error && <ErrorAlert error={error} />}{loading && events.length === 0 && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingActivity')}</div>}{hasMore && <Button className="self-start" size="sm" variant="outline" disabled={loading} onClick={() => void load(nextBeforeId)}>{loading && <Spinner data-icon="inline-start" />}{t('loadEarlierActivity')}</Button>}{activity.map((item) => <ConversationEntry key={item.kind === 'tool' ? item.call_id : item.id} item={item} now={now} peers={peers} />)}</div>}</div>
-}
-
 function EventOutput({ runId, eventId, outputBytes }: { runId: string; eventId: number; outputBytes: number }) {
   const token = useAuthToken()
   const { t } = useUi()
@@ -670,8 +600,6 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     if (conversationInitialized && latestAssistant?.id !== announcedMessageRef.current) announce(latestAssistant?.content ?? null)
     announcedMessageRef.current = latestAssistant?.id ?? null
     updateConversation(conversationItems(state))
-    setContextTokens(latestContextTokens(state.runs))
-    setActiveRuns(state.runs.filter((run) => run.status === 'running' && run.next_retry_at === null).map((run) => run.id))
     setConversationInitialized(true)
   }, [conversationQuery.data, olderPages])
   useEffect(() => {
@@ -681,7 +609,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     focusedMessageRef.current = id
   }, [conversationInitialized, conversationQuery.data?.focus_message_id])
   useEffect(() => {
-    if (!conversationQuery.data?.runs.some((run) => run.status === 'running') && activeSubthreads.length === 0) return
+    if (activeSubthreads.length === 0) return
     const interval = window.setInterval(() => { void conversationQuery.refetch() }, 1000)
     return () => window.clearInterval(interval)
   }, [conversationQuery.data, activeSubthreads.length])
@@ -751,18 +679,13 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
 
   const startRun = (entryId: string | undefined, connect: (runId: string, signal: AbortSignal, onEvent: (event: AgentEvent) => void) => Promise<void>, resentRecordId?: number) => {
     const runId = crypto.randomUUID()
+    activeRef.current.forEach((current) => current.abort())
+    activeRef.current.clear()
     const controller = new AbortController()
     activeRef.current.set(runId, controller)
-    setActiveRuns((runs) => [...runs, runId])
+    setActiveRuns([runId])
     setError('')
     void connect(runId, controller.signal, (event) => {
-      if (event.type === 'status') {
-        updateConversation([
-          ...conversationRef.current.map((item) => item.kind === 'message' && item.id === entryId ? { ...item, queued: false } : item),
-          { kind: 'status', id: `${runId}-${event.stage}-${crypto.randomUUID()}`, stage: event.stage, message: event.message },
-        ])
-      }
-      if (event.type === 'checkpoint') updateConversation([...conversationRef.current, { kind: 'status', id: `${runId}-checkpoint-${event.id}`, stage: 'checkpointing', message: `Checkpoint #${event.id}` }])
       if (event.type === 'tool_call') updateConversation([...conversationRef.current, { kind: 'tool', call_id: event.call_id, name: event.name, arguments: event.arguments, complete: false, started_at: event.started_at }])
       if (event.type === 'tool_result') updateConversation(conversationRef.current.map((item) => item.kind === 'tool' && item.call_id === event.call_id ? { ...item, complete: true, finished_at: event.finished_at, added_lines: event.added_lines, deleted_lines: event.deleted_lines } : item))
       if (event.type === 'context') setContextTokens(event.input_tokens)
@@ -830,11 +753,10 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
 
   const stopAll = async () => {
     const controllers = [...activeRef.current.entries()]
-    const runIds = [...new Set([...activeRuns, ...controllers.map(([id]) => id)])]
     activeRef.current.clear()
     controllers.forEach(([, controller]) => controller.abort())
     setActiveRuns([])
-    await Promise.all(runIds.map((id) => api(`/api/agent/turn/${id}`, token, { method: 'DELETE' }).catch(() => undefined)))
+    await api('/api/agent/turn', token, { method: 'DELETE' }).catch(() => undefined)
     await queryClient.invalidateQueries({ queryKey: ['conversation'] })
   }
 
@@ -1015,16 +937,6 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     if (!enabled) stopAnnouncements()
   }
 
-  const retryNow = async (runId: string) => {
-    try {
-      setError('')
-      await api(`/api/agent/turn/${runId}`, token, { method: 'POST' })
-      await queryClient.invalidateQueries({ queryKey: ['conversation'] })
-    } catch (cause) {
-      setError(message(cause))
-    }
-  }
-
   const loadOlder = async () => {
     const current = conversationQuery.data
     const oldestPage = olderPages.at(-1) ?? current
@@ -1045,10 +957,8 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const unavailable = conversationQuery.isLoading || Boolean(conversationQuery.error) || resendingMessageId !== null
   const checkpoint = conversationState?.context.checkpoint
   const historyMessages = conversationState?.context.history_messages ?? 0
-  const persistedError = conversationState ? runError(conversationState.runs) : ''
-  const retryingMainRun = conversationState ? retryingRun(conversationState.runs) : undefined
-  const mainThreadRunning = activeRuns.length > 0 || conversationState?.runs.some((run) => run.status === 'running' && run.next_retry_at === null) === true
-  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge>{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}<Badge variant="outline">{historyMessages} {t('fullHistory')}</Badge>{activeRuns.length > 0 && <Badge variant="secondary">{activeRuns.length} {t('activeInputs')}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div>{activeSubthreads.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>}{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} hasMore={oldestPage?.has_more} loadingEarlier={loadingOlder} onLoadEarlier={() => void loadOlder()} onResend={resendMessage} resendingMessageId={resendingMessageId} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}{persistedError && <div className="px-4 pb-2"><Alert variant="destructive"><AlertTitle>{t('retrying')}</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><span>{persistedError}</span>{retryingMainRun && <Button size="sm" variant="outline" onClick={() => void retryNow(retryingMainRun.id)}><RefreshCwIcon data-icon="inline-start" />{t('retryNow')}</Button>}</AlertDescription></Alert></div>}</main>
+  const mainThreadRunning = activeRuns.length > 0
+  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><Badge className="ml-auto" variant="outline">{t('context')}: {contextTokens?.toLocaleString() ?? '—'} {t('tokens')}</Badge>{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}<Badge variant="outline">{historyMessages} {t('fullHistory')}</Badge>{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeRuns.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div>{activeSubthreads.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">{activeSubthreads.map((thread) => <div key={thread.id} className="flex items-center gap-2"><Badge variant="outline">{thread.title}</Badge><Button aria-label={`${t('stop')}: ${thread.title}`} size="icon-sm" variant="ghost" onClick={async () => { await api(`/api/threads/${thread.id}`, token, { method: 'DELETE' }); await threadsQuery.refetch() }}><XIcon /></Button></div>)}</div>}{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} hasMore={oldestPage?.has_more} loadingEarlier={loadingOlder} onLoadEarlier={() => void loadOlder()} onResend={resendMessage} resendingMessageId={resendingMessageId} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}</main>
   return <>
     <div className="min-h-0 flex-1 overflow-y-auto">{location.pathname === '/console' ? consoleSurface : children}</div>
     {error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}
@@ -1057,7 +967,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
       <input ref={attachmentPickerRef} className="sr-only" type="file" multiple onChange={(event) => { void attachFiles(event.target.files); event.currentTarget.value = '' }} />
       {attachments.length > 0 && <div className="mx-auto mb-2 flex max-w-4xl flex-wrap gap-2">{attachments.map((file) => <Badge key={file.id} variant="secondary" className="max-w-full gap-1.5 py-1 pl-2"><PaperclipIcon className="size-3 shrink-0" /><span className="truncate">{file.filename}</span><button aria-label={`${t('removeAttachment')}: ${file.filename}`} className="rounded-sm p-0.5 hover:bg-foreground/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" type="button" onClick={() => setAttachments((current) => current.filter((entry) => entry.id !== file.id))}><XIcon className="size-3" /></button></Badge>)}</div>}
       <InputGroup className="mx-auto max-w-4xl">
-        <InputGroupTextarea ref={draftRef} disabled={unavailable || uploadingAttachment} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} />
+        <InputGroupTextarea ref={draftRef} disabled={unavailable || uploadingAttachment} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={t('outcomePlaceholder')} rows={2} />
         <InputGroupAddon align="inline-end">
           <InputGroupButton aria-label={t('attachment')} disabled={unavailable || uploadingAttachment} onClick={() => attachmentPickerRef.current?.click()} size="icon-sm" type="button" variant="ghost">{uploadingAttachment ? <Spinner /> : <PaperclipIcon />}</InputGroupButton>
           <InputGroupButton aria-label={recording ? t('stopRecording') : t('startRecording')} disabled={unavailable || transcribing} onClick={toggleRecording} size="icon-sm" variant={recording ? 'destructive' : 'ghost'}>{recording ? <SquareIcon /> : <MicIcon />}</InputGroupButton>
@@ -1235,11 +1145,6 @@ function BrowserPage({ token }: { token: AuthMiniApi }) {
 function ConversationEntry({ item, now, peers, onResend, resendingMessageId }: { item: ConversationItem; now: number; peers: Peer[]; onResend?: (message: ChatMessage) => void; resendingMessageId?: number | null }) {
   const { language, t } = useUi()
   const [parametersOpen, setParametersOpen] = useState(false)
-  if (item.kind === 'run') return <RunActivity run={item.run} now={now} peers={peers} />
-  if (item.kind === 'status') {
-    const label = item.stage === 'queued' ? t('mainThreadQueued') : item.stage === 'checkpointing' ? t('checkpointing') : item.stage === 'retrying' ? t('retrying') : t('mainThreadRunning')
-    return <div className="flex items-center gap-2 text-xs text-muted-foreground"><Badge variant="outline">{label}</Badge><span>{item.message}</span></div>
-  }
   if (item.kind === 'tool') {
     const path = typeof item.arguments.path === 'string' ? item.arguments.path : ''
     const command = typeof item.arguments.command === 'string' ? item.arguments.command : ''
