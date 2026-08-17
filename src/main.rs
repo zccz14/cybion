@@ -2000,16 +2000,18 @@ async fn compact_checkpoint_once(
     items: Vec<Value>,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<String> {
+    let mut body = json!({
+        "model": config.default_model,
+        "input": prepend_developer_message(checkpoint_developer_prompt(), items),
+        "store": false,
+        "stream": true,
+        "max_output_tokens": CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS,
+    });
+    sanitize_responses_input(&mut body);
     let request = client
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
-        .json(&json!({
-            "model": config.default_model,
-            "input": prepend_developer_message(checkpoint_developer_prompt(), items),
-            "store": false,
-            "stream": true,
-            "max_output_tokens": CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS,
-        }))
+        .json(&body)
         .timeout(CHECKPOINT_COMPACTION_REQUEST_TIMEOUT);
     let body = send_responses_request(request, &mut cancellation).await?;
     let checkpoint = output_text(
@@ -2561,11 +2563,7 @@ fn load_protocol_items(
         .map(|items| {
             items
                 .into_iter()
-                .map(|item| {
-                    let mut item = context_tool_output_item(&item);
-                    remove_image_generation_action(&mut item);
-                    item
-                })
+                .map(|item| context_tool_output_item(&item))
                 .collect()
         })
         .map_err(Into::into)
@@ -6910,10 +6908,10 @@ async fn run_agent_items(
         for (call_index, call) in output.into_iter().enumerate() {
             let call_type = call.get("type").and_then(Value::as_str);
             if call_type != Some("function_call") && call_type != Some("computer_call") {
-                items.extend(response_output_for_input(vec![call]));
+                items.push(call);
                 continue;
             }
-            items.extend(response_output_for_input(vec![call.clone()]));
+            items.push(call.clone());
             if call_type == Some("computer_call") {
                 let call_id = call
                     .get("call_id")
@@ -7044,40 +7042,6 @@ async fn run_agent_items(
     }
 }
 
-fn response_output_for_input(output: Vec<Value>) -> Vec<Value> {
-    output
-        .into_iter()
-        .map(|mut item| match item.get("type").and_then(Value::as_str) {
-            Some("web_search_call") => {
-                // COMPATIBILITY: This upstream rejects `action` when a web-search result is
-                // replayed through `input`. Remove this once replay accepts `action`.
-                item.as_object_mut()
-                    .expect("a JSON value with type is an object")
-                    .remove("action");
-                item
-            }
-            Some("image_generation_call") => {
-                remove_image_generation_action(&mut item);
-                item
-            }
-            _ => item,
-        })
-        .collect()
-}
-
-fn remove_image_generation_action(item: &mut Value) {
-    if item.get("type").and_then(Value::as_str) != Some("image_generation_call") {
-        return;
-    }
-    // COMPATIBILITY: This upstream rejects generated-image `action` during replay.
-    // Retain every other output field because `store: false` prevents ID-only references from
-    // resolving. Remove this once replay accepts `action`; verify with both continuation and
-    // historical-context replay tests.
-    item.as_object_mut()
-        .expect("image generation call is an object")
-        .remove("action");
-}
-
 fn responses_request_body(model: &str, input: &[Value]) -> Value {
     let mut body = json!({
         "model": model,
@@ -7095,7 +7059,30 @@ fn responses_request_body(model: &str, input: &[Value]) -> Value {
         body["tools"] = tools;
         body["tool_choice"] = Value::String("auto".to_owned());
     }
+    sanitize_responses_input(&mut body);
     body
+}
+
+fn sanitize_responses_input(body: &mut Value) {
+    // COMPATIBILITY: The upstream Responses API rejects replayed web-search `action` and
+    // image-generation `action`/native `size` fields. Keep this final request middleware until
+    // a production replay test accepts those fields, then remove the corresponding entry here.
+    let input = body["input"]
+        .as_array_mut()
+        .expect("Responses request input is an array");
+    for item in input {
+        let fields = match item.get("type").and_then(Value::as_str) {
+            Some("web_search_call") => &["action"][..],
+            Some("image_generation_call") => &["action", "size"][..],
+            _ => continue,
+        };
+        let item = item
+            .as_object_mut()
+            .expect("a Responses protocol item with a type is an object");
+        for field in fields {
+            item.remove(*field);
+        }
+    }
 }
 
 fn scoped_responses_request_body(
@@ -7171,6 +7158,7 @@ fn scoped_responses_request_body(
         developer_sections.join("\n\n"),
         body["input"].as_array().cloned().unwrap_or_default(),
     ));
+    sanitize_responses_input(&mut body);
     body
 }
 
@@ -12865,7 +12853,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_context_replays_image_generation_without_action() {
+    fn compiled_context_replays_image_generation_without_action_or_size() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
@@ -12902,9 +12890,25 @@ mod tests {
             .iter()
             .find(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
             .unwrap();
-        assert!(image.get("action").is_none());
+        assert_eq!(image["action"], "generate");
         assert_eq!(image["size"], "1254x1254");
         assert_eq!(image["result"], "aW1hZ2U=");
+        let request = scoped_responses_request_body(
+            "gpt-5",
+            &context.items,
+            &SkillCatalog::default(),
+            AgentScope::Main,
+            &db,
+            None,
+        );
+        let image = request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
+            .unwrap();
+        assert!(image.get("action").is_none());
+        assert!(image.get("size").is_none());
     }
 
     #[test]
@@ -13491,15 +13495,19 @@ mod tests {
 
     #[test]
     fn responses_input_omits_web_search_actions() {
-        let input = response_output_for_input(vec![
-            json!({
-                "type": "web_search_call",
-                "id": "web_1",
-                "status": "completed",
-                "action": {"type": "search", "query": "Cybion"},
-            }),
-            json!({"type": "function_call", "call_id": "call_1"}),
-        ]);
+        let body = responses_request_body(
+            "gpt-5",
+            &[
+                json!({
+                    "type": "web_search_call",
+                    "id": "web_1",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "Cybion"},
+                }),
+                json!({"type": "function_call", "call_id": "call_1"}),
+            ],
+        );
+        let input = body["input"].as_array().unwrap();
         assert!(input[0].get("action").is_none());
         assert_eq!(input[0]["id"], "web_1");
         assert_eq!(input[0]["status"], "completed");
@@ -13507,26 +13515,29 @@ mod tests {
     }
 
     #[test]
-    fn responses_input_preserves_image_generation_result_without_action() {
-        let input = response_output_for_input(vec![json!({
-            "type": "image_generation_call",
-            "id": "image_1",
-            "status": "completed",
-            "action": {"type": "generate"},
-            "size": "1254x1254",
-            "background": "transparent",
-            "output_format": "png",
-            "quality": "medium",
-            "result": "aW1hZ2U=",
-            "revised_prompt": "A Cybion logo.",
-        })]);
-        assert_eq!(
-            input,
-            vec![json!({
+    fn responses_input_preserves_image_generation_result_without_action_or_size() {
+        let body = responses_request_body(
+            "gpt-5",
+            &[json!({
                 "type": "image_generation_call",
                 "id": "image_1",
                 "status": "completed",
+                "action": {"type": "generate"},
                 "size": "1254x1254",
+                "background": "transparent",
+                "output_format": "png",
+                "quality": "medium",
+                "result": "aW1hZ2U=",
+                "revised_prompt": "A Cybion logo.",
+            })],
+        );
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(
+            input,
+            &[json!({
+                "type": "image_generation_call",
+                "id": "image_1",
+                "status": "completed",
                 "background": "transparent",
                 "output_format": "png",
                 "quality": "medium",
@@ -14194,7 +14205,6 @@ mod tests {
                 "type": "image_generation_call",
                 "id": "image_1",
                 "status": "completed",
-                "size": "1254x1254",
                 "background": "transparent",
                 "output_format": "png",
                 "quality": "medium",
