@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AuthMiniApi } from 'auth-mini/sdk/browser'
 import { AuthMiniButton, AuthMiniProvider, useAuthMini } from 'auth-mini-react-components'
-import { ActivityIcon, AlertTriangleIcon, ArrowLeftIcon, BookOpenIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, CircleStopIcon, CopyIcon, CpuIcon, DatabaseIcon, FileIcon, FolderIcon, GitForkIcon, Globe2Icon, HardDriveIcon, LanguagesIcon, MemoryStickIcon, MicIcon, MonitorCogIcon, NetworkIcon, PanelLeftIcon, PlusIcon, RefreshCwIcon, SearchIcon, SendIcon, ServerIcon, Settings2Icon, SquareIcon, TerminalSquareIcon, Volume2Icon, WrenchIcon, XIcon } from 'lucide-react'
+import { ActivityIcon, AlertTriangleIcon, ArrowLeftIcon, BookOpenIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, CircleStopIcon, CopyIcon, CpuIcon, DatabaseIcon, DownloadIcon, FileIcon, FolderIcon, GitForkIcon, Globe2Icon, HardDriveIcon, ImageIcon, LanguagesIcon, MemoryStickIcon, MicIcon, MonitorCogIcon, NetworkIcon, PanelLeftIcon, PaperclipIcon, PlusIcon, RefreshCwIcon, SearchIcon, SendIcon, ServerIcon, Settings2Icon, SquareIcon, TerminalSquareIcon, UploadIcon, Volume2Icon, WrenchIcon, XIcon } from 'lucide-react'
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useRef, useState } from 'react'
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { createRoot } from 'react-dom/client'
@@ -39,7 +39,8 @@ type UpdateStatus = { current_version: string; latest_version: string | null; st
 type Peer = { id: string; name: string; machine_id: string; hostname: string; deployment_role: DeploymentRole; filesystem_enabled: boolean; bash_enabled: boolean; created_at: string; last_seen_at: string | null; online: boolean }
 type FileEntry = { name: string; path: string; kind: 'file' | 'directory'; size: number }
 type SystemResources = { sampled_at: number; sample_interval_ms: number; cpu: { usage_percent: number; load_1m: number; logical_cpus: number }; memory: { used_bytes: number; total_bytes: number; available_bytes: number; process_used_bytes: number; other_used_bytes: number; usage_percent: number; swap_used_bytes: number; swap_total_bytes: number }; network: { receive_bytes_per_second: number; transmit_bytes_per_second: number; interfaces: number }; disk: { mount_point: string; used_bytes: number; total_bytes: number; available_bytes: number; usage_percent: number } | null; sqlite: { main_bytes: number; wal_bytes: number; shm_bytes: number; total_bytes: number; freelist_bytes: number; freelist_percent: number } }
-type GeneratedImage = { id: string; data: string }
+type StoredFile = { id: string; filename: string; mime_type: string; size: number; preview_content?: string; history_entry_id?: number; created_at: string }
+type GeneratedImage = { id: string; data?: string; preview_content?: string; history_entry_id?: number }
 type ChatMessage = { id?: number; role: string; content: string | null; images?: GeneratedImage[]; created_at?: string; duration_ms?: number; input_tokens?: number; output_tokens?: number }
 type Transcription = { text: string }
 type VoiceScript = { text: string }
@@ -51,7 +52,7 @@ type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing
 type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'run'; id: string; run: ConversationRun } | { kind: 'status'; id: string; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; run_id?: string; event_id?: number; output_bytes?: number; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
 type ConversationRun = { id: string; user_message_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled'; retry_attempt: number; next_retry_at: number | null; event_count: number; latest_event_id?: number; latest_context_tokens?: number; last_error?: string }
 type ContextCheckpoint = { id: number; predecessors: { hop: number; checkpoint_id: number }[]; summary: string; created_at: string }
-type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null }; has_more: boolean; next_before_id?: number }
+type ConversationState = { messages: ChatMessage[]; runs: ConversationRun[]; context: { history_messages: number; checkpoint: ContextCheckpoint | null }; has_more: boolean; focus_message_id?: number; next_before_id?: number }
 type ConversationEventSummary = Exclude<AgentEvent, { type: 'complete' }> | { type: 'complete' }
 type ConversationRunEvent = { id: number; event: ConversationEventSummary; created_at: string }
 type ConversationRunEventPage = { events: ConversationRunEvent[]; has_more: boolean; next_before_id?: number }
@@ -80,7 +81,7 @@ const words = {
     machine: 'Machine', console: 'Console', machines: 'Machines', files: 'Files', commands: 'Commands', resources: 'Resources', tools: 'Tools', skills: 'Skills', settings: 'Settings', connecting: 'Connecting…', loadingMachine: 'Loading machine', online: 'Online', light: 'Light', dark: 'Dark', language: 'Language',
     consoleDescription: 'Agent activity is streamed as it happens.', context: 'Context', tokens: 'tokens', duration: 'Duration', seconds: 's', stop: 'Stop', startRecording: 'Start voice input', stopRecording: 'Stop voice input', transcribing: 'Transcribing…', voiceReady: 'Voice ready · start speaking', voiceListening: 'Listening', voiceUnderstanding: 'Understanding the turn…', voiceContinue: 'Keep speaking…', voiceConfirm: 'I heard this. Send it or keep listening?', voiceSend: 'Send', voiceDiscard: 'Discard', agentWorking: 'Agent is working…', greeting: 'I am connected to this machine. Tell me the outcome you want to reach.', queued: 'Queued', completed: 'Completed', calling: 'Calling', listingFiles: 'Listing', listedFiles: 'Listed', readingFile: 'Reading', readFile: 'Read', writingFile: 'Editing', wroteFile: 'Edited', runningCommand: 'Running command', ranCommand: 'Ran command', searchingWeb: 'Searching the web', searchedWeb: 'Searched the web', reasoning: 'Reasoning', parameters: 'Parameters', generatingImage: 'Generating image', generatedImage: 'Generated image', addedLines: 'added', deletedLines: 'deleted', lines: 'lines', outcomePlaceholder: 'Describe the outcome you want…', queuedPlaceholder: 'Add a follow-up prompt to the queue…', composeHint: 'Enter to send · Shift+Enter for a new line · IME Enter confirms composition', queuedCount: 'queued',
     machinesTitle: 'Machines', machinesDescription: 'Pair outbound-only tool executors with this controller.', enrolledMachines: 'Registered machines', noMachines: 'No remote machines registered.', pairExecutor: 'Pair executor', pairExecutorDescription: 'Create a one-time command for a device that has no public address, web console, or Auth Mini login.', pairingCommand: 'Run this on the executor', pairingExpires: 'Expires {time}', pairingOneTime: 'This URL is single-use. The executor stores only its controller URL and device access token.', copy: 'Copy', copied: 'Copied', remove: 'Remove', browser: 'Browser', browserTitle: 'Browser Control', browserDescription: 'Agents autonomously create and control disposable, isolated Chromium sessions.', browserCreateHint: 'Agents create unrestricted sessions when needed. Create one here only for manual takeover.', createBrowser: 'Create browser session', computerUse: 'Enable Computer Use', computerUseHint: 'Visual actions pause for explicit approval before clicks or typing.', noBrowserSessions: 'No browser sessions are active.', selectBrowser: 'Select browser session', noBrowser: 'No browser', closeBrowser: 'Close session', approveAction: 'Approve action', browserInput: 'Type into browser', sendBrowserInput: 'Send input', browserLiveView: 'Live browser view', browserClickHint: 'Click the preview to take over with direct pointer input. Scroll over it with a mouse or trackpad.',
-    filesTitle: 'Files', filesDescription: 'Browse and edit the active machine.', refresh: 'Refresh', directory: 'Directory', selectFile: 'Select a file', save: 'Save',
+    filesTitle: 'Files', filesDescription: 'Browse and edit the active machine.', refresh: 'Refresh', directory: 'Directory', selectFile: 'Select a file', save: 'Save', fileObjects: 'File objects', gallery: 'Gallery', fileObjectsTitle: 'File objects', fileObjectsDescription: 'Content-addressed attachments and generated assets stored by this controller.', galleryTitle: 'Gallery', galleryDescription: 'Generated and uploaded images, indexed by the history that produced them.', uploadFiles: 'Upload attachments', uploadingFiles: 'Uploading…', noFiles: 'No files have been stored yet.', noImages: 'No images have been stored yet.', allFileTypes: 'All types', images: 'Images', documents: 'Documents', media: 'Media', otherFiles: 'Other', fileName: 'Name', fileType: 'Type', fileSize: 'Size', fileId: 'SHA-256', sourceHistory: 'Source history', openOriginal: 'Locate in conversation', download: 'Download', attachment: 'Attach file', attachments: 'Attachments', removeAttachment: 'Remove attachment', historyUnavailable: 'No linked history',
     commandsTitle: 'Commands', commandsDescription: 'Every run_bash invocation is durably recorded. Running commands stay first.', noCommands: 'No commands have been run.', noCommandMatches: 'No commands match these filters.', command: 'Command', commandTarget: 'Target machine', commandStartedAt: 'Started', commandFinishedAt: 'Finished', commandResult: 'Result', commandExitCode: 'Exit code', commandRunning: 'Running', commandCancelled: 'Cancelled', commandComplete: 'Complete', commandSearch: 'Search commands', commandSearchPlaceholder: 'Command, machine, or output', commandAllStatuses: 'All statuses', commandAllMachines: 'All machines', commandClearFilters: 'Clear filters', commandViewResult: 'View result', commandStdout: 'Standard output', commandStderr: 'Standard error', commandNoResult: 'No result yet.', commandRange: '{from}–{to} of {total} commands', commandPage: 'Page {page} of {pages}', commandPreviousPage: 'Previous', commandNextPage: 'Next', commandPageSize: 'Per page',
     resourcesTitle: 'Resources', resourcesDescription: 'Live capacity and local database usage.', sampled: 'Sampled', cpu: 'CPU', memory: 'Memory', network: 'Network', disk: 'Disk', sqlite: 'SQLite database', load1m: '1m load', logicalCpus: 'Logical CPUs', processMemory: 'Cybion RSS', otherMemory: 'Other system usage', available: 'Available', swap: 'Swap', received: 'Received', transmitted: 'Transmitted', interfaces: 'Interfaces', mount: 'Mount', main: 'Main', wal: 'WAL', shm: 'SHM', reclaimable: 'Reclaimable', unavailable: 'Unavailable',
     settingsTitle: 'Settings', settingsDescription: 'Configure this machine\'s agent upstream, thread models, and reply announcements.', defaultModel: 'Default model', defaultModelDescription: 'Used by the next agent turn.', modelId: 'Model ID', modelHint: 'Use a model supported by the configured upstream.', voiceScriptModel: 'Voice announcement model', voiceScriptModelHint: 'Rewrites final replies into natural speech before playback.', voiceTurnModel: 'Voice turn model', voiceTurnModelHint: 'Decides whether a recognized voice segment should be sent or kept open.', voiceScriptLength: 'Voice announcement length', voiceScriptLengthHint: 'Maximum characters in the generated script. 150 characters is usually about 30 seconds.', chineseVoice: 'Chinese Edge voice', englishVoice: 'English Edge voice', edgeVoiceHint: 'Use an Edge Neural voice name, for example {voice}.', baseUrlDescription: 'Used for the next agent turn.', apiKeyDescription: 'Used for the next agent turn.', saveChanges: 'Save changes', requestFailed: 'Request failed', initializeCybion: 'Initialize Cybion', initializeDescription: 'Bind this machine to your Auth Mini identity and OpenAI-compatible upstream.', authMiniUrl: 'Auth Mini URL', continueAuth: 'Continue with Auth Mini', apiKey: 'OpenAI API key', baseUrl: 'Base URL', initialize: 'Initialize', returnMachine: 'Return to the machine', signInDescription: 'Sign in through the configured Auth Mini server.', toolsTitle: 'Tools', toolsDescription: 'Every tool sent with a main-thread Responses request.', toolName: 'Tool', toolDescription: 'Description', toolParameters: 'Parameters', noTools: 'No tools are available.', status: 'Status',
@@ -93,7 +94,7 @@ const words = {
     machine: '机器', console: '控制台', machines: '机器', files: '文件', commands: '命令', resources: '资源', tools: '工具', skills: '技能', settings: '设置', connecting: '正在连接…', loadingMachine: '正在加载机器', online: '在线', light: '亮色', dark: '深色', language: '语言',
     consoleDescription: '实时展示 Agent 的执行过程。', context: '上下文', tokens: 'tokens', duration: '用时', seconds: '秒', stop: '停止', startRecording: '开始语音输入', stopRecording: '停止语音输入', transcribing: '正在转写…', voiceReady: '语音待命，说话即可', voiceListening: '正在听', voiceUnderstanding: '正在判断是否说完…', voiceContinue: '继续补充…', voiceConfirm: '我听到这段内容，要发送还是继续听？', voiceSend: '发送', voiceDiscard: '丢弃', agentWorking: 'Agent 正在执行…', greeting: '我已连接到这台机器。请告诉我你想要达成的结果。', queued: '排队中', completed: '已完成', calling: '正在调用', listingFiles: '正在列出', listedFiles: '已列出', readingFile: '正在读取', readFile: '已读取', writingFile: '正在编辑', wroteFile: '已编辑', runningCommand: '正在运行命令', ranCommand: '已运行命令', searchingWeb: '正在搜索网页', searchedWeb: '已搜索网页', reasoning: '推理', parameters: '参数', generatingImage: '正在生成图片', generatedImage: '已生成图片', addedLines: '增加', deletedLines: '删除', lines: '行', outcomePlaceholder: '描述你想要的结果…', queuedPlaceholder: '追加一条后续提示词…', composeHint: 'Enter 发送 · Shift+Enter 换行 · 输入法确认候选时不会发送', queuedCount: '条排队中',
     machinesTitle: '机器', machinesDescription: '为仅主动出站的工具执行设备配对。', enrolledMachines: '已注册机器', noMachines: '尚未注册远程机器。', pairExecutor: '配对执行设备', pairExecutorDescription: '为没有公网地址、Web 控制台或 Auth Mini 登录的设备生成一次性命令。', pairingCommand: '在执行设备上运行', pairingExpires: '有效期至 {time}', pairingOneTime: '此 URL 仅能使用一次。执行设备只保存主控地址和设备访问 Token。', copy: '复制', copied: '已复制', remove: '移除', browser: '浏览器', browserTitle: '浏览器控制', browserDescription: 'Agent 会自主创建并控制一次性的隔离 Chromium 会话。', browserCreateHint: 'Agent 会在需要时创建可访问任意网页的会话；仅在你要手动接管时在此创建。', createBrowser: '创建浏览器会话', computerUse: '启用 Computer Use', computerUseHint: '视觉操作在点击或输入前会暂停并请求明确批准。', noBrowserSessions: '当前没有浏览器会话。', selectBrowser: '选择浏览器会话', noBrowser: '不使用浏览器', closeBrowser: '关闭会话', approveAction: '批准操作', browserInput: '向浏览器输入', sendBrowserInput: '发送输入', browserLiveView: '浏览器实时视图', browserClickHint: '点击预览即可直接接管指针输入；可在预览上使用鼠标或触控板滚动。',
-    filesTitle: '文件', filesDescription: '浏览并编辑当前机器。', refresh: '刷新', directory: '目录', selectFile: '选择文件', save: '保存',
+    filesTitle: '文件', filesDescription: '浏览并编辑当前机器。', refresh: '刷新', directory: '目录', selectFile: '选择文件', save: '保存', fileObjects: '文件对象', gallery: '图册', fileObjectsTitle: '文件对象', fileObjectsDescription: '由当前控制设备内容寻址保存的附件和生成资产。', galleryTitle: '图册', galleryDescription: '已生成和上传的图片，并按来源历史记录建立索引。', uploadFiles: '上传附件', uploadingFiles: '正在上传…', noFiles: '尚未存储文件。', noImages: '尚未存储图片。', allFileTypes: '全部类型', images: '图片', documents: '文档', media: '媒体', otherFiles: '其他', fileName: '名称', fileType: '类型', fileSize: '大小', fileId: 'SHA-256', sourceHistory: '来源历史', openOriginal: '定位到对话', download: '下载', attachment: '添加附件', attachments: '附件', removeAttachment: '移除附件', historyUnavailable: '没有关联的历史记录',
     commandsTitle: '命令', commandsDescription: '每次 run_bash 调用都会持久化记录；正在运行的命令固定排在前面。', noCommands: '尚未运行任何命令。', noCommandMatches: '没有符合筛选条件的命令。', command: '命令', commandTarget: '目标机器', commandStartedAt: '开始时间', commandFinishedAt: '结束时间', commandResult: '返回结果', commandExitCode: '返回码', commandRunning: '运行中', commandCancelled: '已取消', commandComplete: '已完成', commandSearch: '搜索命令', commandSearchPlaceholder: '命令、机器或输出', commandAllStatuses: '全部状态', commandAllMachines: '全部机器', commandClearFilters: '清除筛选', commandViewResult: '查看返回结果', commandStdout: '标准输出', commandStderr: '标准错误', commandNoResult: '尚无返回结果。', commandRange: '第 {from}–{to} 条，共 {total} 条命令', commandPage: '第 {page} / {pages} 页', commandPreviousPage: '上一页', commandNextPage: '下一页', commandPageSize: '每页',
     resourcesTitle: '系统资源', resourcesDescription: '实时容量和本地数据库占用。', sampled: '采样时间', cpu: 'CPU', memory: '内存', network: '网络', disk: '磁盘', sqlite: 'SQLite 数据库', load1m: '1 分钟负载', logicalCpus: '逻辑核心', processMemory: 'Cybion RSS', otherMemory: '其他系统占用', available: '可用', swap: '交换分区', received: '接收', transmitted: '发送', interfaces: '网卡', mount: '挂载点', main: '主文件', wal: 'WAL', shm: 'SHM', reclaimable: '可回收', unavailable: '不可用',
     settingsTitle: '设置', settingsDescription: '配置当前机器的 Agent 上游、线程模型和结果朗读。', defaultModel: '默认模型', defaultModelDescription: '用于下一轮 Agent 对话。', modelId: '模型 ID', modelHint: '请输入当前上游支持的模型。', voiceScriptModel: '朗读模型', voiceScriptModelHint: '播放前将最终回复改写为自然口语。', voiceTurnModel: '语音轮次模型', voiceTurnModelHint: '判断一段听写应发送给 Agent 还是继续等待补充。', voiceScriptLength: '朗读字数', voiceScriptLengthHint: '生成语音稿的最大字数；150 字通常约为 30 秒。', chineseVoice: '中文 Edge 音色', englishVoice: '英文 Edge 音色', edgeVoiceHint: '使用 Edge Neural 音色名称，例如 {voice}。', baseUrlDescription: '用于下一轮 Agent 对话。', apiKeyDescription: '用于下一轮 Agent 对话。', saveChanges: '保存更改', requestFailed: '请求失败', initializeCybion: '初始化 Cybion', initializeDescription: '将此机器绑定到你的 Auth Mini 身份和 OpenAI 兼容上游。', authMiniUrl: 'Auth Mini 地址', continueAuth: '使用 Auth Mini 继续', apiKey: 'OpenAI API 密钥', baseUrl: '基础地址', initialize: '初始化', returnMachine: '返回机器', signInDescription: '通过已配置的 Auth Mini 服务登录。', toolsTitle: '工具', toolsDescription: '与主线程 Responses 请求一同发送的全部工具。', toolName: '工具', toolDescription: '说明', toolParameters: '参数格式', noTools: '暂时没有可用工具。', status: '状态',
@@ -179,6 +180,25 @@ async function api<T>(path: string, sdk: AuthMiniApi, init?: RequestInit): Promi
   const response = await authenticatedFetch(sdk, path, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
   if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
   return response.json() as Promise<T>
+}
+
+async function uploadStoredFile(sdk: AuthMiniApi, file: File): Promise<StoredFile> {
+  const data = new FormData()
+  data.append('file', file, file.name)
+  const response = await authenticatedFetch(sdk, '/api/file-objects', { method: 'POST', body: data })
+  if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
+  return response.json() as Promise<StoredFile>
+}
+
+async function downloadStoredFile(sdk: AuthMiniApi, file: StoredFile) {
+  const response = await authenticatedFetch(sdk, `/api/file-objects/${encodeURIComponent(file.id)}/content`)
+  if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = file.filename
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 async function bootstrapApi<T>(path: string, token: string, init?: RequestInit): Promise<T> {
@@ -272,7 +292,7 @@ function WorkspaceNav({ nav }: { nav: WorkspaceNavItem[] }) {
 }
 
 function WorkspaceRoutes({ executor, token }: { executor: boolean; token: AuthMiniApi }) {
-  return <Routes><Route path="/console" element={executor ? <Navigate to="/resources" replace /> : null} /><Route path="/threads" element={executor ? <Navigate to="/resources" replace /> : <ThreadsPage token={token} />} /><Route path="/threads/:id" element={executor ? <Navigate to="/resources" replace /> : <ThreadDetailPage token={token} />} /><Route path="/browser" element={executor ? <Navigate to="/resources" replace /> : <BrowserPage token={token} />} /><Route path="/machines" element={<Machines token={token} />} /><Route path="/files" element={<FilesPage token={token} />} /><Route path="/commands" element={<CommandsPage token={token} />} /><Route path="/resources" element={<ResourcesPage token={token} />} /><Route path="/tools" element={<ToolCatalogPage token={token} />} /><Route path="/skills" element={<SkillsPage token={token} />} /><Route path="/settings" element={<SettingsPage token={token} />} /><Route path="*" element={<Navigate to={executor ? "/resources" : "/console"} replace />} /></Routes>
+  return <Routes><Route path="/console" element={executor ? <Navigate to="/resources" replace /> : null} /><Route path="/threads" element={executor ? <Navigate to="/resources" replace /> : <ThreadsPage token={token} />} /><Route path="/threads/:id" element={executor ? <Navigate to="/resources" replace /> : <ThreadDetailPage token={token} />} /><Route path="/browser" element={executor ? <Navigate to="/resources" replace /> : <BrowserPage token={token} />} /><Route path="/file-objects" element={executor ? <Navigate to="/resources" replace /> : <FileObjectsPage token={token} />} /><Route path="/gallery" element={executor ? <Navigate to="/resources" replace /> : <GalleryPage token={token} />} /><Route path="/machines" element={<Machines token={token} />} /><Route path="/files" element={<FilesPage token={token} />} /><Route path="/commands" element={<CommandsPage token={token} />} /><Route path="/resources" element={<ResourcesPage token={token} />} /><Route path="/tools" element={<ToolCatalogPage token={token} />} /><Route path="/skills" element={<SkillsPage token={token} />} /><Route path="/settings" element={<SettingsPage token={token} />} /><Route path="*" element={<Navigate to={executor ? "/resources" : "/console"} replace />} /></Routes>
 }
 
 function AppHeader({ role, hostname, language }: { role?: DeploymentRole; hostname?: string; language: Language }) {
@@ -286,7 +306,7 @@ function Workspace() {
   const token = sdk
   const { dark, language, setLanguage, toggleTheme, t } = useUi()
   const status = useQuery({ queryKey: ['status'], queryFn: () => api<Status>('/api/status', token) })
-  const operatorNav = [{ to: '/console', label: t('console'), icon: TerminalSquareIcon }, { to: '/threads', label: goalText(language, 'goals'), icon: GitForkIcon }, { to: '/browser', label: t('browser'), icon: Globe2Icon }]
+  const operatorNav = [{ to: '/console', label: t('console'), icon: TerminalSquareIcon }, { to: '/file-objects', label: t('fileObjects'), icon: FileIcon }, { to: '/gallery', label: t('gallery'), icon: ImageIcon }, { to: '/threads', label: goalText(language, 'goals'), icon: GitForkIcon }, { to: '/browser', label: t('browser'), icon: Globe2Icon }]
   const machineNav = [{ to: '/machines', label: t('machines'), icon: NetworkIcon }, { to: '/files', label: t('files'), icon: FileIcon }, { to: '/commands', label: t('commands'), icon: TerminalSquareIcon }, { to: '/resources', label: t('resources'), icon: ActivityIcon }, { to: '/tools', label: t('tools'), icon: WrenchIcon }, { to: '/skills', label: t('skills'), icon: BookOpenIcon }, { to: '/settings', label: t('settings'), icon: Settings2Icon }]
   const nav = status.data?.deployment_role === 'executor' ? machineNav : [...operatorNav, ...machineNav]
   const executor = status.data?.deployment_role === 'executor'
@@ -511,7 +531,7 @@ function ConversationFeed({ items, running = false, hasMore = false, loadingEarl
     const interval = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(interval)
   }, [hasRunningTool])
-  return <MessageScrollerProvider autoScroll={false} defaultScrollPosition="end"><MessageScroller className="flex-1"><MessageScrollerViewport><MessageScrollerContent className="mx-auto w-full max-w-4xl p-4">{hasMore && onLoadEarlier && <MessageScrollerItem className="flex justify-center [content-visibility:auto] [contain-intrinsic-size:3rem]"><Button size="sm" variant="outline" disabled={loadingEarlier} onClick={onLoadEarlier}>{loadingEarlier && <Spinner data-icon="inline-start" />}{loadingEarlier ? t('loadingEarlierMessages') : t('loadEarlierMessages')}</Button></MessageScrollerItem>}{items.map((item) => <MessageScrollerItem key={item.kind === 'tool' ? item.call_id : item.id} className="[content-visibility:auto] [contain-intrinsic-size:6rem]"><ConversationEntry item={item} now={now} peers={peers.data ?? []} /></MessageScrollerItem>)}{running && <MessageScrollerItem className="[content-visibility:auto] [contain-intrinsic-size:3rem]"><ThreadRunning /></MessageScrollerItem>}</MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton behavior="auto" /></MessageScroller></MessageScrollerProvider>
+  return <MessageScrollerProvider autoScroll={false} defaultScrollPosition="end"><MessageScroller className="flex-1"><MessageScrollerViewport><MessageScrollerContent className="mx-auto w-full max-w-4xl p-4">{hasMore && onLoadEarlier && <MessageScrollerItem className="flex justify-center [content-visibility:auto] [contain-intrinsic-size:3rem]"><Button size="sm" variant="outline" disabled={loadingEarlier} onClick={onLoadEarlier}>{loadingEarlier && <Spinner data-icon="inline-start" />}{loadingEarlier ? t('loadingEarlierMessages') : t('loadEarlierMessages')}</Button></MessageScrollerItem>}{items.map((item) => <MessageScrollerItem id={item.kind === 'message' && item.message.id !== undefined ? `history-entry-${item.message.id}` : undefined} key={item.kind === 'tool' ? item.call_id : item.id} className="[content-visibility:auto] [contain-intrinsic-size:6rem]"><ConversationEntry item={item} now={now} peers={peers.data ?? []} /></MessageScrollerItem>)}{running && <MessageScrollerItem className="[content-visibility:auto] [contain-intrinsic-size:3rem]"><ThreadRunning /></MessageScrollerItem>}</MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton behavior="auto" /></MessageScroller></MessageScrollerProvider>
 }
 
 function ThreadRunning() {
@@ -589,8 +609,9 @@ function VoicePreviewPanel({ preview, onContinue, onDiscard, onSend }: { preview
 function Console({ children, token }: { children: ReactNode; token: AuthMiniApi }) {
   const { language, t } = useUi()
   const location = useLocation()
+  const focus = new URLSearchParams(location.search).get('focus')
   const queryClient = useQueryClient()
-  const conversationQuery = useQuery({ queryKey: ['conversation'], queryFn: () => api<ConversationState>('/api/conversation', token), refetchOnWindowFocus: false })
+  const conversationQuery = useQuery({ queryKey: ['conversation', focus], queryFn: () => api<ConversationState>(focus ? `/api/conversation?focus=${encodeURIComponent(focus)}` : '/api/conversation', token), refetchOnWindowFocus: false })
   const threadsQuery = useQuery({ queryKey: ['threads'], queryFn: () => api<ThreadIndex>('/api/threads', token), refetchInterval: 1000 })
   const [olderPages, setOlderPages] = useState<ConversationState[]>([])
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -605,8 +626,10 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const announcementRef = useRef(0)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const announcedMessageRef = useRef<number | null>(null)
+  const focusedMessageRef = useRef<number | null>(null)
   const composingRef = useRef(false)
   const draftRef = useRef<HTMLTextAreaElement>(null)
+  const attachmentPickerRef = useRef<HTMLInputElement>(null)
   const [activeRuns, setActiveRuns] = useState<string[]>([])
   const [contextTokens, setContextTokens] = useState<number | null>(null)
   const [error, setError] = useState('')
@@ -616,6 +639,8 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const [voicePreview, setVoicePreview] = useState<VoicePreview>({ state: 'armed', transcript: '' })
   const [announceReplies, setAnnounceReplies] = useState(announceRef.current)
   const [conversationInitialized, setConversationInitialized] = useState(false)
+  const [attachments, setAttachments] = useState<StoredFile[]>([])
+  const [uploadingAttachment, setUploadingAttachment] = useState(false)
   const updateConversation = (next: ConversationItem[]) => { conversationRef.current = next; setConversation(next) }
   const activeSubthreads = (threadsQuery.data?.subthreads ?? []).filter((thread) => thread.goal_state === 'active')
 
@@ -630,6 +655,12 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     setActiveRuns(state.runs.filter((run) => run.status === 'running' && run.next_retry_at === null).map((run) => run.id))
     setConversationInitialized(true)
   }, [conversationQuery.data, olderPages])
+  useEffect(() => {
+    const id = conversationQuery.data?.focus_message_id
+    if (!id || !conversationInitialized || focusedMessageRef.current === id) return
+    document.getElementById(`history-entry-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    focusedMessageRef.current = id
+  }, [conversationInitialized, conversationQuery.data?.focus_message_id])
   useEffect(() => {
     if (!conversationQuery.data?.runs.some((run) => run.status === 'running') && activeSubthreads.length === 0) return
     const interval = window.setInterval(() => { void conversationQuery.refetch() }, 1000)
@@ -731,12 +762,25 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     })
   }
 
-  const submitContent = (content: string) => {
+  const submitContent = (content: string, attached: StoredFile[] = []) => {
     const text = content.trim()
-    if (!text) return
-    const entry: Extract<ConversationItem, { kind: 'message' }> = { kind: 'message', id: crypto.randomUUID(), message: { role: 'user', content: text }, queued: true }
+    if (!text && attached.length === 0) return
+    const attachmentContext = attached.length ? `\n\nAttached file objects:\n${attached.map((file) => `- ${file.filename} (${file.mime_type}; SHA-256 ${file.id})`).join('\n')}` : ''
+    const entry: Extract<ConversationItem, { kind: 'message' }> = { kind: 'message', id: crypto.randomUUID(), message: { role: 'user', content: `${text}${attachmentContext}`.trim() }, queued: true }
     updateConversation([...conversationRef.current, entry])
     startRun(entry.id, entry.message)
+  }
+
+  const attachFiles = async (files: FileList | null) => {
+    if (!files?.length) return
+    setUploadingAttachment(true)
+    setError('')
+    try {
+      const uploaded = [] as StoredFile[]
+      for (const file of Array.from(files)) uploaded.push(await uploadStoredFile(token, file))
+      setAttachments((current) => [...current, ...uploaded.filter((file) => !current.some((existing) => existing.id === file.id))])
+      await queryClient.invalidateQueries({ queryKey: ['file-objects'] })
+    } catch (cause) { setError(message(cause)) } finally { setUploadingAttachment(false) }
   }
 
   const submit = (event: FormEvent) => {
@@ -745,7 +789,8 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     if (!input) return
     const content = input.value
     input.value = ''
-    submitContent(content)
+    submitContent(content, attachments)
+    setAttachments([])
   }
 
   const stopAll = async () => {
@@ -974,11 +1019,14 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     {error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}
     <form className="shrink-0 border-t p-3" onSubmit={submit}>
       {continuousVoice && <VoicePreviewPanel preview={voicePreview} onContinue={continueVoiceTurn} onDiscard={discardVoiceTurn} onSend={sendVoiceTurn} />}
+      <input ref={attachmentPickerRef} className="sr-only" type="file" multiple onChange={(event) => { void attachFiles(event.target.files); event.currentTarget.value = '' }} />
+      {attachments.length > 0 && <div className="mx-auto mb-2 flex max-w-4xl flex-wrap gap-2">{attachments.map((file) => <Badge key={file.id} variant="secondary" className="max-w-full gap-1.5 py-1 pl-2"><PaperclipIcon className="size-3 shrink-0" /><span className="truncate">{file.filename}</span><button aria-label={`${t('removeAttachment')}: ${file.filename}`} className="rounded-sm p-0.5 hover:bg-foreground/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" type="button" onClick={() => setAttachments((current) => current.filter((entry) => entry.id !== file.id))}><XIcon className="size-3" /></button></Badge>)}</div>}
       <InputGroup className="mx-auto max-w-4xl">
-        <InputGroupTextarea ref={draftRef} disabled={unavailable} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} />
+        <InputGroupTextarea ref={draftRef} disabled={unavailable || uploadingAttachment} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return; event.preventDefault(); event.currentTarget.form?.requestSubmit() }} placeholder={activeRuns.length ? t('queuedPlaceholder') : t('outcomePlaceholder')} rows={2} />
         <InputGroupAddon align="inline-end">
+          <InputGroupButton aria-label={t('attachment')} disabled={unavailable || uploadingAttachment} onClick={() => attachmentPickerRef.current?.click()} size="icon-sm" type="button" variant="ghost">{uploadingAttachment ? <Spinner /> : <PaperclipIcon />}</InputGroupButton>
           <InputGroupButton aria-label={recording ? t('stopRecording') : t('startRecording')} disabled={unavailable || transcribing} onClick={toggleRecording} size="icon-sm" variant={recording ? 'destructive' : 'ghost'}>{recording ? <SquareIcon /> : <MicIcon />}</InputGroupButton>
-          <InputGroupButton disabled={unavailable} type="submit" variant="default" size="icon-sm"><SendIcon /><span className="sr-only">{t('mainThread')}</span></InputGroupButton>
+          <InputGroupButton disabled={unavailable || uploadingAttachment} type="submit" variant="default" size="icon-sm"><SendIcon /><span className="sr-only">{t('mainThread')}</span></InputGroupButton>
         </InputGroupAddon>
         <InputGroupAddon align="block-end" className="border-t flex-col items-start sm:flex-row sm:items-center">
           <div className="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1">
@@ -1190,7 +1238,7 @@ function ConversationEntry({ item, now, peers }: { item: ConversationItem; now: 
   const timestamp = item.message.created_at ? new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(item.message.created_at)) : null
   const duration = item.message.duration_ms === undefined ? null : `${t('duration')}: ${(item.message.duration_ms / 1000).toLocaleString(language === 'zh' ? 'zh-CN' : 'en', { maximumFractionDigits: 1 })} ${t('seconds')}`
   const tokens = item.message.input_tokens === undefined || item.message.output_tokens === undefined ? null : `${(item.message.input_tokens + item.message.output_tokens).toLocaleString()} ${t('tokens')}`
-  return <Message><MessageContent className="gap-1.5"><div className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.message.content ?? ''}</ReactMarkdown></div>{item.message.images?.map((image) => <Card key={image.id} size="sm"><CardContent className="p-0"><img alt={t('generatedImage')} className="max-w-full" src={`data:image/png;base64,${image.data}`} /></CardContent></Card>)}<MessageFooter className="gap-2 px-0 font-normal">{[timestamp, duration, tokens].filter(Boolean).map((detail) => <span key={detail}>{detail}</span>)}{item.message.content && <ManualAnnouncementButton content={item.message.content} />}</MessageFooter></MessageContent></Message>
+  return <Message><MessageContent className="gap-1.5"><div className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.message.content ?? ''}</ReactMarkdown></div>{item.message.images?.map((image) => { const source = image.preview_content ?? (image.data ? `data:image/png;base64,${image.data}` : ''); return source ? <Card key={image.id} size="sm"><CardContent className="p-0"><img alt={t('generatedImage')} className="max-w-full" src={source} /></CardContent></Card> : null })}<MessageFooter className="gap-2 px-0 font-normal">{[timestamp, duration, tokens].filter(Boolean).map((detail) => <span key={detail}>{detail}</span>)}{item.message.content && <ManualAnnouncementButton content={item.message.content} />}</MessageFooter></MessageContent></Message>
 }
 
 function ManualAnnouncementButton({ content }: { content: string }) {
@@ -1260,6 +1308,52 @@ function FilesPage({ token }: { token: AuthMiniApi }) {
   const files = useQuery({ queryKey: ['files', path], queryFn: () => api<FileEntry[]>(`/api/files?path=${encodeURIComponent(path)}`, token) })
   const open = async (entry: FileEntry) => { if (entry.kind === 'directory') { setPath(entry.path); return } setSelected(entry); const result = await api<{ content: string }>(`/api/files/read?path=${encodeURIComponent(entry.path)}`, token); setContent(result.content) }
   return <Page title={t('filesTitle')} description={t('filesDescription')}><Card><CardContent className="pt-4"><InputGroup><Input aria-label={t('directory')} value={path} onChange={(event) => setPath(event.target.value)} /><InputGroupAddon align="inline-end"><InputGroupButton onClick={() => files.refetch()}><RefreshCwIcon data-icon="inline-start" />{t('refresh')}</InputGroupButton></InputGroupAddon></InputGroup></CardContent></Card><div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle>{t('directory')}</CardTitle></CardHeader><CardContent className="flex flex-col gap-1">{files.data?.map((entry) => <Button key={entry.path} variant="ghost" className="justify-start" onClick={() => open(entry)}>{entry.kind === 'directory' ? <FolderIcon data-icon="inline-start" /> : <FileIcon data-icon="inline-start" />}{entry.name}</Button>)}</CardContent></Card><Card><CardHeader><CardTitle>{selected?.path ?? t('selectFile')}</CardTitle></CardHeader><CardContent className="flex flex-col gap-3"><Textarea aria-label={selected?.path ?? t('selectFile')} value={content} onChange={(event) => setContent(event.target.value)} disabled={!selected} className="min-h-80 font-mono" /><Button disabled={!selected} onClick={() => selected && api('/api/files/write', token, { method: 'PUT', body: JSON.stringify({ path: selected.path, content }) })}>{t('save')}</Button></CardContent></Card></div></Page>
+}
+
+function StoredFilePreview({ file, full = false, className = '' }: { file: StoredFile; full?: boolean; className?: string }) {
+  const token = useAuthToken()
+  const [source, setSource] = useState(file.preview_content ?? '')
+  useEffect(() => {
+    if (!full) { setSource(file.preview_content ?? ''); return }
+    let active = true
+    let objectUrl = ''
+    void authenticatedFetch(token, `/api/file-objects/${encodeURIComponent(file.id)}/content`).then(async (response) => {
+      if (!response.ok) throw new Error(response.statusText)
+      objectUrl = URL.createObjectURL(await response.blob())
+      if (active) setSource(objectUrl)
+      else URL.revokeObjectURL(objectUrl)
+    }).catch(() => { if (active) setSource(file.preview_content ?? '') })
+    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [file.id, file.preview_content, full, token])
+  return source ? <img alt={file.filename} className={className} src={source} /> : <div aria-label={file.filename} className={`grid place-items-center bg-muted text-muted-foreground ${className}`}><ImageIcon /></div>
+}
+
+function FileObjectsPage({ token }: { token: AuthMiniApi }) {
+  const { language, t } = useUi()
+  const queryClient = useQueryClient()
+  const pickerRef = useRef<HTMLInputElement>(null)
+  const [kind, setKind] = useState('all')
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState('')
+  const files = useQuery({ queryKey: ['file-objects', kind], queryFn: () => api<StoredFile[]>(`/api/file-objects?kind=${kind}`, token) })
+  const upload = async (selected: FileList | null) => {
+    if (!selected?.length) return
+    setUploading(true)
+    setError('')
+    try {
+      for (const file of Array.from(selected)) await uploadStoredFile(token, file)
+      await queryClient.invalidateQueries({ queryKey: ['file-objects'] })
+    } catch (cause) { setError(message(cause)) } finally { setUploading(false) }
+  }
+  const created = (value: string) => new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value))
+  return <Page title={t('fileObjectsTitle')} description={t('fileObjectsDescription')}><input ref={pickerRef} className="sr-only" type="file" multiple onChange={(event) => { void upload(event.target.files); event.currentTarget.value = '' }} /><div className="flex flex-wrap items-center justify-between gap-3"><Select value={kind} onValueChange={setKind}><SelectTrigger aria-label={t('fileType')} className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">{t('allFileTypes')}</SelectItem><SelectItem value="images">{t('images')}</SelectItem><SelectItem value="documents">{t('documents')}</SelectItem><SelectItem value="media">{t('media')}</SelectItem><SelectItem value="other">{t('otherFiles')}</SelectItem></SelectContent></Select><Button disabled={uploading} onClick={() => pickerRef.current?.click()}>{uploading ? <Spinner data-icon="inline-start" /> : <UploadIcon data-icon="inline-start" />}{uploading ? t('uploadingFiles') : t('uploadFiles')}</Button></div>{error && <ErrorAlert error={error} />}{files.error && <ErrorAlert error={message(files.error)} />}{files.isLoading ? <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div> : files.data?.length ? <Card><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>{t('fileName')}</TableHead><TableHead>{t('fileType')}</TableHead><TableHead>{t('fileSize')}</TableHead><TableHead>{t('sourceHistory')}</TableHead><TableHead className="text-right">{goalText(language, 'actions')}</TableHead></TableRow></TableHeader><TableBody>{files.data.map((file) => <TableRow key={file.id}><TableCell className="min-w-64"><div className="flex min-w-0 items-center gap-3">{file.preview_content ? <StoredFilePreview file={file} className="size-10 shrink-0 rounded-md object-cover" /> : <FileIcon className="size-4 shrink-0 text-muted-foreground" />}<div className="min-w-0"><p className="truncate font-medium" title={file.filename}>{file.filename}</p><p className="truncate font-mono text-xs text-muted-foreground" title={file.id}>{file.id}</p></div></div></TableCell><TableCell><code className="text-xs">{file.mime_type}</code></TableCell><TableCell>{bytes(file.size)}</TableCell><TableCell>{file.history_entry_id ? <Button asChild size="sm" variant="ghost"><Link to={`/console?focus=${file.history_entry_id}`}><ArrowLeftIcon data-icon="inline-start" />#{file.history_entry_id}</Link></Button> : <span className="text-sm text-muted-foreground">{t('historyUnavailable')}</span>}</TableCell><TableCell><div className="flex justify-end gap-1"><Button aria-label={`${t('download')}: ${file.filename}`} size="icon-sm" variant="ghost" onClick={() => void downloadStoredFile(token, file)}><DownloadIcon /></Button></div></TableCell></TableRow>)}</TableBody></Table></div><CardContent className="border-t py-3 text-xs text-muted-foreground">{files.data.length} · {created(files.data[0].created_at)}</CardContent></Card> : <Card><CardContent className="py-10 text-sm text-muted-foreground">{t('noFiles')}</CardContent></Card>}</Page>
+}
+
+function GalleryPage({ token }: { token: AuthMiniApi }) {
+  const { t } = useUi()
+  const images = useQuery({ queryKey: ['file-objects', 'images'], queryFn: () => api<StoredFile[]>('/api/file-objects?kind=images', token) })
+  const [selected, setSelected] = useState<StoredFile | null>(null)
+  return <Page title={t('galleryTitle')} description={t('galleryDescription')}>{images.error && <ErrorAlert error={message(images.error)} />}{images.isLoading ? <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div> : images.data?.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{images.data.map((file) => <button key={file.id} className="group relative aspect-square overflow-hidden rounded-lg border bg-muted text-left transition-colors hover:border-foreground/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setSelected(file)}><StoredFilePreview file={file} className="size-full object-cover transition-transform duration-200 motion-safe:group-hover:scale-[1.02]" /><span className="absolute inset-x-0 bottom-0 bg-background/90 px-2 py-1.5 text-xs font-medium opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"><span className="block truncate">{file.filename}</span></span></button>)}</div> : <Card><CardContent className="py-10 text-sm text-muted-foreground">{t('noImages')}</CardContent></Card>}<Dialog open={selected !== null} onOpenChange={(open) => { if (!open) setSelected(null) }}><DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-4xl"><DialogHeader><DialogTitle>{selected?.filename}</DialogTitle><DialogDescription>{selected?.mime_type} · {selected ? bytes(selected.size) : ''}</DialogDescription></DialogHeader>{selected && <div className="grid gap-4"><div className="grid min-h-48 place-items-center overflow-hidden rounded-lg bg-muted"><StoredFilePreview file={selected} full className="max-h-[65svh] max-w-full object-contain" /></div><div className="flex flex-wrap items-center gap-2"><Button onClick={() => void downloadStoredFile(token, selected)}><DownloadIcon data-icon="inline-start" />{t('download')}</Button>{selected.history_entry_id && <Button asChild variant="outline"><Link to={`/console?focus=${selected.history_entry_id}`}><ArrowLeftIcon data-icon="inline-start" />{t('openOriginal')}</Link></Button>}<code className="ml-auto max-w-full truncate text-xs text-muted-foreground" title={selected.id}>{selected.id}</code></div></div>}</DialogContent></Dialog></Page>
 }
 
 type CommandFilter = { page: number; pageSize: number; status: 'all' | CommandRun['status']; targetMachineId: string; query: string }

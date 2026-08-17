@@ -1,6 +1,6 @@
 [package]
 name = "cybion"
-version = "0.1.82"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "An unrestricted, multi-machine AI harness."
@@ -19,6 +19,7 @@ directories = "6.0.0"
 flate2 = "1.1.2"
 futures-util = { version = "0.3.31", features = ["sink"] }
 hostname = "0.4.1"
+image = { version = "0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 notify = "8.0.0"
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
