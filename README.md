@@ -177,17 +177,18 @@ flowchart TB
 所有查询都以 `thread_id IS NULL` 或精确的子线程 `thread_id` 过滤。全局 `id` 的并发交错只决定
 持久化次序；它不能使一个兄弟子线程的记录出现在另一个子线程的上下文中。
 
-#### 历史读取与长期记忆
+#### 历史读取
 
 `search_thread_history` 按关键词或短语查询完整主线程的非 `activity` 记录，并返回
 `record_id`、`kind` 和原始 `payload`；`read_thread_history` 按包含两端的记录 ID 区间分页读取
 同样的协议 records。`get_checkpoint` 读取一个主线程 checkpoint 及该 checkpoint 创建的事实
-修订。它们让 Agent 按需取得较早的历史，而不要求一次请求容纳全部记录。
+状态。它们让 Agent 按需取得较早的历史，而不要求一次请求容纳全部记录。
 
-长期记忆是带来源的事实修订索引，只收录明确表达或稳定验证的协作偏好、项目和权威数据
-路径、持久配置、设备或服务状态。每项保存来源记录 ID、checkpoint ID 与 `current`、
-`superseded` 或 `uncertain` 状态；`search_thread_memory` 可检索该索引。系统不会把 Token、
-密码、API key、Cookie 或其他密钥写入索引，也不会根据对话推断人格特征。
+发生上下文溢出时，checkpoint compacting 的提示词会要求把仍应保留的协作偏好、项目路径、
+持久配置和已验证设备或服务状态，作为简短的
+`## Long-term facts` Markdown 列表写入 checkpoint，并在每项旁标注相关历史 record ID。这个
+列表随 checkpoint 作为 `developer` 协议项进入后续上下文；不再相关的事实不会带入新 checkpoint。
+Token、密码、API key、Cookie 或其他密钥不会被保留在该列表中，也不会根据对话推断人格特征。
 
 服务重启时只恢复尚未开始执行的输入；已经开始调用工具的运行会明确标记失败而不会自动
 重放，以免重复产生副作用。
@@ -271,8 +272,8 @@ flowchart LR
 - 持久化的 MIMO 主线程：连续输入会立即入库并按顺序执行，一次输入可以依次产生已接收、
   上下文编译、工具进展和完成结果；刷新浏览器不会丢失已接受的输入。
 - 溢出驱动的 append-only checkpoint、完整的协议历史与运行 activity、按关键词读取的主线程
-  records，以及带来源的长期事实修订；Agent 可用 `get_checkpoint`、`search_thread_history`、
-  `read_thread_history` 和 `search_thread_memory` 按需读取较早记录。
+  records；checkpoint compacting 会把仍有价值的长期事实直接保留在 checkpoint 中。Agent 可用
+  `get_checkpoint`、`search_thread_history` 和 `read_thread_history` 按需读取较早记录。
 - 从主线程 fork 的后台子线程即持久 Goal；fork 点以 `from_record_id` 固化；每个 Goal 固化名称、目标、完成条件与模型，并在
   非终态回复后记录进展、继续循环。只有 `achieve_goal` 记录可验证证据或 `block_goal` 记录
   具体受阻原因才能结束循环；取消会形成 `cancelled` 终态。Goals 页面将主线程固定置顶，并保留
@@ -376,8 +377,8 @@ Cybion 作为控制设备时监听 `0.0.0.0:1858`，数据存储在 `~/.cybion/d
 
 ### 历史存储切换
 
-`v0.1.80` 起，历史存储统一为 `history_records`。该切换不迁移旧的对话、事件、checkpoint
-和长期记忆表：首次启动检测到旧历史 schema 时，会清理这些旧历史数据后创建新表；应用元数据和
+`v0.1.80` 起，历史存储统一为 `history_records`。该切换不迁移旧的对话、事件和 checkpoint
+表：首次启动检测到旧历史 schema 时，会清理这些旧历史数据后创建新表；应用元数据和
 已配对设备配置会保留。升级前如需保留旧对话，请先自行导出或备份 SQLite 数据库。
 
 ### 后备：从源码构建
@@ -431,7 +432,7 @@ macOS Intel、Linux x86_64 和 Linux aarch64 的发布归档与 SHA-256 校验�
 
 ## 路线图
 
-- 对 checkpoint 压缩质量、长期事实召回、溢出恢复成功率和稳定前缀缓存命中率建立回放
+- 对 checkpoint compacting 质量、长期事实保留、溢出恢复成功率和稳定前缀缓存命中率建立回放
   评测。
 - 在现有浏览器连续语音和主动播报之上，接入 AI 音箱、车载智能等专用交互设备。
 - 为设备 Token 增加路径和有效期等更细粒度的能力约束。

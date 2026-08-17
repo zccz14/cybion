@@ -72,11 +72,11 @@ const CONVERSATION_EVENT_PAGE_DEFAULT: usize = 100;
 const CONVERSATION_EVENT_PAGE_MAX: usize = 200;
 const CONVERSATION_OUTPUT_CHUNK_DEFAULT: usize = 16 * 1024;
 const CONVERSATION_OUTPUT_CHUNK_MAX: usize = 64 * 1024;
-const CONTEXT_SUMMARY_INPUT_BYTES: usize = 64 * 1024;
-const CONTEXT_SUMMARY_SEGMENT_BYTES: usize = 48 * 1024;
-const CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
-const CONTEXT_SUMMARY_MAX_ROUNDS: usize = 8;
-const CONTEXT_SUMMARY_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const CHECKPOINT_COMPACTION_INPUT_BYTES: usize = 64 * 1024;
+const CHECKPOINT_COMPACTION_SEGMENT_BYTES: usize = 48 * 1024;
+const CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS: usize = 4_096;
+const CHECKPOINT_COMPACTION_MAX_ROUNDS: usize = 8;
+const CHECKPOINT_COMPACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const SKILL_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 const COMMAND_RUNS_PAGE_DEFAULT: i64 = 20;
 const COMMAND_RUNS_PAGE_MAX: i64 = 100;
@@ -420,7 +420,6 @@ struct ConversationState {
 struct ContextState {
     history_messages: usize,
     checkpoint: Option<ContextCheckpoint>,
-    memory: ContextMemoryRoot,
 }
 
 #[derive(Clone, Serialize)]
@@ -434,36 +433,6 @@ struct ContextCheckpoint {
 #[derive(Clone, Serialize)]
 struct ContextCheckpointPredecessor {
     hop: usize,
-    checkpoint_id: i64,
-}
-
-#[derive(Serialize)]
-struct ContextMemoryRoot {
-    facts: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    latest_checkpoint_id: Option<i64>,
-    lookup_tool: &'static str,
-}
-
-#[derive(Deserialize)]
-struct MemoryFactCandidate {
-    key: String,
-    value: String,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    source_message_ids: Vec<i64>,
-}
-
-#[derive(Serialize)]
-struct ContextMemoryFact {
-    id: i64,
-    key: String,
-    value: String,
-    status: String,
-    first_seen_message_id: i64,
-    last_confirmed_message_id: i64,
-    source_message_ids: Vec<i64>,
     checkpoint_id: i64,
 }
 
@@ -1661,158 +1630,6 @@ fn load_latest_checkpoint_for_thread(
         .map_err(Into::into)
 }
 
-fn extract_memory_fact_candidates(summary: &str) -> Vec<MemoryFactCandidate> {
-    summary
-        .split("```json")
-        .skip(1)
-        .filter_map(|section| section.split("```").next())
-        .filter_map(|json| serde_json::from_str::<Vec<MemoryFactCandidate>>(json.trim()).ok())
-        .flatten()
-        .filter(memory_fact_candidate_is_safe)
-        .collect()
-}
-
-fn memory_fact_candidate_is_safe(candidate: &MemoryFactCandidate) -> bool {
-    let key = candidate.key.trim();
-    let value = candidate.value.trim();
-    !key.is_empty()
-        && key.len() <= 160
-        && !key.contains(['\n', '\r'])
-        && !value.is_empty()
-        && value.len() <= 4_096
-        && !candidate.source_message_ids.is_empty()
-        && !contains_secret(key)
-        && !contains_secret(value)
-}
-
-fn contains_secret(value: &str) -> bool {
-    let value = value.to_lowercase();
-    [
-        "token",
-        "password",
-        "api key",
-        "api_key",
-        "secret",
-        "bearer",
-        "credential",
-        "private key",
-        "authorization",
-        "cookie",
-        "密码",
-        "密钥",
-        "令牌",
-    ]
-    .iter()
-    .any(|needle| value.contains(needle))
-}
-
-fn merge_memory_facts(
-    connection: &Connection,
-    checkpoint_id: i64,
-    first_message_id: i64,
-    last_message_id: i64,
-    candidates: Vec<MemoryFactCandidate>,
-) -> Result<()> {
-    for candidate in candidates {
-        let key = candidate.key.trim();
-        let value = candidate.value.trim();
-        let mut source_message_ids = candidate
-            .source_message_ids
-            .into_iter()
-            .filter(|id| *id >= first_message_id && *id <= last_message_id)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        source_message_ids.sort_unstable();
-        if source_message_ids.is_empty() {
-            continue;
-        }
-        let status = match candidate.status.as_deref() {
-            Some("uncertain") => "uncertain",
-            _ => "current",
-        };
-        let current = connection
-            .query_row(
-                "SELECT id, fact_value, status, source_message_ids FROM context_memory_facts
-                 WHERE fact_key = ?1 AND status IN ('current', 'uncertain')
-                 ORDER BY id DESC LIMIT 1",
-                [key],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((id, current_value, current_status, current_sources)) = current {
-            if current_value == value && current_status == status {
-                source_message_ids
-                    .extend(serde_json::from_str::<Vec<i64>>(&current_sources).unwrap_or_default());
-                source_message_ids.sort_unstable();
-                source_message_ids.dedup();
-                connection.execute(
-                    "UPDATE context_memory_facts
-                     SET last_confirmed_message_id = ?1, source_message_ids = ?2, checkpoint_id = ?3
-                     WHERE id = ?4",
-                    params![
-                        *source_message_ids.last().expect("non-empty source ids"),
-                        serde_json::to_string(&source_message_ids)?,
-                        checkpoint_id,
-                        id,
-                    ],
-                )?;
-                continue;
-            }
-            connection.execute(
-                "UPDATE context_memory_facts SET status = 'superseded'
-                 WHERE fact_key = ?1 AND status IN ('current', 'uncertain')",
-                [key],
-            )?;
-        }
-        connection.execute(
-            "INSERT INTO context_memory_facts (
-               fact_key, fact_value, status, first_seen_message_id, last_confirmed_message_id,
-               source_message_ids, checkpoint_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                key,
-                value,
-                status,
-                *source_message_ids.first().expect("non-empty source ids"),
-                *source_message_ids.last().expect("non-empty source ids"),
-                serde_json::to_string(&source_message_ids)?,
-                checkpoint_id,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-fn load_context_memory_root(connection: &Connection) -> Result<ContextMemoryRoot> {
-    let facts = connection.query_row(
-        "SELECT COUNT(*) FROM context_memory_facts WHERE status IN ('current', 'uncertain')",
-        [],
-        |row| row.get(0),
-    )?;
-    let latest_checkpoint_id = connection
-        .query_row(
-            "SELECT id FROM history_records
-             WHERE thread_id IS NULL AND kind = 'checkpoint' ORDER BY id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(ContextMemoryRoot {
-        facts,
-        latest_checkpoint_id,
-        lookup_tool: "search_thread_memory",
-    })
-}
-
 fn prepend_developer_message(content: impl Into<String>, items: Vec<Value>) -> Vec<Value> {
     let mut input = Vec::with_capacity(items.len() + 1);
     input.push(json!({ "role": "developer", "content": content.into() }));
@@ -1827,10 +1644,10 @@ fn main_checkpoint_item(checkpoint: &ContextCheckpoint) -> Value {
     })
 }
 
-fn distilled_checkpoint_item(summary: &str) -> Value {
+fn compacted_checkpoint_item(content: &str) -> Value {
     json!({
         "role": "developer",
-        "content": summary,
+        "content": content,
     })
 }
 
@@ -1880,21 +1697,16 @@ fn load_history_for_run(path: &Path, through_record_id: i64) -> Result<Vec<Histo
     })
 }
 
-struct DistilledContext {
-    summary: String,
-    facts: Vec<MemoryFactCandidate>,
-}
-
-async fn summarize_context(
+async fn compact_checkpoint_context(
     client: &reqwest::Client,
     config: &Config,
     items: Vec<Value>,
     cancellation: watch::Receiver<bool>,
-) -> Result<DistilledContext> {
-    let mut batches = context_summary_batches(items);
-    for _ in 0..CONTEXT_SUMMARY_MAX_ROUNDS {
+) -> Result<String> {
+    let mut batches = checkpoint_compaction_batches(items);
+    for _ in 0..CHECKPOINT_COMPACTION_MAX_ROUNDS {
         if batches.len() == 1 {
-            return summarize_context_once(
+            return compact_checkpoint_once(
                 client,
                 config,
                 batches.pop().expect("one summary batch exists"),
@@ -1902,14 +1714,14 @@ async fn summarize_context(
             )
             .await;
         }
-        let input_bytes = context_summary_bytes(&batches);
+        let input_bytes = checkpoint_compaction_bytes(&batches);
         let mut summaries = Vec::with_capacity(batches.len());
         for batch in batches {
-            let distilled =
-                summarize_context_once(client, config, batch, cancellation.clone()).await?;
-            summaries.push(distilled_checkpoint_item(&distilled.summary));
+            let compacted =
+                compact_checkpoint_once(client, config, batch, cancellation.clone()).await?;
+            summaries.push(compacted_checkpoint_item(&compacted));
         }
-        let summary_bytes = context_summary_bytes(std::slice::from_ref(&summaries));
+        let summary_bytes = checkpoint_compaction_bytes(std::slice::from_ref(&summaries));
         if summary_bytes >= input_bytes {
             return Err(anyhow!(
                 "context checkpoint did not reduce its input ({} bytes -> {} bytes)",
@@ -1917,20 +1729,20 @@ async fn summarize_context(
                 summary_bytes
             ));
         }
-        batches = context_summary_batches(summaries);
+        batches = checkpoint_compaction_batches(summaries);
     }
     Err(anyhow!(
         "context checkpoint exceeded {} reduction rounds",
-        CONTEXT_SUMMARY_MAX_ROUNDS
+        CHECKPOINT_COMPACTION_MAX_ROUNDS
     ))
 }
 
-async fn summarize_context_once(
+async fn compact_checkpoint_once(
     client: &reqwest::Client,
     config: &Config,
     items: Vec<Value>,
     mut cancellation: watch::Receiver<bool>,
-) -> Result<DistilledContext> {
+) -> Result<String> {
     let request = client
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
@@ -1939,29 +1751,26 @@ async fn summarize_context_once(
             "input": prepend_developer_message(checkpoint_developer_prompt(), items),
             "store": false,
             "stream": true,
-            "max_output_tokens": CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS,
+            "max_output_tokens": CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS,
         }))
-        .timeout(CONTEXT_SUMMARY_REQUEST_TIMEOUT);
+        .timeout(CHECKPOINT_COMPACTION_REQUEST_TIMEOUT);
     let body = send_responses_request(request, &mut cancellation).await?;
-    let summary = output_text(
+    let checkpoint = output_text(
         completed_response_from_sse(&body)?
             .get("output")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("checkpoint response has no output"))?,
     );
-    if summary.trim().is_empty() {
-        return Err(anyhow!("checkpoint response has no summary"));
+    if checkpoint.trim().is_empty() {
+        return Err(anyhow!("checkpoint compaction returned no content"));
     }
-    Ok(DistilledContext {
-        facts: extract_memory_fact_candidates(&summary),
-        summary,
-    })
+    Ok(checkpoint)
 }
 
 fn checkpoint_developer_prompt() -> &'static str {
-    r#"# Current-state checkpoint
+    r#"# Checkpoint compaction
 
-Write the next small, durable current-state checkpoint. Do not recap or preserve the complete conversation: raw history is permanent and is discovered later with `search_thread_history`.
+Compact the supplied context into the next small current-state checkpoint. Do not recap or preserve the complete conversation: raw history is permanent and is discovered later with `search_thread_history`.
 
 ## Include
 
@@ -1981,7 +1790,7 @@ Return Markdown only, with these sections in order:
 2. `## Objective and next step`
 3. `## Active decisions and constraints`
 4. `## Open work and evidence routes`
-5. `## Long-term memory`
+5. `## Long-term facts`
 
 `## Open work and evidence routes` must include one fenced `json` array. Each entry must contain exactly `topic_key`, `status`, `message_range`, and `search_keywords`:
 
@@ -1991,24 +1800,18 @@ Return Markdown only, with these sections in order:
 
 Include only active work or active constraints; this is a retrieval route, not a history directory.
 
-`## Long-term memory` must include one fenced `json` array of durable facts:
-
-```json
-{"key": string, "value": string, "status": "current" | "uncertain", "source_message_ids": [integer]}
-```
-
-Include only stable, useful facts: explicit user collaboration preferences, project and authoritative-data paths, durable configuration, and verified device or service state. Do not infer personality or save credentials, tokens, passwords, API keys, cookies, or secrets. Omit a fact when its source message ID is uncertain."#
+`## Long-term facts` must be a concise Markdown list of facts that should remain visible after this checkpoint replaces its input: explicit user collaboration preferences, project and authoritative-data paths, durable configuration, and verified device or service state. Cite the relevant history record ID beside each nontrivial fact. Omit resolved, uncertain, or irrelevant facts. Do not infer personality or retain credentials, tokens, passwords, API keys, cookies, or secrets."#
 }
 
-fn context_summary_batches(items: Vec<Value>) -> Vec<Vec<Value>> {
+fn checkpoint_compaction_batches(items: Vec<Value>) -> Vec<Vec<Value>> {
     let mut batches = Vec::new();
     let mut batch = Vec::new();
     let mut bytes = 0;
-    for item in items.into_iter().flat_map(context_summary_segments) {
+    for item in items.into_iter().flat_map(checkpoint_compaction_segments) {
         let item_bytes = serde_json::to_vec(&item)
-            .expect("context summary item is serializable")
+            .expect("checkpoint compaction item is serializable")
             .len();
-        if !batch.is_empty() && bytes + item_bytes > CONTEXT_SUMMARY_INPUT_BYTES {
+        if !batch.is_empty() && bytes + item_bytes > CHECKPOINT_COMPACTION_INPUT_BYTES {
             batches.push(std::mem::take(&mut batch));
             bytes = 0;
         }
@@ -2021,24 +1824,24 @@ fn context_summary_batches(items: Vec<Value>) -> Vec<Vec<Value>> {
     batches
 }
 
-fn context_summary_bytes(batches: &[Vec<Value>]) -> usize {
+fn checkpoint_compaction_bytes(batches: &[Vec<Value>]) -> usize {
     batches
         .iter()
         .flatten()
         .map(|item| {
             serde_json::to_vec(item)
-                .expect("context summary item is serializable")
+                .expect("checkpoint compaction item is serializable")
                 .len()
         })
         .sum()
 }
 
-fn context_summary_segments(item: Value) -> Vec<Value> {
+fn checkpoint_compaction_segments(item: Value) -> Vec<Value> {
     let serialized = serde_json::to_string(&item).expect("context item is serializable");
-    if serialized.len() <= CONTEXT_SUMMARY_SEGMENT_BYTES {
+    if serialized.len() <= CHECKPOINT_COMPACTION_SEGMENT_BYTES {
         return vec![item];
     }
-    let segments = split_utf8_by_bytes(&serialized, CONTEXT_SUMMARY_SEGMENT_BYTES);
+    let segments = split_utf8_by_bytes(&serialized, CHECKPOINT_COMPACTION_SEGMENT_BYTES);
     let count = segments.len();
     segments
         .into_iter()
@@ -2047,7 +1850,7 @@ fn context_summary_segments(item: Value) -> Vec<Value> {
             json!({
                 "role": "developer",
                 "content": format!(
-                    "[Cybion context segment {}/{}; preserve it as evidence and combine every segment before summarizing.]\n{}",
+                    "[Cybion checkpoint-compaction segment {}/{}; preserve it and combine every segment before compacting.]\n{}",
                     index + 1,
                     count,
                     segment,
@@ -2090,7 +1893,7 @@ async fn compact_context_after_overflow(
         events,
         AgentEvent::Status {
             stage: "checkpointing".to_owned(),
-            message: "Context limit reached; distilling completed history".to_owned(),
+            message: "Context limit reached; compacting context into a checkpoint".to_owned(),
         },
     )
     .await?;
@@ -2104,14 +1907,15 @@ async fn compact_context_after_overflow(
             let result = async {
                 let _checkpoint_writer = checkpoint_write_gate.write().await;
                 let snapshot = compile_main_context(db_path, i64::MAX)?;
-                let distilled =
-                    summarize_context(client, config, snapshot.items, cancellation).await?;
+                let checkpoint_content =
+                    compact_checkpoint_context(client, config, snapshot.items, cancellation)
+                        .await?;
                 reset_agent_retry_after_success(db_path, events.run_id)?;
                 let checkpoint = persist_main_checkpoint(
                     db_path,
                     events,
                     snapshot.compile_through_record_id,
-                    distilled,
+                    &checkpoint_content,
                 )
                 .await?;
                 Ok(vec![main_checkpoint_item(&checkpoint)])
@@ -2121,10 +1925,11 @@ async fn compact_context_after_overflow(
             result
         }
         ContextCheckpointTarget::Subthread { id } => {
-            let distilled = summarize_context(client, config, items, cancellation).await?;
+            let checkpoint_content =
+                compact_checkpoint_context(client, config, items, cancellation).await?;
             reset_agent_retry_after_success(db_path, events.run_id)?;
             let checkpoint =
-                persist_subthread_checkpoint(db_path, id, events.run_id, &distilled.summary)?;
+                persist_subthread_checkpoint(db_path, id, events.run_id, &checkpoint_content)?;
             send_agent_event(
                 db_path,
                 events,
@@ -2143,11 +1948,10 @@ async fn persist_main_checkpoint(
     db_path: &Path,
     events: &AgentEventSink<'_>,
     compile_through_record_id: i64,
-    distilled: DistilledContext,
+    checkpoint_content: &str,
 ) -> Result<ContextCheckpoint> {
     let created_at = chrono::Utc::now().to_rfc3339();
     let mut connection = open_db(db_path)?;
-    let DistilledContext { summary, facts } = distilled;
     let checkpoint_id = {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let latest_entry_id: Option<i64> = transaction.query_row(
@@ -2160,7 +1964,7 @@ async fn persist_main_checkpoint(
                 "checkpoint snapshot is stale; refusing to append a checkpoint with a false coverage boundary"
             ));
         }
-        let payload = distilled_checkpoint_item(&summary);
+        let payload = compacted_checkpoint_item(checkpoint_content);
         transaction.execute(
             "INSERT INTO history_records (thread_id, run_id, kind, payload, created_at)
              VALUES (NULL, ?1, 'checkpoint', ?2, ?3)",
@@ -2172,13 +1976,6 @@ async fn persist_main_checkpoint(
     };
     let checkpoint = load_checkpoint_by_id(&connection, checkpoint_id)?
         .ok_or_else(|| anyhow!("new context checkpoint is missing"))?;
-    merge_memory_facts(
-        &connection,
-        checkpoint.id,
-        1,
-        compile_through_record_id,
-        facts,
-    )?;
     send_agent_event(
         db_path,
         events,
@@ -2195,7 +1992,7 @@ fn persist_subthread_checkpoint(
     summary: &str,
 ) -> Result<Value> {
     let connection = open_db(db_path)?;
-    let payload = distilled_checkpoint_item(summary);
+    let payload = compacted_checkpoint_item(summary);
     history_record_payload(
         &connection,
         Some(thread_id),
@@ -2990,7 +2787,6 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
         context: ContextState {
             history_messages: history_messages.try_into().unwrap_or(usize::MAX),
             checkpoint,
-            memory: load_context_memory_root(&connection)?,
         },
         messages,
         runs,
@@ -3259,7 +3055,8 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     let connection = open_db(db)?;
     reset_legacy_history_schema(&connection)?;
     connection.execute_batch(
-        "DROP TABLE IF EXISTS work_item_dependencies;
+        "DROP TABLE IF EXISTS context_memory_facts;
+         DROP TABLE IF EXISTS work_item_dependencies;
          DROP TABLE IF EXISTS work_items;",
     )?;
     connection.execute_batch(
@@ -3326,21 +3123,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            updated_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);
-         CREATE TABLE IF NOT EXISTS context_memory_facts (
-           id INTEGER PRIMARY KEY AUTOINCREMENT,
-           fact_key TEXT NOT NULL,
-           fact_value TEXT NOT NULL,
-           status TEXT NOT NULL CHECK(status IN ('current', 'superseded', 'uncertain')),
-           first_seen_message_id INTEGER NOT NULL,
-           last_confirmed_message_id INTEGER NOT NULL,
-           source_message_ids TEXT NOT NULL,
-           checkpoint_id INTEGER NOT NULL,
-           created_at TEXT NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS context_memory_facts_active
-           ON context_memory_facts(fact_key, status, id DESC);
-         CREATE INDEX IF NOT EXISTS context_memory_facts_checkpoint
-           ON context_memory_facts(checkpoint_id, id DESC);
          CREATE TABLE IF NOT EXISTS command_runs (
            id TEXT PRIMARY KEY,
            command TEXT NOT NULL,
@@ -5637,7 +5419,6 @@ fn clear_conversation_data(path: &Path) -> Result<()> {
         "INSERT INTO app_meta (key, value) VALUES ('conversation_reset_in_progress', '1')",
         [],
     )?;
-    transaction.execute("DELETE FROM context_memory_facts", [])?;
     transaction.execute("DELETE FROM subthreads", [])?;
     transaction.execute("DELETE FROM agent_runs", [])?;
     transaction.execute("DELETE FROM history_records", [])?;
@@ -6658,7 +6439,7 @@ async fn run_agent_items(
             .and_then(|body| completed_response_from_sse(&body))
         {
             // RECOVERY: A structured upstream context-length error means the current context
-            // can be replaced by a distilled checkpoint and retried once without replaying tools.
+            // can be replaced by a compacted checkpoint and retried once without replaying tools.
             // This applies whether the upstream reports it as an HTTP error or a terminal SSE event.
             Err(cause)
                 if is_context_overflow(&cause)
@@ -6964,10 +6745,10 @@ fn scoped_responses_request_body(
     }
     let scope_developer_section = match scope {
         AgentScope::Main => {
-            "## Thread role\n\nYou are Cybion's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Fork only independently executable, substantial work that benefits from parallel execution; every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. Inspect existing Goals before replacing work and cancel obsolete ones. Cybion returns only an achieved or blocked Goal handoff and resumes you automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\nUse `search_thread_history`, `read_thread_history`, `get_checkpoint`, and `search_thread_memory` when you need older information."
+            "## Thread role\n\nYou are Cybion's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Fork only independently executable, substantial work that benefits from parallel execution; every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. Inspect existing Goals before replacing work and cancel obsolete ones. Cybion returns only an achieved or blocked Goal handoff and resumes you automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
         }
         AgentScope::Subthread => {
-            "## Thread role\n\nYou are an internal Cybion Goal loop forked from a compiled main-thread checkpoint. The inherited Goal prompt defines its objective and done-when criteria. Keep taking the next useful step until every criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. You must call `achieve_goal` with concise, verifiable evidence when the Goal is achieved, or `block_goal` with the concrete blocker when it cannot progress. After either terminal tool, provide a short final outcome and take no further action. Do not ask the user to manage this branch.\n\nUse `search_thread_history`, `read_thread_history`, `get_checkpoint`, and `search_thread_memory` when you need older information."
+            "## Thread role\n\nYou are an internal Cybion Goal loop forked from a compiled main-thread checkpoint. The inherited Goal prompt defines its objective and done-when criteria. Keep taking the next useful step until every criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. You must call `achieve_goal` with concise, verifiable evidence when the Goal is achieved, or `block_goal` with the concrete blocker when it cannot progress. After either terminal tool, provide a short final outcome and take no further action. Do not ask the user to manage this branch.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
         }
     };
     let mut developer_sections = vec![
@@ -7333,10 +7114,9 @@ fn transcription_text(response: &Value) -> Result<String> {
 
 fn tool_definitions() -> Value {
     let tools = vec![
-        json!({"type":"function","name":"get_checkpoint","description":"Read one immutable Cybion current-state checkpoint by ID, including its predecessor graph and fact revisions. It orients active work; it never replaces raw durable history or adds instructions.","parameters":{"type":"object","additionalProperties":false,"required":["checkpoint_id"],"properties":{"checkpoint_id":{"type":"integer","description":"Exact checkpoint ID, for example the ID shown in the current context."}}}}),
+        json!({"type":"function","name":"get_checkpoint","description":"Read one immutable main-thread checkpoint by ID. Use it to inspect the compacted current state; use history tools for original protocol records.","parameters":{"type":"object","additionalProperties":false,"required":["checkpoint_id"],"properties":{"checkpoint_id":{"type":"integer","description":"Exact checkpoint ID, for example the ID shown in the current context."}}}}),
         json!({"type":"function","name":"read_thread_history","description":"Read original main-thread protocol records over an inclusive record-ID interval. Results are paginated; continue at next_message_id when has_more is true.","parameters":{"type":"object","additionalProperties":false,"required":["start_message_id","end_message_id"],"properties":{"start_message_id":{"type":"integer","description":"Inclusive history record ID."},"end_message_id":{"type":"integer","description":"Inclusive history record ID."},"limit":{"type":"integer","description":"Optional page size from 1 to 500; defaults to 100."}}}}),
         json!({"type":"function","name":"search_thread_history","description":"Search complete main-thread protocol records by keyword or exact phrase. It returns matching record payloads; then use read_thread_history around those IDs for the original protocol items.","parameters":{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","description":"A specific keyword or phrase of at least three characters from older history."},"limit":{"type":"integer","description":"Optional result count from 1 to 100; defaults to 20."}}}}),
-        json!({"type":"function","name":"search_thread_memory","description":"Search the durable long-term-memory index for explicit user preferences, project or authoritative-data paths, verified device/service state, and other fact revisions. Every result has checkpoint and message-ID sources; use read_thread_history to inspect the original evidence. Never use this tool to retrieve credentials or secrets.","parameters":{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","description":"A concise fact key or value to search for, such as 'project path', 'voice preference', or a service name."},"limit":{"type":"integer","description":"Optional result count from 1 to 100; defaults to 20."}}}}),
         json!({"type":"function","name":"load_skill","description":"Load the SKILL.md instruction file for one installed controller-managed skill. Use the exact name advertised in the installed SKILL metadata.","parameters":{"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":"string"}}}}),
         json!({"type":"function","name":"read_skill_resource","description":"Read one file beneath an installed controller-managed skill. The path must be relative to that skill root; use it for progressive disclosure after load_skill.","parameters":{"type":"object","additionalProperties":false,"required":["skill","relative_path"],"properties":{"skill":{"type":"string"},"relative_path":{"type":"string"}}}}),
         json!({"type":"function","name":"list_files","description":"List files in any directory. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
@@ -7397,38 +7177,6 @@ fn context_tool_output_item(item: &Value) -> Value {
     item
 }
 
-fn context_memory_fact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextMemoryFact> {
-    let source_message_ids = serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default();
-    Ok(ContextMemoryFact {
-        id: row.get(0)?,
-        key: row.get(1)?,
-        value: row.get(2)?,
-        status: row.get(3)?,
-        first_seen_message_id: row.get(4)?,
-        last_confirmed_message_id: row.get(5)?,
-        source_message_ids,
-        checkpoint_id: row.get(7)?,
-    })
-}
-
-fn load_memory_facts(
-    connection: &Connection,
-    where_sql: &str,
-    parameters: &[&dyn rusqlite::ToSql],
-    limit: usize,
-) -> Result<Vec<ContextMemoryFact>> {
-    let sql = format!(
-        "SELECT id, fact_key, fact_value, status, first_seen_message_id, last_confirmed_message_id,
-                source_message_ids, checkpoint_id
-         FROM context_memory_facts {where_sql} ORDER BY id DESC LIMIT {limit}"
-    );
-    connection
-        .prepare(&sql)?
-        .query_map(parameters, context_memory_fact_from_row)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
 fn get_checkpoint_tool(path: &Path, args: Value) -> ToolExecution {
     let Some(checkpoint_id) = args.get("checkpoint_id").and_then(Value::as_i64) else {
         return tool_execution("error: checkpoint_id must be an integer");
@@ -7437,15 +7185,8 @@ fn get_checkpoint_tool(path: &Path, args: Value) -> ToolExecution {
         let connection = open_db(path)?;
         let checkpoint = load_checkpoint_by_id(&connection, checkpoint_id)?
             .ok_or_else(|| anyhow!("checkpoint not found"))?;
-        let facts = load_memory_facts(
-            &connection,
-            "WHERE checkpoint_id = ?1",
-            &[&checkpoint.id],
-            100,
-        )?;
         Ok(json!({
             "checkpoint": checkpoint,
-            "facts_created_at_checkpoint": facts,
             "next": "Use search_thread_history to discover original evidence by keyword, then read_thread_history by message ID.",
         })
         .to_string())
@@ -7554,43 +7295,6 @@ fn search_thread_history_tool(path: &Path, args: Value) -> ToolExecution {
             "query": query,
             "matches": matches,
             "next": "Use read_thread_history around a record_id to inspect the original protocol items.",
-        })
-        .to_string())
-    })();
-    result
-        .map(tool_execution)
-        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
-}
-
-fn search_thread_memory_tool(path: &Path, args: Value) -> ToolExecution {
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if query.is_empty() {
-        return tool_execution("error: query is required");
-    }
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(20)
-        .clamp(1, 100);
-    let result = (|| -> Result<String> {
-        let connection = open_db(path)?;
-        let pattern = format!("%{}%", query.to_lowercase());
-        let facts = load_memory_facts(
-            &connection,
-            "WHERE status IN ('current', 'uncertain')
-             AND (LOWER(fact_key) LIKE ?1 OR LOWER(fact_value) LIKE ?1)",
-            &[&pattern],
-            limit,
-        )?;
-        Ok(json!({
-            "query": query,
-            "facts": facts,
-            "next": "Inspect cited checkpoint or message IDs before acting on a historical fact when its current applicability matters.",
         })
         .to_string())
     })();
@@ -7796,7 +7500,6 @@ async fn execute_tool(
         "get_checkpoint" => get_checkpoint_tool(db_path, args),
         "read_thread_history" => read_thread_history_tool(db_path, args),
         "search_thread_history" => search_thread_history_tool(db_path, args),
-        "search_thread_memory" => search_thread_memory_tool(db_path, args),
         "load_skill" => load_skill_tool(skills, args).await,
         "read_skill_resource" => read_skill_resource_tool(skills, args).await,
         "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
@@ -9246,20 +8949,20 @@ mod tests {
     }
 
     #[test]
-    fn context_summary_segments_preserve_utf8_boundaries() {
-        let content = "你".repeat(CONTEXT_SUMMARY_SEGMENT_BYTES);
-        let segments = split_utf8_by_bytes(&content, CONTEXT_SUMMARY_SEGMENT_BYTES);
+    fn checkpoint_compaction_segments_preserve_utf8_boundaries() {
+        let content = "你".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES);
+        let segments = split_utf8_by_bytes(&content, CHECKPOINT_COMPACTION_SEGMENT_BYTES);
 
         assert!(
             segments
                 .iter()
-                .all(|segment| segment.len() <= CONTEXT_SUMMARY_SEGMENT_BYTES)
+                .all(|segment| segment.len() <= CHECKPOINT_COMPACTION_SEGMENT_BYTES)
         );
         assert_eq!(segments.concat(), content);
     }
 
     #[tokio::test]
-    async fn context_summary_merges_chunked_input_before_returning_a_checkpoint() {
+    async fn checkpoint_compaction_merges_chunked_input_before_returning_a_checkpoint() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
@@ -9305,12 +9008,12 @@ mod tests {
             deployment_role: "controller".to_owned(),
         };
 
-        let result = summarize_context(
+        let result = compact_checkpoint_context(
             &reqwest::Client::new(),
             &config,
             vec![json!({
                 "role": "user",
-                "content": "x".repeat(CONTEXT_SUMMARY_SEGMENT_BYTES * 2),
+                "content": "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2),
             })],
             watch::channel(false).1,
         )
@@ -9318,25 +9021,50 @@ mod tests {
         .unwrap();
         server.abort();
 
-        assert_eq!(result.summary, "chunk checkpoint");
+        assert_eq!(result, "chunk checkpoint");
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 3);
         assert!(requests.iter().all(|request| {
-            serde_json::to_vec(&request["input"]).unwrap().len() <= CONTEXT_SUMMARY_INPUT_BYTES
+            serde_json::to_vec(&request["input"]).unwrap().len()
+                <= CHECKPOINT_COMPACTION_INPUT_BYTES
         }));
         assert!(requests.iter().all(|request| {
-            request["max_output_tokens"] == json!(CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS)
+            request["max_output_tokens"] == json!(CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS)
         }));
+        let developer = requests[0]["input"][0]["content"].as_str().unwrap();
+        assert!(developer.contains("## Long-term facts"));
+        assert!(developer.contains("history record ID"));
+        assert!(!developer.contains("source_message_ids"));
+    }
+
+    #[test]
+    fn bootstrap_removes_the_retired_fact_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE context_memory_facts (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(connection);
+
+        bootstrap_database(&db).unwrap();
+
+        assert!(
+            open_db(&db)
+                .unwrap()
+                .prepare("SELECT * FROM context_memory_facts")
+                .is_err()
+        );
     }
 
     #[tokio::test]
-    async fn context_summary_stops_when_a_reduction_round_grows_the_context() {
+    async fn checkpoint_compaction_stops_when_a_reduction_round_grows_the_context() {
         async fn responses(Json(_): Json<Value>) -> String {
             let item = json!({
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": "x".repeat(CONTEXT_SUMMARY_INPUT_BYTES),
+                    "text": "x".repeat(CHECKPOINT_COMPACTION_INPUT_BYTES),
                 }],
             });
             format!(
@@ -9368,12 +9096,12 @@ mod tests {
             deployment_role: "controller".to_owned(),
         };
 
-        let result = summarize_context(
+        let result = compact_checkpoint_context(
             &reqwest::Client::new(),
             &config,
             vec![json!({
                 "role": "user",
-                "content": "x".repeat(CONTEXT_SUMMARY_SEGMENT_BYTES * 2),
+                "content": "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2),
             })],
             watch::channel(false).1,
         )
@@ -9831,10 +9559,7 @@ mod tests {
                 sender: &events,
             },
             first.id,
-            DistilledContext {
-                summary: "stale state".to_owned(),
-                facts: Vec::new(),
-            },
+            "stale state",
         )
         .await;
         let Err(error) = result else {
@@ -9917,109 +9642,6 @@ mod tests {
                 .unwrap(),
             0
         );
-    }
-
-    #[test]
-    #[ignore = "replaced by the history_records clean cutover"]
-    fn memory_facts_keep_sources_and_supersede_only_the_same_key() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let first = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("The project root is /work/cybion.".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        let second = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String(
-                    "The canonical project root moved to /srv/cybion.".to_owned(),
-                ),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        let connection = open_db(&db).unwrap();
-        connection
-            .execute(
-                "INSERT INTO conversation_messages (role, type, content, created_at)
-                 VALUES ('assistant', 'checkpoint', 'checkpoint', 'now')",
-                [],
-            )
-            .unwrap();
-        let first_checkpoint = connection.last_insert_rowid();
-        merge_memory_facts(
-            &connection,
-            first_checkpoint,
-            first.id,
-            second.id,
-            vec![MemoryFactCandidate {
-                key: "project.root".to_owned(),
-                value: "/work/cybion".to_owned(),
-                status: Some("current".to_owned()),
-                source_message_ids: vec![first.id],
-            }],
-        )
-        .unwrap();
-        connection
-            .execute(
-                "INSERT INTO conversation_messages (role, type, content, created_at)
-                 VALUES ('assistant', 'checkpoint', 'checkpoint', 'now')",
-                [],
-            )
-            .unwrap();
-        let second_checkpoint = connection.last_insert_rowid();
-        merge_memory_facts(
-            &connection,
-            second_checkpoint,
-            first.id,
-            second.id,
-            vec![MemoryFactCandidate {
-                key: "project.root".to_owned(),
-                value: "/srv/cybion".to_owned(),
-                status: Some("current".to_owned()),
-                source_message_ids: vec![second.id],
-            }],
-        )
-        .unwrap();
-        let facts =
-            load_memory_facts(&connection, "WHERE fact_key = ?1", &[&"project.root"], 10).unwrap();
-        assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].value, "/srv/cybion");
-        assert_eq!(facts[0].status, "current");
-        assert_eq!(facts[0].source_message_ids, vec![second.id]);
-        assert_eq!(facts[1].status, "superseded");
-        assert_eq!(facts[1].source_message_ids, vec![first.id]);
-        let search = search_thread_memory_tool(&db, json!({"query":"project.root"}));
-        let search: Value = serde_json::from_str(&search.output).unwrap();
-        assert_eq!(search["facts"].as_array().unwrap().len(), 1);
-        assert_eq!(search["facts"][0]["value"], "/srv/cybion");
-        assert_eq!(search["facts"][0]["source_message_ids"], json!([second.id]));
-    }
-
-    #[test]
-    fn memory_fact_extraction_requires_sources_and_rejects_secrets() {
-        let facts = extract_memory_fact_candidates(
-            "## Long-term memory\n```json\n[
-              {\"key\":\"project.root\",\"value\":\"/work/cybion\",\"status\":\"current\",\"source_message_ids\":[17]},
-              {\"key\":\"api token\",\"value\":\"do-not-store\",\"status\":\"current\",\"source_message_ids\":[18]},
-              {\"key\":\"missing.source\",\"value\":\"ignored\",\"status\":\"current\",\"source_message_ids\":[]}
-            ]\n```",
-        );
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].key, "project.root");
     }
 
     #[test]
@@ -11221,7 +10843,7 @@ mod tests {
                 .into_response();
             }
             let text = if request_number == 2 {
-                "# Checkpoint\nGoal: ship the context-overflow recovery. Completed: inspected the old history.\n\n## Long-term memory\n```json\n[{\"key\":\"project.release_evidence\",\"value\":\"Deployment evidence was inspected.\",\"status\":\"current\",\"source_message_ids\":[1]}]\n```"
+                "# Current state\n\n## Objective and next step\nShip the context-overflow recovery.\n\n## Long-term facts\n- Deployment evidence was inspected. (record #1)"
             } else {
                 "Context recovery completed."
             };
@@ -11358,14 +10980,7 @@ mod tests {
             .unwrap();
         assert!(checkpoint.id > current.id);
         assert!(checkpoint.summary.contains("context-overflow recovery"));
-        let facts = load_memory_facts(
-            &open_db(&db).unwrap(),
-            "WHERE fact_key = ?1",
-            &[&"project.release_evidence"],
-            1,
-        )
-        .unwrap();
-        assert_eq!(facts[0].source_message_ids, vec![1]);
+        assert!(checkpoint.summary.contains("## Long-term facts"));
         assert!(matches!(
             received.recv().await,
             Some(AgentEvent::Status { stage, .. }) if stage == "checkpointing"
@@ -11391,13 +11006,13 @@ mod tests {
             requests[1]["input"][0]["content"]
                 .as_str()
                 .unwrap()
-                .contains("Write the next small, durable current-state checkpoint")
+                .contains("# Checkpoint compaction")
         );
         assert!(
             requests[1]["input"][0]["content"]
                 .as_str()
                 .unwrap()
-                .contains("source_message_ids")
+                .contains("## Long-term facts")
         );
         assert!(
             requests[1]["input"][0]["content"]
@@ -11484,7 +11099,7 @@ mod tests {
         bootstrap_database(&db).unwrap();
         let oversized_reply = format!(
             "Second completed reply. {}",
-            "x".repeat(CONTEXT_SUMMARY_SEGMENT_BYTES * 2)
+            "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2)
         );
         for (role, content) in [
             ("user", "First request.".to_owned()),
@@ -11586,7 +11201,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "replaced by protocol history checkpoint coverage tests"]
-    async fn subthread_context_overflow_uses_the_same_distillation_retry() {
+    async fn subthread_context_overflow_uses_the_same_compaction_retry() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
@@ -12409,15 +12024,6 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO context_memory_facts (
-                   fact_key, fact_value, status, first_seen_message_id, last_confirmed_message_id,
-                   source_message_ids, checkpoint_id, created_at
-                 ) VALUES ('project', 'cybion', 'current', ?1, ?1, '[1]', ?2, ?3)",
-                params![user.id, checkpoint_id, now],
-            )
-            .unwrap();
-        connection
-            .execute(
                 "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
                  VALUES ('main-run', ?1, 'completed', ?2, 'main')",
                 params![user.id, now],
@@ -12480,7 +12086,6 @@ mod tests {
             "agent_events",
             "subthreads",
             "context_checkpoint_edges",
-            "context_memory_facts",
             "conversation_history_search",
         ] {
             let count: i64 = connection
@@ -12970,11 +12575,6 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "search_thread_history")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool["name"] == "search_thread_memory")
         );
         assert!(tools.iter().any(|tool| tool["type"] == "web_search"));
         assert!(tools.iter().any(|tool| tool["type"] == "image_generation"));
