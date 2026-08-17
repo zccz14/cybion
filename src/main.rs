@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
     fmt,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -33,6 +33,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures_util::SinkExt;
+use image::{ColorType, ImageEncoder, ImageReader, codecs::png::PngEncoder};
 use notify::{Event as NotifyEvent, EventKind as NotifyEventKind, RecursiveMode, Watcher};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -232,6 +233,36 @@ struct FileContent {
     encoding: String,
 }
 
+#[derive(Clone, Serialize)]
+struct StoredFile {
+    id: String,
+    filename: String,
+    mime_type: String,
+    size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_entry_id: Option<i64>,
+    created_at: String,
+}
+
+struct StoredFileContent {
+    metadata: StoredFile,
+    content: Vec<u8>,
+}
+
+#[derive(Default, Deserialize)]
+struct StoredFileQuery {
+    kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DownloadFileInput {
+    file_id: String,
+    path: String,
+    target_device: Option<String>,
+}
+
 #[derive(Serialize)]
 struct TranscriptionResponse {
     text: String,
@@ -387,7 +418,12 @@ struct ChatMessage {
 #[derive(Clone, Deserialize, Serialize)]
 struct GeneratedImage {
     id: String,
-    data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_entry_id: Option<i64>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -412,6 +448,8 @@ struct ConversationState {
     runs: Vec<ConversationRun>,
     context: ContextState,
     has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_message_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_before_id: Option<i64>,
 }
@@ -498,6 +536,7 @@ struct ConversationRun {
 struct ConversationQuery {
     before: Option<i64>,
     limit: Option<usize>,
+    focus: Option<i64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -1281,6 +1320,13 @@ fn app(state: AppState) -> Router {
         .route("/api/update", get(update_status))
         .route("/api/update/check", post(download_update))
         .route("/api/update/restart", post(restart_update))
+        .route(
+            "/api/file-objects",
+            get(list_stored_files)
+                .post(upload_stored_file)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route("/api/file-objects/{id}/content", get(stored_file_content))
         .route("/api/files", get(list_files))
         .route("/api/files/read", get(read_file))
         .route("/api/files/write", put(write_file))
@@ -1462,6 +1508,217 @@ fn open_db(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     Ok(connection)
+}
+
+fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile> {
+    let size: i64 = row.get(3)?;
+    Ok(StoredFile {
+        id: row.get(0)?,
+        filename: row.get(1)?,
+        mime_type: row.get(2)?,
+        size: size.try_into().unwrap_or_default(),
+        preview_content: row.get(4)?,
+        history_entry_id: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+fn image_preview_content(mime_type: &str, content: &[u8]) -> Option<String> {
+    if !mime_type.starts_with("image/") {
+        return None;
+    }
+    let image = ImageReader::new(Cursor::new(content))
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let preview = image.thumbnail(480, 480).to_rgba8();
+    let mut encoded = Vec::new();
+    PngEncoder::new(&mut encoded)
+        .write_image(
+            preview.as_raw(),
+            preview.width(),
+            preview.height(),
+            ColorType::Rgba8.into(),
+        )
+        .ok()?;
+    Some(format!("data:image/png;base64,{}", BASE64.encode(encoded)))
+}
+
+fn store_file(
+    connection: &Connection,
+    filename: &str,
+    mime_type: &str,
+    content: &[u8],
+    history_entry_id: Option<i64>,
+) -> Result<StoredFile> {
+    let id = format!("{:x}", Sha256::digest(content));
+    let preview_content = image_preview_content(mime_type, content);
+    connection.execute(
+        "INSERT INTO files (
+             id, content, filename, mime_type, preview_content, history_entry_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+           preview_content = COALESCE(files.preview_content, excluded.preview_content),
+           history_entry_id = COALESCE(files.history_entry_id, excluded.history_entry_id)",
+        params![
+            id,
+            content,
+            filename,
+            mime_type,
+            preview_content,
+            history_entry_id,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
+    connection
+        .query_row(
+            "SELECT id, filename, mime_type, length(content), preview_content, history_entry_id, created_at
+             FROM files WHERE id = ?1",
+            [&id],
+            stored_file_from_row,
+        )
+        .map_err(Into::into)
+}
+
+fn load_stored_file(connection: &Connection, id: &str) -> Result<StoredFileContent> {
+    connection
+        .query_row(
+            "SELECT id, filename, mime_type, length(content), preview_content, history_entry_id, created_at, content
+             FROM files WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(StoredFileContent {
+                    metadata: stored_file_from_row(row)?,
+                    content: row.get(7)?,
+                })
+            },
+        )
+        .context("file object not found")
+}
+
+fn stored_files(connection: &Connection, kind: Option<&str>) -> Result<Vec<StoredFile>> {
+    let query = match kind.unwrap_or("all") {
+        "all" => {
+            "SELECT id, filename, mime_type, length(content), preview_content, history_entry_id, created_at FROM files ORDER BY created_at DESC"
+        }
+        "images" => {
+            "SELECT id, filename, mime_type, length(content), preview_content, history_entry_id, created_at FROM files WHERE mime_type LIKE 'image/%' ORDER BY created_at DESC"
+        }
+        "documents" => {
+            "SELECT id, filename, mime_type, length(content), preview_content, history_entry_id, created_at FROM files WHERE mime_type LIKE 'text/%' OR mime_type IN ('application/pdf', 'application/json', 'application/zip') ORDER BY created_at DESC"
+        }
+        "media" => {
+            "SELECT id, filename, mime_type, length(content), preview_content, history_entry_id, created_at FROM files WHERE mime_type LIKE 'audio/%' OR mime_type LIKE 'video/%' ORDER BY created_at DESC"
+        }
+        "other" => {
+            "SELECT id, filename, mime_type, length(content), preview_content, history_entry_id, created_at FROM files WHERE mime_type NOT LIKE 'image/%' AND mime_type NOT LIKE 'text/%' AND mime_type NOT LIKE 'audio/%' AND mime_type NOT LIKE 'video/%' AND mime_type NOT IN ('application/pdf', 'application/json', 'application/zip') ORDER BY created_at DESC"
+        }
+        _ => {
+            return Err(anyhow!(
+                "file kind must be all, images, documents, media, or other"
+            ));
+        }
+    };
+    connection
+        .prepare(query)?
+        .query_map([], stored_file_from_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn generated_image_mime_type(item: &Value) -> &'static str {
+    match item.get("output_format").and_then(Value::as_str) {
+        Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    }
+}
+
+fn generated_image_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+fn archive_generated_images(
+    path: &Path,
+    output: &[Value],
+    record_ids: &[i64],
+) -> Result<Vec<GeneratedImage>> {
+    let connection = open_db(path)?;
+    output
+        .iter()
+        .zip(record_ids)
+        .filter(|(item, _)| {
+            item.get("type").and_then(Value::as_str) == Some("image_generation_call")
+        })
+        .map(|(item, history_entry_id)| {
+            let data = item
+                .get("result")
+                .and_then(Value::as_str)
+                .context("image generation result is missing")?;
+            let content = BASE64
+                .decode(data)
+                .context("image generation result is not base64")?;
+            let mime_type = generated_image_mime_type(item);
+            let file = store_file(
+                &connection,
+                &format!(
+                    "generated-{}.{}",
+                    history_entry_id,
+                    generated_image_extension(mime_type)
+                ),
+                mime_type,
+                &content,
+                Some(*history_entry_id),
+            )?;
+            Ok(GeneratedImage {
+                id: file.id,
+                data: None,
+                preview_content: file.preview_content,
+                history_entry_id: file.history_entry_id,
+            })
+        })
+        .collect()
+}
+
+fn generated_images_for_message(
+    connection: &Connection,
+    run_id: Option<&str>,
+    message_id: i64,
+) -> Result<Vec<GeneratedImage>> {
+    let Some(run_id) = run_id else {
+        return Ok(Vec::new());
+    };
+    connection
+        .prepare(
+            "SELECT file.id, file.preview_content, file.history_entry_id
+             FROM files file
+             JOIN history_records source ON source.id = file.history_entry_id
+             WHERE source.run_id = ?1 AND source.thread_id IS NULL AND source.id <= ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM history_records earlier_message
+                   WHERE earlier_message.run_id = source.run_id
+                     AND earlier_message.id > source.id
+                     AND earlier_message.id < ?2
+                     AND earlier_message.kind = 'response_output'
+                     AND json_extract(earlier_message.payload, '$.type') = 'message'
+               )
+             ORDER BY source.id",
+        )?
+        .query_map(params![run_id, message_id], |row| {
+            Ok(GeneratedImage {
+                id: row.get(0)?,
+                data: None,
+                preview_content: row.get(1)?,
+                history_entry_id: row.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -2739,11 +2996,36 @@ fn load_conversation_runs(
 
 fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<ConversationState> {
     let connection = open_db(path)?;
-    let before = query.before.filter(|id| *id > 0).unwrap_or(i64::MAX);
+    let focused_message_id = query
+        .focus
+        .filter(|id| *id > 0)
+        .map(|focus| {
+            connection.query_row(
+                "SELECT COALESCE(
+                     (SELECT later.id
+                      FROM history_records source
+                      JOIN history_records later ON later.run_id = source.run_id
+                      WHERE source.id = ?1 AND later.thread_id IS NULL
+                        AND later.id >= source.id
+                        AND later.kind = 'response_output'
+                        AND json_extract(later.payload, '$.type') = 'message'
+                      ORDER BY later.id LIMIT 1),
+                     ?1
+                 )",
+                [focus],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .transpose()?;
+    let before = query
+        .before
+        .filter(|id| *id > 0)
+        .or_else(|| focused_message_id.map(|id| id.saturating_add(1)))
+        .unwrap_or(i64::MAX);
     let limit = conversation_page_limit(query.limit);
-    let mut messages = connection
+    let records = connection
         .prepare(
-            "SELECT id, payload, created_at FROM history_records
+            "SELECT id, payload, created_at, run_id FROM history_records
              WHERE thread_id IS NULL AND id < ?1
                AND ((kind = 'input' AND json_extract(payload, '$.role') IN ('user', 'assistant'))
                  OR (kind = 'response_output' AND json_extract(payload, '$.type') = 'message'))
@@ -2755,14 +3037,20 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
                 serde_json::from_str::<Value>(&row.get::<_, String>(1)?)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter_map(|(id, payload, created_at)| {
-            conversation_message_from_protocol(id, &payload, created_at)
-        })
-        .collect::<Vec<_>>();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut messages = Vec::with_capacity(records.len());
+    for (id, payload, created_at, run_id) in records {
+        let Some(mut message) = conversation_message_from_protocol(id, &payload, created_at) else {
+            continue;
+        };
+        if message.role == "assistant" {
+            message.images = generated_images_for_message(&connection, run_id.as_deref(), id)?;
+        }
+        messages.push(message);
+    }
     let has_more = messages.len() > limit;
     messages.truncate(limit);
     messages.reverse();
@@ -2791,6 +3079,7 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
         messages,
         runs,
         has_more,
+        focus_message_id: focused_message_id,
         next_before_id,
     })
 }
@@ -3089,6 +3378,17 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            ON history_records(thread_id, id);
          CREATE INDEX IF NOT EXISTS history_records_run_id
            ON history_records(run_id, id);
+         CREATE TABLE IF NOT EXISTS files (
+           id TEXT PRIMARY KEY,
+           content BLOB NOT NULL,
+           filename TEXT NOT NULL,
+           mime_type TEXT NOT NULL,
+           preview_content TEXT,
+           history_entry_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS files_mime_type ON files(mime_type, created_at DESC);
+         CREATE INDEX IF NOT EXISTS files_history_entry_id ON files(history_entry_id);
          CREATE TRIGGER IF NOT EXISTS history_records_immutable_update
            BEFORE UPDATE ON history_records
            BEGIN SELECT RAISE(ABORT, 'history records are append-only'); END;
@@ -4044,6 +4344,74 @@ async fn restart_update(State(state): State<AppState>, headers: HeaderMap) -> Ap
     update::restart(&state.db_path)
         .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
     Ok(Json(json!({ "restarting": true })))
+}
+
+async fn list_stored_files(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<StoredFileQuery>,
+) -> ApiResult<Vec<StoredFile>> {
+    identity(&state, &headers).await?;
+    stored_files(
+        &open_db(&state.db_path)
+            .map_err(|cause| error(StatusCode::INTERNAL_SERVER_ERROR, cause.to_string()))?,
+        query.kind.as_deref(),
+    )
+    .map(Json)
+    .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))
+}
+
+async fn upload_stored_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> ApiResult<StoredFile> {
+    identity(&state, &headers).await?;
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "an attachment is required"))?;
+    let filename = field.file_name().unwrap_or("attachment").to_owned();
+    let mime_type = field
+        .content_type()
+        .map(str::to_owned)
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    let content = field
+        .bytes()
+        .await
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    let connection = open_db(&state.db_path)
+        .map_err(|cause| error(StatusCode::INTERNAL_SERVER_ERROR, cause.to_string()))?;
+    store_file(&connection, &filename, &mime_type, &content, None)
+        .map(Json)
+        .map_err(|cause| error(StatusCode::INTERNAL_SERVER_ERROR, cause.to_string()))
+}
+
+async fn stored_file_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    identity(&state, &headers).await?;
+    let file = load_stored_file(
+        &open_db(&state.db_path)
+            .map_err(|cause| error(StatusCode::INTERNAL_SERVER_ERROR, cause.to_string()))?,
+        &id,
+    )
+    .map_err(|cause| error(StatusCode::NOT_FOUND, cause.to_string()))?;
+    let mut response = Response::new(Body::from(file.content));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&file.metadata.mime_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&file.metadata.size.to_string())
+            .expect("file size is a header value"),
+    );
+    Ok(response)
 }
 
 async fn list_files(
@@ -6487,7 +6855,11 @@ async fn run_agent_items(
         let output_record_ids =
             append_response_output_items(db_path, history_thread_id, events.run_id, &output)?;
         reset_agent_retry_after_success(db_path, events.run_id)?;
-        images.extend(generated_images(&output));
+        images.extend(archive_generated_images(
+            db_path,
+            &output,
+            &output_record_ids,
+        )?);
         emit_response_process_events(&output, db_path, &events).await?;
         if !output.iter().any(|item| {
             matches!(
@@ -6507,16 +6879,17 @@ async fn run_agent_items(
                         chrono::Utc::now().to_rfc3339(),
                     )
                 });
-            let persisted_message = message.unwrap_or(ConversationMessage {
+            let mut persisted_message = message.unwrap_or(ConversationMessage {
                 id: output_record_ids.last().copied().unwrap_or_default(),
                 role: "assistant".to_owned(),
                 content: output_text(&output),
-                images: generated_images(&output),
+                images: images.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 duration_ms: None,
                 input_tokens: None,
                 output_tokens: None,
             });
+            persisted_message.images = images.clone();
             return Ok(AgentResult {
                 message: ChatMessage {
                     role: "assistant".to_owned(),
@@ -7045,7 +7418,9 @@ fn generated_images(output: &[Value]) -> Vec<GeneratedImage> {
         .filter_map(|item| {
             Some(GeneratedImage {
                 id: item.get("id")?.as_str()?.to_owned(),
-                data: item.get("result")?.as_str()?.to_owned(),
+                data: Some(item.get("result")?.as_str()?.to_owned()),
+                preview_content: None,
+                history_entry_id: None,
             })
         })
         .collect()
@@ -7125,6 +7500,7 @@ fn tool_definitions() -> Value {
         json!({"type":"function","name":"edit_file","description":"Partially edit a UTF-8 text file by replacing one exact old_text match with new_text. Use this after reading the file; old_text must occur exactly once. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["path","old_text","new_text"],"properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
         json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
         json!({"type":"function","name":"copy_files","description":"Copy one regular file or directory through the controller relay without putting file contents in model context. source_device is optional: omit it for the controller filesystem, or provide an exact remote device ID. target_device must be an exact remote device ID, or skill-store to install a skill package into the controller-managed skill root. For a remote target, target_path is the destination directory. For skill-store, omit target_path; the copied source basename becomes the skill directory name.","parameters":{"type":"object","additionalProperties":false,"required":["source_path","target_device"],"properties":{"source_path":{"type":"string"},"source_device":{"type":"string","description":"Optional exact remote device ID; omit to read from the controller."},"target_device":{"type":"string","description":"An exact remote device ID or skill-store."},"target_path":{"type":"string","description":"Required destination directory for a remote target; omit for skill-store."}}}}),
+        json!({"type":"function","name":"download_file","description":"Save one Cybion file object, including a generated image, to an exact path on this controller or an enrolled remote device. Use the SHA-256 file_id from the File objects or Gallery page. For a remote device, provide its exact target_device ID and an absolute destination path including the filename.","parameters":{"type":"object","additionalProperties":false,"required":["file_id","path"],"properties":{"file_id":{"type":"string","description":"The exact SHA-256 file object ID."},"path":{"type":"string","description":"Exact destination file path, including the filename."},"target_device":{"type":"string","description":"Optional exact remote device ID. Omit for the controller."}}}}),
         json!({"type":"web_search"}),
         json!({"type":"image_generation"}),
     ];
@@ -7506,6 +7882,7 @@ async fn execute_tool(
             execute_device_tool(name, args, db_path, executor_tunnels, cancellation).await
         }
         "copy_files" => execute_copy_files(args, db_path, executor_tunnels, cancellation).await,
+        "download_file" => download_file_tool(args, db_path, executor_tunnels, cancellation).await,
         "list_subthreads" if scope == AgentScope::Main => load_subthreads(db_path)
             .and_then(|threads| serde_json::to_string(&threads).map_err(Into::into))
             .map(tool_execution)
@@ -7677,6 +8054,81 @@ async fn execute_copy_files(
         .await;
         cleanup_transfer(&tunnels.transfers, &transfer_id).await;
         copied
+    }
+    .await;
+    result
+        .map(tool_execution)
+        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+}
+
+async fn download_file_tool(
+    args: Value,
+    db_path: &Path,
+    tunnels: &ExecutorTunnels,
+    cancellation: watch::Receiver<bool>,
+) -> ToolExecution {
+    let result: Result<String> = async {
+        let input: DownloadFileInput = serde_json::from_value(args)?;
+        let file_id = nonempty_transfer_input(&input.file_id, "file_id")?;
+        let destination = PathBuf::from(nonempty_transfer_input(&input.path, "path")?);
+        let file = load_stored_file(&open_db(db_path)?, &file_id)?;
+        let target_device = input
+            .target_device
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if target_device.is_none() {
+            let parent = destination
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .context("destination path must have a parent directory")?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(&destination, file.content)?;
+            return serde_json::to_string(&json!({
+                "file_id": file.metadata.id,
+                "bytes": file.metadata.size,
+                "destination": destination,
+                "target_device": "controller",
+            }))
+            .map_err(Into::into);
+        }
+        let target_device = target_device.expect("target device is present");
+        let filename = destination
+            .file_name()
+            .filter(|value| !value.is_empty())
+            .context("destination path must include a filename")?;
+        let target_path = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .context("destination path must have a parent directory")?;
+        let staging = std::env::temp_dir()
+            .join("cybion-file-downloads")
+            .join(Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&staging)?;
+        let source_path = staging.join(filename);
+        std::fs::write(&source_path, file.content)?;
+        let copied = execute_copy_files(
+            json!({
+                "source_path": source_path,
+                "target_device": target_device,
+                "target_path": target_path,
+            }),
+            db_path,
+            tunnels,
+            cancellation,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&staging);
+        if copied.output.starts_with("error:") {
+            return Err(anyhow!(copied.output));
+        }
+        serde_json::to_string(&json!({
+            "file_id": file.metadata.id,
+            "bytes": file.metadata.size,
+            "destination": destination,
+            "target_device": target_device,
+        }))
+        .map_err(Into::into)
     }
     .await;
     result
@@ -12432,6 +12884,7 @@ mod tests {
             ConversationQuery {
                 before: newest.next_before_id,
                 limit: None,
+                focus: None,
             },
         )
         .unwrap();
@@ -13052,7 +13505,7 @@ mod tests {
         })]);
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].id, "image_1");
-        assert_eq!(images[0].data, "aW1hZ2U=");
+        assert_eq!(images[0].data, Some("aW1hZ2U=".to_owned()));
     }
 
     #[tokio::test]
@@ -13593,8 +14046,9 @@ mod tests {
         assert_eq!(reply.message.content, Value::String("complete".to_owned()));
         let images = reply.message.images.as_ref().unwrap();
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0].id, "image_1");
-        assert_eq!(images[0].data, "aW1hZ2U=");
+        assert_eq!(images[0].id, format!("{:x}", Sha256::digest(b"image")));
+        assert_eq!(images[0].data, None);
+        assert!(images[0].history_entry_id.is_some());
         assert!(matches!(
             received_events.recv().await,
             Some(AgentEvent::ToolCall { name, .. }) if name == "image_generation"
@@ -13963,5 +14417,115 @@ mod tests {
             )
             .unwrap();
         assert_eq!(default_model, "configured-model");
+    }
+
+    #[test]
+    fn files_are_content_addressed_and_images_keep_a_data_url_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([20, 40, 60, 255]));
+        let mut content = Vec::new();
+        PngEncoder::new(&mut content)
+            .write_image(pixel.as_raw(), 1, 1, ColorType::Rgba8.into())
+            .unwrap();
+        let connection = open_db(&db).unwrap();
+        let first = store_file(&connection, "pixel.png", "image/png", &content, None).unwrap();
+        let second = store_file(&connection, "renamed.png", "image/png", &content, None).unwrap();
+        assert_eq!(first.id, format!("{:x}", Sha256::digest(&content)));
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.filename, "pixel.png");
+        assert!(
+            first
+                .preview_content
+                .as_deref()
+                .is_some_and(|value| value.starts_with("data:image/png;base64,"))
+        );
+        assert_eq!(stored_files(&connection, Some("images")).unwrap().len(), 1);
+        assert_eq!(
+            load_stored_file(&connection, &first.id).unwrap().content,
+            content
+        );
+    }
+
+    #[test]
+    fn generated_images_are_archived_and_focus_the_message_that_displays_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("generate a pixel".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "image-run", user.id).unwrap();
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([20, 40, 60, 255]));
+        let mut content = Vec::new();
+        PngEncoder::new(&mut content)
+            .write_image(pixel.as_raw(), 1, 1, ColorType::Rgba8.into())
+            .unwrap();
+        let output = vec![
+            json!({
+                "type": "image_generation_call",
+                "id": "image-1",
+                "output_format": "png",
+                "result": BASE64.encode(content),
+            }),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Here is the pixel."}],
+            }),
+        ];
+        let record_ids = append_response_output_items(&db, None, "image-run", &output).unwrap();
+        let archived = archive_generated_images(&db, &output, &record_ids).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].history_entry_id, Some(record_ids[0]));
+
+        let page = load_conversation_page(
+            &db,
+            ConversationQuery {
+                before: None,
+                limit: None,
+                focus: Some(record_ids[0]),
+            },
+        )
+        .unwrap();
+        assert_eq!(page.focus_message_id, Some(record_ids[1]));
+        let message = page.messages.last().unwrap();
+        assert_eq!(message.content, "Here is the pixel.");
+        assert_eq!(message.images[0].id, archived[0].id);
+    }
+
+    #[tokio::test]
+    async fn download_file_saves_a_file_object_to_the_controller_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let file = store_file(
+            &open_db(&db).unwrap(),
+            "report.txt",
+            "text/plain",
+            b"durable file",
+            None,
+        )
+        .unwrap();
+        let destination = temp.path().join("nested/report.txt");
+        let result = download_file_tool(
+            json!({"file_id": file.id, "path": destination}),
+            &db,
+            &ExecutorTunnels::default(),
+            watch::channel(false).1,
+        )
+        .await;
+        assert!(!result.output.starts_with("error:"));
+        assert_eq!(std::fs::read(destination).unwrap(), b"durable file");
     }
 }
