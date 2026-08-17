@@ -77,6 +77,8 @@ Goal 不以一次自然语言回复为完成。每一轮执行后，系统把回
 远程设备的选择只属于一次具体的文件系统或 Bash 工具调用，因此同一个线程可以在连续的
 工具调用中操作不同设备。
 
+![一条主线程与持续 Goal 的关系图](docs/images/thread-goals.svg)
+
 ```mermaid
 flowchart LR
   U["用户的连续输入"] --> M["主线程：唯一用户可见的会话"]
@@ -124,6 +126,8 @@ history_records (
 **Context Layout 是每次调用 Responses API 时 `input[]` 的确切组成和顺序。** 所有 Agent
 指令都放在 `developer` 协议项中；请求不设置顶层 `instructions` 字段。这样，稳定指令、
 压缩后的当前状态和持续变化的协议历史都有明确的角色与位置。
+
+![Cybion Context Layout 的组成和顺序](docs/images/context-layout.svg)
 
 常规 Agent 请求的 `input[]` 从一个稳定的 Markdown `developer` 前缀开始：
 
@@ -265,6 +269,8 @@ OpenAI-compatible Responses API 连接模型上游。
 主动保持的 SSE 连接；B 执行文件、Shell 或其他本地工具后，以 HTTP 回传结果。结果回到 A，
 继续同一条主线程的推理。B 不发起 AI 推理请求，也不需要配置 OpenAI Responses 上游。
 
+![控制设备与执行设备的只出站协作关系](docs/images/device-execution.svg)
+
 `copy_files` 复用这条纯出站通道：源设备将压缩 tar 包以 Bearer HTTP 分块上传到 A，A 校验
 总大小、顺序与 SHA-256 后再让目标设备取回分块并安全解包。文件内容不会进入模型上下文或
 普通工具结果接口；tar 条目禁止绝对路径、`..`、符号链接及其他非常规类型，目标目录在校验
@@ -305,6 +311,18 @@ flowchart LR
 远程控制台仍应经 HTTPS 暴露，并只部署在你愿意授予文件系统和 Shell 权限的机器上。
 网络连通解决访问问题；操作者 API 由 Auth Mini JWT 保护，远程工具调用由设备 Token
 和共享 `root_user_id` 限制设备间的权限。
+
+### 8. 文件对象与图册：可追溯的内容资产
+
+控制设备保存一个内容寻址的文件对象库。上传的附件和模型生成的图片都以内容的 SHA-256
+作为 `file_id`，因此同一内容只保存一份。文件对象保存原始内容、文件名、MIME 类型、创建时间、
+可选的来源历史记录 ID，以及图片缩略预览；二进制内容不作为普通工具结果放入模型上下文。
+
+![内容寻址文件对象库与图册](docs/images/file-library.svg)
+
+控制台提供【文件对象】页用于上传、筛选和下载资产，并提供【图册】页浏览上传或生成的图片、
+查看预览并定位到产生它的对话历史。Agent 可通过 `download_file` 使用文件对象的 `file_id`
+把资产写入控制设备或已接入执行设备的精确路径。
 
 ## 当前能力
 
