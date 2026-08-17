@@ -119,16 +119,58 @@ history_records (
 时会沿用输出长度上限，保存的原始 `payload` 不会被截断。`response_output` 与
 `tool_output` 在下一轮作为 Responses `input` 的协议项回放，而不是转换成文本执行轨迹。
 
-固定的 Agent 指令不使用 Responses 的 `instructions` 字段。每次请求的第一个 `input` 项都是
-稳定的 Markdown `developer` 消息，按本次作用域组合技能目录、线程角色、可用远程设备和
-Browser Control 规则；之后依次追加编译出的协议历史。这个布局既把固定前缀与会变化的
-历史分开，也使用户刚提交的 `input` 保持其原始协议角色。
+#### Context Layout
+
+**Context Layout 是每次调用 Responses API 时 `input[]` 的确切组成和顺序。** 所有 Agent
+指令都放在 `developer` 协议项中；请求不设置顶层 `instructions` 字段。这样，稳定指令、
+压缩后的当前状态和持续变化的协议历史都有明确的角色与位置。
+
+常规 Agent 请求的 `input[]` 从一个稳定的 Markdown `developer` 前缀开始：
+
+| 顺序 | 协议项 | 内容 |
+| --- | --- | --- |
+| `input[0]` | `developer` | `# Cybion agent policy`：one-more-step 工作方式和当前安装的技能目录；`## Thread role`：主线程或子线程的职责与终态规则；有已接入设备时附加远程执行设备清单；可用 Browser Control 时附加浏览器控制规则。 |
+| `input[1..]` | 编译出的协议项 | checkpoint 的 `developer` 项，以及按记录顺序排列的 `input`、`response_output` 和 `tool_output`。 |
+| 最后一项（仅子线程刚结束而触发主线程续跑时） | `developer` | 要求主线程基于该子线程的证据继续推进原始用户结果的临时续跑指令。 |
+
+固定前缀在同一 Agent run 的每一次 Responses 调用前都会重新放在 `input[0]`。模型产生的
+`response_output` 原始项会立即追加到本次运行中的协议序列；若其中包含
+`function_call` 或 `computer_call`，对应的 `function_call_output` 或
+`computer_call_output` 随后追加，形成下一次 Responses 调用的后缀。所有这些项也会写入
+`history_records`，供下一次上下文编译使用。用户刚提交的输入在运行开始前已作为 `input`
+记录写入，因此保留其原始 `user` 协议角色，而不会被包装成“历史证据”文本。
+
+主线程的常规布局如下，其中 `C` 为当前可见范围内最新 checkpoint，`M` 为本次编译上界：
+
+```text
+无 checkpoint：
+[ 固定 developer 前缀 ] [ 主线程 records #1 .. #M ]
+
+有 checkpoint：
+[ 固定 developer 前缀 ] [ checkpoint #C（developer） ]
+[ 主线程 records #C+1 .. #M ]
+```
+
+子线程使用同一个稳定前缀，但协议历史按 fork 边界编译：若子线程已有 checkpoint，则后缀是
+该 checkpoint（包含）到该子线程自身上界的记录；否则后缀先是主线程的最新 checkpoint（若有）
+到 `from_record_id`（包含）的主线程记录，再是该子线程从起点到自身上界的记录。兄弟子线程的
+记录永远不进入该后缀。
+
+`response_output` 和 `tool_output` 保持 Responses 协议项回放，而不是转换成文本执行轨迹。
+`function_call_output` 的完整内容保存在 `history_records`；为控制单次请求的长度，只有编译到
+模型输入时才会按工具输出上限截短。`activity` 只用于控制台与运行状态，始终不在 `input[]` 中。
+
+发生上下文窗口溢出时，Cybion 会发起独立的 checkpoint compacting 请求，而不是把压缩提示词
+混入常规 Agent 请求：其 `input[0]` 是 `# Checkpoint compaction` 的 `developer` 提示词，
+后面是待压缩的已编译协议项。返回的 Markdown 随即以 `developer` 角色写为新的 checkpoint，
+成为之后常规 Context Layout 中的当前状态起点。
 
 ```mermaid
 flowchart LR
-  D["稳定 Markdown developer 指令"] --> R["Responses input"]
-  C["checkpoint developer 项"] --> R
-  H["input / response_output / tool_output"] --> R
+  D["input[0]：稳定 developer 前缀"] --> R["Responses input[]"]
+  C["checkpoint developer 项"] --> H["编译的协议历史"]
+  P["input / response_output / tool_output"] --> H
+  H --> R
   A["activity"] -. "不编译" .-> R
   R --> U["Responses API"]
 ```
@@ -148,7 +190,8 @@ latest_checkpoint_id = max(id | thread_id IS NULL, kind = checkpoint,
 `response_output`、`tool_output` 和 `checkpoint`，按 `id` 升序回放。**checkpoint 本身包含
 在结果中。** 这使 checkpoint 成为当前状态的起点，而不会遗漏它之后或与它同一位置的协议项。
 
-上下文窗口溢出时，Cybion 将已编译的上下文蒸馏为新的不可变 checkpoint 后重试。写入前会在
+上下文窗口溢出时，Cybion 通过 checkpoint compacting 将已编译的上下文压缩为新的不可变
+checkpoint 后重试。写入前会在
 SQLite 事务中确认主线程最新记录仍等于这次编译的上界，避免把发生变化的历史标记为已覆盖。
 
 #### 子线程的 fork 与查询边界
@@ -181,8 +224,8 @@ flowchart TB
 
 `search_thread_history` 按关键词或短语查询完整主线程的非 `activity` 记录，并返回
 `record_id`、`kind` 和原始 `payload`；`read_thread_history` 按包含两端的记录 ID 区间分页读取
-同样的协议 records。`get_checkpoint` 读取一个主线程 checkpoint 及该 checkpoint 创建的事实
-状态。它们让 Agent 按需取得较早的历史，而不要求一次请求容纳全部记录。
+同样的协议 records。`get_checkpoint` 读取一个主线程 checkpoint 的原始 Markdown 当前状态。
+它们让 Agent 按需取得较早的历史，而不要求一次请求容纳全部记录。
 
 发生上下文溢出时，checkpoint compacting 的提示词会要求把仍应保留的协作偏好、项目路径、
 持久配置和已验证设备或服务状态，作为简短的
