@@ -7199,6 +7199,15 @@ fn sanitize_responses_input(body: &mut Value) {
     let input = body["input"]
         .as_array_mut()
         .expect("Responses request input is an array");
+    // INVARIANT: Every function call replayed to Responses has exactly one later tool output.
+    let paired_function_call_ids = paired_function_call_ids(input);
+    input.retain(|item| match item.get("type").and_then(Value::as_str) {
+        Some("function_call" | "function_call_output") => item
+            .get("call_id")
+            .and_then(Value::as_str)
+            .is_some_and(|call_id| paired_function_call_ids.contains(call_id)),
+        _ => true,
+    });
     for item in input {
         let fields = match item.get("type").and_then(Value::as_str) {
             Some("web_search_call") => &["action"][..],
@@ -7212,6 +7221,30 @@ fn sanitize_responses_input(body: &mut Value) {
             item.remove(*field);
         }
     }
+}
+
+fn paired_function_call_ids(input: &[Value]) -> HashSet<String> {
+    let mut function_calls = HashMap::<String, (usize, usize)>::new();
+    let mut function_call_outputs = HashMap::<String, (usize, usize)>::new();
+    for (index, item) in input.iter().enumerate() {
+        let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let records = match item.get("type").and_then(Value::as_str) {
+            Some("function_call") => &mut function_calls,
+            Some("function_call_output") => &mut function_call_outputs,
+            _ => continue,
+        };
+        let entry = records.entry(call_id.to_owned()).or_insert((0, index));
+        entry.0 += 1;
+    }
+    function_calls
+        .into_iter()
+        .filter_map(|(call_id, (call_count, call_index))| {
+            let (output_count, output_index) = function_call_outputs.get(&call_id)?;
+            (call_count == 1 && *output_count == 1 && call_index < *output_index).then_some(call_id)
+        })
+        .collect()
 }
 
 fn scoped_responses_request_body(
@@ -13638,6 +13671,7 @@ mod tests {
                     "action": {"type": "search", "query": "Cybion"},
                 }),
                 json!({"type": "function_call", "call_id": "call_1"}),
+                json!({"type": "function_call_output", "call_id": "call_1", "output": "complete"}),
             ],
         );
         let input = body["input"].as_array().unwrap();
@@ -13645,6 +13679,36 @@ mod tests {
         assert_eq!(input[0]["id"], "web_1");
         assert_eq!(input[0]["status"], "completed");
         assert_eq!(input[1]["call_id"], "call_1");
+        assert_eq!(input[2]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn responses_input_keeps_only_one_to_one_function_call_pairs() {
+        let body = responses_request_body(
+            "gpt-5",
+            &[
+                json!({"role": "user", "content": "Continue."}),
+                json!({"type": "function_call", "call_id": "complete", "name": "run_bash", "arguments": "{\"cmd\":\"pwd\"}"}),
+                json!({"type": "reasoning", "id": "reasoning_1", "summary": []}),
+                json!({"type": "function_call", "call_id": "missing", "name": "run_bash", "arguments": "{}"}),
+                json!({"type": "function_call_output", "call_id": "complete", "output": "raw tool result"}),
+                json!({"type": "function_call_output", "call_id": "orphan", "output": "must not be replayed"}),
+                json!({"type": "function_call", "call_id": "duplicate", "name": "run_bash", "arguments": "{}"}),
+                json!({"type": "function_call", "call_id": "duplicate", "name": "run_bash", "arguments": "{}"}),
+                json!({"type": "function_call_output", "call_id": "duplicate", "output": "ambiguous"}),
+                json!({"type": "function_call_output", "call_id": "out_of_order", "output": "invalid order"}),
+                json!({"type": "function_call", "call_id": "out_of_order", "name": "run_bash", "arguments": "{}"}),
+            ],
+        );
+        assert_eq!(
+            body["input"],
+            json!([
+                {"role": "user", "content": "Continue."},
+                {"type": "function_call", "call_id": "complete", "name": "run_bash", "arguments": "{\"cmd\":\"pwd\"}"},
+                {"type": "reasoning", "id": "reasoning_1", "summary": []},
+                {"type": "function_call_output", "call_id": "complete", "output": "raw tool result"},
+            ])
+        );
     }
 
     #[test]
@@ -14434,6 +14498,70 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert!(kinds.contains(&"activity".to_owned()));
+    }
+
+    #[test]
+    fn subthread_request_omits_a_fork_call_without_its_later_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Verify the release in parallel.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "main-run", user.id).unwrap();
+        let fork_call_id = append_response_output_items(
+            &db,
+            None,
+            "main-run",
+            &[json!({
+                "type": "function_call",
+                "call_id": "fork-call",
+                "name": "fork_subthread",
+                "arguments": "{\"title\":\"Release\"}",
+            })],
+        )
+        .unwrap()[0];
+        append_tool_output_item(
+            &db,
+            None,
+            "main-run",
+            &json!({
+                "type": "function_call_output",
+                "call_id": "fork-call",
+                "output": "{\"status\":\"queued\"}",
+            }),
+        )
+        .unwrap();
+
+        let inherited = compile_subthread_context(&db, "child", fork_call_id).unwrap();
+        assert!(inherited.iter().any(|item| item["call_id"] == "fork-call"));
+        assert!(!inherited.iter().any(|item| {
+            item["type"] == "function_call_output" && item["call_id"] == "fork-call"
+        }));
+
+        let request = scoped_responses_request_body(
+            "gpt-5",
+            &inherited,
+            &SkillCatalog::default(),
+            AgentScope::Subthread,
+            &db,
+            None,
+        );
+        assert!(!request["input"].as_array().unwrap().iter().any(|item| {
+            matches!(
+                item["type"].as_str(),
+                Some("function_call" | "function_call_output")
+            ) && item["call_id"] == "fork-call"
+        }));
     }
 
     #[test]
