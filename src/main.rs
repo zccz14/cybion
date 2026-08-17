@@ -761,6 +761,11 @@ struct AgentTurn {
 }
 
 #[derive(Deserialize)]
+struct ResendConversationMessage {
+    run_id: String,
+}
+
+#[derive(Deserialize)]
 struct ClearConversationInput {
     confirmation: String,
 }
@@ -1375,6 +1380,10 @@ fn app(state: AppState) -> Router {
         .route("/api/browser/sessions/{id}/input", post(browser_user_input))
         .route("/api/conversation", get(conversation))
         .route("/api/conversation/clear", post(clear_conversation))
+        .route(
+            "/api/conversation/messages/{record_id}/resend",
+            post(resend_conversation_message),
+        )
         .route(
             "/api/conversation/runs/{run_id}/events",
             get(conversation_run_events),
@@ -3394,10 +3403,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          CREATE TRIGGER IF NOT EXISTS history_records_immutable_update
            BEFORE UPDATE ON history_records
            BEGIN SELECT RAISE(ABORT, 'history records are append-only'); END;
-         CREATE TRIGGER IF NOT EXISTS history_records_immutable_delete
-           BEFORE DELETE ON history_records
-           WHEN NOT EXISTS (SELECT 1 FROM app_meta WHERE key = 'conversation_reset_in_progress')
-           BEGIN SELECT RAISE(ABORT, 'history records are append-only'); END;
          CREATE TABLE IF NOT EXISTS agent_runs (
            id TEXT PRIMARY KEY,
            user_message_id INTEGER NOT NULL REFERENCES history_records(id),
@@ -3446,6 +3451,13 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          );",
     )?;
     migrate_peer_schema(&connection)?;
+    connection.execute_batch(
+        "DROP TRIGGER IF EXISTS history_records_immutable_delete;
+         CREATE TRIGGER history_records_immutable_delete
+           BEFORE DELETE ON history_records
+           WHEN NOT EXISTS (SELECT 1 FROM app_meta WHERE key = 'conversation_mutation_in_progress')
+           BEGIN SELECT RAISE(ABORT, 'history records are append-only'); END;",
+    )?;
     connection.execute(
         "UPDATE executor_tool_calls SET status = 'unknown', completed_at = ?1
          WHERE status = 'running'",
@@ -5786,14 +5798,76 @@ fn clear_conversation_data(path: &Path) -> Result<()> {
     let mut connection = open_db(path)?;
     let transaction = connection.transaction()?;
     transaction.execute(
-        "INSERT INTO app_meta (key, value) VALUES ('conversation_reset_in_progress', '1')",
+        "INSERT INTO app_meta (key, value) VALUES ('conversation_mutation_in_progress', '1')",
         [],
     )?;
     transaction.execute("DELETE FROM subthreads", [])?;
     transaction.execute("DELETE FROM agent_runs", [])?;
     transaction.execute("DELETE FROM history_records", [])?;
     transaction.execute(
-        "DELETE FROM app_meta WHERE key = 'conversation_reset_in_progress'",
+        "DELETE FROM app_meta WHERE key = 'conversation_mutation_in_progress'",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn resend_conversation_from(path: &Path, record_id: i64, run_id: &str) -> Result<()> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let run_exists = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE id = ?1)",
+        [run_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if run_exists {
+        return Err(anyhow!("agent run already exists"));
+    }
+    let payload = transaction
+        .query_row(
+            "SELECT payload FROM history_records
+             WHERE id = ?1 AND thread_id IS NULL AND kind = 'input'",
+            [record_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("conversation message not found"))?;
+    let payload = serde_json::from_str::<Value>(&payload)?;
+    if payload.get("role").and_then(Value::as_str) != Some("user") {
+        return Err(anyhow!("only user messages can be resent"));
+    }
+    transaction.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('conversation_mutation_in_progress', '1')",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM agent_runs
+         WHERE user_message_id >= ?1
+            OR id IN (
+                SELECT DISTINCT run_id FROM history_records
+                WHERE id > ?1 AND run_id IS NOT NULL
+            )
+            OR id IN (
+                SELECT run_id FROM subthreads
+                WHERE from_record_id > ?1 AND run_id IS NOT NULL
+            )",
+        [record_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM subthreads
+         WHERE from_record_id > ?1
+            OR run_id IS NULL
+            OR NOT EXISTS (SELECT 1 FROM agent_runs WHERE id = subthreads.run_id)",
+        [record_id],
+    )?;
+    transaction.execute("DELETE FROM history_records WHERE id > ?1", [record_id])?;
+    transaction.execute(
+        "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
+         VALUES (?1, ?2, 'running', ?3, 'main')",
+        params![run_id, record_id, chrono::Utc::now().to_rfc3339()],
+    )?;
+    transaction.execute(
+        "DELETE FROM app_meta WHERE key = 'conversation_mutation_in_progress'",
         [],
     )?;
     transaction.commit()?;
@@ -5849,6 +5923,57 @@ async fn clear_conversation(
         )
     })?;
     Ok(Json(json!({ "cleared": true })))
+}
+
+async fn resend_conversation_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(record_id): AxumPath<i64>,
+    Json(input): Json<ResendConversationMessage>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    identity(&state, &headers).await?;
+    if input.run_id.trim().is_empty() {
+        return Err(error(StatusCode::BAD_REQUEST, "agent run ID is required"));
+    }
+    let config = load_config(&state.db_path).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read configuration",
+        )
+    })?;
+    if config.deployment_role != "controller" {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "this Cybion machine is configured as a tool executor and has no model upstream",
+        ));
+    }
+    if state.checkpoint_write_pending.load(Ordering::Acquire) {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "main-thread checkpoint is in progress; retry this message shortly",
+        ));
+    }
+    let checkpoint_writer = state.checkpoint_write_gate.try_write().map_err(|_| {
+        error(
+            StatusCode::CONFLICT,
+            "main-thread checkpoint is in progress; retry this message shortly",
+        )
+    })?;
+    let _conversation = state.conversation_mutations.lock().await;
+    stop_active_conversation_work(&state).await;
+    resend_conversation_from(&state.db_path, record_id, &input.run_id).map_err(|cause| {
+        let status = match cause.to_string().as_str() {
+            "conversation message not found" => StatusCode::NOT_FOUND,
+            "only user messages can be resent" | "agent run ID is required" => {
+                StatusCode::BAD_REQUEST
+            }
+            _ => StatusCode::CONFLICT,
+        };
+        error(status, cause.to_string())
+    })?;
+    drop(_conversation);
+    drop(checkpoint_writer);
+    Ok(stream_main_user_run(state, input.run_id, record_id).await)
 }
 
 fn execute_fork_subthread(
@@ -6340,7 +6465,11 @@ async fn agent_turn(
     )
     .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
     drop(checkpoint_message_permit);
-    let run_id = input.run_id.clone();
+    drop(_conversation);
+    Ok(stream_main_user_run(state, input.run_id, user_message.id).await)
+}
+
+async fn stream_main_user_run(state: AppState, run_id: String, user_message_id: i64) -> Response {
     let (cancel, cancellation) = watch::channel(false);
     state
         .active_runs
@@ -6351,7 +6480,7 @@ async fn agent_turn(
     tokio::spawn(process_main_run(
         state.clone(),
         run_id,
-        user_message.id,
+        user_message_id,
         MainRunReason::UserMessage,
         events,
         cancellation,
@@ -6359,9 +6488,9 @@ async fn agent_turn(
     let stream = ReceiverStream::new(receiver).map(|event| {
         Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&event).unwrap()))
     });
-    Ok(Sse::new(stream)
+    Sse::new(stream)
         .keep_alive(KeepAlive::default())
-        .into_response())
+        .into_response()
 }
 
 fn continuation_is_superseded(path: &Path, user_message_id: i64) -> Result<bool> {
@@ -6808,9 +6937,9 @@ async fn run_agent_items(
             .await
             .and_then(|body| completed_response_from_sse(&body))
         {
-            // RECOVERY: A structured upstream context-length error means the current context
-            // can be replaced by a compacted checkpoint and retried once without replaying tools.
-            // This applies whether the upstream reports it as an HTTP error or a terminal SSE event.
+            // RECOVERY: HTTP 413, a structured upstream context-length error, or a terminal SSE
+            // error means the current context can be replaced by a compacted checkpoint and
+            // retried once without replaying tools.
             Err(cause)
                 if is_context_overflow(&cause)
                     && (!retried_after_context_overflow || adaptive_main_checkpointing) =>
@@ -7247,7 +7376,7 @@ async fn send_responses_request(
     if status.is_success() {
         return Ok(body);
     }
-    if context_overflow_response(&body) {
+    if context_overflow_response(status, &body) {
         let detail = serde_json::from_str::<Value>(&body)
             .ok()
             .and_then(|value| {
@@ -7257,7 +7386,7 @@ async fn send_responses_request(
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
-            .unwrap_or_else(|| "context_length_exceeded".to_owned());
+            .unwrap_or_else(|| body.clone());
         return Err(ContextOverflow { detail }.into());
     }
     Err(anyhow!(
@@ -7265,7 +7394,10 @@ async fn send_responses_request(
     ))
 }
 
-fn context_overflow_response(body: &str) -> bool {
+fn context_overflow_response(status: StatusCode, body: &str) -> bool {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return true;
+    }
     let Ok(response) = serde_json::from_str::<Value>(body) else {
         return false;
     };
@@ -10139,17 +10271,27 @@ mod tests {
     }
 
     #[test]
-    fn context_overflow_detection_requires_a_structured_upstream_code() {
+    fn context_overflow_detection_accepts_413_or_a_structured_upstream_code() {
         assert!(context_overflow_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "length limit exceeded"
+        ));
+        assert!(context_overflow_response(
+            StatusCode::BAD_REQUEST,
             r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#
         ));
         assert!(context_overflow_response(
+            StatusCode::BAD_REQUEST,
             r#"{"code":"context_window_exceeded"}"#
         ));
         assert!(!context_overflow_response(
+            StatusCode::BAD_REQUEST,
             r#"{"error":{"code":"invalid_request_error","message":"too long"}}"#
         ));
-        assert!(!context_overflow_response("not JSON"));
+        assert!(!context_overflow_response(
+            StatusCode::BAD_REQUEST,
+            "not JSON"
+        ));
     }
 
     #[test]
@@ -11266,8 +11408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "replaced by protocol history checkpoint coverage tests"]
-    async fn context_overflow_writes_current_state_then_retries_once() {
+    async fn http_413_writes_current_state_then_retries_once() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
@@ -11278,17 +11419,7 @@ mod tests {
                 requests.len()
             };
             if request_number == 1 {
-                return format!(
-                    "event: error\ndata: {}\n\n",
-                    json!({
-                        "type": "error",
-                        "error": {
-                            "code": "context_length_exceeded",
-                            "message": "input exceeds the model context window"
-                        }
-                    })
-                )
-                .into_response();
+                return (StatusCode::PAYLOAD_TOO_LARGE, "length limit exceeded").into_response();
             }
             let text = if request_number == 2 {
                 "# Current state\n\n## Objective and next step\nShip the context-overflow recovery.\n\n## Long-term facts\n- Deployment evidence was inspected. (record #1)"
@@ -11365,22 +11496,15 @@ mod tests {
         .unwrap();
         create_agent_run(&db, "checkpoint-run", current.id).unwrap();
         let context = compile_main_context(&db, current.id).unwrap();
-        assert_eq!(context.items.len(), 4);
+        assert_eq!(context.items.len(), 3);
         let original_context = context.items.clone();
         assert!(
-            original_context[1]["content"]
+            original_context[0]["content"]
                 .as_str()
                 .unwrap()
                 .starts_with("Keep deployment evidence.")
         );
-        assert!(
-            original_context
-                .iter()
-                .filter_map(|item| item["content"].as_str())
-                .map(str::len)
-                .sum::<usize>()
-                > 25_000
-        );
+        assert!(serde_json::to_vec(&original_context).unwrap().len() > 25_000);
         let config = Config {
             root_user_id: "root".to_owned(),
             auth_url: "https://auth.example.com".to_owned(),
@@ -11437,6 +11561,15 @@ mod tests {
             received.recv().await,
             Some(AgentEvent::Checkpoint { id, .. }) if id == checkpoint.id
         ));
+        let retried: i64 = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT retry_attempt FROM agent_runs WHERE id = 'checkpoint-run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retried, 0);
 
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 3);
@@ -14301,6 +14434,155 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert!(kinds.contains(&"activity".to_owned()));
+    }
+
+    #[test]
+    fn resending_a_user_message_truncates_future_history_and_restarts_its_main_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let earlier = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Keep the verified release constraint.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "earlier-run", earlier.id).unwrap();
+        let checkpoint_id = history_record_payload(
+            &open_db(&db).unwrap(),
+            None,
+            Some("earlier-run"),
+            "checkpoint",
+            &json!({"role":"developer","content":"# Current state\nKeep the verified release constraint."}),
+            "now",
+        )
+        .unwrap();
+        let target = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Re-run the release verification.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "discarded-main-run", target.id).unwrap();
+        let fork_record_id = append_response_output_items(
+            &db,
+            None,
+            "discarded-main-run",
+            &[json!({
+                "type":"function_call",
+                "call_id":"fork-1",
+                "name":"fork_subthread",
+                "arguments":"{}",
+            })],
+        )
+        .unwrap()[0];
+        let child_input_id = history_record_payload(
+            &open_db(&db).unwrap(),
+            Some("discarded-child"),
+            Some("discarded-child-run"),
+            "input",
+            &json!({"role":"user","content":"Verify the discarded branch."}),
+            "now",
+        )
+        .unwrap();
+        create_agent_run_with_kind(&db, "discarded-child-run", child_input_id, "subthread")
+            .unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO subthreads (
+                   id, run_id, title, task, completion_criteria, goal_state, status, model,
+                   from_record_id, created_at, updated_at
+                 ) VALUES (
+                   'discarded-child', 'discarded-child-run', 'Discarded child', 'Verify',
+                   'Verified', 'active', 'queued', 'test-model', ?1, 'now', 'now'
+                 )",
+                [fork_record_id],
+            )
+            .unwrap();
+        append_agent_event(
+            &db,
+            "discarded-child-run",
+            &AgentEvent::Status {
+                stage: "queued".to_owned(),
+                message: "This event must be discarded.".to_owned(),
+            },
+        )
+        .unwrap();
+        append_conversation_for_run(
+            &db,
+            &ChatMessage {
+                role: "assistant".to_owned(),
+                content: Value::String("Discard this answer.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+            Some("discarded-main-run"),
+        )
+        .unwrap();
+
+        resend_conversation_from(&db, target.id, "resent-main-run").unwrap();
+
+        let records: Vec<(i64, Option<String>, String)> = open_db(&db)
+            .unwrap()
+            .prepare("SELECT id, thread_id, kind FROM history_records ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(records.last().map(|record| record.0), Some(target.id));
+        assert!(records.iter().all(|record| record.1.is_none()));
+        assert!(records.iter().any(|record| record.0 == checkpoint_id));
+        assert_eq!(
+            load_conversation(&db)
+                .unwrap()
+                .into_iter()
+                .map(|message| message.content)
+                .collect::<Vec<_>>(),
+            [
+                "Keep the verified release constraint.".to_owned(),
+                "Re-run the release verification.".to_owned(),
+            ]
+        );
+        let runs: Vec<String> = open_db(&db)
+            .unwrap()
+            .prepare("SELECT id FROM agent_runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            runs,
+            ["earlier-run".to_owned(), "resent-main-run".to_owned()]
+        );
+        let subthreads: i64 = open_db(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM subthreads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(subthreads, 0);
+        let context = compile_main_context(&db, target.id).unwrap();
+        assert_eq!(context.compile_through_record_id, target.id);
+        assert_eq!(context.items[0]["role"], "developer");
+        assert_eq!(
+            context.items[1]["content"],
+            "Re-run the release verification."
+        );
     }
 
     #[test]
