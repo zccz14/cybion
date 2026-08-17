@@ -111,11 +111,10 @@ struct AppState {
     client: reqwest::Client,
     auth_verifier: Arc<Mutex<Option<CachedAuthVerifier>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
-    active_runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    active_main: Arc<Mutex<Option<ActiveMain>>>,
     active_subthreads: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     conversation_mutations: Arc<Mutex<()>>,
     executor_tunnels: ExecutorTunnels,
-    main_thread: Arc<Mutex<()>>,
     checkpoint_write_gate: Arc<RwLock<()>>,
     checkpoint_write_pending: Arc<AtomicBool>,
     browser_sessions: browser::BrowserSessions,
@@ -445,7 +444,6 @@ struct ConversationMessage {
 #[derive(Serialize)]
 struct ConversationState {
     messages: Vec<ConversationMessage>,
-    runs: Vec<ConversationRun>,
     context: ContextState,
     has_more: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -515,22 +513,6 @@ impl fmt::Display for ContextOverflow {
 }
 
 impl std::error::Error for ContextOverflow {}
-
-#[derive(Serialize)]
-struct ConversationRun {
-    id: String,
-    user_message_id: i64,
-    status: String,
-    retry_attempt: i64,
-    next_retry_at: Option<i64>,
-    event_count: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    latest_event_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    latest_context_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_error: Option<String>,
-}
 
 #[derive(Default, Deserialize)]
 struct ConversationQuery {
@@ -710,10 +692,9 @@ struct SubthreadGoalState {
     blocked_reason: Option<String>,
 }
 
-struct QueuedMainRun {
-    id: String,
-    user_message_id: i64,
-    reason: MainRunReason,
+struct ActiveMain {
+    source_record_id: i64,
+    cancellation: watch::Sender<bool>,
 }
 
 struct RetrySchedule {
@@ -756,14 +737,11 @@ impl BrowserAgentContext {
 
 #[derive(Deserialize)]
 struct AgentTurn {
-    run_id: String,
     message: ChatMessage,
 }
 
 #[derive(Deserialize)]
-struct ResendConversationMessage {
-    run_id: String,
-}
+struct ResendConversationMessage {}
 
 #[derive(Deserialize)]
 struct ClearConversationInput {
@@ -904,12 +882,6 @@ enum AgentScope {
     Subthread,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MainRunReason {
-    UserMessage,
-    SubthreadSettled,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     install_rustls_crypto_provider()?;
@@ -946,17 +918,14 @@ async fn main() -> Result<()> {
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(
             default_db_path(),
         ))),
-        active_runs: Arc::new(Mutex::new(HashMap::new())),
+        active_main: Arc::new(Mutex::new(None)),
         active_subthreads: Arc::new(Mutex::new(HashMap::new())),
         conversation_mutations: Arc::new(Mutex::new(())),
         executor_tunnels: ExecutorTunnels::default(),
-        main_thread: Arc::new(Mutex::new(())),
         checkpoint_write_gate: Arc::new(RwLock::new(())),
         checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
         browser_sessions: browser::sessions(),
     };
-    schedule_recovered_main_runs(state.clone());
-    schedule_main_retries(state.clone());
     schedule_subthreads(state.clone());
     schedule_auto_update(state.client.clone(), state.db_path.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
@@ -1027,49 +996,6 @@ fn schedule_subthreads(state: AppState) {
                     }
                 }
                 Err(cause) => tracing::warn!(%cause, "cannot claim queued subthreads"),
-            }
-            tokio::time::sleep(RETRY_SCHEDULER_INTERVAL).await;
-        }
-    });
-}
-
-fn schedule_recovered_main_runs(state: AppState) {
-    let runs = open_db(&state.db_path).and_then(|connection| {
-        connection
-            .prepare(
-                "SELECT run.id
-                 FROM agent_runs run
-                 WHERE run.kind IN ('main', 'continuation')
-                   AND run.status = 'running' AND run.next_retry_at IS NULL
-                 ORDER BY run.user_message_id",
-            )?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    });
-    let Ok(runs) = runs else {
-        return;
-    };
-    for run_id in runs {
-        record_retry(
-            &state.db_path,
-            &run_id,
-            "main-thread execution was interrupted by a process restart",
-        );
-    }
-    recover_interrupted_subthreads(&state.db_path);
-}
-
-fn schedule_main_retries(state: AppState) {
-    tokio::spawn(async move {
-        loop {
-            match claim_due_main_retries(&state.db_path, chrono::Utc::now().timestamp()) {
-                Ok(runs) => {
-                    for run in runs {
-                        spawn_main_run(state.clone(), run);
-                    }
-                }
-                Err(cause) => tracing::warn!(%cause, "cannot claim main-thread retries"),
             }
             tokio::time::sleep(RETRY_SCHEDULER_INTERVAL).await;
         }
@@ -1227,7 +1153,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                         append_main_subthread_outcome(&state.db_path, &run_id, &outcome)
                             .unwrap_or(job.from_record_id);
                     state.active_subthreads.lock().await.remove(&job.id);
-                    schedule_main_continuation(state, continuation_record_id).await;
+                    start_latest_main_response(state, continuation_record_id, None).await;
                 }
                 Ok(goal) if goal.state == "cancelled" => {
                     let _ = cancel_goal_subthread(&state.db_path, &job.id, &content);
@@ -1398,10 +1324,9 @@ fn app(state: AppState) -> Router {
             "/api/threads/{id}",
             get(subthread_detail).put(update_goal).delete(delete_goal),
         )
-        .route("/api/agent/turn", post(agent_turn))
         .route(
-            "/api/agent/turn/{id}",
-            post(retry_agent_turn).delete(cancel_agent_turn),
+            "/api/agent/turn",
+            post(agent_turn).delete(cancel_main_response),
         )
         .with_state(state)
         .layer(CorsLayer::permissive())
@@ -2710,22 +2635,10 @@ fn append_main_subthread_outcome(path: &Path, run_id: &str, outcome: &str) -> Re
 
 #[cfg(test)]
 fn create_agent_run(path: &Path, id: &str, user_message_id: i64) -> Result<()> {
-    create_main_run(path, id, user_message_id, MainRunReason::UserMessage)
+    create_agent_run_with_kind(path, id, user_message_id, "main")
 }
 
-fn create_main_run(
-    path: &Path,
-    id: &str,
-    user_message_id: i64,
-    reason: MainRunReason,
-) -> Result<()> {
-    let kind = match reason {
-        MainRunReason::UserMessage => "main",
-        MainRunReason::SubthreadSettled => "continuation",
-    };
-    create_agent_run_with_kind(path, id, user_message_id, kind)
-}
-
+#[cfg(test)]
 fn create_agent_run_with_kind(
     path: &Path,
     id: &str,
@@ -2827,48 +2740,6 @@ fn retry_status_event(schedule: &RetrySchedule) -> AgentEvent {
     }
 }
 
-fn record_retry(path: &Path, run_id: &str, detail: &str) {
-    let _ = append_agent_event(
-        path,
-        run_id,
-        &AgentEvent::Error {
-            error: detail.to_owned(),
-        },
-    );
-    if let Ok(schedule) = schedule_agent_retry(path, run_id) {
-        let _ = append_agent_event(path, run_id, &retry_status_event(&schedule));
-    }
-}
-
-fn recover_interrupted_subthreads(path: &Path) {
-    let runs = open_db(path).and_then(|connection| {
-        connection
-            .prepare(
-                "SELECT run.id
-                 FROM agent_runs run
-                 JOIN subthreads thread ON thread.run_id = run.id
-                 WHERE run.kind = 'subthread' AND run.status = 'running'
-                   AND run.next_retry_at IS NULL AND thread.status = 'queued'
-                   AND EXISTS(
-                     SELECT 1 FROM history_records record
-                     WHERE record.run_id = run.id AND record.kind = 'activity'
-                   )",
-            )?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    });
-    if let Ok(runs) = runs {
-        for run_id in runs {
-            record_retry(
-                path,
-                &run_id,
-                "subthread execution was interrupted by a process restart",
-            );
-        }
-    }
-}
-
 fn append_agent_event(path: &Path, run_id: &str, event: &AgentEvent) -> Result<()> {
     let connection = open_db(path)?;
     let thread_id = connection
@@ -2957,54 +2828,6 @@ fn conversation_output_chunk_limit(value: Option<usize>) -> usize {
         .clamp(1, CONVERSATION_OUTPUT_CHUNK_MAX)
 }
 
-fn load_conversation_runs(
-    connection: &Connection,
-    first_message_id: Option<i64>,
-    last_message_id: Option<i64>,
-) -> Result<Vec<ConversationRun>> {
-    let first_message_id = first_message_id.unwrap_or(i64::MAX);
-    let last_message_id = last_message_id.unwrap_or(i64::MIN);
-    connection
-        .prepare(
-            "SELECT run.id, run.user_message_id, run.status, run.retry_attempt, run.next_retry_at,
-                    (SELECT COUNT(*) FROM history_records event
-                     WHERE event.run_id = run.id AND event.kind = 'activity'),
-                    (SELECT event.id FROM history_records event
-                     WHERE event.run_id = run.id AND event.kind = 'activity'
-                     ORDER BY event.id DESC LIMIT 1),
-                    (SELECT CAST(json_extract(event.payload, '$.input_tokens') AS INTEGER)
-                     FROM history_records event
-                     WHERE event.run_id = run.id AND event.kind = 'activity'
-                       AND json_extract(event.payload, '$.type') = 'context'
-                     ORDER BY event.id DESC LIMIT 1),
-                    (SELECT json_extract(event.payload, '$.error')
-                     FROM history_records event
-                     WHERE event.run_id = run.id AND event.kind = 'activity'
-                       AND json_extract(event.payload, '$.type') = 'error'
-                     ORDER BY event.id DESC LIMIT 1)
-             FROM agent_runs run
-             WHERE run.kind IN ('main', 'continuation')
-               AND (run.status = 'running' OR run.user_message_id BETWEEN ?1 AND ?2)
-             ORDER BY run.created_at, run.id",
-        )?
-        .query_map(params![first_message_id, last_message_id], |row| {
-            let input_tokens: Option<i64> = row.get(7)?;
-            Ok(ConversationRun {
-                id: row.get(0)?,
-                user_message_id: row.get(1)?,
-                status: row.get(2)?,
-                retry_attempt: row.get(3)?,
-                next_retry_at: row.get(4)?,
-                event_count: row.get(5)?,
-                latest_event_id: row.get(6)?,
-                latest_context_tokens: input_tokens.and_then(|value| value.try_into().ok()),
-                last_error: row.get(8)?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
 fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<ConversationState> {
     let connection = open_db(path)?;
     let focused_message_id = query
@@ -3068,11 +2891,6 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
     let next_before_id = has_more
         .then(|| messages.first().map(|message| message.id))
         .flatten();
-    let runs = load_conversation_runs(
-        &connection,
-        messages.first().map(|message| message.id),
-        messages.last().map(|message| message.id),
-    )?;
     let history_messages = connection.query_row(
         "SELECT COUNT(*) FROM history_records
          WHERE thread_id IS NULL
@@ -3088,7 +2906,6 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
             checkpoint,
         },
         messages,
-        runs,
         has_more,
         focus_message_id: focused_message_id,
         next_before_id,
@@ -5413,35 +5230,10 @@ fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
         [],
         |row| row.get(0),
     )?;
-    let running = connection.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM agent_runs
-           WHERE kind IN ('main', 'continuation') AND status = 'running'
-             AND next_retry_at IS NULL
-         )",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    let retrying = connection.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM agent_runs
-           WHERE kind IN ('main', 'continuation') AND status = 'running'
-             AND next_retry_at IS NOT NULL
-         )",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
     drop(connection);
     Ok(ThreadIndex {
         main_thread: MainThreadSummary {
-            status: if running {
-                "running"
-            } else if retrying {
-                "retrying"
-            } else {
-                "idle"
-            }
-            .to_owned(),
+            status: "idle".to_owned(),
             model,
             updated_at,
         },
@@ -5812,17 +5604,9 @@ fn clear_conversation_data(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn resend_conversation_from(path: &Path, record_id: i64, run_id: &str) -> Result<()> {
+fn resend_conversation_from(path: &Path, record_id: i64) -> Result<()> {
     let mut connection = open_db(path)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let run_exists = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE id = ?1)",
-        [run_id],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if run_exists {
-        return Err(anyhow!("agent run already exists"));
-    }
     let payload = transaction
         .query_row(
             "SELECT payload FROM history_records
@@ -5842,30 +5626,16 @@ fn resend_conversation_from(path: &Path, record_id: i64, run_id: &str) -> Result
     )?;
     transaction.execute(
         "DELETE FROM agent_runs
-         WHERE user_message_id >= ?1
-            OR id IN (
-                SELECT DISTINCT run_id FROM history_records
-                WHERE id > ?1 AND run_id IS NOT NULL
-            )
-            OR id IN (
-                SELECT run_id FROM subthreads
-                WHERE from_record_id > ?1 AND run_id IS NOT NULL
-            )",
+         WHERE user_message_id > ?1
+            OR id IN (SELECT DISTINCT run_id FROM history_records WHERE id > ?1 AND run_id IS NOT NULL)
+            OR id IN (SELECT run_id FROM subthreads WHERE from_record_id > ?1)",
         [record_id],
     )?;
     transaction.execute(
-        "DELETE FROM subthreads
-         WHERE from_record_id > ?1
-            OR run_id IS NULL
-            OR NOT EXISTS (SELECT 1 FROM agent_runs WHERE id = subthreads.run_id)",
+        "DELETE FROM subthreads WHERE from_record_id > ?1",
         [record_id],
     )?;
     transaction.execute("DELETE FROM history_records WHERE id > ?1", [record_id])?;
-    transaction.execute(
-        "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
-         VALUES (?1, ?2, 'running', ?3, 'main')",
-        params![run_id, record_id, chrono::Utc::now().to_rfc3339()],
-    )?;
     transaction.execute(
         "DELETE FROM app_meta WHERE key = 'conversation_mutation_in_progress'",
         [],
@@ -5875,13 +5645,7 @@ fn resend_conversation_from(path: &Path, record_id: i64, run_id: &str) -> Result
 }
 
 async fn cancel_active_conversation_work(state: &AppState) -> bool {
-    let main_runs = state
-        .active_runs
-        .lock()
-        .await
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+    let main = state.active_main.lock().await.take();
     let subthreads = state
         .active_subthreads
         .lock()
@@ -5889,8 +5653,11 @@ async fn cancel_active_conversation_work(state: &AppState) -> bool {
         .values()
         .cloned()
         .collect::<Vec<_>>();
-    let active = !main_runs.is_empty() || !subthreads.is_empty();
-    for cancellation in main_runs.into_iter().chain(subthreads) {
+    let active = main.is_some() || !subthreads.is_empty();
+    if let Some(main) = main {
+        let _ = main.cancellation.send(true);
+    }
+    for cancellation in subthreads {
         let _ = cancellation.send(true);
     }
     active
@@ -5929,12 +5696,9 @@ async fn resend_conversation_message(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(record_id): AxumPath<i64>,
-    Json(input): Json<ResendConversationMessage>,
+    Json(_input): Json<ResendConversationMessage>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     identity(&state, &headers).await?;
-    if input.run_id.trim().is_empty() {
-        return Err(error(StatusCode::BAD_REQUEST, "agent run ID is required"));
-    }
     let config = load_config(&state.db_path).map_err(|_| {
         error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -5961,19 +5725,17 @@ async fn resend_conversation_message(
     })?;
     let _conversation = state.conversation_mutations.lock().await;
     stop_active_conversation_work(&state).await;
-    resend_conversation_from(&state.db_path, record_id, &input.run_id).map_err(|cause| {
+    resend_conversation_from(&state.db_path, record_id).map_err(|cause| {
         let status = match cause.to_string().as_str() {
             "conversation message not found" => StatusCode::NOT_FOUND,
-            "only user messages can be resent" | "agent run ID is required" => {
-                StatusCode::BAD_REQUEST
-            }
+            "only user messages can be resent" => StatusCode::BAD_REQUEST,
             _ => StatusCode::CONFLICT,
         };
         error(status, cause.to_string())
     })?;
     drop(_conversation);
     drop(checkpoint_writer);
-    Ok(stream_main_user_run(state, input.run_id, record_id).await)
+    Ok(stream_latest_main_response(state, record_id).await)
 }
 
 fn execute_fork_subthread(
@@ -6430,61 +6192,32 @@ async fn agent_turn(
             "this Cybion machine is configured as a tool executor and has no model upstream",
         ));
     }
-    if state.checkpoint_write_pending.load(Ordering::Acquire) {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "main-thread checkpoint is in progress; retry your message shortly",
-        ));
-    }
-    let checkpoint_message_permit = state.checkpoint_write_gate.try_read().map_err(|_| {
-        error(
-            StatusCode::CONFLICT,
-            "main-thread checkpoint is in progress; retry your message shortly",
-        )
-    })?;
-    if state.checkpoint_write_pending.load(Ordering::Acquire) {
-        drop(checkpoint_message_permit);
-        return Err(error(
-            StatusCode::CONFLICT,
-            "main-thread checkpoint is in progress; retry your message shortly",
-        ));
-    }
-    let _conversation = state.conversation_mutations.lock().await;
-    let user_message = append_conversation(&state.db_path, &input.message, None).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot save conversation message",
-        )
-    })?;
-    cancel_stale_continuations(&state, user_message.id).await;
-    create_main_run(
-        &state.db_path,
-        &input.run_id,
-        user_message.id,
-        MainRunReason::UserMessage,
-    )
-    .map_err(|_| error(StatusCode::CONFLICT, "agent run already exists"))?;
-    drop(checkpoint_message_permit);
-    drop(_conversation);
-    Ok(stream_main_user_run(state, input.run_id, user_message.id).await)
+    let user_message = {
+        let _conversation = state.conversation_mutations.lock().await;
+        append_conversation(&state.db_path, &input.message, None).map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot save conversation message",
+            )
+        })?
+    };
+    Ok(stream_latest_main_response(state, user_message.id).await)
 }
 
-async fn stream_main_user_run(state: AppState, run_id: String, user_message_id: i64) -> Response {
-    let (cancel, cancellation) = watch::channel(false);
-    state
-        .active_runs
-        .lock()
-        .await
-        .insert(run_id.clone(), cancel);
+async fn cancel_main_response(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    if let Some(active) = state.active_main.lock().await.take() {
+        let _ = active.cancellation.send(true);
+    }
+    Ok(Json(json!({ "cancelled": true })))
+}
+
+async fn stream_latest_main_response(state: AppState, source_record_id: i64) -> Response {
     let (events, receiver) = mpsc::channel(32);
-    tokio::spawn(process_main_run(
-        state.clone(),
-        run_id,
-        user_message_id,
-        MainRunReason::UserMessage,
-        events,
-        cancellation,
-    ));
+    start_latest_main_response(state, source_record_id, Some(events)).await;
     let stream = ReceiverStream::new(receiver).map(|event| {
         Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&event).unwrap()))
     });
@@ -6493,361 +6226,95 @@ async fn stream_main_user_run(state: AppState, run_id: String, user_message_id: 
         .into_response()
 }
 
-fn continuation_is_superseded(path: &Path, user_message_id: i64) -> Result<bool> {
-    open_db(path)?
-        .query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM history_records
-               WHERE thread_id IS NULL AND kind = 'input'
-                 AND json_extract(payload, '$.role') = 'user' AND id > ?1
-             )",
-            [user_message_id],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
-}
-
-fn main_run_reason(kind: &str) -> Result<MainRunReason> {
-    match kind {
-        "main" => Ok(MainRunReason::UserMessage),
-        "continuation" => Ok(MainRunReason::SubthreadSettled),
-        _ => Err(anyhow!("run is not a main-thread run")),
-    }
-}
-
-fn claim_due_main_retries(path: &Path, now: i64) -> Result<Vec<QueuedMainRun>> {
-    let mut connection = open_db(path)?;
-    let transaction = connection.transaction()?;
-    let candidates = transaction
-        .prepare(
-            "SELECT id, user_message_id, kind FROM agent_runs
-             WHERE kind IN ('main', 'continuation') AND status = 'running'
-               AND next_retry_at IS NOT NULL AND next_retry_at <= ?1
-             ORDER BY user_message_id, id",
-        )?
-        .query_map([now], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut runs = Vec::new();
-    for (id, user_message_id, kind) in candidates {
-        let claimed = transaction.execute(
-            "UPDATE agent_runs SET next_retry_at = NULL
-             WHERE id = ?1 AND status = 'running' AND next_retry_at IS NOT NULL
-               AND next_retry_at <= ?2",
-            params![id, now],
-        )?;
-        if claimed == 1 {
-            runs.push(QueuedMainRun {
-                id,
-                user_message_id,
-                reason: main_run_reason(&kind)?,
-            });
-        }
-    }
-    transaction.commit()?;
-    Ok(runs)
-}
-
-fn claim_main_retry_now(path: &Path, id: &str) -> Result<QueuedMainRun> {
-    let mut connection = open_db(path)?;
-    let transaction = connection.transaction()?;
-    let (user_message_id, kind) = transaction
-        .query_row(
-            "SELECT user_message_id, kind FROM agent_runs
-             WHERE id = ?1 AND kind IN ('main', 'continuation')
-               AND status = 'running' AND next_retry_at IS NOT NULL",
-            [id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("main-thread run is not waiting after an error"))?;
-    transaction.execute(
-        "UPDATE agent_runs SET next_retry_at = NULL WHERE id = ?1",
-        [id],
-    )?;
-    transaction.commit()?;
-    Ok(QueuedMainRun {
-        id: id.to_owned(),
-        user_message_id,
-        reason: main_run_reason(&kind)?,
-    })
-}
-
-fn spawn_main_run(state: AppState, run: QueuedMainRun) {
-    tokio::spawn(async move {
-        let (cancel, cancellation) = watch::channel(false);
-        state
-            .active_runs
-            .lock()
-            .await
-            .insert(run.id.clone(), cancel);
-        let (events, receiver) = mpsc::channel(1);
-        drop(receiver);
-        process_main_run(
-            state,
-            run.id,
-            run.user_message_id,
-            run.reason,
-            events,
-            cancellation,
-        )
-        .await;
-    });
-}
-
-fn continuation_is_running(path: &Path, user_message_id: i64) -> Result<bool> {
-    open_db(path)?
-        .query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM agent_runs
-               WHERE kind = 'continuation' AND status = 'running' AND user_message_id = ?1
-             )",
-            [user_message_id],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
-}
-
-async fn cancel_stale_continuations(state: &AppState, user_message_id: i64) {
-    let stale = open_db(&state.db_path)
-        .and_then(|connection| {
-            connection
-                .prepare(
-                    "SELECT id FROM agent_runs
-                     WHERE kind = 'continuation' AND status = 'running' AND user_message_id < ?1",
-                )?
-                .query_map([user_message_id], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
-        })
-        .unwrap_or_default();
-    let active_runs = state.active_runs.lock().await;
-    for run_id in stale {
-        if let Some(cancel) = active_runs.get(&run_id) {
-            let _ = cancel.send(true);
-        }
-    }
-}
-
-async fn schedule_main_continuation(state: AppState, user_message_id: i64) {
-    let guard = state.main_thread.lock().await;
-    if continuation_is_superseded(&state.db_path, user_message_id).unwrap_or(true)
-        || continuation_is_running(&state.db_path, user_message_id).unwrap_or(true)
-    {
-        return;
-    }
-    let run_id = format!("continuation-{}", Uuid::new_v4());
-    if create_main_run(
-        &state.db_path,
-        &run_id,
-        user_message_id,
-        MainRunReason::SubthreadSettled,
-    )
-    .is_err()
-    {
-        return;
-    }
-    drop(guard);
-    spawn_main_run(
-        state,
-        QueuedMainRun {
-            id: run_id,
-            user_message_id,
-            reason: MainRunReason::SubthreadSettled,
-        },
-    );
-}
-
-fn is_next_main_run(path: &Path, user_message_id: i64) -> Result<bool> {
-    open_db(path)?
-        .query_row(
-            "SELECT NOT EXISTS(
-               SELECT 1 FROM agent_runs
-               WHERE kind = 'main' AND status = 'running' AND user_message_id < ?1
-             )",
-            [user_message_id],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
-}
-
-async fn process_main_run(
+async fn start_latest_main_response(
     state: AppState,
-    run_id: String,
-    user_message_id: i64,
-    reason: MainRunReason,
-    events: mpsc::Sender<AgentEvent>,
+    source_record_id: i64,
+    events: Option<mpsc::Sender<AgentEvent>>,
+) {
+    let (cancellation, receiver) = watch::channel(false);
+    let previous = {
+        let mut active = state.active_main.lock().await;
+        active.replace(ActiveMain {
+            source_record_id,
+            cancellation,
+        })
+    };
+    if let Some(previous) = previous {
+        let _ = previous.cancellation.send(true);
+    }
+    tokio::spawn(process_latest_main_response(
+        state,
+        source_record_id,
+        events,
+        receiver,
+    ));
+}
+
+async fn process_latest_main_response(
+    state: AppState,
+    source_record_id: i64,
+    events: Option<mpsc::Sender<AgentEvent>>,
     cancellation: watch::Receiver<bool>,
 ) {
-    let started_at = Instant::now();
+    let source = format!("main-input-{source_record_id}");
+    let (fallback_sender, fallback_receiver) = mpsc::channel(1);
+    drop(fallback_receiver);
+    let sender = events.unwrap_or(fallback_sender);
     let sink = AgentEventSink {
-        run_id: &run_id,
-        sender: &events,
+        run_id: &source,
+        sender: &sender,
     };
-    let _ = send_agent_event(
-        &state.db_path,
-        &sink,
-        AgentEvent::Status {
-            stage: "queued".to_owned(),
-            message: "Accepted into the main thread".to_owned(),
-        },
-    )
+    let result = async {
+        let config = load_config(&state.db_path)?;
+        if config.deployment_role != "controller" {
+            return Err(anyhow!("tool-executor machines cannot run the main thread"));
+        }
+        let context = compile_main_context(&state.db_path, source_record_id)?;
+        run_agent_items(
+            &state.client,
+            &config,
+            context.items,
+            &state.db_path,
+            &state.skills,
+            sink,
+            cancellation,
+            AgentScope::Main,
+            &state.active_subthreads,
+            ContextCheckpointTarget::Main {
+                current_message_id: Some(source_record_id),
+                checkpoint_write_gate: state.checkpoint_write_gate.clone(),
+                checkpoint_write_pending: state.checkpoint_write_pending.clone(),
+            },
+            Some(browser_agent_context(&state)),
+            &state.executor_tunnels,
+        )
+        .await
+    }
     .await;
-    let mut queued_cancellation = cancellation.clone();
-    let guard = loop {
-        let candidate = tokio::select! {
-            guard = state.main_thread.lock() => Some(guard),
-            _ = queued_cancellation.changed() => None,
-        };
-        let Some(candidate) = candidate else {
-            break None;
-        };
-        if reason == MainRunReason::SubthreadSettled
-            && continuation_is_superseded(&state.db_path, user_message_id).unwrap_or(false)
-        {
-            break None;
-        }
-        if is_next_main_run(&state.db_path, user_message_id).unwrap_or(false) {
-            break Some(candidate);
-        }
-        drop(candidate);
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
-            _ = queued_cancellation.changed() => break None,
-        }
-    };
-    let result = match guard {
-        None => Err(anyhow!("agent stopped")),
-        Some(_guard) => {
-            let _ = send_agent_event(
-                &state.db_path,
-                &sink,
-                AgentEvent::Status {
-                    stage: "running".to_owned(),
-                    message: "Compiling the main-thread context".to_owned(),
-                },
-            )
-            .await;
-            let continuation_is_stale = reason == MainRunReason::SubthreadSettled
-                && continuation_is_superseded(&state.db_path, user_message_id).unwrap_or(false);
-            match load_config(&state.db_path) {
-                _ if continuation_is_stale => Err(anyhow!("agent stopped")),
-                Ok(config) if config.deployment_role == "controller" => {
-                    match compile_main_context(&state.db_path, user_message_id) {
-                        Ok(mut context) => {
-                            if reason == MainRunReason::SubthreadSettled {
-                                context.items.push(json!({
-                                "role": "developer",
-                                "content": "A background task has just settled. Re-evaluate its evidence against the original user outcome and take exactly the next useful step: verify directly, repair a concrete defect, or fork one genuinely independent substantial task. Stop only at verifiable completion, when a user decision is required, or when newer user input supersedes this work. Never merely summarize the background result."
-                            }));
-                            }
-                            run_agent_items(
-                                &state.client,
-                                &config,
-                                context.items,
-                                &state.db_path,
-                                &state.skills,
-                                sink,
-                                cancellation,
-                                AgentScope::Main,
-                                &state.active_subthreads,
-                                ContextCheckpointTarget::Main {
-                                    current_message_id: (reason == MainRunReason::UserMessage)
-                                        .then_some(user_message_id),
-                                    checkpoint_write_gate: state.checkpoint_write_gate.clone(),
-                                    checkpoint_write_pending: state
-                                        .checkpoint_write_pending
-                                        .clone(),
-                                },
-                                Some(browser_agent_context(&state)),
-                                &state.executor_tunnels,
-                            )
-                            .await
-                        }
-                        Err(cause) => Err(cause),
-                    }
-                }
-                Ok(_) => Err(anyhow!("tool-executor machines cannot run the main thread")),
-                Err(cause) => Err(cause),
-            }
-        }
-    };
-    let event = match result {
+    match result {
         Ok(result) => {
-            let mut message = result.persisted_message;
-            message.duration_ms = Some(started_at.elapsed().as_millis() as u64);
-            message.input_tokens = Some(result.input_tokens);
-            message.output_tokens = Some(result.output_tokens);
-            AgentEvent::Complete { message }
+            let _ = sender
+                .send(AgentEvent::Complete {
+                    message: result.persisted_message,
+                })
+                .await;
         }
-        Err(cause) => AgentEvent::Error {
-            error: cause.to_string(),
-        },
-    };
-    let sink = AgentEventSink {
-        run_id: &run_id,
-        sender: &events,
-    };
-    match &event {
-        AgentEvent::Complete { .. } => {
-            let _ = send_agent_event(&state.db_path, &sink, event).await;
-            let _ = finish_agent_run(&state.db_path, &run_id, "completed");
+        Err(cause) if cause.to_string() != "agent stopped" => {
+            let _ = sender
+                .send(AgentEvent::Error {
+                    error: cause.to_string(),
+                })
+                .await;
         }
-        AgentEvent::Error { error } if error == "agent stopped" => {
-            let _ = send_agent_event(&state.db_path, &sink, event).await;
-            let _ = finish_agent_run(&state.db_path, &run_id, "cancelled");
-        }
-        AgentEvent::Error { .. } => {
-            let _ = send_agent_event(&state.db_path, &sink, event).await;
-            if let Ok(schedule) = schedule_agent_retry(&state.db_path, &run_id) {
-                let _ =
-                    send_agent_event(&state.db_path, &sink, retry_status_event(&schedule)).await;
-            }
-        }
-        _ => unreachable!("agent runs always end with a terminal event"),
+        Err(_) => {}
     }
-    state.active_runs.lock().await.remove(&run_id);
-}
-
-async fn retry_agent_turn(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult<Value> {
-    identity(&state, &headers).await?;
-    let _conversation = state.conversation_mutations.lock().await;
-    let run = claim_main_retry_now(&state.db_path, &id)
-        .map_err(|cause| error(StatusCode::CONFLICT, cause.to_string()))?;
-    drop(_conversation);
-    spawn_main_run(state, run);
-    Ok(Json(json!({ "retrying": true })))
-}
-
-async fn cancel_agent_turn(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult<Value> {
-    identity(&state, &headers).await?;
-    if let Some(cancel) = state.active_runs.lock().await.get(&id) {
-        let _ = cancel.send(true);
+    let mut active = state.active_main.lock().await;
+    if active
+        .as_ref()
+        .is_some_and(|current| current.source_record_id == source_record_id)
+    {
+        *active = None;
     }
-    open_db(&state.db_path)
-        .and_then(|connection| {
-            connection.execute(
-                "UPDATE agent_runs SET status = 'cancelled', completed_at = ?1, next_retry_at = NULL
-                 WHERE id = ?2 AND kind IN ('main', 'continuation') AND status = 'running'",
-                params![chrono::Utc::now().to_rfc3339(), id],
-            )?;
-            Ok(())
-        })
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot cancel agent run"))?;
-    Ok(Json(json!({"cancelled": true})))
 }
 
 #[cfg(test)]
@@ -9785,11 +9252,10 @@ mod tests {
             skills: Arc::new(StdRwLock::new(SkillCatalog::default())),
             client: reqwest::Client::new(),
             auth_verifier: Arc::new(Mutex::new(None)),
-            active_runs: Arc::new(Mutex::new(HashMap::new())),
+            active_main: Arc::new(Mutex::new(None)),
             active_subthreads: Arc::new(Mutex::new(HashMap::new())),
             conversation_mutations: Arc::new(Mutex::new(())),
             executor_tunnels: ExecutorTunnels::default(),
-            main_thread: Arc::new(Mutex::new(())),
             checkpoint_write_gate: Arc::new(RwLock::new(())),
             checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             browser_sessions: browser::sessions(),
@@ -10574,7 +10040,7 @@ mod tests {
         );
 
         let active = load_thread_index(&db).unwrap();
-        assert_eq!(active.main_thread.status, "running");
+        assert_eq!(active.main_thread.status, "idle");
         assert_eq!(active.main_thread.model, "main-index-model");
         assert_eq!(
             active.main_thread.updated_at.as_deref(),
@@ -10585,56 +10051,10 @@ mod tests {
 
         finish_agent_run(&db, "main-index-run", "completed").unwrap();
         assert_eq!(load_thread_index(&db).unwrap().main_thread.status, "idle");
-        create_main_run(
-            &db,
-            "continuation-index-run",
-            user.id,
-            MainRunReason::SubthreadSettled,
-        )
-        .unwrap();
-        assert_eq!(
-            load_thread_index(&db).unwrap().main_thread.status,
-            "running"
-        );
+        create_agent_run_with_kind(&db, "continuation-index-run", user.id, "continuation").unwrap();
+        assert_eq!(load_thread_index(&db).unwrap().main_thread.status, "idle");
         finish_agent_run(&db, "continuation-index-run", "completed").unwrap();
         assert_eq!(load_thread_index(&db).unwrap().main_thread.status, "idle");
-    }
-
-    #[test]
-    fn main_thread_runs_follow_persisted_user_input_order() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let append_user = |content: &str| {
-            append_conversation(
-                &db,
-                &ChatMessage {
-                    role: "user".to_owned(),
-                    content: Value::String(content.to_owned()),
-                    images: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                },
-                None,
-            )
-            .unwrap()
-        };
-        let first = append_user("first");
-        let second = append_user("second");
-        create_agent_run(&db, "run-first", first.id).unwrap();
-        create_agent_run(&db, "run-second", second.id).unwrap();
-        assert!(is_next_main_run(&db, first.id).unwrap());
-        assert!(!is_next_main_run(&db, second.id).unwrap());
-        finish_agent_run(&db, "run-first", "completed").unwrap();
-        assert!(is_next_main_run(&db, second.id).unwrap());
-        create_main_run(
-            &db,
-            "continuation-first",
-            first.id,
-            MainRunReason::SubthreadSettled,
-        )
-        .unwrap();
-        assert!(is_next_main_run(&db, second.id).unwrap());
     }
 
     #[test]
@@ -10645,44 +10065,6 @@ mod tests {
         assert_eq!(retry_delay(63), Duration::from_secs(1_u64 << 62));
         assert_eq!(retry_delay(64), Duration::from_secs(1_u64 << 63));
         assert_eq!(retry_delay(65), Duration::from_secs(u64::MAX));
-    }
-
-    #[test]
-    fn retry_state_persists_and_only_main_runs_have_a_manual_claim() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let user = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("retry this".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        create_agent_run(&db, "main-retry", user.id).unwrap();
-        assert_eq!(
-            schedule_agent_retry(&db, "main-retry").unwrap().delay,
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            schedule_agent_retry(&db, "main-retry").unwrap().delay,
-            Duration::from_secs(2)
-        );
-        let claimed = claim_main_retry_now(&db, "main-retry").unwrap();
-        assert_eq!(claimed.id, "main-retry");
-        reset_agent_retry_after_success(&db, "main-retry").unwrap();
-        let state = load_conversation_state(&db).unwrap();
-        assert_eq!(state.runs[0].retry_attempt, 0);
-        assert_eq!(state.runs[0].next_retry_at, None);
-
-        create_agent_run_with_kind(&db, "subthread-retry", user.id, "subthread").unwrap();
-        schedule_agent_retry(&db, "subthread-retry").unwrap();
-        assert!(claim_main_retry_now(&db, "subthread-retry").is_err());
     }
 
     #[test]
@@ -10775,179 +10157,6 @@ mod tests {
             .unwrap();
         assert_eq!(attempt, 1);
         assert!(next_retry_at <= chrono::Utc::now().timestamp());
-    }
-
-    #[tokio::test]
-    async fn repeated_main_request_failures_retry_and_a_success_resets_backoff() {
-        async fn responses(State(attempts): State<Arc<Mutex<usize>>>) -> (StatusCode, String) {
-            let attempt = {
-                let mut attempts = attempts.lock().await;
-                *attempts += 1;
-                *attempts
-            };
-            if attempt < 3 {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    r#"{"error":{"message":"temporary upstream failure"}}"#.to_owned(),
-                );
-            }
-            let item = json!({
-                "type": "message",
-                "content": [{"type": "output_text", "text": "recovered"}],
-            });
-            (
-                StatusCode::OK,
-                format!(
-                    "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
-                    json!({"type":"response.output_item.done","item":item}),
-                    json!({"type":"response.completed","response":{"output":[]}}),
-                ),
-            )
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let attempts = Arc::new(Mutex::new(0));
-        let server_attempts = attempts.clone();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new()
-                    .route("/responses", post(responses))
-                    .with_state(server_attempts),
-            )
-            .await
-            .unwrap();
-        });
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        configure_test_database(&db, &format!("http://{address}"));
-        let user = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("finish this request".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        create_agent_run(&db, "retry-run", user.id).unwrap();
-        let state = test_state(db.clone());
-
-        for expected_attempt in [1, 2] {
-            let (events, receiver) = mpsc::channel(1);
-            drop(receiver);
-            process_main_run(
-                state.clone(),
-                "retry-run".to_owned(),
-                user.id,
-                MainRunReason::UserMessage,
-                events,
-                watch::channel(false).1,
-            )
-            .await;
-            let mut conversation = load_conversation_state(&db).unwrap();
-            let run = conversation.runs.remove(0);
-            assert_eq!(run.retry_attempt, expected_attempt);
-            assert!(run.next_retry_at.is_some());
-            let claimed = claim_main_retry_now(&db, "retry-run").unwrap();
-            assert_eq!(claimed.user_message_id, user.id);
-        }
-
-        let (events, receiver) = mpsc::channel(1);
-        drop(receiver);
-        process_main_run(
-            state,
-            "retry-run".to_owned(),
-            user.id,
-            MainRunReason::UserMessage,
-            events,
-            watch::channel(false).1,
-        )
-        .await;
-        server.abort();
-
-        let mut conversation = load_conversation_state(&db).unwrap();
-        let run = conversation.runs.remove(0);
-        assert_eq!(run.status, "completed");
-        assert_eq!(run.retry_attempt, 0);
-        assert_eq!(run.next_retry_at, None);
-        assert_eq!(*attempts.lock().await, 3);
-        let events =
-            load_conversation_run_events(&db, "retry-run", ConversationRunEventsQuery::default())
-                .unwrap()
-                .unwrap();
-        assert_eq!(
-            events
-                .events
-                .iter()
-                .filter(|event| matches!(event.event, ConversationEventData::Error { .. }))
-                .count(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn incomplete_sse_responses_keep_exponential_main_retry_backoff() {
-        async fn responses() -> String {
-            let item = json!({
-                "type": "message",
-                "content": [{"type": "output_text", "text": "partial"}],
-            });
-            format!(
-                "event: response.output_item.done\ndata: {}\n\n",
-                json!({"type":"response.output_item.done","item":item}),
-            )
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, Router::new().route("/responses", post(responses)))
-                .await
-                .unwrap();
-        });
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        configure_test_database(&db, &format!("http://{address}"));
-        let user = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("retry incomplete stream".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        create_agent_run(&db, "incomplete-sse-retry", user.id).unwrap();
-        let state = test_state(db.clone());
-
-        for expected_attempt in [1, 2] {
-            let (events, receiver) = mpsc::channel(1);
-            drop(receiver);
-            process_main_run(
-                state.clone(),
-                "incomplete-sse-retry".to_owned(),
-                user.id,
-                MainRunReason::UserMessage,
-                events,
-                watch::channel(false).1,
-            )
-            .await;
-            let run = load_conversation_state(&db).unwrap().runs.remove(0);
-            assert_eq!(run.retry_attempt, expected_attempt);
-            assert!(run.next_retry_at.is_some());
-            claim_main_retry_now(&db, "incomplete-sse-retry").unwrap();
-        }
-        server.abort();
     }
 
     #[test]
@@ -12555,49 +11764,6 @@ mod tests {
         assert_eq!((runs, events), (0, 0));
     }
 
-    #[tokio::test]
-    async fn newer_user_input_prevents_a_stale_continuation() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let original = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("finish the release".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("instead inspect the current status".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-
-        schedule_main_continuation(test_state(db.clone()), original.id).await;
-
-        let continuations: i64 = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM agent_runs WHERE kind = 'continuation'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(continuations, 0);
-    }
-
     #[test]
     #[ignore = "replaced by the history_records clean cutover"]
     fn clearing_conversation_preserves_machine_configuration_and_devices() {
@@ -12822,10 +11988,6 @@ mod tests {
         .unwrap();
         let state = load_conversation_state(&db).unwrap();
         assert_eq!(state.messages[0].id, user.id);
-        assert_eq!(state.runs.len(), 1);
-        assert_eq!(state.runs[0].user_message_id, user.id);
-        assert_eq!(state.runs[0].status, "running");
-        assert_eq!(state.runs[0].event_count, 2);
         let events =
             load_conversation_run_events(&db, "run_1", ConversationRunEventsQuery::default())
                 .unwrap()
@@ -13680,6 +12842,101 @@ mod tests {
         assert_eq!(input[0]["status"], "completed");
         assert_eq!(input[1]["call_id"], "call_1");
         assert_eq!(input[2]["call_id"], "call_1");
+    }
+
+    #[tokio::test]
+    async fn latest_main_input_cancels_the_previous_response_without_waiting() {
+        async fn responses(State(requests): State<Arc<Mutex<usize>>>) -> String {
+            let request = {
+                let mut requests = requests.lock().await;
+                *requests += 1;
+                *requests
+            };
+            if request == 1 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            let text = if request == 1 { "stale" } else { "latest" };
+            let item = json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}}),
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let first = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("first".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        let state = test_state(db.clone());
+        start_latest_main_response(state.clone(), first.id, None).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let second = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("second".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        start_latest_main_response(state, second.id, None).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let complete = open_db(&db).unwrap().query_row(
+                    "SELECT EXISTS(SELECT 1 FROM history_records WHERE kind = 'response_output')", [], |row| row.get::<_, bool>(0)
+                ).unwrap();
+                if complete { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let outputs = open_db(&db)
+            .unwrap()
+            .prepare(
+                "SELECT payload FROM history_records WHERE kind = 'response_output' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert!(outputs[0].contains("latest"));
+        assert!(!outputs[0].contains("stale"));
+        server.abort();
     }
 
     #[test]
@@ -14663,7 +13920,7 @@ mod tests {
         )
         .unwrap();
 
-        resend_conversation_from(&db, target.id, "resent-main-run").unwrap();
+        resend_conversation_from(&db, target.id).unwrap();
 
         let records: Vec<(i64, Option<String>, String)> = open_db(&db)
             .unwrap()
@@ -14695,10 +13952,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap();
-        assert_eq!(
-            runs,
-            ["earlier-run".to_owned(), "resent-main-run".to_owned()]
-        );
+        assert_eq!(runs, ["earlier-run".to_owned()]);
         let subthreads: i64 = open_db(&db)
             .unwrap()
             .query_row("SELECT COUNT(*) FROM subthreads", [], |row| row.get(0))
