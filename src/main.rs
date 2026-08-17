@@ -2561,7 +2561,11 @@ fn load_protocol_items(
         .map(|items| {
             items
                 .into_iter()
-                .map(|item| context_tool_output_item(&item))
+                .map(|item| {
+                    let mut item = context_tool_output_item(&item);
+                    remove_image_generation_action(&mut item);
+                    item
+                })
                 .collect()
         })
         .map_err(Into::into)
@@ -7053,21 +7057,25 @@ fn response_output_for_input(output: Vec<Value>) -> Vec<Value> {
                 item
             }
             Some("image_generation_call") => {
-                // COMPATIBILITY: This upstream rejects generated-image `action` and its
-                // native pixel `size` (for example, 1254x1254) during replay. Keep the image
-                // result because `store: false` prevents ID-only references from resolving.
-                // Remove this once the upstream accepts the full output item; verify with the
-                // stateless image-generation continuation test.
-                let image = item
-                    .as_object_mut()
-                    .expect("image generation call is an object");
-                image.remove("action");
-                image.remove("size");
+                remove_image_generation_action(&mut item);
                 item
             }
             _ => item,
         })
         .collect()
+}
+
+fn remove_image_generation_action(item: &mut Value) {
+    if item.get("type").and_then(Value::as_str) != Some("image_generation_call") {
+        return;
+    }
+    // COMPATIBILITY: This upstream rejects generated-image `action` during replay.
+    // Retain every other output field because `store: false` prevents ID-only references from
+    // resolving. Remove this once replay accepts `action`; verify with both continuation and
+    // historical-context replay tests.
+    item.as_object_mut()
+        .expect("image generation call is an object")
+        .remove("action");
 }
 
 fn responses_request_body(model: &str, input: &[Value]) -> Value {
@@ -12857,6 +12865,49 @@ mod tests {
     }
 
     #[test]
+    fn compiled_context_replays_image_generation_without_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("generate a pixel".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        create_agent_run(&db, "image-run", user.id).unwrap();
+        append_response_output_items(
+            &db,
+            None,
+            "image-run",
+            &[json!({
+                "type": "image_generation_call",
+                "id": "image-1",
+                "action": "generate",
+                "size": "1254x1254",
+                "result": "aW1hZ2U=",
+            })],
+        )
+        .unwrap();
+
+        let context = compile_main_context(&db, i64::MAX).unwrap();
+        let image = context
+            .items
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
+            .unwrap();
+        assert!(image.get("action").is_none());
+        assert_eq!(image["size"], "1254x1254");
+        assert_eq!(image["result"], "aW1hZ2U=");
+    }
+
+    #[test]
     fn conversation_page_uses_a_cursor_without_loading_prior_messages() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -13456,7 +13507,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_input_preserves_image_generation_result_without_action_or_size() {
+    fn responses_input_preserves_image_generation_result_without_action() {
         let input = response_output_for_input(vec![json!({
             "type": "image_generation_call",
             "id": "image_1",
@@ -13475,6 +13526,7 @@ mod tests {
                 "type": "image_generation_call",
                 "id": "image_1",
                 "status": "completed",
+                "size": "1254x1254",
                 "background": "transparent",
                 "output_format": "png",
                 "quality": "medium",
@@ -14142,6 +14194,7 @@ mod tests {
                 "type": "image_generation_call",
                 "id": "image_1",
                 "status": "completed",
+                "size": "1254x1254",
                 "background": "transparent",
                 "output_format": "png",
                 "quality": "medium",
