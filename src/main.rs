@@ -511,6 +511,74 @@ struct ContextCheckpointPredecessor {
 struct CompiledMainContext {
     items: Vec<Value>,
     compile_through_record_id: i64,
+    context_start_record_id: Option<i64>,
+    checkpoint_id: Option<i64>,
+}
+
+struct CompiledSubthreadContext {
+    items: Vec<Value>,
+    context_start_record_id: Option<i64>,
+    checkpoint_id: Option<i64>,
+}
+
+impl std::ops::Deref for CompiledSubthreadContext {
+    type Target = [Value];
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+#[derive(Clone)]
+struct ResponseAuditContext {
+    request_kind: &'static str,
+    thread_id: Option<String>,
+    run_id: Option<String>,
+    context_start_record_id: Option<i64>,
+    checkpoint_id: Option<i64>,
+}
+
+struct ResponsesRuntime<'a> {
+    client: &'a reqwest::Client,
+    config: &'a Config,
+    db_path: &'a Path,
+}
+
+struct ResponseAuditFinish<'a> {
+    status: &'a str,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cached_tokens: Option<i64>,
+    openai_lb_request_id: Option<&'a str>,
+    error: Option<&'a str>,
+}
+
+impl ResponseAuditContext {
+    fn for_request(
+        request_kind: &'static str,
+        thread_id: Option<String>,
+        run_id: Option<String>,
+        context_start_record_id: Option<i64>,
+        checkpoint_id: Option<i64>,
+    ) -> Self {
+        Self {
+            request_kind,
+            thread_id,
+            run_id,
+            context_start_record_id,
+            checkpoint_id,
+        }
+    }
+
+    fn with_kind(&self, request_kind: &'static str) -> Self {
+        Self {
+            request_kind,
+            thread_id: self.thread_id.clone(),
+            run_id: self.run_id.clone(),
+            context_start_record_id: self.context_start_record_id,
+            checkpoint_id: self.checkpoint_id,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -868,6 +936,46 @@ struct CommandRunPage {
     target_machines: Vec<CommandTarget>,
 }
 
+#[derive(Default, Deserialize)]
+struct ReasoningAuditQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    status: Option<String>,
+    thread_id: Option<String>,
+    model: Option<String>,
+    request_kind: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReasoningAuditPage {
+    items: Vec<ReasoningAudit>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+    thread_ids: Vec<String>,
+    models: Vec<String>,
+    request_kinds: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ReasoningAudit {
+    id: i64,
+    thread_id: Option<String>,
+    run_id: Option<String>,
+    context_start_record_id: Option<i64>,
+    checkpoint_id: Option<i64>,
+    request_kind: String,
+    model: String,
+    status: String,
+    started_at: String,
+    finished_at: Option<String>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cached_tokens: Option<i64>,
+    openai_lb_request_id: Option<String>,
+    error: Option<String>,
+}
+
 #[derive(Serialize)]
 struct CommandTarget {
     id: String,
@@ -1144,10 +1252,17 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
             config.default_model = job.model.clone();
             match compile_subthread_context(&state.db_path, &job.id, job.from_record_id) {
                 Ok(context) => {
+                    let audit = ResponseAuditContext::for_request(
+                        "normal",
+                        Some(job.id.clone()),
+                        Some(run_id.clone()),
+                        context.context_start_record_id,
+                        context.checkpoint_id,
+                    );
                     run_agent_items(
                         &state.client,
                         &config,
-                        context,
+                        context.items,
                         &state.db_path,
                         &state.skills,
                         sink,
@@ -1155,6 +1270,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                         AgentScope::Subthread,
                         &state.active_subthreads,
                         ContextCheckpointTarget::Subthread { id: job.id.clone() },
+                        audit,
                         Some(browser_agent_context(&state)),
                         &state.executor_tunnels,
                     )
@@ -1295,6 +1411,7 @@ fn app(state: AppState) -> Router {
         .route("/api/settings", get(settings).put(update_settings))
         .route("/api/tools", get(tools))
         .route("/api/commands", get(list_command_runs))
+        .route("/api/reasoning-audits", get(reasoning_audits))
         .route("/api/skills", get(skills))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(update_status))
@@ -1942,6 +2059,8 @@ fn load_history_for_run(path: &Path, through_record_id: i64) -> Result<Vec<Histo
 async fn compact_checkpoint_context(
     client: &reqwest::Client,
     config: &Config,
+    db_path: &Path,
+    audit: ResponseAuditContext,
     items: Vec<Value>,
     cancellation: watch::Receiver<bool>,
 ) -> Result<String> {
@@ -1951,6 +2070,8 @@ async fn compact_checkpoint_context(
             return compact_checkpoint_once(
                 client,
                 config,
+                db_path,
+                audit.with_kind("compaction"),
                 batches.pop().expect("one summary batch exists"),
                 cancellation,
             )
@@ -1959,8 +2080,15 @@ async fn compact_checkpoint_context(
         let input_bytes = checkpoint_compaction_bytes(&batches);
         let mut summaries = Vec::with_capacity(batches.len());
         for batch in batches {
-            let compacted =
-                compact_checkpoint_once(client, config, batch, cancellation.clone()).await?;
+            let compacted = compact_checkpoint_once(
+                client,
+                config,
+                db_path,
+                audit.with_kind("compaction"),
+                batch,
+                cancellation.clone(),
+            )
+            .await?;
             summaries.push(compacted_checkpoint_item(&compacted));
         }
         let summary_bytes = checkpoint_compaction_bytes(std::slice::from_ref(&summaries));
@@ -1982,6 +2110,8 @@ async fn compact_checkpoint_context(
 async fn compact_checkpoint_once(
     client: &reqwest::Client,
     config: &Config,
+    db_path: &Path,
+    audit: ResponseAuditContext,
     items: Vec<Value>,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<String> {
@@ -1998,9 +2128,16 @@ async fn compact_checkpoint_once(
         .bearer_auth(&config.openai_api_key)
         .json(&body)
         .timeout(CHECKPOINT_COMPACTION_REQUEST_TIMEOUT);
-    let body = send_responses_request(request, &mut cancellation).await?;
+    let completed = send_audited_responses_request(
+        db_path,
+        request,
+        audit,
+        &config.default_model,
+        &mut cancellation,
+    )
+    .await?;
     let checkpoint = output_text(
-        completed_response_from_sse(&body)?
+        completed
             .get("output")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("checkpoint response has no output"))?,
@@ -2124,16 +2261,15 @@ fn split_utf8_by_bytes(value: &str, limit: usize) -> Vec<&str> {
 }
 
 async fn compact_context_after_overflow(
-    client: &reqwest::Client,
-    config: &Config,
-    db_path: &Path,
+    runtime: ResponsesRuntime<'_>,
     items: Vec<Value>,
+    audit: &ResponseAuditContext,
     events: &AgentEventSink<'_>,
     cancellation: watch::Receiver<bool>,
     target: &ContextCheckpointTarget,
-) -> Result<Vec<Value>> {
+) -> Result<(Vec<Value>, ResponseAuditContext)> {
     send_agent_event(
-        db_path,
+        runtime.db_path,
         events,
         AgentEvent::Status {
             stage: "checkpointing".to_owned(),
@@ -2150,32 +2286,65 @@ async fn compact_context_after_overflow(
             checkpoint_write_pending.store(true, Ordering::Release);
             let result = async {
                 let _checkpoint_writer = checkpoint_write_gate.write().await;
-                let snapshot = compile_main_context(db_path, i64::MAX)?;
-                let checkpoint_content =
-                    compact_checkpoint_context(client, config, snapshot.items, cancellation)
-                        .await?;
-                reset_agent_retry_after_success(db_path, events.run_id)?;
+                let snapshot = compile_main_context(runtime.db_path, i64::MAX)?;
+                let checkpoint_audit = ResponseAuditContext::for_request(
+                    "compaction",
+                    audit.thread_id.clone(),
+                    audit.run_id.clone(),
+                    snapshot.context_start_record_id,
+                    snapshot.checkpoint_id,
+                );
+                let checkpoint_content = compact_checkpoint_context(
+                    runtime.client,
+                    runtime.config,
+                    runtime.db_path,
+                    checkpoint_audit,
+                    snapshot.items,
+                    cancellation,
+                )
+                .await?;
+                reset_agent_retry_after_success(runtime.db_path, events.run_id)?;
                 let checkpoint = persist_main_checkpoint(
-                    db_path,
+                    runtime.db_path,
                     events,
                     snapshot.compile_through_record_id,
                     &checkpoint_content,
                 )
                 .await?;
-                Ok(vec![main_checkpoint_item(&checkpoint)])
+                Ok((
+                    vec![main_checkpoint_item(&checkpoint)],
+                    ResponseAuditContext::for_request(
+                        "normal",
+                        audit.thread_id.clone(),
+                        audit.run_id.clone(),
+                        Some(checkpoint.id),
+                        Some(checkpoint.id),
+                    ),
+                ))
             }
             .await;
             checkpoint_write_pending.store(false, Ordering::Release);
             result
         }
         ContextCheckpointTarget::Subthread { id } => {
-            let checkpoint_content =
-                compact_checkpoint_context(client, config, items, cancellation).await?;
-            reset_agent_retry_after_success(db_path, events.run_id)?;
-            let checkpoint =
-                persist_subthread_checkpoint(db_path, id, events.run_id, &checkpoint_content)?;
+            let checkpoint_content = compact_checkpoint_context(
+                runtime.client,
+                runtime.config,
+                runtime.db_path,
+                audit.with_kind("compaction"),
+                items,
+                cancellation,
+            )
+            .await?;
+            reset_agent_retry_after_success(runtime.db_path, events.run_id)?;
+            let (checkpoint, checkpoint_id) = persist_subthread_checkpoint(
+                runtime.db_path,
+                id,
+                events.run_id,
+                &checkpoint_content,
+            )?;
             send_agent_event(
-                db_path,
+                runtime.db_path,
                 events,
                 AgentEvent::Status {
                     stage: "running".to_owned(),
@@ -2183,7 +2352,16 @@ async fn compact_context_after_overflow(
                 },
             )
             .await?;
-            Ok(vec![checkpoint])
+            Ok((
+                vec![checkpoint],
+                ResponseAuditContext::for_request(
+                    "normal",
+                    audit.thread_id.clone(),
+                    audit.run_id.clone(),
+                    Some(checkpoint_id),
+                    Some(checkpoint_id),
+                ),
+            ))
         }
     }
 }
@@ -2234,10 +2412,10 @@ fn persist_subthread_checkpoint(
     thread_id: &str,
     run_id: &str,
     summary: &str,
-) -> Result<Value> {
+) -> Result<(Value, i64)> {
     let connection = open_db(db_path)?;
     let payload = compacted_checkpoint_item(summary);
-    history_record_payload(
+    let checkpoint_id = history_record_payload(
         &connection,
         Some(thread_id),
         Some(run_id),
@@ -2245,15 +2423,16 @@ fn persist_subthread_checkpoint(
         &payload,
         &chrono::Utc::now().to_rfc3339(),
     )?;
-    Ok(payload)
+    Ok((payload, checkpoint_id))
 }
 
 async fn create_voice_script(
     client: &reqwest::Client,
     config: &Config,
+    db_path: &Path,
     content: &str,
 ) -> Result<String> {
-    let response = client
+    let request = client
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
         .json(&json!({
@@ -2264,13 +2443,18 @@ async fn create_voice_script(
             ),
             "store": false,
             "stream": true,
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    let body = response.text().await?;
+        }));
+    let (_cancellation_sender, mut cancellation) = watch::channel(false);
+    let completed = send_audited_responses_request(
+        db_path,
+        request,
+        ResponseAuditContext::for_request("voice_script", None, None, None, None),
+        &config.voice_script_model,
+        &mut cancellation,
+    )
+    .await?;
     let text = output_text(
-        completed_response_from_sse(&body)?
+        completed
             .get("output")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("voice script response has no output"))?,
@@ -2290,11 +2474,12 @@ fn voice_script_developer_prompt(max_chars: usize) -> String {
 async fn create_voice_turn_decision(
     client: &reqwest::Client,
     config: &Config,
+    db_path: &Path,
     transcript: &str,
     latest_user_message: &str,
     latest_assistant_message: &str,
 ) -> Result<VoiceTurnDecisionResponse> {
-    let response = client
+    let request = client
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
         .json(&json!({
@@ -2325,12 +2510,16 @@ async fn create_voice_turn_decision(
                     }
                 }
             }
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    let body = response.text().await?;
-    let completed = completed_response_from_sse(&body)?;
+        }));
+    let (_cancellation_sender, mut cancellation) = watch::channel(false);
+    let completed = send_audited_responses_request(
+        db_path,
+        request,
+        ResponseAuditContext::for_request("voice_turn_decision", None, None, None, None),
+        &config.voice_turn_model,
+        &mut cancellation,
+    )
+    .await?;
     let output = completed
         .get("output")
         .and_then(Value::as_array)
@@ -2554,6 +2743,26 @@ fn load_protocol_items(
         .map_err(Into::into)
 }
 
+fn context_start_record_id(
+    connection: &Connection,
+    thread_id: Option<&str>,
+    compile_through_record_id: i64,
+    checkpoint_id: Option<i64>,
+) -> Result<Option<i64>> {
+    if checkpoint_id.is_some() {
+        return Ok(checkpoint_id);
+    }
+    connection
+        .query_row(
+            "SELECT MIN(id) FROM history_records
+             WHERE thread_id IS ?1 AND id <= ?2
+               AND kind IN ('input', 'response_output', 'tool_output', 'checkpoint')",
+            params![thread_id, compile_through_record_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
 fn compile_main_context(
     db_path: &Path,
     requested_through_record_id: i64,
@@ -2567,18 +2776,21 @@ fn compile_main_context(
         )?
         .ok_or_else(|| anyhow!("main-thread context has no records"))?;
     let compile_through_record_id = latest_visible_record_id.min(requested_through_record_id);
-    let latest_checkpoint_id = load_latest_checkpoint(&connection, compile_through_record_id)?
-        .map(|checkpoint| checkpoint.id)
-        .unwrap_or(1);
+    let checkpoint_id = load_latest_checkpoint(&connection, compile_through_record_id)?
+        .map(|checkpoint| checkpoint.id);
+    let context_start_record_id =
+        context_start_record_id(&connection, None, compile_through_record_id, checkpoint_id)?;
     let items = load_protocol_items(
         &connection,
         None,
-        latest_checkpoint_id,
+        context_start_record_id.unwrap_or(1),
         compile_through_record_id,
     )?;
     Ok(CompiledMainContext {
         items,
         compile_through_record_id,
+        context_start_record_id,
+        checkpoint_id,
     })
 }
 
@@ -2586,7 +2798,7 @@ fn compile_subthread_context(
     db_path: &Path,
     thread_id: &str,
     from_record_id: i64,
-) -> Result<Vec<Value>> {
+) -> Result<CompiledSubthreadContext> {
     let connection = open_db(db_path)?;
     let compile_through_record_id = connection
         .query_row(
@@ -2598,24 +2810,51 @@ fn compile_subthread_context(
     if let Some(checkpoint) =
         load_latest_checkpoint_for_thread(&connection, Some(thread_id), compile_through_record_id)?
     {
-        return load_protocol_items(
+        let items = load_protocol_items(
             &connection,
             Some(thread_id),
             checkpoint.id,
             compile_through_record_id,
-        );
+        )?;
+        return Ok(CompiledSubthreadContext {
+            items,
+            context_start_record_id: Some(checkpoint.id),
+            checkpoint_id: Some(checkpoint.id),
+        });
     }
-    let main_checkpoint_id = load_latest_checkpoint(&connection, from_record_id)?
-        .map(|checkpoint| checkpoint.id)
-        .unwrap_or(1);
-    let mut items = load_protocol_items(&connection, None, main_checkpoint_id, from_record_id)?;
+    let checkpoint_id =
+        load_latest_checkpoint(&connection, from_record_id)?.map(|checkpoint| checkpoint.id);
+    let main_context_start_record_id =
+        context_start_record_id(&connection, None, from_record_id, checkpoint_id)?;
+    let mut items = load_protocol_items(
+        &connection,
+        None,
+        main_context_start_record_id.unwrap_or(1),
+        from_record_id,
+    )?;
     items.extend(load_protocol_items(
         &connection,
         Some(thread_id),
         1,
         compile_through_record_id,
     )?);
-    Ok(items)
+    let subthread_context_start_record_id = context_start_record_id(
+        &connection,
+        Some(thread_id),
+        compile_through_record_id,
+        None,
+    )?;
+    Ok(CompiledSubthreadContext {
+        items,
+        context_start_record_id: [
+            main_context_start_record_id,
+            subthread_context_start_record_id,
+        ]
+        .into_iter()
+        .flatten()
+        .min(),
+        checkpoint_id,
+    })
 }
 
 fn append_conversation(
@@ -3493,6 +3732,23 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            exit_code INTEGER,
            status TEXT NOT NULL CHECK(status IN ('running', 'cancelled', 'complete'))
          );
+         CREATE TABLE IF NOT EXISTS responses_request_audits (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           thread_id TEXT,
+           run_id TEXT,
+           context_start_record_id INTEGER,
+           checkpoint_id INTEGER,
+           request_kind TEXT NOT NULL,
+           model TEXT NOT NULL,
+           status TEXT NOT NULL CHECK(status IN ('in_flight', 'completed', 'failed', 'cancelled', 'interrupted')),
+           started_at TEXT NOT NULL,
+           finished_at TEXT,
+           input_tokens INTEGER,
+           output_tokens INTEGER,
+           cached_tokens INTEGER,
+           openai_lb_request_id TEXT,
+           error TEXT
+         );
          CREATE TABLE IF NOT EXISTS executor_tool_calls (
            call_id TEXT PRIMARY KEY,
            output TEXT,
@@ -3518,7 +3774,13 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     )?;
     connection.execute_batch(
         "         CREATE INDEX IF NOT EXISTS command_runs_active_first
-         ON command_runs(status, started_at DESC);",
+         ON command_runs(status, started_at DESC);
+         CREATE INDEX IF NOT EXISTS responses_request_audits_active_first
+         ON responses_request_audits(status, started_at DESC);
+         CREATE INDEX IF NOT EXISTS responses_request_audits_thread_started
+         ON responses_request_audits(thread_id, started_at DESC);
+         CREATE INDEX IF NOT EXISTS responses_request_audits_model_started
+         ON responses_request_audits(model, started_at DESC);",
     )?;
     connection.execute(
         "UPDATE subthreads SET status = 'queued', updated_at = ?1
@@ -3531,6 +3793,14 @@ fn bootstrap_database(db: &Path) -> Result<()> {
              completed_at = COALESCE(completed_at, ?1),
              result = COALESCE(result, 'command cancelled because Cybion restarted')
          WHERE status = 'running'",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    connection.execute(
+        "UPDATE responses_request_audits
+         SET status = 'interrupted',
+             finished_at = COALESCE(finished_at, ?1),
+             error = COALESCE(error, 'Responses request interrupted because Cybion restarted')
+         WHERE status = 'in_flight'",
         [chrono::Utc::now().to_rfc3339()],
     )?;
     connection.execute(
@@ -4349,6 +4619,22 @@ async fn list_command_runs(
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "cannot read command history",
+            )
+        })
+}
+
+async fn reasoning_audits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ReasoningAuditQuery>,
+) -> ApiResult<ReasoningAuditPage> {
+    identity(&state, &headers).await?;
+    load_reasoning_audit_page(&state.db_path, &query)
+        .map(Json)
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read reasoning audits",
             )
         })
 }
@@ -6302,6 +6588,7 @@ async fn decide_voice_turn(
     create_voice_turn_decision(
         &state.client,
         &config,
+        &state.db_path,
         &transcript,
         &bounded_voice_turn_text(&input.latest_user_message),
         &bounded_voice_turn_text(&input.latest_assistant_message),
@@ -6337,7 +6624,7 @@ async fn voice_script(
     if content.is_empty() {
         return Err(error(StatusCode::BAD_REQUEST, "reply content is required"));
     }
-    let text = create_voice_script(&state.client, &config, content)
+    let text = create_voice_script(&state.client, &config, &state.db_path, content)
         .await
         .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot prepare voice script"))?;
     Ok(Json(VoiceScriptResponse { text }))
@@ -6486,6 +6773,13 @@ async fn process_latest_main_response(
             return Err(anyhow!("tool-executor machines cannot run the main thread"));
         }
         let context = compile_main_context(&state.db_path, source_record_id)?;
+        let audit = ResponseAuditContext::for_request(
+            "normal",
+            None,
+            Some(source.clone()),
+            context.context_start_record_id,
+            context.checkpoint_id,
+        );
         run_agent_items(
             &state.client,
             &config,
@@ -6501,6 +6795,7 @@ async fn process_latest_main_response(
                 checkpoint_write_gate: state.checkpoint_write_gate.clone(),
                 checkpoint_write_pending: state.checkpoint_write_pending.clone(),
             },
+            audit,
             Some(browser_agent_context(&state)),
             &state.executor_tunnels,
         )
@@ -6562,6 +6857,7 @@ async fn run_agent(
             checkpoint_write_gate: Arc::new(RwLock::new(())),
             checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
         },
+        ResponseAuditContext::for_request("normal", None, None, None, None),
         None,
         &ExecutorTunnels::default(),
     )
@@ -6580,6 +6876,7 @@ async fn run_agent_items(
     scope: AgentScope,
     active_subthreads: &Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     checkpoint_target: ContextCheckpointTarget,
+    mut audit: ResponseAuditContext,
     mut browser: Option<BrowserAgentContext>,
     executor_tunnels: &ExecutorTunnels,
 ) -> Result<AgentResult> {
@@ -6602,23 +6899,29 @@ async fn run_agent_items(
         if *cancellation.borrow() {
             return Err(anyhow!("agent stopped"));
         }
+        let body = scoped_responses_request_body(
+            &config.default_model,
+            &items,
+            &skills
+                .read()
+                .map_err(|_| anyhow!("cannot read skills"))?
+                .clone(),
+            scope,
+            db_path,
+            browser.as_ref(),
+        );
         let request = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
-            .json(&scoped_responses_request_body(
-                &config.default_model,
-                &items,
-                &skills
-                    .read()
-                    .map_err(|_| anyhow!("cannot read skills"))?
-                    .clone(),
-                scope,
-                db_path,
-                browser.as_ref(),
-            ));
-        let response = match send_responses_request(request, &mut cancellation)
-            .await
-            .and_then(|body| completed_response_from_sse(&body))
+            .json(&body);
+        let response = match send_audited_responses_request(
+            db_path,
+            request,
+            audit.clone(),
+            &config.default_model,
+            &mut cancellation,
+        )
+        .await
         {
             // RECOVERY: HTTP 413, a structured upstream context-length error, or a terminal SSE
             // error means the current context can be replaced by a compacted checkpoint and
@@ -6627,16 +6930,21 @@ async fn run_agent_items(
                 if is_context_overflow(&cause)
                     && (!retried_after_context_overflow || adaptive_main_checkpointing) =>
             {
-                items = compact_context_after_overflow(
-                    client,
-                    config,
-                    db_path,
+                let (compacted_items, retry_audit) = compact_context_after_overflow(
+                    ResponsesRuntime {
+                        client,
+                        config,
+                        db_path,
+                    },
                     items,
+                    &audit,
                     &events,
                     cancellation.clone(),
                     &checkpoint_target,
                 )
                 .await?;
+                items = compacted_items;
+                audit = retry_audit;
                 retried_after_context_overflow = true;
                 continue;
             }
@@ -7071,38 +7379,167 @@ fn remote_machine_context(path: &Path) -> Result<String> {
     }
 }
 
-async fn send_responses_request(
+fn begin_response_audit(db_path: &Path, audit: &ResponseAuditContext, model: &str) -> Result<i64> {
+    let connection = open_db(db_path)?;
+    connection.execute(
+        "INSERT INTO responses_request_audits (
+           thread_id, run_id, context_start_record_id, checkpoint_id,
+           request_kind, model, status, started_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'in_flight', ?7)",
+        params![
+            audit.thread_id,
+            audit.run_id,
+            audit.context_start_record_id,
+            audit.checkpoint_id,
+            audit.request_kind,
+            model,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+fn finish_response_audit(
+    db_path: &Path,
+    audit_id: i64,
+    finish: ResponseAuditFinish<'_>,
+) -> Result<()> {
+    open_db(db_path)?.execute(
+        "UPDATE responses_request_audits
+         SET status = ?2, finished_at = ?3,
+             input_tokens = ?4, output_tokens = ?5, cached_tokens = ?6,
+             openai_lb_request_id = ?7, error = ?8
+         WHERE id = ?1",
+        params![
+            audit_id,
+            finish.status,
+            chrono::Utc::now().to_rfc3339(),
+            finish.input_tokens,
+            finish.output_tokens,
+            finish.cached_tokens,
+            finish.openai_lb_request_id,
+            finish.error,
+        ],
+    )?;
+    Ok(())
+}
+
+fn response_usage(response: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
+    (
+        response
+            .pointer("/usage/input_tokens")
+            .and_then(Value::as_i64),
+        response
+            .pointer("/usage/output_tokens")
+            .and_then(Value::as_i64),
+        response
+            .pointer("/usage/input_tokens_details/cached_tokens")
+            .and_then(Value::as_i64),
+    )
+}
+
+async fn send_audited_responses_request(
+    db_path: &Path,
     request: reqwest::RequestBuilder,
+    audit: ResponseAuditContext,
+    model: &str,
     cancellation: &mut watch::Receiver<bool>,
-) -> Result<String> {
+) -> Result<Value> {
+    let audit_id = begin_response_audit(db_path, &audit, model)?;
     let response = tokio::select! {
-        response = request.send() => response?,
-        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+        response = request.send() => match response {
+            Ok(response) => response,
+            Err(cause) => {
+                finish_response_audit(db_path, audit_id, ResponseAuditFinish { status: "failed", input_tokens: None, output_tokens: None, cached_tokens: None, openai_lb_request_id: None, error: Some(&cause.to_string()) })?;
+                return Err(cause.into());
+            }
+        },
+        _ = cancellation.changed() => {
+            finish_response_audit(db_path, audit_id, ResponseAuditFinish { status: "cancelled", input_tokens: None, output_tokens: None, cached_tokens: None, openai_lb_request_id: None, error: Some("agent stopped") })?;
+            return Err(anyhow!("agent stopped"));
+        },
     };
     let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-openai-lb-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let body = tokio::select! {
-        body = response.text() => body?,
-        _ = cancellation.changed() => return Err(anyhow!("agent stopped")),
+        body = response.text() => match body {
+            Ok(body) => body,
+            Err(cause) => {
+                finish_response_audit(db_path, audit_id, ResponseAuditFinish { status: "failed", input_tokens: None, output_tokens: None, cached_tokens: None, openai_lb_request_id: request_id.as_deref(), error: Some(&cause.to_string()) })?;
+                return Err(cause.into());
+            }
+        },
+        _ = cancellation.changed() => {
+            finish_response_audit(db_path, audit_id, ResponseAuditFinish { status: "cancelled", input_tokens: None, output_tokens: None, cached_tokens: None, openai_lb_request_id: request_id.as_deref(), error: Some("agent stopped") })?;
+            return Err(anyhow!("agent stopped"));
+        },
     };
-    if status.is_success() {
-        return Ok(body);
+    if !status.is_success() {
+        let cause: anyhow::Error = if context_overflow_response(status, &body) {
+            let detail = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/error/message")
+                        .or_else(|| value.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| body.clone());
+            ContextOverflow { detail }.into()
+        } else {
+            anyhow!("upstream Responses request failed with HTTP {status}: {body}")
+        };
+        finish_response_audit(
+            db_path,
+            audit_id,
+            ResponseAuditFinish {
+                status: "failed",
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                openai_lb_request_id: request_id.as_deref(),
+                error: Some(&cause.to_string()),
+            },
+        )?;
+        return Err(cause);
     }
-    if context_overflow_response(status, &body) {
-        let detail = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|value| {
-                value
-                    .pointer("/error/message")
-                    .or_else(|| value.get("message"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| body.clone());
-        return Err(ContextOverflow { detail }.into());
-    }
-    Err(anyhow!(
-        "upstream Responses request failed with HTTP {status}: {body}"
-    ))
+    let completed = match completed_response_from_sse(&body) {
+        Ok(completed) => completed,
+        Err(cause) => {
+            finish_response_audit(
+                db_path,
+                audit_id,
+                ResponseAuditFinish {
+                    status: "failed",
+                    input_tokens: None,
+                    output_tokens: None,
+                    cached_tokens: None,
+                    openai_lb_request_id: request_id.as_deref(),
+                    error: Some(&cause.to_string()),
+                },
+            )?;
+            return Err(cause);
+        }
+    };
+    let (input_tokens, output_tokens, cached_tokens) = response_usage(&completed);
+    finish_response_audit(
+        db_path,
+        audit_id,
+        ResponseAuditFinish {
+            status: "completed",
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            openai_lb_request_id: request_id.as_deref(),
+            error: None,
+        },
+    )?;
+    Ok(completed)
 }
 
 fn context_overflow_response(status: StatusCode, body: &str) -> bool {
@@ -9149,6 +9586,94 @@ fn load_command_run_page(db_path: &Path, query: &CommandRunQuery) -> Result<Comm
     })
 }
 
+fn reasoning_audit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReasoningAudit> {
+    Ok(ReasoningAudit {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        run_id: row.get(2)?,
+        context_start_record_id: row.get(3)?,
+        checkpoint_id: row.get(4)?,
+        request_kind: row.get(5)?,
+        model: row.get(6)?,
+        status: row.get(7)?,
+        started_at: row.get(8)?,
+        finished_at: row.get(9)?,
+        input_tokens: row.get(10)?,
+        output_tokens: row.get(11)?,
+        cached_tokens: row.get(12)?,
+        openai_lb_request_id: row.get(13)?,
+        error: row.get(14)?,
+    })
+}
+
+fn load_reasoning_audit_page(
+    db_path: &Path,
+    query: &ReasoningAuditQuery,
+) -> Result<ReasoningAuditPage> {
+    let connection = open_db(db_path)?;
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(50).clamp(1, 100);
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
+    let status = history_record_filter(query.status.as_deref())?;
+    let thread_id = history_record_filter(query.thread_id.as_deref())?;
+    let model = history_record_filter(query.model.as_deref())?;
+    let request_kind = history_record_filter(query.request_kind.as_deref())?;
+    let total = connection.query_row(
+        "SELECT COUNT(*)
+         FROM responses_request_audits
+         WHERE (?1 IS NULL OR status = ?1)
+           AND (?2 IS NULL OR (?2 = 'main' AND thread_id IS NULL) OR thread_id = ?2)
+           AND (?3 IS NULL OR model = ?3)
+           AND (?4 IS NULL OR request_kind = ?4)",
+        params![status, thread_id, model, request_kind],
+        |row| row.get(0),
+    )?;
+    let items = connection
+        .prepare(
+            "SELECT id, thread_id, run_id, context_start_record_id, checkpoint_id,
+                    request_kind, model, status, started_at, finished_at,
+                    input_tokens, output_tokens, cached_tokens, openai_lb_request_id, error
+             FROM responses_request_audits
+             WHERE (?1 IS NULL OR status = ?1)
+               AND (?2 IS NULL OR (?2 = 'main' AND thread_id IS NULL) OR thread_id = ?2)
+               AND (?3 IS NULL OR model = ?3)
+               AND (?4 IS NULL OR request_kind = ?4)
+             ORDER BY CASE status WHEN 'in_flight' THEN 0 ELSE 1 END, started_at DESC, id DESC
+             LIMIT ?5 OFFSET ?6",
+        )?
+        .query_map(
+            params![status, thread_id, model, request_kind, page_size, offset],
+            reasoning_audit_from_row,
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let thread_ids = connection
+        .prepare(
+            "SELECT DISTINCT thread_id FROM responses_request_audits
+             WHERE thread_id IS NOT NULL ORDER BY thread_id",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    let models = connection
+        .prepare("SELECT DISTINCT model FROM responses_request_audits ORDER BY model")?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    let request_kinds = connection
+        .prepare(
+            "SELECT DISTINCT request_kind FROM responses_request_audits ORDER BY request_kind",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(ReasoningAuditPage {
+        items,
+        total,
+        page,
+        page_size,
+        thread_ids,
+        models,
+        request_kinds,
+    })
+}
+
 #[cfg(test)]
 fn load_command_runs(db_path: &Path) -> Result<Vec<CommandRun>> {
     let connection = open_db(db_path)?;
@@ -9239,6 +9764,191 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn responses_audit_captures_lifecycle_usage_and_openai_lb_link_id() {
+        async fn responses() -> Response {
+            let body = format!(
+                "event: response.completed\ndata: {}\n\n",
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "usage": {
+                            "input_tokens": 200,
+                            "output_tokens": 50,
+                            "input_tokens_details": {"cached_tokens": 80}
+                        },
+                        "output": []
+                    }
+                }),
+            );
+            let mut response = body.into_response();
+            response.headers_mut().insert(
+                "x-openai-lb-request-id",
+                HeaderValue::from_static("lb-request-123"),
+            );
+            response
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/responses", post(responses)))
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let audit = ResponseAuditContext::for_request(
+            "normal",
+            Some("child-1".to_owned()),
+            Some("run-1".to_owned()),
+            Some(41),
+            Some(30),
+        );
+        let in_flight_id = begin_response_audit(&db, &audit, "test-model").unwrap();
+        let status: String = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT status FROM responses_request_audits WHERE id = ?1",
+                [in_flight_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_flight");
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "DELETE FROM responses_request_audits WHERE id = ?1",
+                [in_flight_id],
+            )
+            .unwrap();
+
+        let request = reqwest::Client::new()
+            .post(format!("http://{address}/responses"))
+            .json(&json!({"model":"test-model","input":[],"stream":true}));
+        let (_cancellation_sender, mut cancellation) = watch::channel(false);
+        let response =
+            send_audited_responses_request(&db, request, audit, "test-model", &mut cancellation)
+                .await
+                .unwrap();
+        server.abort();
+        assert_eq!(response["usage"]["input_tokens"], 200);
+
+        let page = load_reasoning_audit_page(&db, &ReasoningAuditQuery::default()).unwrap();
+        assert_eq!(page.items.len(), 1);
+        let item = &page.items[0];
+        assert_eq!(item.status, "completed");
+        assert_eq!(item.request_kind, "normal");
+        assert_eq!(item.thread_id.as_deref(), Some("child-1"));
+        assert_eq!(item.context_start_record_id, Some(41));
+        assert_eq!(item.checkpoint_id, Some(30));
+        assert_eq!(item.input_tokens, Some(200));
+        assert_eq!(item.output_tokens, Some(50));
+        assert_eq!(item.cached_tokens, Some(80));
+        assert_eq!(item.openai_lb_request_id.as_deref(), Some("lb-request-123"));
+        assert!(item.finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn responses_audit_finishes_failed_upstream_requests() {
+        async fn responses() -> Response {
+            let mut response = (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response();
+            response.headers_mut().insert(
+                "x-openai-lb-request-id",
+                HeaderValue::from_static("lb-request-failed"),
+            );
+            response
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/responses", post(responses)))
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let request = reqwest::Client::new()
+            .post(format!("http://{address}/responses"))
+            .json(&json!({"model":"test-model","input":[],"stream":true}));
+        let (_cancellation_sender, mut cancellation) = watch::channel(false);
+        let error = send_audited_responses_request(
+            &db,
+            request,
+            ResponseAuditContext::for_request("normal", None, None, Some(9), None),
+            "test-model",
+            &mut cancellation,
+        )
+        .await
+        .unwrap_err();
+        server.abort();
+        assert!(error.to_string().contains("HTTP 502"));
+
+        let page = load_reasoning_audit_page(&db, &ReasoningAuditQuery::default()).unwrap();
+        assert_eq!(page.items.len(), 1);
+        let item = &page.items[0];
+        assert_eq!(item.status, "failed");
+        assert_eq!(
+            item.openai_lb_request_id.as_deref(),
+            Some("lb-request-failed")
+        );
+        assert!(item.finished_at.is_some());
+        assert!(
+            item.error
+                .as_deref()
+                .is_some_and(|error| error.contains("HTTP 502"))
+        );
+    }
+
+    #[test]
+    fn reasoning_audit_filters_keep_in_flight_requests_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let completed = ResponseAuditContext::for_request("voice_script", None, None, None, None);
+        let completed_id = begin_response_audit(&db, &completed, "voice-model").unwrap();
+        finish_response_audit(
+            &db,
+            completed_id,
+            ResponseAuditFinish {
+                status: "completed",
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cached_tokens: Some(2),
+                openai_lb_request_id: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let in_flight = ResponseAuditContext::for_request(
+            "compaction",
+            Some("child-2".to_owned()),
+            None,
+            Some(9),
+            Some(8),
+        );
+        begin_response_audit(&db, &in_flight, "main-model").unwrap();
+
+        let page = load_reasoning_audit_page(&db, &ReasoningAuditQuery::default()).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].status, "in_flight");
+        assert_eq!(page.items[0].request_kind, "compaction");
+        let filtered = load_reasoning_audit_page(
+            &db,
+            &ReasoningAuditQuery {
+                status: Some("completed".to_owned()),
+                thread_id: Some("main".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].request_kind, "voice_script");
+    }
+
     #[test]
     fn checkpoint_compaction_segments_preserve_utf8_boundaries() {
         let content = "你".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES);
@@ -9298,15 +10008,21 @@ mod tests {
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
 
+        let (_cancellation_sender, cancellation) = watch::channel(false);
         let result = compact_checkpoint_context(
             &reqwest::Client::new(),
             &config,
+            &db,
+            ResponseAuditContext::for_request("compaction", None, None, None, None),
             vec![json!({
                 "role": "user",
                 "content": "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2),
             })],
-            watch::channel(false).1,
+            cancellation,
         )
         .await
         .unwrap();
@@ -9386,15 +10102,21 @@ mod tests {
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
 
+        let (_cancellation_sender, cancellation) = watch::channel(false);
         let result = compact_checkpoint_context(
             &reqwest::Client::new(),
             &config,
+            &db,
+            ResponseAuditContext::for_request("compaction", None, None, None, None),
             vec![json!({
                 "role": "user",
                 "content": "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2),
             })],
-            watch::channel(false).1,
+            cancellation,
         )
         .await;
         server.abort();
@@ -10999,6 +11721,7 @@ mod tests {
                 checkpoint_write_gate: Arc::new(RwLock::new(())),
                 checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             },
+            ResponseAuditContext::for_request("normal", None, None, None, None),
             None,
             &ExecutorTunnels::default(),
         )
@@ -11188,6 +11911,7 @@ mod tests {
                 checkpoint_write_gate: Arc::new(RwLock::new(())),
                 checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             },
+            ResponseAuditContext::for_request("normal", None, None, None, None),
             None,
             &ExecutorTunnels::default(),
         )
@@ -11346,6 +12070,7 @@ mod tests {
             ContextCheckpointTarget::Subthread {
                 id: "child".to_owned(),
             },
+            ResponseAuditContext::for_request("normal", Some("child".to_owned()), None, None, None),
             None,
             &ExecutorTunnels::default(),
         )
@@ -11439,8 +12164,11 @@ mod tests {
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
         let source = "## 部署结果\n\n```sh\nmake deploy\n```\n\n| 状态 | 完成 |";
-        let script = create_voice_script(&reqwest::Client::new(), &config, source)
+        let script = create_voice_script(&reqwest::Client::new(), &config, &db, source)
             .await
             .unwrap();
         server.abort();
@@ -13723,9 +14451,13 @@ mod tests {
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
         let decision = create_voice_turn_decision(
             &reqwest::Client::new(),
             &config,
+            &db,
             "然后把它发布",
             "修复语音功能",
             "我已经准备好发布。",
