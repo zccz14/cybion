@@ -35,7 +35,10 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures_util::SinkExt;
 use image::{ColorType, ImageEncoder, ImageReader, codecs::png::PngEncoder};
 use notify::{Event as NotifyEvent, EventKind as NotifyEventKind, RecursiveMode, Watcher};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OptionalExtension, TransactionBehavior, params, params_from_iter,
+    types::Value as SqlValue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -560,6 +563,14 @@ struct ConversationQuery {
 struct HistoryRecordQuery {
     page: Option<usize>,
     page_size: Option<usize>,
+    #[serde(rename = "type")]
+    item_type: Option<String>,
+    kind: Option<String>,
+    role: Option<String>,
+    name: Option<String>,
+    thread_id: Option<String>,
+    run_id: Option<String>,
+    call_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -3000,6 +3011,46 @@ fn history_record_summary(
     }
 }
 
+fn history_record_filter(value: Option<&str>) -> Result<Option<String>> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all");
+    if value.is_some_and(|value| value.chars().count() > 256) {
+        return Err(anyhow!("history record filter is too long"));
+    }
+    Ok(value.map(str::to_owned))
+}
+
+fn history_record_filters(query: &HistoryRecordQuery) -> Result<Vec<(&'static str, String)>> {
+    Ok([
+        (
+            "json_extract(payload, '$.type')",
+            history_record_filter(query.item_type.as_deref())?,
+        ),
+        ("kind", history_record_filter(query.kind.as_deref())?),
+        (
+            "json_extract(payload, '$.role')",
+            history_record_filter(query.role.as_deref())?,
+        ),
+        (
+            "json_extract(payload, '$.name')",
+            history_record_filter(query.name.as_deref())?,
+        ),
+        (
+            "thread_id",
+            history_record_filter(query.thread_id.as_deref())?,
+        ),
+        ("run_id", history_record_filter(query.run_id.as_deref())?),
+        (
+            "json_extract(payload, '$.call_id')",
+            history_record_filter(query.call_id.as_deref())?,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(column, value)| value.map(|value| (column, value)))
+    .collect())
+}
+
 fn load_history_record_page(path: &Path, query: HistoryRecordQuery) -> Result<HistoryRecordPage> {
     let connection = open_db(path)?;
     let page = query.page.unwrap_or(1).max(1);
@@ -3007,17 +3058,39 @@ fn load_history_record_page(path: &Path, query: HistoryRecordQuery) -> Result<Hi
     let offset = (page - 1).saturating_mul(page_size);
     let offset = i64::try_from(offset).context("history record page is too large")?;
     let limit = i64::try_from(page_size).expect("history record page size fits in i64");
-    let total = connection.query_row("SELECT COUNT(*) FROM history_records", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
+    let filters = history_record_filters(&query)?;
+    let where_clause = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " WHERE {}",
+            filters
+                .iter()
+                .map(|(column, _)| format!("{column} = ?"))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        )
+    };
+    let values = filters
+        .into_iter()
+        .map(|(_, value)| SqlValue::Text(value))
+        .collect::<Vec<_>>();
+    let total = connection.query_row(
+        &format!("SELECT COUNT(*) FROM history_records{where_clause}"),
+        params_from_iter(values.iter()),
+        |row| row.get::<_, i64>(0),
+    )?;
+    let mut pagination_values = values;
+    pagination_values.push(SqlValue::Integer(limit));
+    pagination_values.push(SqlValue::Integer(offset));
     let records = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT id, thread_id, run_id, kind, payload, created_at,
                     length(CAST(payload AS BLOB))
-             FROM history_records
-             ORDER BY id DESC LIMIT ?1 OFFSET ?2",
-        )?
-        .query_map(params![limit, offset], |row| {
+             FROM history_records{where_clause}
+             ORDER BY id DESC LIMIT ? OFFSET ?"
+        ))?
+        .query_map(params_from_iter(pagination_values.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -3371,6 +3444,10 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            ON history_records(thread_id, id);
          CREATE INDEX IF NOT EXISTS history_records_run_id
            ON history_records(run_id, id);
+         CREATE INDEX IF NOT EXISTS history_records_kind_id
+           ON history_records(kind, id);
+         CREATE INDEX IF NOT EXISTS history_records_type_id
+           ON history_records(json_extract(payload, '$.type'), id);
          CREATE TABLE IF NOT EXISTS files (
            id TEXT PRIMARY KEY,
            content BLOB NOT NULL,
@@ -5299,12 +5376,7 @@ async fn history_records(
     identity(&state, &headers).await?;
     load_history_record_page(&state.db_path, query)
         .map(Json)
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot read history records",
-            )
-        })
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))
 }
 
 async fn history_record_detail(
@@ -12393,6 +12465,7 @@ mod tests {
             HistoryRecordQuery {
                 page: Some(1),
                 page_size: Some(20),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -12410,6 +12483,72 @@ mod tests {
 
         let detail = load_history_record_detail(&db, id).unwrap().unwrap();
         assert_eq!(detail.payload, payload);
+    }
+
+    #[test]
+    fn history_record_page_filters_metadata_and_counts_filtered_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        let matching = history_record_payload(
+            &connection,
+            Some("thread-match"),
+            Some("run-match"),
+            "response_output",
+            &json!({
+                "type": "function_call",
+                "role": "assistant",
+                "name": "read_file",
+                "call_id": "call-match"
+            }),
+            "2026-08-18T00:00:00Z",
+        )
+        .unwrap();
+        history_record_payload(
+            &connection,
+            Some("thread-other"),
+            Some("run-other"),
+            "response_output",
+            &json!({
+                "type": "message",
+                "role": "user",
+                "name": "write_file",
+                "call_id": "call-other"
+            }),
+            "2026-08-18T00:00:01Z",
+        )
+        .unwrap();
+
+        let page = load_history_record_page(
+            &db,
+            HistoryRecordQuery {
+                page: Some(1),
+                page_size: Some(20),
+                item_type: Some("function_call".to_owned()),
+                kind: Some("response_output".to_owned()),
+                role: Some("assistant".to_owned()),
+                name: Some("read_file".to_owned()),
+                thread_id: Some("thread-match".to_owned()),
+                run_id: Some("run-match".to_owned()),
+                call_id: Some("call-match".to_owned()),
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].id, matching);
+
+        assert!(
+            load_history_record_page(
+                &db,
+                HistoryRecordQuery {
+                    item_type: Some("x".repeat(257)),
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]
