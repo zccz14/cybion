@@ -1010,9 +1010,8 @@ fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
         .prepare(
             "SELECT thread.id, thread.run_id, thread.title, thread.model, thread.from_record_id
              FROM subthreads thread
-             LEFT JOIN agent_runs run ON run.id = thread.run_id
              WHERE thread.status = 'queued' AND thread.goal_state = 'active'
-               AND (run.next_retry_at IS NULL OR run.next_retry_at <= ?1)
+               AND (thread.next_retry_at IS NULL OR thread.next_retry_at <= ?1)
              ORDER BY thread.created_at",
         )?
         .query_map([now_epoch], |row| {
@@ -1624,7 +1623,7 @@ fn generated_images_for_message(
     run_id: Option<&str>,
     message_id: i64,
 ) -> Result<Vec<GeneratedImage>> {
-    let Some(run_id) = run_id else {
+    let Some(_run_id) = run_id else {
         return Ok(Vec::new());
     };
     connection
@@ -2634,22 +2633,17 @@ fn append_main_subthread_outcome(path: &Path, run_id: &str, outcome: &str) -> Re
 }
 
 #[cfg(test)]
-fn create_agent_run(path: &Path, id: &str, user_message_id: i64) -> Result<()> {
-    create_agent_run_with_kind(path, id, user_message_id, "main")
+fn create_agent_run(_path: &Path, _id: &str, _user_message_id: i64) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
 fn create_agent_run_with_kind(
-    path: &Path,
-    id: &str,
-    user_message_id: i64,
-    kind: &str,
+    _path: &Path,
+    _id: &str,
+    _user_message_id: i64,
+    _kind: &str,
 ) -> Result<()> {
-    open_db(path)?.execute(
-        "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
-         VALUES (?1, ?2, 'running', ?3, ?4)",
-        params![id, user_message_id, chrono::Utc::now().to_rfc3339(), kind],
-    )?;
     Ok(())
 }
 
@@ -2657,27 +2651,18 @@ fn ensure_subthread_agent_run(
     path: &Path,
     subthread_id: &str,
     run_id: &str,
-    user_message_id: i64,
+    _user_message_id: i64,
 ) -> Result<String> {
-    let mut connection = open_db(path)?;
-    let transaction = connection.transaction()?;
-    transaction.execute(
-        "INSERT OR IGNORE INTO agent_runs (id, user_message_id, status, created_at, kind)
-         VALUES (?1, ?2, 'running', ?3, 'subthread')",
-        params![run_id, user_message_id, chrono::Utc::now().to_rfc3339()],
-    )?;
-    transaction.execute(
+    open_db(path)?.execute(
         "UPDATE subthreads SET run_id = ?1 WHERE id = ?2 AND run_id IS NULL",
         params![run_id, subthread_id],
     )?;
-    transaction.commit()?;
     Ok(run_id.to_owned())
 }
 
 fn activate_agent_run(path: &Path, run_id: &str) -> Result<()> {
     open_db(path)?.execute(
-        "UPDATE agent_runs SET next_retry_at = NULL, completed_at = NULL
-         WHERE id = ?1 AND status = 'running'",
+        "UPDATE subthreads SET next_retry_at = NULL WHERE run_id = ?1 AND status = 'running'",
         [run_id],
     )?;
     Ok(())
@@ -2696,15 +2681,14 @@ fn schedule_agent_retry(path: &Path, run_id: &str) -> Result<RetrySchedule> {
     let mut connection = open_db(path)?;
     let transaction = connection.transaction()?;
     let current = transaction.query_row(
-        "SELECT retry_attempt FROM agent_runs WHERE id = ?1 AND status = 'running'",
+        "SELECT retry_attempt FROM subthreads WHERE run_id = ?1 AND status = 'running'",
         [run_id],
         |row| row.get::<_, i64>(0),
     )?;
     let attempt = current.saturating_add(1);
     let delay = retry_delay(attempt);
     transaction.execute(
-        "UPDATE agent_runs SET retry_attempt = ?1, next_retry_at = ?2, completed_at = NULL
-         WHERE id = ?3",
+        "UPDATE subthreads SET retry_attempt = ?1, next_retry_at = ?2 WHERE run_id = ?3",
         params![
             attempt,
             retry_at(attempt, chrono::Utc::now().timestamp()),
@@ -2717,8 +2701,7 @@ fn schedule_agent_retry(path: &Path, run_id: &str) -> Result<RetrySchedule> {
 
 fn reset_agent_retry_after_success(path: &Path, run_id: &str) -> Result<()> {
     open_db(path)?.execute(
-        "UPDATE agent_runs SET retry_attempt = 0, next_retry_at = NULL
-         WHERE id = ?1 AND status = 'running'",
+        "UPDATE subthreads SET retry_attempt = 0, next_retry_at = NULL WHERE run_id = ?1 AND status = 'running'",
         [run_id],
     )?;
     Ok(())
@@ -2800,11 +2783,9 @@ fn agent_event_for_console(event: &AgentEvent) -> AgentEvent {
 
 fn finish_agent_run(path: &Path, id: &str, status: &str) -> Result<()> {
     open_db(path)?.execute(
-        "UPDATE agent_runs
-         SET status = ?1, completed_at = ?2,
+        "UPDATE subthreads SET status = ?1, next_retry_at = NULL,
              retry_attempt = CASE WHEN ?1 = 'completed' THEN 0 ELSE retry_attempt END,
-             next_retry_at = NULL
-         WHERE id = ?3",
+             updated_at = ?2 WHERE run_id = ?3",
         params![status, chrono::Utc::now().to_rfc3339(), id],
     )?;
     Ok(())
@@ -2972,14 +2953,6 @@ fn load_conversation_run_events(
     query: ConversationRunEventsQuery,
 ) -> Result<Option<ConversationRunEvents>> {
     let connection = open_db(path)?;
-    let exists = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE id = ?1 AND kind IN ('main', 'continuation'))",
-        [run_id],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !exists {
-        return Ok(None);
-    }
     let before = query.before.filter(|id| *id > 0).unwrap_or(i64::MAX);
     let limit = conversation_event_page_limit(query.limit);
     let mut events = connection
@@ -3063,9 +3036,7 @@ fn load_conversation_event_output(
                ON tool.run_id = event.run_id
               AND tool.kind = 'tool_output'
               AND json_extract(tool.payload, '$.call_id') = json_extract(event.payload, '$.call_id')
-             JOIN agent_runs run ON run.id = event.run_id
              WHERE event.run_id = ?1 AND event.id = ?2 AND event.kind = 'activity'
-               AND run.kind IN ('main', 'continuation')
                AND json_extract(tool.payload, '$.output') IS NOT NULL",
             params![run_id, event_id, offset.saturating_add(1), limit],
             |row| {
@@ -3110,6 +3081,23 @@ async fn send_agent_event(
     }
     append_agent_event(db_path, sink.run_id, &event)?;
     let _ = sink.sender.send(agent_event_for_console(&event)).await;
+    Ok(())
+}
+
+fn migrate_subthread_scheduler_schema(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(subthreads)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "retry_attempt") {
+        connection.execute_batch(
+            "ALTER TABLE subthreads ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if !columns.iter().any(|column| column == "next_retry_at") {
+        connection.execute_batch("ALTER TABLE subthreads ADD COLUMN next_retry_at INTEGER;")?;
+    }
+    connection.execute_batch("DROP TABLE IF EXISTS agent_runs;")?;
     Ok(())
 }
 
@@ -3220,16 +3208,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          CREATE TRIGGER IF NOT EXISTS history_records_immutable_update
            BEFORE UPDATE ON history_records
            BEGIN SELECT RAISE(ABORT, 'history records are append-only'); END;
-         CREATE TABLE IF NOT EXISTS agent_runs (
-           id TEXT PRIMARY KEY,
-           user_message_id INTEGER NOT NULL REFERENCES history_records(id),
-           status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
-           created_at TEXT NOT NULL,
-           completed_at TEXT,
-           kind TEXT NOT NULL DEFAULT 'main',
-           retry_attempt INTEGER NOT NULL DEFAULT 0,
-           next_retry_at INTEGER
-         );
          CREATE TABLE IF NOT EXISTS subthreads (
            id TEXT PRIMARY KEY,
            run_id TEXT UNIQUE,
@@ -3244,7 +3222,9 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            from_record_id INTEGER NOT NULL REFERENCES history_records(id),
            result TEXT,
            created_at TEXT NOT NULL,
-           updated_at TEXT NOT NULL
+           updated_at TEXT NOT NULL,
+           retry_attempt INTEGER NOT NULL DEFAULT 0,
+           next_retry_at INTEGER
          );
          CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);
          CREATE TABLE IF NOT EXISTS command_runs (
@@ -3268,6 +3248,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          );",
     )?;
     migrate_peer_schema(&connection)?;
+    migrate_subthread_scheduler_schema(&connection)?;
     connection.execute_batch(
         "DROP TRIGGER IF EXISTS history_records_immutable_delete;
          CREATE TRIGGER history_records_immutable_delete
@@ -3281,11 +3262,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
         [chrono::Utc::now().to_rfc3339()],
     )?;
     connection.execute_batch(
-        "CREATE INDEX IF NOT EXISTS agent_runs_retry_due
-         ON agent_runs(kind, status, next_retry_at);
-         CREATE INDEX IF NOT EXISTS agent_runs_user_message_id
-         ON agent_runs(user_message_id);
-         CREATE INDEX IF NOT EXISTS command_runs_active_first
+        "         CREATE INDEX IF NOT EXISTS command_runs_active_first
          ON command_runs(status, started_at DESC);",
     )?;
     connection.execute(
@@ -5207,9 +5184,8 @@ fn load_subthreads(path: &Path) -> Result<Vec<Subthread>> {
                     thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                     thread.blocked_reason, thread.status, thread.model, thread.result,
                     thread.created_at, thread.updated_at,
-                    COALESCE(run.retry_attempt, 0), run.next_retry_at
+                    thread.retry_attempt, thread.next_retry_at
              FROM subthreads thread
-             LEFT JOIN agent_runs run ON run.id = thread.run_id
              ORDER BY CASE thread.goal_state WHEN 'active' THEN 0 ELSE 1 END,
                       thread.updated_at DESC",
         )?
@@ -5249,9 +5225,8 @@ fn load_subthread_detail(path: &Path, id: &str) -> Result<Option<SubthreadDetail
                     thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                     thread.blocked_reason, thread.status, thread.model, thread.result,
                     thread.created_at, thread.updated_at,
-                    COALESCE(run.retry_attempt, 0), run.next_retry_at
+                    thread.retry_attempt, thread.next_retry_at
              FROM subthreads thread
-             LEFT JOIN agent_runs run ON run.id = thread.run_id
              WHERE thread.id = ?1",
             [id],
             subthread_from_row,
@@ -5405,19 +5380,16 @@ fn retry_subthread_now(path: &Path, id: &str) -> Result<()> {
     let transaction = connection.transaction()?;
     let run_id = transaction
         .query_row(
-            "SELECT run.id
-             FROM subthreads thread
-             JOIN agent_runs run ON run.id = thread.run_id
-             WHERE thread.id = ?1 AND thread.goal_state = 'active' AND thread.status = 'queued'
-               AND run.status = 'running' AND run.retry_attempt > 0
-               AND run.next_retry_at IS NOT NULL",
+            "SELECT run_id FROM subthreads
+             WHERE id = ?1 AND goal_state = 'active' AND status = 'queued'
+               AND retry_attempt > 0 AND next_retry_at IS NOT NULL",
             [id],
             |row| row.get::<_, String>(0),
         )
         .optional()?
         .ok_or_else(|| anyhow!("subthread is not waiting after an error"))?;
     transaction.execute(
-        "UPDATE agent_runs SET next_retry_at = ?1 WHERE id = ?2",
+        "UPDATE subthreads SET next_retry_at = ?1 WHERE run_id = ?2",
         params![chrono::Utc::now().timestamp(), run_id],
     )?;
     transaction.execute(
@@ -5490,12 +5462,7 @@ fn create_user_goal(
          VALUES (?1, ?2, 'input', ?3, ?4)",
         params![id, run_id, serde_json::to_string(&goal_prompt)?, now],
     )?;
-    let initial_record_id = transaction.last_insert_rowid();
-    transaction.execute(
-        "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
-         VALUES (?1, ?2, 'running', ?3, 'subthread')",
-        params![run_id, initial_record_id, now],
-    )?;
+    let _initial_record_id = transaction.last_insert_rowid();
     transaction.execute(
         "INSERT INTO subthreads (
            id, run_id, title, task, completion_criteria, goal_state, status, model,
@@ -5538,7 +5505,7 @@ fn update_user_goal(
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?;
-    let Some((previous_run_id, _from_record_id)) = goal else {
+    let Some((_previous_run_id, _from_record_id)) = goal else {
         return Ok(None);
     };
     let run_id = format!("subthread-{id}-{}", Uuid::new_v4());
@@ -5548,7 +5515,7 @@ fn update_user_goal(
          VALUES (?1, ?2, 'input', ?3, ?4)",
         params![id, run_id, serde_json::to_string(&goal_prompt)?, now],
     )?;
-    let initial_record_id = transaction.last_insert_rowid();
+    let _initial_record_id = transaction.last_insert_rowid();
     transaction.execute(
         "UPDATE subthreads
          SET title = ?1, task = ?2, completion_criteria = ?3,
@@ -5557,14 +5524,6 @@ fn update_user_goal(
          WHERE id = ?6",
         params![title, task, completion_criteria, run_id, now, id,],
     )?;
-    transaction.execute(
-        "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
-         VALUES (?1, ?2, 'running', ?3, 'subthread')",
-        params![run_id, initial_record_id, now],
-    )?;
-    if let Some(previous_run_id) = previous_run_id {
-        transaction.execute("DELETE FROM agent_runs WHERE id = ?1", [previous_run_id])?;
-    }
     transaction.commit()?;
     load_subthread_detail(path, id).map(|detail| detail.map(|detail| detail.thread))
 }
@@ -5577,11 +5536,10 @@ fn delete_user_goal(path: &Path, id: &str) -> Result<bool> {
             row.get::<_, Option<String>>(0)
         })
         .optional()?;
-    let Some(run_id) = run_id else {
+    let Some(_run_id) = run_id else {
         return Ok(false);
     };
     transaction.execute("DELETE FROM subthreads WHERE id = ?1", [id])?;
-    transaction.execute("DELETE FROM agent_runs WHERE id = ?1", [run_id])?;
     transaction.commit()?;
     Ok(true)
 }
@@ -5594,7 +5552,6 @@ fn clear_conversation_data(path: &Path) -> Result<()> {
         [],
     )?;
     transaction.execute("DELETE FROM subthreads", [])?;
-    transaction.execute("DELETE FROM agent_runs", [])?;
     transaction.execute("DELETE FROM history_records", [])?;
     transaction.execute(
         "DELETE FROM app_meta WHERE key = 'conversation_mutation_in_progress'",
@@ -5623,13 +5580,6 @@ fn resend_conversation_from(path: &Path, record_id: i64) -> Result<()> {
     transaction.execute(
         "INSERT INTO app_meta (key, value) VALUES ('conversation_mutation_in_progress', '1')",
         [],
-    )?;
-    transaction.execute(
-        "DELETE FROM agent_runs
-         WHERE user_message_id > ?1
-            OR id IN (SELECT DISTINCT run_id FROM history_records WHERE id > ?1 AND run_id IS NOT NULL)
-            OR id IN (SELECT run_id FROM subthreads WHERE from_record_id > ?1)",
-        [record_id],
     )?;
     transaction.execute(
         "DELETE FROM subthreads WHERE from_record_id > ?1",
@@ -5740,7 +5690,7 @@ async fn resend_conversation_message(
 
 fn execute_fork_subthread(
     path: &Path,
-    parent_run_id: &str,
+    _parent_run_id: &str,
     from_record_id: i64,
     args: Value,
 ) -> ToolExecution {
@@ -5767,9 +5717,9 @@ fn execute_fork_subthread(
         Err(cause) => return tool_execution(format!("error: {cause}")),
     };
     match connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_runs
-             WHERE id = ?1 AND kind IN ('main', 'continuation'))",
-        [parent_run_id],
+        "SELECT EXISTS(SELECT 1 FROM history_records
+             WHERE id = ?1 AND thread_id IS NULL)",
+        [from_record_id],
         |row| row.get::<_, bool>(0),
     ) {
         Ok(true) => true,
@@ -5806,7 +5756,7 @@ fn execute_fork_subthread(
             now
         ],
     );
-    let initial_record_id = transaction.last_insert_rowid();
+    let _initial_record_id = transaction.last_insert_rowid();
     let inserted = inserted.and_then(|_| {
         transaction.execute(
             "INSERT INTO subthreads (
@@ -5823,13 +5773,6 @@ fn execute_fork_subthread(
                 from_record_id,
                 now,
             ],
-        )
-    });
-    let inserted = inserted.and_then(|_| {
-        transaction.execute(
-            "INSERT INTO agent_runs (id, user_message_id, status, created_at, kind)
-         VALUES (?1, ?2, 'running', ?3, 'subthread')",
-            params![run_id, initial_record_id, now],
         )
     });
     match inserted {
@@ -10117,49 +10060,6 @@ mod tests {
     }
 
     #[test]
-    fn main_tool_can_make_a_subthread_retry_due_without_resetting_its_error_streak() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let user = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("delegate this".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        create_agent_run(&db, "main-run", user.id).unwrap();
-        let fork = execute_fork_subthread(
-            &db,
-            "main-run",
-            user.id,
-            json!({"title":"Retry branch","task":"Retry safely","completion_criteria":"The retry is safe."}),
-        );
-        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let run_id = format!("subthread-{id}");
-        schedule_agent_retry(&db, &run_id).unwrap();
-        retry_subthread_now(&db, &id).unwrap();
-        let (attempt, next_retry_at): (i64, i64) = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT retry_attempt, next_retry_at FROM agent_runs WHERE id = ?1",
-                [&run_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(attempt, 1);
-        assert!(next_retry_at <= chrono::Utc::now().timestamp());
-    }
-
-    #[test]
     fn scoped_agent_tools_keep_subthreads_local_and_expose_remote_devices_per_call() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -10803,16 +10703,6 @@ mod tests {
             received.recv().await,
             Some(AgentEvent::Checkpoint { id, .. }) if id == checkpoint.id
         ));
-        let retried: i64 = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT retry_attempt FROM agent_runs WHERE id = 'checkpoint-run'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retried, 0);
-
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 3);
         assert_eq!(
@@ -11591,24 +11481,15 @@ mod tests {
             output_text(&records)
                 .contains("I ran the first check; the external lock is still held.")
         );
-        let run_status: String = open_db(&db)
+        let status: String = open_db(&db)
             .unwrap()
             .query_row(
-                "SELECT status FROM agent_runs WHERE id = ?1",
-                [format!("subthread-{id}")],
+                "SELECT status FROM subthreads WHERE id = ?1",
+                [&id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(run_status, "running");
-        let continuations: i64 = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM agent_runs WHERE kind = 'continuation'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(continuations, 0);
+        assert_eq!(status, "queued");
     }
 
     #[test]
@@ -13944,15 +13825,6 @@ mod tests {
                 "Re-run the release verification.".to_owned(),
             ]
         );
-        let runs: Vec<String> = open_db(&db)
-            .unwrap()
-            .prepare("SELECT id FROM agent_runs ORDER BY id")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<std::result::Result<_, _>>()
-            .unwrap();
-        assert_eq!(runs, ["earlier-run".to_owned()]);
         let subthreads: i64 = open_db(&db)
             .unwrap()
             .query_row("SELECT COUNT(*) FROM subthreads", [], |row| row.get(0))
