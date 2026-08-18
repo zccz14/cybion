@@ -99,7 +99,6 @@ flowchart LR
 history_records (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   thread_id  TEXT NULL,  -- NULL 为主线程；子线程使用自己的 ID
-  run_id     TEXT NULL,
   kind       TEXT NOT NULL,
   payload    TEXT NOT NULL, -- JSON 协议项
   created_at TEXT NOT NULL
@@ -137,14 +136,14 @@ history_records (
 | `input[1..]` | 编译出的协议项 | checkpoint 的 `developer` 项，以及按记录顺序排列的 `input`、`response_output` 和 `tool_output`。 |
 | 最后一项（仅子线程刚结束而触发主线程续跑时） | `developer` | 要求主线程基于该子线程的证据继续推进原始用户结果的临时续跑指令。 |
 
-固定前缀在同一 Agent run 的每一次 Responses 调用前都会重新放在 `input[0]`。模型产生的
+固定前缀在每一次 Responses 调用前都会重新放在 `input[0]`。模型产生的
 `response_output` 原始项会立即追加到本次运行中的协议序列；若其中包含
 `function_call` 或 `computer_call`，对应的 `function_call_output` 或
 `computer_call_output` 随后追加，形成下一次 Responses 调用的后缀。所有这些项也会写入
 `history_records`，供下一次上下文编译使用。用户刚提交的输入在运行开始前已作为 `input`
 记录写入，因此保留其原始 `user` 协议角色，而不会被包装成“历史证据”文本。
 
-主线程的常规布局如下，其中 `C` 为当前可见范围内最新 checkpoint，`M` 为本次编译上界：
+主线程的常规布局如下，其中 `C` 为当前可见范围内最新 checkpoint，`M` 为本次编译的 `idx_tail`：
 
 ```text
 无 checkpoint：
@@ -156,8 +155,8 @@ history_records (
 ```
 
 子线程使用同一个稳定前缀，但协议历史按 fork 边界编译：若子线程已有 checkpoint，则后缀是
-该 checkpoint（包含）到该子线程自身上界的记录；否则后缀先是主线程的最新 checkpoint（若有）
-到 `from_record_id`（包含）的主线程记录，再是该子线程从起点到自身上界的记录。兄弟子线程的
+该 checkpoint（包含）到该子线程自身 `idx_tail` 的记录；否则后缀先是主线程的最新 checkpoint（若有）
+到 `from_record_id`（包含）的主线程记录，再是该子线程从起点到自身 `idx_tail` 的记录。兄弟子线程的
 记录永远不进入该后缀。
 
 `response_output` 和 `tool_output` 保持 Responses 协议项回放，而不是转换成文本执行轨迹。
@@ -179,24 +178,16 @@ flowchart LR
   R --> U["Responses API"]
 ```
 
-#### 主线程的 checkpoint 与查询边界
+#### 主线程的 `idx_head` 与 `idx_tail`
 
-设本次请求允许看到的主线程上界为 `requested_through_record_id`。主线程编译时先取得：
-
-```text
-compile_through_record_id = min(requested_through_record_id, max(main-thread record id))
-latest_checkpoint_id = max(id | thread_id IS NULL, kind = checkpoint,
-                             id <= compile_through_record_id)
-```
-
-如果尚无 checkpoint，则从记录 `1` 开始。否则查询主线程中
-`id >= latest_checkpoint_id AND id <= compile_through_record_id` 的 `input`、
-`response_output`、`tool_output` 和 `checkpoint`，按 `id` 升序回放。**checkpoint 本身包含
-在结果中。** 这使 checkpoint 成为当前状态的起点，而不会遗漏它之后或与它同一位置的协议项。
+每次请求从当前主线程最后一条协议记录得到 `idx_tail`。`idx_head` 是不晚于该尾部的最后一个
+checkpoint；若不存在 checkpoint，则为不晚于 `idx_tail` 的第一条主线程协议记录。回放区间为
+`[idx_head, idx_tail]`，精确过滤主线程的 `input`、`response_output`、`tool_output` 和
+`checkpoint`，并按 `id` 升序排列。checkpoint 本身包含在结果中。
 
 上下文窗口溢出时，Cybion 通过 checkpoint compacting 将已编译的上下文压缩为新的不可变
 checkpoint 后重试。写入前会在
-SQLite 事务中确认主线程最新记录仍等于这次编译的上界，避免把发生变化的历史标记为已覆盖。
+SQLite 事务中确认主线程最新协议记录仍等于这次编译的 `idx_tail`，避免把发生变化的历史标记为已覆盖。
 
 #### 子线程的 fork 与查询边界
 
@@ -213,10 +204,10 @@ flowchart TB
   SC["子线程最新 checkpoint"] --> S
 ```
 
-子线程的 `latest_checkpoint_id` 按以下顺序确定：
+子线程的 `idx_head` 按以下顺序确定：
 
 1. 先在该子线程中，取 `id <= max(该子线程 record id)` 的最新 checkpoint。存在时，只回放该
-   子线程从该 checkpoint（包含）到自身上界的记录。
+   子线程从该 checkpoint（包含）到自身 `idx_tail` 的记录。
 2. 若子线程没有 checkpoint，则在主线程中取 `id <= from_record_id` 的最新 checkpoint；从该
    checkpoint（包含）回放主线程至 `from_record_id`，再回放该子线程自身的全部记录。
 3. 若该主线程范围也没有 checkpoint，主线程部分从记录 `1` 开始。
