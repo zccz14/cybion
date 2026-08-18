@@ -354,8 +354,6 @@ struct Peer {
     machine_id: String,
     hostname: String,
     deployment_role: String,
-    filesystem_enabled: bool,
-    bash_enabled: bool,
     created_at: String,
     last_seen_at: Option<String>,
     online: bool,
@@ -3356,25 +3354,30 @@ fn migrate_peer_schema(connection: &Connection) -> Result<()> {
         .prepare("PRAGMA table_info(peers)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    if columns.iter().any(|column| column == "access_token_hash") {
+    if !columns.iter().any(|column| column == "filesystem_enabled")
+        && !columns.iter().any(|column| column == "bash_enabled")
+    {
         return Ok(());
     }
     connection.execute_batch(
-        "ALTER TABLE peers RENAME TO peers_legacy;
+        "ALTER TABLE peers RENAME TO peers_with_capabilities;
          CREATE TABLE peers (
            id TEXT PRIMARY KEY,
            name TEXT NOT NULL,
            machine_id TEXT NOT NULL UNIQUE,
-           hostname TEXT NOT NULL,
+           hostname TEXT NOT NULL DEFAULT '',
            access_token_hash TEXT NOT NULL UNIQUE,
-           deployment_role TEXT NOT NULL DEFAULT 'executor',
-           filesystem_enabled INTEGER NOT NULL DEFAULT 0,
-           bash_enabled INTEGER NOT NULL DEFAULT 0,
+           deployment_role TEXT NOT NULL DEFAULT 'controller',
            created_at TEXT NOT NULL,
            last_seen_at TEXT
-         );",
+         );
+         INSERT INTO peers (
+           id, name, machine_id, hostname, access_token_hash, deployment_role, created_at, last_seen_at
+         ) SELECT
+           id, name, machine_id, hostname, access_token_hash, deployment_role, created_at, last_seen_at
+         FROM peers_with_capabilities;
+         DROP TABLE peers_with_capabilities;",
     )?;
-    connection.execute_batch("DROP TABLE peers_legacy;")?;
     Ok(())
 }
 
@@ -3423,8 +3426,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            hostname TEXT NOT NULL DEFAULT '',
            access_token_hash TEXT NOT NULL UNIQUE,
            deployment_role TEXT NOT NULL DEFAULT 'controller',
-           filesystem_enabled INTEGER NOT NULL DEFAULT 0,
-           bash_enabled INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
            last_seen_at TEXT
          );
@@ -4561,8 +4562,7 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
     let peers = connection
         .prepare(
-            "SELECT id, name, machine_id, hostname, deployment_role,
-                    filesystem_enabled, bash_enabled, created_at, last_seen_at
+            "SELECT id, name, machine_id, hostname, deployment_role, created_at, last_seen_at
              FROM peers ORDER BY name",
         )
         .map_err(|_| {
@@ -4578,10 +4578,8 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
                 machine_id: row.get(2)?,
                 hostname: row.get(3)?,
                 deployment_role: row.get(4)?,
-                filesystem_enabled: row.get(5)?,
-                bash_enabled: row.get(6)?,
-                created_at: row.get(7)?,
-                last_seen_at: row.get(8)?,
+                created_at: row.get(5)?,
+                last_seen_at: row.get(6)?,
                 online: false,
             })
         })
@@ -4686,8 +4684,6 @@ async fn pair_executor(
         machine_id: machine_id.to_owned(),
         hostname: hostname.to_owned(),
         deployment_role: "executor".to_owned(),
-        filesystem_enabled: true,
-        bash_enabled: true,
         created_at: chrono::Utc::now().to_rfc3339(),
         last_seen_at: None,
         online: false,
@@ -4763,17 +4759,14 @@ fn consume_executor_pairing(
     }
     transaction.execute(
         "INSERT INTO peers (
-           id, name, machine_id, hostname, access_token_hash, deployment_role,
-           filesystem_enabled, bash_enabled, created_at, last_seen_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
+           id, name, machine_id, hostname, access_token_hash, deployment_role, created_at, last_seen_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)
          ON CONFLICT(machine_id) DO UPDATE SET
            id = excluded.id,
            name = excluded.name,
            hostname = excluded.hostname,
            access_token_hash = excluded.access_token_hash,
            deployment_role = excluded.deployment_role,
-           filesystem_enabled = excluded.filesystem_enabled,
-           bash_enabled = excluded.bash_enabled,
            last_seen_at = NULL",
         params![
             peer.id,
@@ -4782,8 +4775,6 @@ fn consume_executor_pairing(
             peer.hostname,
             token_hash(access_token),
             peer.deployment_role,
-            peer.filesystem_enabled,
-            peer.bash_enabled,
             peer.created_at,
         ],
     )?;
@@ -7059,9 +7050,8 @@ fn remote_machine_context(path: &Path) -> Result<String> {
     let connection = open_db(path)?;
     let machines = connection
         .prepare(
-            "SELECT machine_id, name, hostname, deployment_role, filesystem_enabled, bash_enabled
+            "SELECT machine_id, name, hostname, deployment_role
              FROM peers
-             WHERE filesystem_enabled OR bash_enabled
              ORDER BY name",
         )?
         .query_map([], |row| {
@@ -7071,10 +7061,6 @@ fn remote_machine_context(path: &Path) -> Result<String> {
             Ok(json!({
                 "target_device": row.get::<_, String>(0)?,
                 "description": format!("{name} on {hostname} ({deployment_role})"),
-                "capabilities": {
-                    "filesystem": row.get::<_, bool>(4)?,
-                    "bash": row.get::<_, bool>(5)?,
-                }
             }))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -10342,6 +10328,62 @@ mod tests {
     }
 
     #[test]
+    fn peer_capability_columns_are_migrated_away_without_losing_enrollment() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE peers (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   machine_id TEXT NOT NULL UNIQUE,
+                   hostname TEXT NOT NULL,
+                   access_token_hash TEXT NOT NULL UNIQUE,
+                   deployment_role TEXT NOT NULL,
+                   filesystem_enabled INTEGER NOT NULL DEFAULT 0,
+                   bash_enabled INTEGER NOT NULL DEFAULT 0,
+                   created_at TEXT NOT NULL,
+                   last_seen_at TEXT
+                 );
+                 INSERT INTO peers (
+                   id, name, machine_id, hostname, access_token_hash, deployment_role,
+                   filesystem_enabled, bash_enabled, created_at
+                 ) VALUES ('peer', 'Executor', 'machine', 'host', 'hash', 'executor', 0, 0, 'now');",
+            )
+            .unwrap();
+        drop(connection);
+
+        bootstrap_database(&db).unwrap();
+
+        let connection = open_db(&db).unwrap();
+        let columns = connection
+            .prepare("PRAGMA table_info(peers)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!columns.contains(&"filesystem_enabled".to_owned()));
+        assert!(!columns.contains(&"bash_enabled".to_owned()));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT machine_id FROM peers WHERE id = 'peer'",
+                    [],
+                    |row| { row.get::<_, String>(0) }
+                )
+                .unwrap(),
+            "machine"
+        );
+        assert!(
+            remote_machine_context(&db)
+                .unwrap()
+                .contains("\"target_device\":\"machine\"")
+        );
+    }
+
+    #[test]
     fn scoped_agent_tools_keep_subthreads_local_and_expose_remote_devices_per_call() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -10351,8 +10393,8 @@ mod tests {
             .execute(
                 "INSERT INTO peers (
                id, name, machine_id, hostname, access_token_hash, deployment_role,
-               filesystem_enabled, bash_enabled, created_at
-             ) VALUES ('peer', 'Build host', 'machine-build', 'build-1', ?1, 'executor', 1, 0, 'now')",
+               created_at
+             ) VALUES ('peer', 'Build host', 'machine-build', 'build-1', ?1, 'executor', 'now')",
                 [token_hash("secret-token")],
             )
             .unwrap();
@@ -10361,8 +10403,8 @@ mod tests {
             .execute(
                 "INSERT INTO peers (
                    id, name, machine_id, hostname, access_token_hash, deployment_role,
-                   filesystem_enabled, bash_enabled, created_at
-                 ) VALUES ('unavailable', 'Unavailable host', 'machine-unavailable', 'unavailable-1', ?1, 'executor', 1, 0, 'now')",
+                   created_at
+                 ) VALUES ('unavailable', 'Unavailable host', 'machine-unavailable', 'unavailable-1', ?1, 'executor', 'now')",
                 [token_hash("unavailable-token")],
             )
             .unwrap();
@@ -10430,6 +10472,7 @@ mod tests {
         assert!(developer.contains("an empty string also executes locally"));
         assert!(developer.contains("Use direct tools for brief, localized checks or edits"));
         assert!(developer.contains("machine-unavailable"));
+        assert!(!developer.contains("capabilities"));
         assert!(!developer.contains("secret-token"));
         assert!(main.get("instructions").is_none());
     }
@@ -10479,8 +10522,8 @@ mod tests {
             .execute(
                 "INSERT INTO peers (
                    id, name, machine_id, hostname, access_token_hash, deployment_role,
-                   filesystem_enabled, bash_enabled, created_at
-                 ) VALUES ('peer', 'Build host', 'machine-build', 'build-1', ?1, 'executor', 1, 0, 'now')",
+                   created_at
+                 ) VALUES ('peer', 'Build host', 'machine-build', 'build-1', ?1, 'executor', 'now')",
                 [token_hash("secret-token")],
             )
             .unwrap();
@@ -10592,8 +10635,6 @@ mod tests {
             machine_id: "machine-mac".to_owned(),
             hostname: "MacMini".to_owned(),
             deployment_role: "executor".to_owned(),
-            filesystem_enabled: true,
-            bash_enabled: true,
             created_at: "now".to_owned(),
             last_seen_at: None,
             online: false,
@@ -10713,8 +10754,6 @@ mod tests {
             machine_id: "machine-mac".to_owned(),
             hostname: "MacMini".to_owned(),
             deployment_role: "executor".to_owned(),
-            filesystem_enabled: true,
-            bash_enabled: true,
             created_at: "now".to_owned(),
             last_seen_at: None,
             online: false,
@@ -10738,8 +10777,6 @@ mod tests {
             machine_id: "machine-mac".to_owned(),
             hostname: "MacMini".to_owned(),
             deployment_role: "executor".to_owned(),
-            filesystem_enabled: true,
-            bash_enabled: true,
             created_at: "now".to_owned(),
             last_seen_at: None,
             online: false,
@@ -11999,8 +12036,8 @@ mod tests {
             .execute(
                 "INSERT INTO peers (
                    id, name, machine_id, hostname, access_token_hash, deployment_role,
-                   filesystem_enabled, bash_enabled, created_at
-                 ) VALUES ('peer', 'Executor', 'machine', 'host', 'hash', 'executor', 1, 1, ?1)",
+                   created_at
+                 ) VALUES ('peer', 'Executor', 'machine', 'host', 'hash', 'executor', ?1)",
                 [&now],
             )
             .unwrap();
@@ -12811,8 +12848,8 @@ mod tests {
             .execute(
                 "INSERT INTO peers (
                    id, name, machine_id, hostname, access_token_hash, deployment_role,
-                   filesystem_enabled, bash_enabled, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'executor', 1, 1, ?6)",
+                   created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'executor', ?6)",
                 params![
                     "peer",
                     "peer",
