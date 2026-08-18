@@ -69,6 +69,8 @@ const HISTORY_PAGE_DEFAULT: usize = 100;
 const HISTORY_PAGE_MAX: usize = 500;
 const CONVERSATION_PAGE_DEFAULT: usize = 50;
 const CONVERSATION_PAGE_MAX: usize = 100;
+const HISTORY_RECORD_PAGE_DEFAULT: usize = 50;
+const HISTORY_RECORD_PAGE_MAX: usize = 100;
 const CONVERSATION_EVENT_PAGE_DEFAULT: usize = 100;
 const CONVERSATION_EVENT_PAGE_MAX: usize = 200;
 const CONVERSATION_OUTPUT_CHUNK_DEFAULT: usize = 16 * 1024;
@@ -453,6 +455,39 @@ struct ConversationState {
 }
 
 #[derive(Serialize)]
+struct HistoryRecordPage {
+    records: Vec<HistoryRecordSummary>,
+    total: usize,
+    page: usize,
+    page_size: usize,
+}
+
+#[derive(Serialize)]
+struct HistoryRecordSummary {
+    id: i64,
+    thread_id: Option<String>,
+    run_id: Option<String>,
+    kind: String,
+    created_at: String,
+    payload_bytes: i64,
+    role: Option<String>,
+    item_type: Option<String>,
+    name: Option<String>,
+    call_id: Option<String>,
+    summary: String,
+}
+
+#[derive(Serialize)]
+struct HistoryRecordDetail {
+    id: i64,
+    thread_id: Option<String>,
+    run_id: Option<String>,
+    kind: String,
+    created_at: String,
+    payload: Value,
+}
+
+#[derive(Serialize)]
 struct ContextState {
     history_messages: usize,
     checkpoint: Option<ContextCheckpoint>,
@@ -519,6 +554,12 @@ struct ConversationQuery {
     before: Option<i64>,
     limit: Option<usize>,
     focus: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct HistoryRecordQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -1304,6 +1345,8 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/browser/sessions/{id}/input", post(browser_user_input))
         .route("/api/conversation", get(conversation))
+        .route("/api/history-records", get(history_records))
+        .route("/api/history-records/{id}", get(history_record_detail))
         .route("/api/conversation/clear", post(clear_conversation))
         .route(
             "/api/conversation/messages/{record_id}/resend",
@@ -2896,6 +2939,140 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
 #[cfg(test)]
 fn load_conversation_state(path: &Path) -> Result<ConversationState> {
     load_conversation_page(path, ConversationQuery::default())
+}
+
+fn history_record_page_size(value: Option<usize>) -> usize {
+    value
+        .unwrap_or(HISTORY_RECORD_PAGE_DEFAULT)
+        .clamp(1, HISTORY_RECORD_PAGE_MAX)
+}
+
+fn concise_history_summary(payload: &Value) -> String {
+    let content = payload
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("output").and_then(Value::as_str))
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .map(str::to_owned)
+        .unwrap_or_else(|| payload.to_string());
+    let mut characters = content.chars();
+    let summary: String = characters.by_ref().take(180).collect();
+    if characters.next().is_some() {
+        format!("{summary}…")
+    } else {
+        summary
+    }
+}
+
+fn history_record_summary(
+    id: i64,
+    thread_id: Option<String>,
+    run_id: Option<String>,
+    kind: String,
+    payload: Value,
+    created_at: String,
+    payload_bytes: i64,
+) -> HistoryRecordSummary {
+    HistoryRecordSummary {
+        id,
+        thread_id,
+        run_id,
+        kind,
+        created_at,
+        payload_bytes,
+        role: payload
+            .get("role")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        item_type: payload
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        name: payload
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        call_id: payload
+            .get("call_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        summary: concise_history_summary(&payload),
+    }
+}
+
+fn load_history_record_page(path: &Path, query: HistoryRecordQuery) -> Result<HistoryRecordPage> {
+    let connection = open_db(path)?;
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = history_record_page_size(query.page_size);
+    let offset = (page - 1).saturating_mul(page_size);
+    let offset = i64::try_from(offset).context("history record page is too large")?;
+    let limit = i64::try_from(page_size).expect("history record page size fits in i64");
+    let total = connection.query_row("SELECT COUNT(*) FROM history_records", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    let records = connection
+        .prepare(
+            "SELECT id, thread_id, run_id, kind, payload, created_at,
+                    length(CAST(payload AS BLOB))
+             FROM history_records
+             ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+        )?
+        .query_map(params![limit, offset], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                serde_json::from_str::<Value>(&row.get::<_, String>(4)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(
+            |(id, thread_id, run_id, kind, payload, created_at, payload_bytes)| {
+                history_record_summary(
+                    id,
+                    thread_id,
+                    run_id,
+                    kind,
+                    payload,
+                    created_at,
+                    payload_bytes,
+                )
+            },
+        )
+        .collect();
+    Ok(HistoryRecordPage {
+        records,
+        total: usize::try_from(total).unwrap_or(usize::MAX),
+        page,
+        page_size,
+    })
+}
+
+fn load_history_record_detail(path: &Path, id: i64) -> Result<Option<HistoryRecordDetail>> {
+    open_db(path)?
+        .query_row(
+            "SELECT id, thread_id, run_id, kind, payload, created_at
+             FROM history_records WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(HistoryRecordDetail {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    payload: serde_json::from_str::<Value>(&row.get::<_, String>(4)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 fn conversation_event_data_from_fields(
@@ -5112,6 +5289,39 @@ async fn conversation(
         )
     })?;
     Ok(Json(conversation))
+}
+
+async fn history_records(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HistoryRecordQuery>,
+) -> ApiResult<HistoryRecordPage> {
+    identity(&state, &headers).await?;
+    load_history_record_page(&state.db_path, query)
+        .map(Json)
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read history records",
+            )
+        })
+}
+
+async fn history_record_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<HistoryRecordDetail> {
+    identity(&state, &headers).await?;
+    load_history_record_detail(&state.db_path, id)
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read history record",
+            )
+        })?
+        .map(Json)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "history record does not exist"))
 }
 
 async fn conversation_run_events(
@@ -12155,6 +12365,51 @@ mod tests {
         assert_eq!(oldest.messages.len(), 1);
         assert_eq!(oldest.messages[0].content, "message 0");
         assert!(!oldest.has_more);
+    }
+
+    #[test]
+    fn history_record_page_is_metadata_first_and_loads_payload_on_demand() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let payload = json!({
+            "type": "function_call",
+            "call_id": "call-record",
+            "name": "read_file",
+            "arguments": "x".repeat(512),
+        });
+        let id = history_record_payload(
+            &open_db(&db).unwrap(),
+            None,
+            Some("main-response"),
+            "response_output",
+            &payload,
+            "2026-08-18T00:00:00Z",
+        )
+        .unwrap();
+
+        let page = load_history_record_page(
+            &db,
+            HistoryRecordQuery {
+                page: Some(1),
+                page_size: Some(20),
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.records.len(), 1);
+        let record = &page.records[0];
+        assert_eq!(record.id, id);
+        assert_eq!(record.kind, "response_output");
+        assert_eq!(record.item_type.as_deref(), Some("function_call"));
+        assert_eq!(record.name.as_deref(), Some("read_file"));
+        assert_eq!(record.call_id.as_deref(), Some("call-record"));
+        assert_eq!(record.run_id.as_deref(), Some("main-response"));
+        assert!(record.payload_bytes > 512);
+        assert!(record.summary.len() < 200);
+
+        let detail = load_history_record_detail(&db, id).unwrap().unwrap();
+        assert_eq!(detail.payload, payload);
     }
 
     #[test]
