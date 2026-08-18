@@ -1,6 +1,6 @@
 [package]
 name = "cybion"
-version = "0.2.10"
+version = "0.2.11"
 edition = "2024"
 license = "MIT"
 description = "An unrestricted, multi-machine AI harness."
