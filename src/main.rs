@@ -1995,14 +1995,16 @@ async fn compact_checkpoint_once(
 fn checkpoint_developer_prompt() -> &'static str {
     r#"# Checkpoint compaction
 
-Compact the supplied context into the next small current-state checkpoint. Do not recap or preserve the complete conversation: raw history is permanent and is discovered later with `search_thread_history`.
+Compact the supplied context into durable working memory for the next agent turn. Do not recap or preserve the complete conversation: raw history is permanent and is discovered later with `search_thread_history`.
+
+The primary purpose is to preserve the concepts, terminology, and authoritative resources an agent needs to understand and continue this work. Do not let the immediate task status displace that working knowledge. When output space requires a trade-off, retain concepts, terms, and resource locations before resolved narrative or transient progress detail.
 
 ## Include
 
-- The current objective and next useful step.
+- Concepts, terminology, domain meanings, identifiers, and established technical behavior needed to understand the work.
+- Authoritative resources needed to complete the work: repositories, files, directories, symbols, URLs, services, databases, migrations, configuration, data locations, and commands. Preserve exact paths and identifiers.
 - Active decisions and constraints.
-- Unfinished work.
-- Current verified environment or tool state.
+- The current objective, next useful step, unfinished work, and current verified environment or tool state.
 - Exact Cybion history record IDs for every nontrivial item, plus precise retrieval keywords when older detail may be needed.
 
 Remove resolved narrative unless it remains an active constraint. Do not answer the user, call tools, or invent facts.
@@ -2011,11 +2013,16 @@ Remove resolved narrative unless it remains an active constraint. Do not answer 
 
 Return Markdown only, with these sections in order:
 
-1. `# Current state`
-2. `## Objective and next step`
-3. `## Active decisions and constraints`
-4. `## Open work and evidence routes`
-5. `## Long-term facts`
+1. `# Durable working context`
+2. `## Concepts and terminology`
+3. `## Resources and authoritative locations`
+4. `## Active decisions and constraints`
+5. `## Current objective and next step`
+6. `## Open work and evidence routes`
+
+`## Concepts and terminology` must be a concise Markdown list that defines the project-specific language, domain meanings, identifiers, and behavior an agent needs to interpret the remaining context. Keep concepts that remain useful even after the immediate task is resolved.
+
+`## Resources and authoritative locations` must be a concise Markdown list of the exact resources required to continue the work. Include paths, symbols, URLs, service names, database tables, migrations, configuration keys, data locations, or commands when they are authoritative. Cite the relevant history record ID beside each nontrivial item.
 
 `## Open work and evidence routes` must include one fenced `json` array. Each entry must contain exactly `topic_key`, `status`, `message_range`, and `search_keywords`:
 
@@ -2025,7 +2032,7 @@ Return Markdown only, with these sections in order:
 
 Include only active work or active constraints; this is a retrieval route, not a history directory.
 
-`## Long-term facts` must be a concise Markdown list of facts that should remain visible after this checkpoint replaces its input: explicit user collaboration preferences, project and authoritative-data paths, durable configuration, and verified device or service state. Cite the relevant history record ID beside each nontrivial fact. Omit resolved, uncertain, or irrelevant facts. Do not infer personality or retain credentials, tokens, passwords, API keys, cookies, or secrets.
+All sections must omit resolved, uncertain, or irrelevant facts. Do not infer personality or retain credentials, tokens, passwords, API keys, cookies, or secrets.
 
 An input developer item may be an intermediate checkpoint from an earlier compaction pass. It covers earlier history; combine its state with the raw protocol items that follow it into one new checkpoint."#
 }
@@ -11226,7 +11233,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_413_writes_current_state_then_retries_once() {
+    async fn http_413_writes_durable_working_context_then_retries_once() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
@@ -11240,7 +11247,7 @@ mod tests {
                 return (StatusCode::PAYLOAD_TOO_LARGE, "length limit exceeded").into_response();
             }
             let text = if request_number == 2 {
-                "# Current state\n\n## Objective and next step\nShip the context-overflow recovery.\n\n## Long-term facts\n- Deployment evidence was inspected. (record #1)"
+                "# Durable working context\n\n## Concepts and terminology\n- Context checkpoint: durable working memory after a context overflow. (record #1)\n\n## Resources and authoritative locations\n- `src/main.rs`: checkpoint compaction implementation. (record #1)\n\n## Current objective and next step\nShip the context-overflow recovery."
             } else {
                 "Context recovery completed."
             };
@@ -11368,7 +11375,7 @@ mod tests {
             .unwrap();
         assert!(checkpoint.id > current.id);
         assert!(checkpoint.summary.contains("context-overflow recovery"));
-        assert!(checkpoint.summary.contains("## Long-term facts"));
+        assert!(checkpoint.summary.contains("## Concepts and terminology"));
         assert!(matches!(
             received.recv().await,
             Some(AgentEvent::Status { stage, .. }) if stage == "checkpointing"
@@ -11395,23 +11402,22 @@ mod tests {
                 .unwrap()
                 .contains("# Checkpoint compaction")
         );
+        let prompt = requests[1]["input"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("## Concepts and terminology"));
+        assert!(prompt.contains("## Resources and authoritative locations"));
+        assert!(prompt.contains("## Open work and evidence routes"));
+        assert!(prompt.contains("search_keywords"));
         assert!(
-            requests[1]["input"][0]["content"]
-                .as_str()
-                .unwrap()
-                .contains("## Long-term facts")
+            prompt.find("## Concepts and terminology").unwrap()
+                < prompt
+                    .find("## Resources and authoritative locations")
+                    .unwrap()
         );
         assert!(
-            requests[1]["input"][0]["content"]
-                .as_str()
+            prompt
+                .find("## Resources and authoritative locations")
                 .unwrap()
-                .contains("## Open work and evidence routes")
-        );
-        assert!(
-            requests[1]["input"][0]["content"]
-                .as_str()
-                .unwrap()
-                .contains("search_keywords")
+                < prompt.find("## Current objective and next step").unwrap()
         );
         assert_eq!(requests[2]["input"].as_array().unwrap().len(), 2);
         assert!(
