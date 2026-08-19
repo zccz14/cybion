@@ -540,6 +540,7 @@ struct ResponsesRuntime<'a> {
     client: &'a reqwest::Client,
     config: &'a Config,
     db_path: &'a Path,
+    upstream_thread_id: &'a str,
 }
 
 struct ResponseAuditFinish<'a> {
@@ -708,6 +709,7 @@ enum SubthreadStreamMessage {
 struct QueuedSubthread {
     id: String,
     model: String,
+    upstream_thread_id: String,
 }
 
 struct PendingSubthreadJoin {
@@ -1075,7 +1077,7 @@ fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
     let now_epoch = chrono::Utc::now().timestamp();
     let jobs = transaction
         .prepare(
-            "SELECT thread.id, thread.model
+            "SELECT thread.id, thread.model, thread.upstream_thread_id
              FROM subthreads thread
              WHERE thread.status = 'queued' AND thread.goal_state = 'active'
                AND (thread.next_retry_at IS NULL OR thread.next_retry_at <= ?1)
@@ -1086,6 +1088,7 @@ fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
             Ok(QueuedSubthread {
                 id,
                 model: row.get(1)?,
+                upstream_thread_id: row.get(2)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1144,6 +1147,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                 &state.client,
                 &config,
                 &state.db_path,
+                &job.upstream_thread_id,
                 &state.skills,
                 sink,
                 cancellation,
@@ -1868,6 +1872,7 @@ async fn compact_checkpoint_context(
     client: &reqwest::Client,
     config: &Config,
     db_path: &Path,
+    upstream_thread_id: &str,
     audit: ResponseAuditContext,
     context: &CompiledContext,
     cancellation: watch::Receiver<bool>,
@@ -1881,6 +1886,7 @@ async fn compact_checkpoint_context(
             client,
             config,
             db_path,
+            upstream_thread_id,
             audit.with_kind("compaction"),
             input,
             cancellation.clone(),
@@ -1913,6 +1919,7 @@ async fn compact_checkpoint_context(
                 client,
                 config,
                 db_path,
+                upstream_thread_id,
                 audit.with_kind("compaction"),
                 input,
                 cancellation.clone(),
@@ -1955,6 +1962,7 @@ async fn compact_checkpoint_once(
     client: &reqwest::Client,
     config: &Config,
     db_path: &Path,
+    upstream_thread_id: &str,
     audit: ResponseAuditContext,
     items: Vec<Value>,
     mut cancellation: watch::Receiver<bool>,
@@ -1970,6 +1978,7 @@ async fn compact_checkpoint_once(
     let request = client
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
+        .header("thread-id", upstream_thread_id)
         .json(&body)
         .timeout(CHECKPOINT_COMPACTION_REQUEST_TIMEOUT);
     let completed = send_audited_responses_request(
@@ -2073,6 +2082,7 @@ async fn compact_context_after_overflow(
                     runtime.client,
                     runtime.config,
                     runtime.db_path,
+                    runtime.upstream_thread_id,
                     checkpoint_audit,
                     &snapshot,
                     cancellation,
@@ -2097,6 +2107,7 @@ async fn compact_context_after_overflow(
                 runtime.client,
                 runtime.config,
                 runtime.db_path,
+                runtime.upstream_thread_id,
                 ResponseAuditContext::for_request(
                     "compaction",
                     Some(id.clone()),
@@ -2185,9 +2196,11 @@ async fn create_voice_script(
     db_path: &Path,
     content: &str,
 ) -> Result<String> {
+    let upstream_thread_id = main_upstream_thread_id(db_path)?;
     let request = client
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
+        .header("thread-id", upstream_thread_id)
         .json(&json!({
             "model": config.voice_script_model,
             "input": prepend_developer_message(
@@ -2232,9 +2245,11 @@ async fn create_voice_turn_decision(
     latest_user_message: &str,
     latest_assistant_message: &str,
 ) -> Result<VoiceTurnDecisionResponse> {
+    let upstream_thread_id = main_upstream_thread_id(db_path)?;
     let request = client
         .post(format!("{}/responses", config.openai_base_url))
         .bearer_auth(&config.openai_api_key)
+        .header("thread-id", upstream_thread_id)
         .json(&json!({
             "model": config.voice_turn_model,
             "input": prepend_developer_message(voice_turn_developer_prompt(), vec![json!({
@@ -3269,6 +3284,21 @@ fn migrate_subthread_scheduler_schema(connection: &Connection) -> Result<()> {
     if !columns.iter().any(|column| column == "outcome_record_id") {
         connection.execute_batch("ALTER TABLE subthreads ADD COLUMN outcome_record_id INTEGER;")?;
     }
+    if !columns.iter().any(|column| column == "upstream_thread_id") {
+        connection.execute_batch("ALTER TABLE subthreads ADD COLUMN upstream_thread_id TEXT;")?;
+        let mut statement =
+            connection.prepare("SELECT id FROM subthreads WHERE upstream_thread_id IS NULL")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        for id in ids {
+            connection.execute(
+                "UPDATE subthreads SET upstream_thread_id = ?1 WHERE id = ?2",
+                params![Uuid::new_v4().to_string(), id],
+            )?;
+        }
+    }
     connection.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS subthreads_outcome_record
          ON subthreads(outcome_record_id)
@@ -3513,6 +3543,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            blocked_reason TEXT,
            status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
            model TEXT NOT NULL,
+           upstream_thread_id TEXT NOT NULL,
            from_record_id INTEGER NOT NULL REFERENCES history_records(id),
            result TEXT,
            outcome_record_id INTEGER REFERENCES history_records(id),
@@ -5924,15 +5955,16 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
     let inserted = inserted.and_then(|_| {
         transaction.execute(
             "INSERT INTO subthreads (
-           id, title, task, completion_criteria, goal_state, status, model,
+           id, title, task, completion_criteria, goal_state, status, model, upstream_thread_id,
            from_record_id, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, 'active', 'queued', ?5, ?6, ?7, ?7)",
+         ) VALUES (?1, ?2, ?3, ?4, 'active', 'queued', ?5, ?6, ?7, ?8, ?8)",
             params![
                 id,
                 title,
                 task,
                 completion_criteria,
                 model,
+                Uuid::new_v4().to_string(),
                 from_record_id,
                 now,
             ],
@@ -6226,6 +6258,27 @@ async fn speech(
         .into_response())
 }
 
+fn main_upstream_thread_id(path: &Path) -> Result<String> {
+    let connection = open_db(path)?;
+    let current: Option<String> = connection
+        .query_row(
+            "SELECT value FROM app_meta WHERE key = 'upstream_main_thread_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(current) = current.filter(|value| Uuid::parse_str(value).is_ok()) {
+        return Ok(current);
+    }
+    let upstream_thread_id = Uuid::new_v4().to_string();
+    connection.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('upstream_main_thread_id', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [&upstream_thread_id],
+    )?;
+    Ok(upstream_thread_id)
+}
+
 async fn agent_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6326,10 +6379,12 @@ async fn process_latest_main_response(
         if config.deployment_role != "controller" {
             return Err(anyhow!("tool-executor machines cannot run the main thread"));
         }
+        let upstream_thread_id = main_upstream_thread_id(&state.db_path)?;
         run_agent_items(
             &state.client,
             &config,
             &state.db_path,
+            &upstream_thread_id,
             &state.skills,
             sink,
             cancellation,
@@ -6385,10 +6440,12 @@ async fn run_agent(
     for message in messages {
         append_conversation(db_path, &message, None)?;
     }
+    let upstream_thread_id = main_upstream_thread_id(db_path)?;
     run_agent_items(
         client,
         config,
         db_path,
+        &upstream_thread_id,
         skills,
         events,
         cancellation,
@@ -6410,6 +6467,7 @@ async fn run_agent_items(
     client: &reqwest::Client,
     config: &Config,
     db_path: &Path,
+    upstream_thread_id: &str,
     skills: &Arc<StdRwLock<SkillCatalog>>,
     events: AgentEventSink<'_>,
     mut cancellation: watch::Receiver<bool>,
@@ -6457,6 +6515,7 @@ async fn run_agent_items(
         let request = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
+            .header("thread-id", upstream_thread_id)
             .json(&body);
         let response = match send_audited_responses_request(
             db_path,
@@ -6479,6 +6538,7 @@ async fn run_agent_items(
                         client,
                         config,
                         db_path,
+                        upstream_thread_id,
                     },
                     &context,
                     &events,
@@ -9600,6 +9660,7 @@ mod tests {
             &reqwest::Client::new(),
             &checkpoint_compaction_test_config(format!("http://{address}")),
             &db,
+            "11111111-1111-4111-8111-111111111111",
             ResponseAuditContext::for_request("compaction", None, Some(10), Some(13)),
             &checkpoint_compaction_test_context(&["one", "two", "three", "four"]),
             cancellation,
@@ -9671,6 +9732,7 @@ mod tests {
             &reqwest::Client::new(),
             &checkpoint_compaction_test_config(format!("http://{address}")),
             &db,
+            "11111111-1111-4111-8111-111111111111",
             ResponseAuditContext::for_request("compaction", None, Some(10), Some(13)),
             &checkpoint_compaction_test_context(&["one", "two", "three", "four"]),
             cancellation,
@@ -9734,6 +9796,7 @@ mod tests {
             &reqwest::Client::new(),
             &checkpoint_compaction_test_config(format!("http://{address}")),
             &db,
+            "11111111-1111-4111-8111-111111111111",
             ResponseAuditContext::for_request("compaction", None, Some(10), Some(10)),
             &checkpoint_compaction_test_context(&["uncompressible"]),
             cancellation,
@@ -9780,6 +9843,7 @@ mod tests {
             &reqwest::Client::new(),
             &checkpoint_compaction_test_config(format!("http://{address}")),
             &db,
+            "11111111-1111-4111-8111-111111111111",
             ResponseAuditContext::for_request("compaction", None, Some(10), Some(11)),
             &checkpoint_compaction_test_context(&["one", "two"]),
             cancellation,
@@ -11348,6 +11412,7 @@ mod tests {
             &reqwest::Client::new(),
             &config,
             &db,
+            "11111111-1111-4111-8111-111111111111",
             &Arc::new(StdRwLock::new(SkillCatalog::default())),
             AgentEventSink {
                 thread_id: None,
@@ -11531,6 +11596,7 @@ mod tests {
             &reqwest::Client::new(),
             &config,
             &db,
+            "11111111-1111-4111-8111-111111111111",
             &Arc::new(StdRwLock::new(SkillCatalog::default())),
             AgentEventSink {
                 thread_id: None,
@@ -11689,6 +11755,7 @@ mod tests {
             &reqwest::Client::new(),
             &config,
             &db,
+            "11111111-1111-4111-8111-111111111111",
             &Arc::new(StdRwLock::new(SkillCatalog::default())),
             AgentEventSink {
                 thread_id: Some("child"),
@@ -14507,11 +14574,11 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO subthreads (
-                   id, title, task, completion_criteria, goal_state, status, model,
+                   id, title, task, completion_criteria, goal_state, status, model, upstream_thread_id,
                    from_record_id, created_at, updated_at
                  ) VALUES (
                    'discarded-child', 'Discarded child', 'Verify',
-                   'Verified', 'active', 'queued', 'test-model', ?1, 'now', 'now'
+                   'Verified', 'active', 'queued', 'test-model', '11111111-1111-4111-8111-111111111111', ?1, 'now', 'now'
                  )",
                 [fork_record_id],
             )
@@ -14609,10 +14676,10 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO subthreads (
-                   id, title, task, completion_criteria, goal_state, status, model,
+                   id, title, task, completion_criteria, goal_state, status, model, upstream_thread_id,
                    from_record_id, created_at, updated_at
                  ) VALUES ('child-a', 'Verify', 'Verify the release', 'Release is verified.',
-                           'active', 'queued', 'test', ?1, 'now', 'now')",
+                           'active', 'queued', 'test', '11111111-1111-4111-8111-111111111111', ?1, 'now', 'now')",
                 [fork_id],
             )
             .unwrap();
@@ -14947,5 +15014,83 @@ mod tests {
         .await;
         assert!(!result.output.starts_with("error:"));
         assert_eq!(std::fs::read(destination).unwrap(), b"durable file");
+    }
+
+    #[test]
+    fn main_upstream_thread_id_is_a_stable_rfc4122_uuid() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let first = main_upstream_thread_id(&db).unwrap();
+        let second = main_upstream_thread_id(&db).unwrap();
+        assert_eq!(first, second);
+        assert!(Uuid::parse_str(&first).is_ok());
+    }
+
+    #[test]
+    fn legacy_subthreads_receive_distinct_upstream_thread_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        let parent_id = history_record_payload(
+            &connection,
+            None,
+            "input",
+            &json!({"role":"user","content":"parent"}),
+            "now",
+        )
+        .unwrap();
+        connection
+            .execute_batch("ALTER TABLE subthreads DROP COLUMN upstream_thread_id;")
+            .unwrap();
+        connection.execute(
+            "INSERT INTO subthreads (id,title,task,completion_criteria,goal_state,status,model,from_record_id,created_at,updated_at) VALUES ('one','one','task','done','active','queued','model',?1,'now','now'),('two','two','task','done','active','queued','model',?1,'now','now')",
+            [parent_id],
+        ).unwrap();
+        migrate_subthread_scheduler_schema(&connection).unwrap();
+        let ids = connection
+            .prepare("SELECT upstream_thread_id FROM subthreads ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids.iter().all(|id| Uuid::parse_str(id).is_ok()));
+    }
+
+    #[tokio::test]
+    async fn normal_and_compaction_requests_keep_the_scope_thread_id() {
+        async fn responses(headers: HeaderMap, Json(_request): Json<Value>) -> String {
+            let thread_id = headers.get("thread-id").unwrap().to_str().unwrap();
+            assert_eq!(thread_id, "11111111-1111-4111-8111-111111111111");
+            checkpoint_compaction_response("checkpoint")
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/responses", post(responses)))
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let config = checkpoint_compaction_test_config(format!("http://{address}"));
+        let (_cancellation_sender, cancellation) = watch::channel(false);
+        compact_checkpoint_context(
+            &reqwest::Client::new(),
+            &config,
+            &db,
+            "11111111-1111-4111-8111-111111111111",
+            ResponseAuditContext::for_request("compaction", None, Some(1), Some(1)),
+            &checkpoint_compaction_test_context(&["one"]),
+            cancellation,
+        )
+        .await
+        .unwrap();
+        server.abort();
     }
 }
