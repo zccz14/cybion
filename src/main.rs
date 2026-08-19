@@ -76,10 +76,7 @@ const HISTORY_RECORD_PAGE_DEFAULT: usize = 50;
 const HISTORY_RECORD_PAGE_MAX: usize = 100;
 const CONVERSATION_OUTPUT_CHUNK_DEFAULT: usize = 16 * 1024;
 const CONVERSATION_OUTPUT_CHUNK_MAX: usize = 64 * 1024;
-const CHECKPOINT_COMPACTION_INPUT_BYTES: usize = 64 * 1024;
-const CHECKPOINT_COMPACTION_SEGMENT_BYTES: usize = 48 * 1024;
 const CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS: usize = 4_096;
-const CHECKPOINT_COMPACTION_MAX_ROUNDS: usize = 8;
 const CHECKPOINT_COMPACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const SKILL_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 const COMMAND_RUNS_PAGE_DEFAULT: i64 = 20;
@@ -506,6 +503,7 @@ struct ContextCheckpointPredecessor {
 
 struct CompiledContext {
     items: Vec<Value>,
+    record_ids: Vec<i64>,
     idx_head: i64,
     idx_tail: i64,
 }
@@ -515,6 +513,18 @@ impl std::ops::Deref for CompiledContext {
 
     fn deref(&self) -> &Self::Target {
         &self.items
+    }
+}
+
+impl CompiledContext {
+    fn from_records(idx_head: i64, idx_tail: i64, records: Vec<(i64, Value)>) -> Self {
+        let (record_ids, items) = records.into_iter().unzip();
+        Self {
+            items,
+            record_ids,
+            idx_head,
+            idx_tail,
+        }
     }
 }
 
@@ -1859,50 +1869,86 @@ async fn compact_checkpoint_context(
     config: &Config,
     db_path: &Path,
     audit: ResponseAuditContext,
-    items: Vec<Value>,
+    context: &CompiledContext,
     cancellation: watch::Receiver<bool>,
 ) -> Result<String> {
-    let mut batches = checkpoint_compaction_batches(items);
-    for _ in 0..CHECKPOINT_COMPACTION_MAX_ROUNDS {
-        if batches.len() == 1 {
-            return compact_checkpoint_once(
-                client,
-                config,
-                db_path,
-                audit.with_kind("compaction"),
-                batches.pop().expect("one summary batch exists"),
-                cancellation,
-            )
-            .await;
+    let mut prefix = None;
+    let mut raw_items = context.items.as_slice();
+    let mut raw_record_ids = context.record_ids.as_slice();
+    loop {
+        let input = checkpoint_compaction_input(prefix.as_ref(), raw_items);
+        let overflow = match compact_checkpoint_once(
+            client,
+            config,
+            db_path,
+            audit.with_kind("compaction"),
+            input,
+            cancellation.clone(),
+        )
+        .await
+        {
+            Ok(checkpoint) => return Ok(checkpoint),
+            Err(cause) if is_context_overflow(&cause) => cause,
+            Err(cause) => return Err(cause),
+        };
+        if raw_items.is_empty() {
+            return Err(overflow);
         }
-        let input_bytes = checkpoint_compaction_bytes(&batches);
-        let mut summaries = Vec::with_capacity(batches.len());
-        for batch in batches {
-            let compacted = compact_checkpoint_once(
+        if raw_items.len() == 1 {
+            // RECOVERY: this durable record remains available through history retrieval, but it
+            // cannot enter the checkpoint without overflowing the upstream context window.
+            tracing::warn!(
+                record_id = raw_record_ids[0],
+                "excluding uncompressible record from checkpoint"
+            );
+            raw_items = &raw_items[1..];
+            raw_record_ids = &raw_record_ids[1..];
+            continue;
+        }
+
+        let mut left_len = raw_items.len().div_ceil(2);
+        loop {
+            let input = checkpoint_compaction_input(prefix.as_ref(), &raw_items[..left_len]);
+            match compact_checkpoint_once(
                 client,
                 config,
                 db_path,
                 audit.with_kind("compaction"),
-                batch,
+                input,
                 cancellation.clone(),
             )
-            .await?;
-            summaries.push(compacted_checkpoint_item(&compacted));
+            .await
+            {
+                Ok(checkpoint) => {
+                    prefix = Some(compacted_checkpoint_item(&checkpoint));
+                    raw_items = &raw_items[left_len..];
+                    raw_record_ids = &raw_record_ids[left_len..];
+                    break;
+                }
+                Err(cause) if is_context_overflow(&cause) && left_len > 1 => {
+                    left_len = left_len.div_ceil(2);
+                }
+                Err(cause) if is_context_overflow(&cause) => {
+                    // RECOVERY: this durable record remains available through history retrieval,
+                    // but it cannot enter the checkpoint even as the only raw record.
+                    tracing::warn!(
+                        record_id = raw_record_ids[0],
+                        "excluding uncompressible record from checkpoint"
+                    );
+                    raw_items = &raw_items[1..];
+                    raw_record_ids = &raw_record_ids[1..];
+                    break;
+                }
+                Err(cause) => return Err(cause),
+            }
         }
-        let summary_bytes = checkpoint_compaction_bytes(std::slice::from_ref(&summaries));
-        if summary_bytes >= input_bytes {
-            return Err(anyhow!(
-                "context checkpoint did not reduce its input ({} bytes -> {} bytes)",
-                input_bytes,
-                summary_bytes
-            ));
-        }
-        batches = checkpoint_compaction_batches(summaries);
     }
-    Err(anyhow!(
-        "context checkpoint exceeded {} reduction rounds",
-        CHECKPOINT_COMPACTION_MAX_ROUNDS
-    ))
+}
+
+fn checkpoint_compaction_input(prefix: Option<&Value>, raw_items: &[Value]) -> Vec<Value> {
+    let mut input = prefix.into_iter().cloned().collect::<Vec<_>>();
+    input.extend(raw_items.iter().cloned());
+    input
 }
 
 async fn compact_checkpoint_once(
@@ -1979,83 +2025,9 @@ Return Markdown only, with these sections in order:
 
 Include only active work or active constraints; this is a retrieval route, not a history directory.
 
-`## Long-term facts` must be a concise Markdown list of facts that should remain visible after this checkpoint replaces its input: explicit user collaboration preferences, project and authoritative-data paths, durable configuration, and verified device or service state. Cite the relevant history record ID beside each nontrivial fact. Omit resolved, uncertain, or irrelevant facts. Do not infer personality or retain credentials, tokens, passwords, API keys, cookies, or secrets."#
-}
+`## Long-term facts` must be a concise Markdown list of facts that should remain visible after this checkpoint replaces its input: explicit user collaboration preferences, project and authoritative-data paths, durable configuration, and verified device or service state. Cite the relevant history record ID beside each nontrivial fact. Omit resolved, uncertain, or irrelevant facts. Do not infer personality or retain credentials, tokens, passwords, API keys, cookies, or secrets.
 
-fn checkpoint_compaction_batches(items: Vec<Value>) -> Vec<Vec<Value>> {
-    let mut batches = Vec::new();
-    let mut batch = Vec::new();
-    let mut bytes = 0;
-    for item in items.into_iter().flat_map(checkpoint_compaction_segments) {
-        let item_bytes = serde_json::to_vec(&item)
-            .expect("checkpoint compaction item is serializable")
-            .len();
-        if !batch.is_empty() && bytes + item_bytes > CHECKPOINT_COMPACTION_INPUT_BYTES {
-            batches.push(std::mem::take(&mut batch));
-            bytes = 0;
-        }
-        bytes += item_bytes;
-        batch.push(item);
-    }
-    if !batch.is_empty() {
-        batches.push(batch);
-    }
-    batches
-}
-
-fn checkpoint_compaction_bytes(batches: &[Vec<Value>]) -> usize {
-    batches
-        .iter()
-        .flatten()
-        .map(|item| {
-            serde_json::to_vec(item)
-                .expect("checkpoint compaction item is serializable")
-                .len()
-        })
-        .sum()
-}
-
-fn checkpoint_compaction_segments(item: Value) -> Vec<Value> {
-    let serialized = serde_json::to_string(&item).expect("context item is serializable");
-    if serialized.len() <= CHECKPOINT_COMPACTION_SEGMENT_BYTES {
-        return vec![item];
-    }
-    let segments = split_utf8_by_bytes(&serialized, CHECKPOINT_COMPACTION_SEGMENT_BYTES);
-    let count = segments.len();
-    segments
-        .into_iter()
-        .enumerate()
-        .map(|(index, segment)| {
-            json!({
-                "role": "developer",
-                "content": format!(
-                    "[Cybion checkpoint-compaction segment {}/{}; preserve it and combine every segment before compacting.]\n{}",
-                    index + 1,
-                    count,
-                    segment,
-                )
-            })
-        })
-        .collect()
-}
-
-fn split_utf8_by_bytes(value: &str, limit: usize) -> Vec<&str> {
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut bytes = 0;
-    for (index, character) in value.char_indices() {
-        let width = character.len_utf8();
-        if bytes + width > limit && start < index {
-            segments.push(&value[start..index]);
-            start = index;
-            bytes = 0;
-        }
-        bytes += width;
-    }
-    if start < value.len() {
-        segments.push(&value[start..]);
-    }
-    segments
+An input developer item may be an intermediate checkpoint from an earlier compaction pass. It covers earlier history; combine its state with the raw protocol items that follow it into one new checkpoint."#
 }
 
 async fn compact_context_after_overflow(
@@ -2095,7 +2067,7 @@ async fn compact_context_after_overflow(
                     runtime.config,
                     runtime.db_path,
                     checkpoint_audit,
-                    snapshot.items,
+                    &snapshot,
                     cancellation,
                 )
                 .await?;
@@ -2124,7 +2096,7 @@ async fn compact_context_after_overflow(
                     Some(context.idx_head),
                     Some(context.idx_tail),
                 ),
-                context.items.clone(),
+                context,
                 cancellation,
             )
             .await?;
@@ -2491,24 +2463,27 @@ fn load_protocol_items(
     thread_id: Option<&str>,
     first_id: i64,
     idx_tail: i64,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<(i64, Value)>> {
     connection
         .prepare(
-            "SELECT payload FROM history_records
+            "SELECT id, payload FROM history_records
              WHERE thread_id IS ?1
                AND id >= ?2 AND id <= ?3
                AND kind IN ('input', 'response_output', 'tool_output', 'checkpoint')
              ORDER BY id",
         )?
         .query_map(params![thread_id, first_id, idx_tail], |row| {
-            serde_json::from_str::<Value>(&row.get::<_, String>(0)?)
-                .map_err(|_| rusqlite::Error::InvalidQuery)
+            Ok((
+                row.get::<_, i64>(0)?,
+                serde_json::from_str::<Value>(&row.get::<_, String>(1)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map(|items| {
             items
                 .into_iter()
-                .map(|item| context_tool_output_item(&item))
+                .map(|(id, item)| (id, context_tool_output_item(&item)))
                 .collect()
         })
         .map_err(Into::into)
@@ -2563,12 +2538,11 @@ fn compile_main_context(db_path: &Path, idx_tail: i64) -> Result<CompiledContext
         return Err(anyhow!("idx_tail must be a protocol record"));
     }
     let idx_head = context_idx_head(&connection, None, idx_tail)?;
-    let items = load_protocol_items(&connection, None, idx_head, idx_tail)?;
-    Ok(CompiledContext {
-        items,
+    Ok(CompiledContext::from_records(
         idx_head,
         idx_tail,
-    })
+        load_protocol_items(&connection, None, idx_head, idx_tail)?,
+    ))
 }
 
 fn compile_subthread_context(
@@ -2621,26 +2595,21 @@ fn compile_subthread_context(
         )
         .optional()?;
     if let Some(checkpoint) = own_checkpoint {
-        let items = load_protocol_items(&connection, Some(thread_id), checkpoint.id, idx_tail)?;
-        return Ok(CompiledContext {
-            items,
-            idx_head: checkpoint.id,
+        return Ok(CompiledContext::from_records(
+            checkpoint.id,
             idx_tail,
-        });
+            load_protocol_items(&connection, Some(thread_id), checkpoint.id, idx_tail)?,
+        ));
     }
     let idx_head = context_idx_head(&connection, None, fork_from_id)?;
-    let mut items = load_protocol_items(&connection, None, idx_head, fork_from_id)?;
-    items.extend(load_protocol_items(
+    let mut records = load_protocol_items(&connection, None, idx_head, fork_from_id)?;
+    records.extend(load_protocol_items(
         &connection,
         Some(thread_id),
         fork_from_id,
         idx_tail,
     )?);
-    Ok(CompiledContext {
-        items,
-        idx_head,
-        idx_tail,
-    })
+    Ok(CompiledContext::from_records(idx_head, idx_tail, records))
 }
 
 fn compile_latest_context(db_path: &Path, thread_id: Option<&str>) -> Result<CompiledContext> {
@@ -9535,35 +9504,71 @@ mod tests {
         assert_eq!(filtered.items[0].request_kind, "voice_script");
     }
 
-    #[test]
-    fn checkpoint_compaction_segments_preserve_utf8_boundaries() {
-        let content = "你".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES);
-        let segments = split_utf8_by_bytes(&content, CHECKPOINT_COMPACTION_SEGMENT_BYTES);
+    fn checkpoint_compaction_response(text: &str) -> String {
+        let item = json!({
+            "type": "message",
+            "content": [{"type": "output_text", "text": text}],
+        });
+        format!(
+            "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+            json!({"type":"response.output_item.done","item":item}),
+            json!({"type":"response.completed","response":{"output":[]}}),
+        )
+    }
 
-        assert!(
-            segments
-                .iter()
-                .all(|segment| segment.len() <= CHECKPOINT_COMPACTION_SEGMENT_BYTES)
-        );
-        assert_eq!(segments.concat(), content);
+    fn checkpoint_compaction_test_config(openai_base_url: String) -> Config {
+        Config {
+            root_user_id: "root".to_owned(),
+            auth_url: "https://auth.example.com".to_owned(),
+            openai_base_url,
+            openai_api_key: "test-key".to_owned(),
+            default_model: "test-model".to_owned(),
+            voice_script_model: "voice-model".to_owned(),
+            voice_turn_model: DEFAULT_VOICE_TURN_MODEL_ID.to_owned(),
+            voice_script_max_chars: 150,
+            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
+            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
+            machine_id: "machine".to_owned(),
+            deployment_role: "controller".to_owned(),
+        }
+    }
+
+    fn checkpoint_compaction_test_context(contents: &[&str]) -> CompiledContext {
+        let records = contents
+            .iter()
+            .enumerate()
+            .map(|(index, content)| {
+                (
+                    i64::try_from(index + 10).unwrap(),
+                    json!({"role":"user","content":content}),
+                )
+            })
+            .collect::<Vec<_>>();
+        CompiledContext::from_records(10, i64::try_from(contents.len() + 9).unwrap(), records)
     }
 
     #[tokio::test]
-    async fn checkpoint_compaction_merges_chunked_input_before_returning_a_checkpoint() {
+    async fn checkpoint_compaction_recursively_folds_the_summary_into_the_raw_suffix() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
-        ) -> String {
-            requests.lock().await.push(request);
-            let item = json!({
-                "type": "message",
-                "content": [{"type": "output_text", "text": "chunk checkpoint"}],
-            });
-            format!(
-                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
-                json!({"type":"response.output_item.done","item":item}),
-                json!({"type":"response.completed","response":{"output":[]}}),
-            )
+        ) -> Response {
+            let request_number = {
+                let mut requests = requests.lock().await;
+                requests.push(request);
+                requests.len() - 1
+            };
+            match request_number {
+                0 | 2 => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({"error":{"code":"context_length_exceeded","message":"context too large"}})),
+                )
+                    .into_response(),
+                1 => checkpoint_compaction_response("left checkpoint").into_response(),
+                3 => checkpoint_compaction_response("middle checkpoint").into_response(),
+                4 => checkpoint_compaction_response("final checkpoint").into_response(),
+                _ => panic!("unexpected compaction request {request_number}"),
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -9580,54 +9585,204 @@ mod tests {
             .await
             .unwrap();
         });
-        let config = Config {
-            root_user_id: "root".to_owned(),
-            auth_url: "https://auth.example.com".to_owned(),
-            openai_base_url: format!("http://{address}"),
-            openai_api_key: "test-key".to_owned(),
-            default_model: "test-model".to_owned(),
-            voice_script_model: "voice-model".to_owned(),
-            voice_turn_model: DEFAULT_VOICE_TURN_MODEL_ID.to_owned(),
-            voice_script_max_chars: 150,
-            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
-            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            machine_id: "machine".to_owned(),
-            deployment_role: "controller".to_owned(),
-        };
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
-
         let (_cancellation_sender, cancellation) = watch::channel(false);
         let result = compact_checkpoint_context(
             &reqwest::Client::new(),
-            &config,
+            &checkpoint_compaction_test_config(format!("http://{address}")),
             &db,
-            ResponseAuditContext::for_request("compaction", None, None, None),
-            vec![json!({
-                "role": "user",
-                "content": "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2),
-            })],
+            ResponseAuditContext::for_request("compaction", None, Some(10), Some(13)),
+            &checkpoint_compaction_test_context(&["one", "two", "three", "four"]),
             cancellation,
         )
         .await
         .unwrap();
         server.abort();
 
-        assert_eq!(result, "chunk checkpoint");
+        assert_eq!(result, "final checkpoint");
         let requests = requests.lock().await;
-        assert_eq!(requests.len(), 3);
-        assert!(requests.iter().all(|request| {
-            serde_json::to_vec(&request["input"]).unwrap().len()
-                <= CHECKPOINT_COMPACTION_INPUT_BYTES
-        }));
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0]["input"].as_array().unwrap().len(), 5);
+        assert_eq!(requests[1]["input"][1]["content"], "one");
+        assert_eq!(requests[1]["input"][2]["content"], "two");
+        assert_eq!(requests[2]["input"][1]["content"], "left checkpoint");
+        assert_eq!(requests[2]["input"][2]["content"], "three");
+        assert_eq!(requests[2]["input"][3]["content"], "four");
+        assert_eq!(requests[3]["input"][1]["content"], "left checkpoint");
+        assert_eq!(requests[3]["input"][2]["content"], "three");
+        assert_eq!(requests[4]["input"][1]["content"], "middle checkpoint");
+        assert_eq!(requests[4]["input"][2]["content"], "four");
         assert!(requests.iter().all(|request| {
             request["max_output_tokens"] == json!(CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS)
         }));
-        let developer = requests[0]["input"][0]["content"].as_str().unwrap();
-        assert!(developer.contains("## Long-term facts"));
-        assert!(developer.contains("history record ID"));
-        assert!(!developer.contains("source_message_ids"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_compaction_shrinks_the_left_window_before_continuing() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            let request_number = {
+                let mut requests = requests.lock().await;
+                requests.push(request);
+                requests.len() - 1
+            };
+            match request_number {
+                0 | 1 => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({"error":{"code":"context_length_exceeded","message":"context too large"}})),
+                )
+                    .into_response(),
+                2 => checkpoint_compaction_response("first checkpoint").into_response(),
+                3 => checkpoint_compaction_response("final checkpoint").into_response(),
+                _ => panic!("unexpected compaction request {request_number}"),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let (_cancellation_sender, cancellation) = watch::channel(false);
+        let result = compact_checkpoint_context(
+            &reqwest::Client::new(),
+            &checkpoint_compaction_test_config(format!("http://{address}")),
+            &db,
+            ResponseAuditContext::for_request("compaction", None, Some(10), Some(13)),
+            &checkpoint_compaction_test_context(&["one", "two", "three", "four"]),
+            cancellation,
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(result, "final checkpoint");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[1]["input"][1]["content"], "one");
+        assert_eq!(requests[1]["input"][2]["content"], "two");
+        assert_eq!(requests[2]["input"][1]["content"], "one");
+        assert_eq!(requests[3]["input"][1]["content"], "first checkpoint");
+        assert_eq!(requests[3]["input"][2]["content"], "two");
+        assert_eq!(requests[3]["input"][4]["content"], "four");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_compaction_excludes_an_uncompressible_single_record() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            let request_number = {
+                let mut requests = requests.lock().await;
+                requests.push(request);
+                requests.len() - 1
+            };
+            match request_number {
+                0 => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({"error":{"code":"context_length_exceeded","message":"context too large"}})),
+                )
+                    .into_response(),
+                1 => checkpoint_compaction_response("empty checkpoint").into_response(),
+                _ => panic!("unexpected compaction request {request_number}"),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let (_cancellation_sender, cancellation) = watch::channel(false);
+        let result = compact_checkpoint_context(
+            &reqwest::Client::new(),
+            &checkpoint_compaction_test_config(format!("http://{address}")),
+            &db,
+            ResponseAuditContext::for_request("compaction", None, Some(10), Some(10)),
+            &checkpoint_compaction_test_context(&["uncompressible"]),
+            cancellation,
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(result, "empty checkpoint");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_compaction_returns_non_context_errors_without_recursing() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            requests.lock().await.push(request);
+            (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let (_cancellation_sender, cancellation) = watch::channel(false);
+        let error = compact_checkpoint_context(
+            &reqwest::Client::new(),
+            &checkpoint_compaction_test_config(format!("http://{address}")),
+            &db,
+            ResponseAuditContext::for_request("compaction", None, Some(10), Some(11)),
+            &checkpoint_compaction_test_context(&["one", "two"]),
+            cancellation,
+        )
+        .await
+        .unwrap_err();
+        server.abort();
+
+        assert!(error.to_string().contains("HTTP 502"));
+        assert_eq!(requests.lock().await.len(), 1);
     }
 
     #[test]
@@ -9647,74 +9802,6 @@ mod tests {
                 .unwrap()
                 .prepare("SELECT * FROM context_memory_facts")
                 .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn checkpoint_compaction_stops_when_a_reduction_round_grows_the_context() {
-        async fn responses(Json(_): Json<Value>) -> String {
-            let item = json!({
-                "type": "message",
-                "content": [{
-                    "type": "output_text",
-                    "text": "x".repeat(CHECKPOINT_COMPACTION_INPUT_BYTES),
-                }],
-            });
-            format!(
-                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
-                json!({"type":"response.output_item.done","item":item}),
-                json!({"type":"response.completed","response":{"output":[]}}),
-            )
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, Router::new().route("/responses", post(responses)))
-                .await
-                .unwrap();
-        });
-        let config = Config {
-            root_user_id: "root".to_owned(),
-            auth_url: "https://auth.example.com".to_owned(),
-            openai_base_url: format!("http://{address}"),
-            openai_api_key: "test-key".to_owned(),
-            default_model: "test-model".to_owned(),
-            voice_script_model: "voice-model".to_owned(),
-            voice_turn_model: DEFAULT_VOICE_TURN_MODEL_ID.to_owned(),
-            voice_script_max_chars: 150,
-            edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
-            edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            machine_id: "machine".to_owned(),
-            deployment_role: "controller".to_owned(),
-        };
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-
-        let (_cancellation_sender, cancellation) = watch::channel(false);
-        let result = compact_checkpoint_context(
-            &reqwest::Client::new(),
-            &config,
-            &db,
-            ResponseAuditContext::for_request("compaction", None, None, None),
-            vec![json!({
-                "role": "user",
-                "content": "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2),
-            })],
-            cancellation,
-        )
-        .await;
-        server.abort();
-        let error = match result {
-            Ok(_) => panic!("non-shrinking checkpoint reduction unexpectedly succeeded"),
-            Err(error) => error,
-        };
-
-        assert!(
-            error
-                .to_string()
-                .starts_with("context checkpoint did not reduce its input")
         );
     }
 
@@ -11397,10 +11484,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
-        let oversized_reply = format!(
-            "Second completed reply. {}",
-            "x".repeat(CHECKPOINT_COMPACTION_SEGMENT_BYTES * 2)
-        );
+        let oversized_reply = format!("Second completed reply. {}", "x".repeat(96 * 1024));
         for (role, content) in [
             ("user", "First request.".to_owned()),
             ("assistant", "First completed reply.".to_owned()),
@@ -14249,6 +14333,20 @@ mod tests {
         assert_eq!(context.items[2]["type"], "function_call_output");
         assert_eq!(context.items[2]["output"], "[\"Cargo.toml\"]");
         assert_eq!(context.items[3]["type"], "message");
+        let protocol_ids = open_db(&db)
+            .unwrap()
+            .prepare(
+                "SELECT id FROM history_records
+                 WHERE thread_id IS NULL
+                   AND kind IN ('input', 'response_output', 'tool_output', 'checkpoint')
+                 ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(context.record_ids, protocol_ids);
         let activity_id: i64 = open_db(&db)
             .unwrap()
             .query_row(
