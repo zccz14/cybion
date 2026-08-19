@@ -32,6 +32,17 @@ compaction = compaction_developer_prefix + records
 压缩请求不附带普通 Agent 的工具定义。发送前仍经过同一 Responses replay sanitizer；它只改变
 请求副本，不改写持久化 history records。
 
+## Checkpoint 内容契约
+
+checkpoint 是下一轮 Agent 的工作记忆，而不是仅保留当下状态的进度报告。压缩时按以下优先级保留信息：
+
+1. 概念、术语、领域含义、标识符和已验证的技术行为。
+2. 完成工作所需的权威资源与精确位置：仓库、文件、目录、符号、URL、服务、数据库、迁移、配置、数据位置和命令。
+3. 活跃决策、约束、当前目标、下一步、未完成工作和已验证的环境状态。
+
+输出必须按此顺序使用 `# Durable working context`、`## Concepts and terminology`、`## Resources and authoritative locations`、`## Active decisions and constraints`、`## Current objective and next step` 和 `## Open work and evidence routes` 标题。
+当空间不足时，应先去除已解决的叙事和短暂的进度细节，不能将前两类工作记忆仅仅因为当前任务已结束而丢弃。除可检索的路由外，每个非平凡事项必须附上准确的 history record ID；当需要回溯更早细节时，同时提供检索关键词。
+
 ## 递归前缀压缩
 
 一次压缩的运行态由一个可选的临时摘要前缀与一段连续的未压缩 records 后缀组成：
@@ -86,3 +97,4 @@ records。它不会从 `history_records` 删除，仍可由 `search_thread_histo
 4. 左侧溢出时，`idx_mid` 向左缩小直到成功。
 5. 单条无法压缩的 record 被排除出 checkpoint 但仍保留在历史中。
 6. 非上下文溢出错误不会被当作递归压缩处理。
+7. 压缩 developer 消息先要求概念术语和资源位置，再要求当前状态和目标。
