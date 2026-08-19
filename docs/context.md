@@ -200,7 +200,7 @@ action
 | --- | --- |
 | `idx_head` | 由 `H` 与 `idx_tail` 计算出的窗口起点。 |
 | `idx_tail` | 该请求的编译尾部；这是上下文快照的主身份。 |
-| `thread_id`、`run_id`、`request_kind` | 归属与用途。 |
+| `thread_id`、`request_kind` | 归属与用途。 |
 
 `idx_head` 可以在多个请求间保持不变；`idx_tail` 则应在有新协议记录的非重试请求间严格递增。
 审计页面应把两者分别展示，不能用 `idx_head` 替代 `idx_tail`。

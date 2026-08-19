@@ -655,13 +655,6 @@ struct Subthread {
     updated_at: String,
 }
 
-#[derive(Deserialize)]
-struct GoalInput {
-    title: String,
-    task: String,
-    completion_criteria: String,
-}
-
 #[derive(Serialize)]
 struct MainThreadSummary {
     status: String,
@@ -704,15 +697,15 @@ enum SubthreadStreamMessage {
 
 struct QueuedSubthread {
     id: String,
-    title: String,
     model: String,
-    from_record_id: i64,
 }
 
-struct SubthreadGoalState {
-    state: String,
-    evidence: Option<String>,
+struct PendingSubthreadJoin {
+    id: String,
+    goal_state: String,
+    goal_evidence: Option<String>,
     blocked_reason: Option<String>,
+    result: String,
 }
 
 struct ActiveMain {
@@ -738,10 +731,9 @@ struct AgentUsage {
 }
 
 struct AgentResult {
-    message: ChatMessage,
     persisted_message: ConversationMessage,
-    input_tokens: u64,
-    output_tokens: u64,
+    #[cfg(test)]
+    message: ChatMessage,
 }
 
 struct BrowserAgentContext {
@@ -1048,6 +1040,9 @@ fn schedule_auto_update(client: reqwest::Client, db_path: PathBuf) {
 fn schedule_subthreads(state: AppState) {
     tokio::spawn(async move {
         loop {
+            if let Err(cause) = reconcile_terminal_subthread_joins(&state).await {
+                tracing::warn!(%cause, "cannot reconcile terminal subthread joins");
+            }
             match claim_queued_subthreads(&state.db_path) {
                 Ok(jobs) => {
                     for job in jobs {
@@ -1070,7 +1065,7 @@ fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
     let now_epoch = chrono::Utc::now().timestamp();
     let jobs = transaction
         .prepare(
-            "SELECT thread.id, thread.title, thread.model, thread.from_record_id
+            "SELECT thread.id, thread.model
              FROM subthreads thread
              WHERE thread.status = 'queued' AND thread.goal_state = 'active'
                AND (thread.next_retry_at IS NULL OR thread.next_retry_at <= ?1)
@@ -1080,9 +1075,7 @@ fn claim_queued_subthreads(path: &Path) -> Result<Vec<QueuedSubthread>> {
             let id: String = row.get(0)?;
             Ok(QueuedSubthread {
                 id,
-                title: row.get(1)?,
-                model: row.get(2)?,
-                from_record_id: row.get(3)?,
+                model: row.get(1)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1134,7 +1127,6 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
         },
     )
     .await;
-    let started_at = Instant::now();
     let result = match load_config(&state.db_path) {
         Ok(mut config) if config.deployment_role == "controller" => {
             config.default_model = job.model.clone();
@@ -1157,51 +1149,52 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
         Err(cause) => Err(cause),
     };
     match result {
-        Ok(result) => {
-            let content = result
-                .message
-                .content
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            let _usage = AgentUsage {
-                duration_ms: started_at.elapsed().as_millis() as u64,
-                input_tokens: result.input_tokens,
-                output_tokens: result.output_tokens,
-            };
-            match load_subthread_goal_state(&state.db_path, &job.id) {
-                Ok(goal) if matches!(goal.state.as_str(), "achieved" | "blocked") => {
-                    let _ = complete_goal_subthread(&state.db_path, &job.id, &content);
-                    let _ = finish_subthread_execution(&state.db_path, &job.id, "completed");
-                    let outcome = match goal.state.as_str() {
-                        "achieved" => format!(
-                            "### Goal achieved: {}\n\n{}\n\nEvidence:\n{}",
-                            job.title,
-                            content,
-                            goal.evidence.as_deref().unwrap_or_default(),
-                        ),
-                        "blocked" => format!(
-                            "### Goal blocked: {}\n\n{}\n\nBlocker:\n{}",
-                            job.title,
-                            content,
-                            goal.blocked_reason.as_deref().unwrap_or_default(),
-                        ),
-                        _ => unreachable!("the match guard only allows terminal Goal states"),
-                    };
-                    let continuation_record_id =
-                        append_main_subthread_outcome(&state.db_path, &outcome)
-                            .unwrap_or(job.from_record_id);
+        Ok(_) => match start_terminal_subthread_join(&state, &job.id).await {
+            Ok(true) => {}
+            Ok(false) if subthread_is_active(&state.db_path, &job.id).unwrap_or(false) => {
+                let _ = requeue_subthread_after_progress(&state.db_path, &job.id);
+                let _ = reset_subthread_retry_after_success(&state.db_path, Some(&job.id));
+                let sink = AgentEventSink {
+                    thread_id: Some(&job.id),
+                    sender: &events,
+                };
+                let _ = send_agent_event(
+                    &state.db_path,
+                    &sink,
+                    AgentEvent::Status {
+                        stage: "queued".to_owned(),
+                        message: "Progress recorded; continuing the Goal".to_owned(),
+                    },
+                )
+                .await;
+            }
+            Ok(false) => {}
+            Err(cause) => {
+                tracing::warn!(%cause, subthread = %job.id, "cannot join terminal subthread");
+                let sink = AgentEventSink {
+                    thread_id: Some(&job.id),
+                    sender: &events,
+                };
+                let _ = send_agent_event(
+                    &state.db_path,
+                    &sink,
+                    AgentEvent::Error {
+                        error: cause.to_string(),
+                    },
+                )
+                .await;
+            }
+        },
+        Err(cause) => {
+            let detail = cause.to_string();
+            match start_terminal_subthread_join(&state, &job.id).await {
+                Ok(true) => {
                     state.active_subthreads.lock().await.remove(&job.id);
-                    start_latest_main_response(state, continuation_record_id, None).await;
+                    return;
                 }
-                Ok(goal) if goal.state == "cancelled" => {
-                    let _ = cancel_goal_subthread(&state.db_path, &job.id, &content);
-                    let _ = finish_subthread_execution(&state.db_path, &job.id, "cancelled");
-                    state.active_subthreads.lock().await.remove(&job.id);
-                }
-                Ok(_) => {
-                    let _ = requeue_subthread_after_progress(&state.db_path, &job.id, &content);
-                    let _ = reset_subthread_retry_after_success(&state.db_path, Some(&job.id));
+                Ok(false) => {}
+                Err(join_cause) => {
+                    tracing::warn!(%join_cause, subthread = %job.id, "cannot join terminal subthread after execution error");
                     let sink = AgentEventSink {
                         thread_id: Some(&job.id),
                         sender: &events,
@@ -1209,32 +1202,15 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                     let _ = send_agent_event(
                         &state.db_path,
                         &sink,
-                        AgentEvent::Status {
-                            stage: "queued".to_owned(),
-                            message: "Progress recorded; continuing the Goal".to_owned(),
+                        AgentEvent::Error {
+                            error: join_cause.to_string(),
                         },
                     )
                     .await;
                     state.active_subthreads.lock().await.remove(&job.id);
-                }
-                Err(cause) => {
-                    tracing::warn!(%cause, subthread = %job.id, "cannot load Goal state after progress");
-                    let sink = AgentEventSink {
-                        thread_id: Some(&job.id),
-                        sender: &events,
-                    };
-                    if let Ok(schedule) = schedule_subthread_retry(&state.db_path, &job.id) {
-                        let _ =
-                            send_agent_event(&state.db_path, &sink, retry_status_event(&schedule))
-                                .await;
-                    }
-                    let _ = requeue_subthread_after_error(&state.db_path, &job.id);
-                    state.active_subthreads.lock().await.remove(&job.id);
+                    return;
                 }
             }
-        }
-        Err(cause) => {
-            let detail = cause.to_string();
             if detail == "agent stopped" {
                 if subthread_is_active(&state.db_path, &job.id).unwrap_or(false) {
                     state.active_subthreads.lock().await.remove(&job.id);
@@ -1265,6 +1241,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
             state.active_subthreads.lock().await.remove(&job.id);
         }
     }
+    state.active_subthreads.lock().await.remove(&job.id);
 }
 
 fn app(state: AppState) -> Router {
@@ -1351,12 +1328,9 @@ fn app(state: AppState) -> Router {
             "/api/history-records/{event_id}/output",
             get(conversation_event_output),
         )
-        .route("/api/threads", get(list_threads).post(create_goal))
+        .route("/api/threads", get(list_threads))
         .route("/api/threads/{id}/events", get(stream_subthread_events))
-        .route(
-            "/api/threads/{id}",
-            get(subthread_detail).put(update_goal).delete(delete_goal),
-        )
+        .route("/api/threads/{id}", get(subthread_detail))
         .route(
             "/api/agent/turn",
             post(agent_turn).delete(cancel_main_response),
@@ -2717,15 +2691,121 @@ fn append_conversation(
     })
 }
 
-fn append_main_subthread_outcome(path: &Path, outcome: &str) -> Result<i64> {
-    let connection = open_db(path)?;
-    history_record_payload(
-        &connection,
+fn format_subthread_outcome(join: &PendingSubthreadJoin) -> String {
+    let detail = match join.goal_state.as_str() {
+        "achieved" => format!(
+            "Evidence:\n{}",
+            join.goal_evidence.as_deref().unwrap_or_default()
+        ),
+        "blocked" => format!(
+            "Blocker:\n{}",
+            join.blocked_reason.as_deref().unwrap_or_default()
+        ),
+        _ => unreachable!("only terminal subthreads can be joined"),
+    };
+    format!(
+        "### Subthread result\n\nsubthread_id: {}\nstatus: {}\n\nresult:\n{}\n\n{}",
+        join.id, join.goal_state, join.result, detail
+    )
+}
+
+fn finalize_terminal_subthread_join(path: &Path, id: &str) -> Result<Option<i64>> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let pending = transaction
+        .query_row(
+            "SELECT id, goal_state, goal_evidence, blocked_reason, COALESCE(result, '')
+             FROM subthreads
+             WHERE id = ?1
+               AND goal_state IN ('achieved', 'blocked')
+               AND status != 'completed'
+               AND outcome_record_id IS NULL",
+            [id],
+            |row| {
+                Ok(PendingSubthreadJoin {
+                    id: row.get(0)?,
+                    goal_state: row.get(1)?,
+                    goal_evidence: row.get(2)?,
+                    blocked_reason: row.get(3)?,
+                    result: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(pending) = pending else {
+        return Ok(None);
+    };
+    if pending.result.trim().is_empty() {
+        return Err(anyhow!("terminal subthread result is missing"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let outcome_record_id = history_record_payload(
+        &transaction,
         None,
         "input",
-        &json!({ "role": "developer", "content": outcome }),
-        &chrono::Utc::now().to_rfc3339(),
-    )
+        &json!({
+            "role": "developer",
+            "content": format_subthread_outcome(&pending),
+        }),
+        &now,
+    )?;
+    let changed = transaction.execute(
+        "UPDATE subthreads
+         SET status = 'completed', outcome_record_id = ?1, next_retry_at = NULL,
+             retry_attempt = 0, updated_at = ?2
+         WHERE id = ?3
+           AND goal_state IN ('achieved', 'blocked')
+           AND status != 'completed'
+           AND outcome_record_id IS NULL",
+        params![outcome_record_id, now, id],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("terminal subthread join changed unexpectedly"));
+    }
+    transaction.commit()?;
+    Ok(Some(outcome_record_id))
+}
+
+fn pending_terminal_subthread_ids(path: &Path) -> Result<Vec<String>> {
+    open_db(path)?
+        .prepare(
+            "SELECT id FROM subthreads
+             WHERE goal_state IN ('achieved', 'blocked')
+               AND status != 'completed'
+               AND outcome_record_id IS NULL
+             ORDER BY updated_at, id",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn terminal_subthread_result(path: &Path, id: &str) -> Result<String> {
+    open_db(path)?
+        .query_row(
+            "SELECT COALESCE(result, '') FROM subthreads
+             WHERE id = ?1 AND goal_state IN ('achieved', 'blocked')",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .filter(|result| !result.trim().is_empty())
+        .ok_or_else(|| anyhow!("terminal subthread result is missing"))
+}
+
+async fn start_terminal_subthread_join(state: &AppState, id: &str) -> Result<bool> {
+    let Some(outcome_record_id) = finalize_terminal_subthread_join(&state.db_path, id)? else {
+        return Ok(false);
+    };
+    start_latest_main_response(state.clone(), outcome_record_id, None).await;
+    Ok(true)
+}
+
+async fn reconcile_terminal_subthread_joins(state: &AppState) -> Result<()> {
+    for id in pending_terminal_subthread_ids(&state.db_path)? {
+        start_terminal_subthread_join(state, &id).await?;
+    }
+    Ok(())
 }
 
 fn retry_delay(attempt: i64) -> Duration {
@@ -3210,6 +3290,29 @@ fn migrate_subthread_scheduler_schema(connection: &Connection) -> Result<()> {
     if !columns.iter().any(|column| column == "next_retry_at") {
         connection.execute_batch("ALTER TABLE subthreads ADD COLUMN next_retry_at INTEGER;")?;
     }
+    if !columns.iter().any(|column| column == "outcome_record_id") {
+        connection.execute_batch("ALTER TABLE subthreads ADD COLUMN outcome_record_id INTEGER;")?;
+    }
+    connection.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS subthreads_outcome_record
+         ON subthreads(outcome_record_id)
+         WHERE outcome_record_id IS NOT NULL;",
+    )?;
+    Ok(())
+}
+
+fn backfill_pending_terminal_subthread_results(connection: &Connection) -> Result<()> {
+    connection.execute(
+        "UPDATE subthreads
+         SET result = CASE goal_state
+             WHEN 'achieved' THEN goal_evidence
+             WHEN 'blocked' THEN blocked_reason
+         END
+         WHERE goal_state IN ('achieved', 'blocked')
+           AND status != 'completed'
+           AND COALESCE(trim(result), '') = ''",
+        [],
+    )?;
     Ok(())
 }
 
@@ -3436,6 +3539,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            model TEXT NOT NULL,
            from_record_id INTEGER NOT NULL REFERENCES history_records(id),
            result TEXT,
+           outcome_record_id INTEGER REFERENCES history_records(id),
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL,
            retry_attempt INTEGER NOT NULL DEFAULT 0,
@@ -3481,6 +3585,8 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     migrate_peer_schema(&connection)?;
     migrate_subthread_scheduler_schema(&connection)?;
     migrate_execution_ownership_schema(&connection)?;
+    migrate_subthread_scheduler_schema(&connection)?;
+    backfill_pending_terminal_subthread_results(&connection)?;
     connection.execute_batch(
         "DROP TRIGGER IF EXISTS history_records_immutable_delete;
          CREATE TRIGGER history_records_immutable_delete
@@ -5555,33 +5661,6 @@ fn subthread_is_active(path: &Path, id: &str) -> Result<bool> {
         .map_err(Into::into)
 }
 
-fn load_subthread_goal_state(path: &Path, id: &str) -> Result<SubthreadGoalState> {
-    open_db(path)?
-        .query_row(
-            "SELECT goal_state, goal_evidence, blocked_reason
-             FROM subthreads WHERE id = ?1",
-            [id],
-            |row| {
-                Ok(SubthreadGoalState {
-                    state: row.get(0)?,
-                    evidence: row.get(1)?,
-                    blocked_reason: row.get(2)?,
-                })
-            },
-        )
-        .map_err(Into::into)
-}
-
-fn complete_goal_subthread(path: &Path, id: &str, result: &str) -> Result<()> {
-    open_db(path)?.execute(
-        "UPDATE subthreads
-         SET status = 'completed', result = ?1, updated_at = ?2
-         WHERE id = ?3 AND goal_state IN ('achieved', 'blocked')",
-        params![result, chrono::Utc::now().to_rfc3339(), id],
-    )?;
-    Ok(())
-}
-
 fn cancel_goal_subthread(path: &Path, id: &str, result: &str) -> Result<()> {
     open_db(path)?.execute(
         "UPDATE subthreads
@@ -5592,7 +5671,7 @@ fn cancel_goal_subthread(path: &Path, id: &str, result: &str) -> Result<()> {
     Ok(())
 }
 
-fn requeue_subthread_after_progress(path: &Path, id: &str, _progress: &str) -> Result<()> {
+fn requeue_subthread_after_progress(path: &Path, id: &str) -> Result<()> {
     let changed = open_db(path)?.execute(
         "UPDATE subthreads
          SET status = 'queued', updated_at = ?1
@@ -5654,138 +5733,10 @@ fn retry_subthread_now(path: &Path, id: &str) -> Result<()> {
     )
 }
 
-fn normalize_goal_input(input: GoalInput) -> Result<(String, String, String)> {
-    let title = input.title.trim().to_owned();
-    let task = input.task.trim().to_owned();
-    let completion_criteria = input.completion_criteria.trim().to_owned();
-    if title.is_empty() || task.is_empty() || completion_criteria.is_empty() {
-        return Err(anyhow!("title, task, and completion_criteria are required"));
-    }
-    Ok((title, task, completion_criteria))
-}
-
 fn goal_agent_prompt(task: &str, completion_criteria: &str) -> String {
     format!(
-        "You own this persistent Goal. Keep working in repeated turns until it is achieved or blocked.\n\n## Objective\n{task}\n\n## Done when\n{completion_criteria}\n\nUse achieve_goal with concise, verifiable evidence only when every criterion is met. Use block_goal with the concrete blocker only when further progress requires an external change. A natural-language response is progress, not completion."
+        "You own this persistent Goal. Keep working in repeated turns until it is achieved or blocked.\n\n## Objective\n{task}\n\n## Done when\n{completion_criteria}\n\nUse achieve_goal with a concise final result and verifiable evidence only when every criterion is met. Use block_goal with a concise final result and the concrete blocker only when further progress requires an external change. A natural-language response is progress, not completion. After either terminal tool, take no further action."
     )
-}
-
-fn create_user_goal(
-    path: &Path,
-    title: String,
-    task: String,
-    completion_criteria: String,
-) -> Result<Subthread> {
-    let mut connection = open_db(path)?;
-    let model = connection.query_row(
-        "SELECT value FROM app_meta WHERE key = 'subthread_model'",
-        [],
-        |row| row.get::<_, String>(0),
-    )?;
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    let goal_prompt = json!({
-        "role": "user",
-        "content": goal_agent_prompt(&task, &completion_criteria),
-    });
-    let transaction = connection.transaction()?;
-    transaction.execute(
-        "INSERT INTO history_records (thread_id, kind, payload, created_at)
-         VALUES (NULL, 'input', ?1, ?2)",
-        params![
-            serde_json::to_string(&json!({
-                "role": "user",
-                "content": format!(
-                    "Created Goal: {title}\n\n## Objective\n{task}\n\n## Done when\n{completion_criteria}"
-                ),
-            }))?,
-            now,
-        ],
-    )?;
-    let from_record_id = transaction.last_insert_rowid();
-    transaction.execute(
-        "INSERT INTO history_records (thread_id, kind, payload, created_at)
-         VALUES (?1, 'input', ?2, ?3)",
-        params![id, serde_json::to_string(&goal_prompt)?, now],
-    )?;
-    let _initial_record_id = transaction.last_insert_rowid();
-    transaction.execute(
-        "INSERT INTO subthreads (
-           id, title, task, completion_criteria, goal_state, status, model,
-           from_record_id, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, 'active', 'queued', ?5, ?6, ?7, ?7)",
-        params![
-            id,
-            title,
-            task,
-            completion_criteria,
-            model,
-            from_record_id,
-            now,
-        ],
-    )?;
-    transaction.commit()?;
-    load_subthread_detail(path, &id)?
-        .map(|detail| detail.thread)
-        .ok_or_else(|| anyhow!("Goal was not created"))
-}
-
-fn update_user_goal(
-    path: &Path,
-    id: &str,
-    title: String,
-    task: String,
-    completion_criteria: String,
-) -> Result<Option<Subthread>> {
-    let goal_prompt = json!({
-        "role": "user",
-        "content": goal_agent_prompt(&task, &completion_criteria),
-    });
-    let mut connection = open_db(path)?;
-    let transaction = connection.transaction()?;
-    let goal = transaction
-        .query_row(
-            "SELECT from_record_id FROM subthreads WHERE id = ?1",
-            [id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    let Some(_from_record_id) = goal else {
-        return Ok(None);
-    };
-    let now = chrono::Utc::now().to_rfc3339();
-    transaction.execute(
-        "INSERT INTO history_records (thread_id, kind, payload, created_at)
-         VALUES (?1, 'input', ?2, ?3)",
-        params![id, serde_json::to_string(&goal_prompt)?, now],
-    )?;
-    let _initial_record_id = transaction.last_insert_rowid();
-    transaction.execute(
-        "UPDATE subthreads
-             SET title = ?1, task = ?2, completion_criteria = ?3,
-             goal_state = 'active', goal_evidence = NULL, blocked_reason = NULL, result = NULL,
-             status = 'queued', updated_at = ?4
-         WHERE id = ?5",
-        params![title, task, completion_criteria, now, id,],
-    )?;
-    transaction.commit()?;
-    load_subthread_detail(path, id).map(|detail| detail.map(|detail| detail.thread))
-}
-
-fn delete_user_goal(path: &Path, id: &str) -> Result<bool> {
-    let mut connection = open_db(path)?;
-    let transaction = connection.transaction()?;
-    let exists = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM subthreads WHERE id = ?1)",
-        [id],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !exists {
-        return Ok(false);
-    }
-    transaction.execute("DELETE FROM subthreads WHERE id = ?1", [id])?;
-    transaction.commit()?;
-    Ok(true)
 }
 
 fn clear_conversation_data(path: &Path) -> Result<()> {
@@ -6022,12 +5973,13 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
     }
 }
 
-fn achieve_goal(path: &Path, thread_id: &str, evidence: &str) -> Result<()> {
+fn achieve_goal(path: &Path, thread_id: &str, result: &str, evidence: &str) -> Result<()> {
     let changed = open_db(path)?.execute(
         "UPDATE subthreads
-         SET goal_state = 'achieved', goal_evidence = ?1, blocked_reason = NULL, updated_at = ?2
-         WHERE id = ?3 AND status = 'running' AND goal_state = 'active'",
-        params![evidence, chrono::Utc::now().to_rfc3339(), thread_id],
+         SET goal_state = 'achieved', result = ?1, goal_evidence = ?2,
+             blocked_reason = NULL, updated_at = ?3
+         WHERE id = ?4 AND status = 'running' AND goal_state = 'active'",
+        params![result, evidence, chrono::Utc::now().to_rfc3339(), thread_id],
     )?;
     if changed != 1 {
         return Err(anyhow!("the current Goal is not active"));
@@ -6035,12 +5987,13 @@ fn achieve_goal(path: &Path, thread_id: &str, evidence: &str) -> Result<()> {
     Ok(())
 }
 
-fn block_goal(path: &Path, thread_id: &str, reason: &str) -> Result<()> {
+fn block_goal(path: &Path, thread_id: &str, result: &str, reason: &str) -> Result<()> {
     let changed = open_db(path)?.execute(
         "UPDATE subthreads
-         SET goal_state = 'blocked', blocked_reason = ?1, goal_evidence = NULL, updated_at = ?2
-         WHERE id = ?3 AND status = 'running' AND goal_state = 'active'",
-        params![reason, chrono::Utc::now().to_rfc3339(), thread_id],
+         SET goal_state = 'blocked', result = ?1, blocked_reason = ?2,
+             goal_evidence = NULL, updated_at = ?3
+         WHERE id = ?4 AND status = 'running' AND goal_state = 'active'",
+        params![result, reason, chrono::Utc::now().to_rfc3339(), thread_id],
     )?;
     if changed != 1 {
         return Err(anyhow!("the current Goal is not active"));
@@ -6055,20 +6008,6 @@ async fn list_threads(State(state): State<AppState>, headers: HeaderMap) -> ApiR
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read threads"))
 }
 
-async fn create_goal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<GoalInput>,
-) -> ApiResult<Subthread> {
-    identity(&state, &headers).await?;
-    let (title, task, completion_criteria) = normalize_goal_input(input)
-        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
-    let _conversation = state.conversation_mutations.lock().await;
-    create_user_goal(&state.db_path, title, task, completion_criteria)
-        .map(Json)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot create Goal"))
-}
-
 async fn subthread_detail(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6079,25 +6018,6 @@ async fn subthread_detail(
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read subthread"))?
         .map(Json)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "Goal not found"))
-}
-
-async fn update_goal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-    Json(input): Json<GoalInput>,
-) -> ApiResult<Subthread> {
-    identity(&state, &headers).await?;
-    let (title, task, completion_criteria) = normalize_goal_input(input)
-        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
-    let _conversation = state.conversation_mutations.lock().await;
-    let goal = update_user_goal(&state.db_path, &id, title, task, completion_criteria)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot update Goal"))?
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Goal not found"))?;
-    if let Some(cancel) = state.active_subthreads.lock().await.get(&id) {
-        let _ = cancel.send(true);
-    }
-    Ok(Json(goal))
 }
 
 async fn stream_subthread_events(
@@ -6162,24 +6082,6 @@ async fn stream_subthread_events(
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response())
-}
-
-async fn delete_goal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult<Value> {
-    identity(&state, &headers).await?;
-    let _conversation = state.conversation_mutations.lock().await;
-    if let Some(cancel) = state.active_subthreads.lock().await.remove(&id) {
-        let _ = cancel.send(true);
-    }
-    if !delete_user_goal(&state.db_path, &id)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot delete Goal"))?
-    {
-        return Err(error(StatusCode::NOT_FOUND, "Goal not found"));
-    }
-    Ok(Json(json!({ "deleted": true })))
 }
 
 async fn transcribe_audio(
@@ -6541,8 +6443,6 @@ async fn run_agent_items(
     mut browser: Option<BrowserAgentContext>,
     executor_tunnels: &ExecutorTunnels,
 ) -> Result<AgentResult> {
-    let mut input_tokens = 0;
-    let mut output_tokens = 0;
     let mut images = Vec::new();
     let history_thread_id = match &checkpoint_target {
         ContextCheckpointTarget::Main { .. } => None,
@@ -6620,7 +6520,6 @@ async fn run_agent_items(
             .pointer("/usage/input_tokens")
             .and_then(Value::as_u64)
         {
-            input_tokens += response_input_tokens;
             send_agent_event(
                 db_path,
                 &events,
@@ -6630,10 +6529,6 @@ async fn run_agent_items(
             )
             .await?;
         }
-        output_tokens += response
-            .pointer("/usage/output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
         let output = response
             .get("output")
             .and_then(Value::as_array)
@@ -6677,6 +6572,8 @@ async fn run_agent_items(
             });
             persisted_message.images = images.clone();
             return Ok(AgentResult {
+                persisted_message,
+                #[cfg(test)]
                 message: ChatMessage {
                     role: "assistant".to_owned(),
                     content: Value::String(output_text(&output)),
@@ -6684,9 +6581,6 @@ async fn run_agent_items(
                     tool_call_id: None,
                     tool_calls: None,
                 },
-                persisted_message,
-                input_tokens,
-                output_tokens,
             });
         }
         for (call_index, call) in output.into_iter().enumerate() {
@@ -6788,6 +6682,8 @@ async fn run_agent_items(
                 },
             )
             .await?;
+            let terminal_tool =
+                scope == AgentScope::Subthread && matches!(name, "achieve_goal" | "block_goal");
             let execution = execute_tool(
                 name,
                 args,
@@ -6816,6 +6712,31 @@ async fn run_agent_items(
                 },
             )
             .await?;
+            if terminal_tool && !execution.output.starts_with("error:") {
+                let thread_id = history_thread_id
+                    .ok_or_else(|| anyhow!("terminal Goal has no subthread ID"))?;
+                let result = terminal_subthread_result(db_path, thread_id)?;
+                return Ok(AgentResult {
+                    persisted_message: ConversationMessage {
+                        id: output_record_ids[call_index],
+                        role: "assistant".to_owned(),
+                        content: result.clone(),
+                        images: Vec::new(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        duration_ms: None,
+                        input_tokens: None,
+                        output_tokens: None,
+                    },
+                    #[cfg(test)]
+                    message: ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: Value::String(result),
+                        images: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                });
+            }
         }
     }
 }
@@ -6927,7 +6848,7 @@ fn scoped_responses_request_body(
             "## Thread role\n\nYou are Cybion's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Fork only independently executable, substantial work that benefits from parallel execution; every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. Inspect existing Goals before replacing work and cancel obsolete ones. Cybion returns only an achieved or blocked Goal handoff and resumes you automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
         }
         AgentScope::Subthread => {
-            "## Thread role\n\nYou are an internal Cybion Goal loop forked from a compiled main-thread checkpoint. The inherited Goal prompt defines its objective and done-when criteria. Keep taking the next useful step until every criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. You must call `achieve_goal` with concise, verifiable evidence when the Goal is achieved, or `block_goal` with the concrete blocker when it cannot progress. After either terminal tool, provide a short final outcome and take no further action. Do not ask the user to manage this branch.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
+            "## Thread role\n\nYou are an internal Cybion Goal loop forked from a compiled main-thread checkpoint. The inherited Goal prompt defines its objective and done-when criteria. Keep taking the next useful step until every criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. You must call `achieve_goal` with a concise final result and verifiable evidence when the Goal is achieved, or `block_goal` with a concise final result and the concrete blocker when it cannot progress. After either terminal tool, take no further action. Do not ask the user to manage this branch.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
         }
     };
     let mut developer_sections = vec![
@@ -6961,8 +6882,8 @@ fn scoped_responses_request_body(
             .as_array_mut()
             .expect("tool definitions are an array");
         tools.extend([
-            json!({"type":"function","name":"achieve_goal","description":"Mark your own persistent Goal achieved. Call this only when every done-when criterion is met. Evidence must be concise and verifiable. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["evidence"],"properties":{"evidence":{"type":"string"}}}}),
-            json!({"type":"function","name":"block_goal","description":"Mark your own persistent Goal blocked. Call this only when an external change or decision is required before progress can continue. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["reason"],"properties":{"reason":{"type":"string"}}}}),
+            json!({"type":"function","name":"achieve_goal","description":"Mark your own persistent Goal achieved. Call this only when every done-when criterion is met. result is the concise terminal handoff; evidence must be concise and verifiable. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["result","evidence"],"properties":{"result":{"type":"string"},"evidence":{"type":"string"}}}}),
+            json!({"type":"function","name":"block_goal","description":"Mark your own persistent Goal blocked. Call this only when an external change or decision is required before progress can continue. result is the concise terminal handoff. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["result","reason"],"properties":{"result":{"type":"string"},"reason":{"type":"string"}}}}),
         ]);
     }
     body["input"] = Value::Array(prepend_developer_message(
@@ -7822,34 +7743,44 @@ async fn execute_tool(
             .map(|from_record_id| execute_fork_subthread(db_path, from_record_id, args))
             .unwrap_or_else(|| tool_execution("error: fork has no durable history record")),
         "achieve_goal" if scope == AgentScope::Subthread => {
+            let result = args
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
             let evidence = args
                 .get("evidence")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim();
-            if evidence.is_empty() {
-                tool_execution("error: evidence is required")
+            if result.is_empty() || evidence.is_empty() {
+                tool_execution("error: result and evidence are required")
             } else {
                 thread_id
                     .ok_or_else(|| anyhow!("subthread has no thread ID"))
-                    .and_then(|thread_id| achieve_goal(db_path, thread_id, evidence))
-                    .map(|()| tool_execution("Goal marked achieved; provide the final outcome without further actions."))
+                    .and_then(|thread_id| achieve_goal(db_path, thread_id, result, evidence))
+                    .map(|()| tool_execution("Goal marked achieved and will join the main thread."))
                     .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
             }
         }
         "block_goal" if scope == AgentScope::Subthread => {
+            let result = args
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
             let reason = args
                 .get("reason")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim();
-            if reason.is_empty() {
-                tool_execution("error: reason is required")
+            if result.is_empty() || reason.is_empty() {
+                tool_execution("error: result and reason are required")
             } else {
                 thread_id
                     .ok_or_else(|| anyhow!("subthread has no thread ID"))
-                    .and_then(|thread_id| block_goal(db_path, thread_id, reason))
-                    .map(|()| tool_execution("Goal marked blocked; provide the final outcome without further actions."))
+                    .and_then(|thread_id| block_goal(db_path, thread_id, result, reason))
+                    .map(|()| tool_execution("Goal marked blocked and will join the main thread."))
                     .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
             }
         }
@@ -10413,7 +10344,15 @@ mod tests {
         assert_eq!(created["status"], "queued");
         let jobs = claim_queued_subthreads(&db).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].from_record_id, user.id);
+        let fork_from_id: i64 = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT from_record_id FROM subthreads WHERE id = ?1",
+                [&jobs[0].id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fork_from_id, user.id);
         let context = compile_latest_context(&db, Some(&jobs[0].id)).unwrap();
         assert!(
             context.last().unwrap()["content"]
@@ -10438,6 +10377,7 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert!(!columns.iter().any(|column| column == "target_machine_id"));
+        assert!(columns.iter().any(|column| column == "outcome_record_id"));
         bootstrap_database(&db).unwrap();
         assert_eq!(load_subthreads(&db).unwrap()[0].status, "queued");
     }
@@ -10511,8 +10451,12 @@ mod tests {
             next[0].event,
             AgentEvent::Context { input_tokens: 42 }
         ));
-        achieve_goal(&db, &id, "events inspected").unwrap();
-        complete_goal_subthread(&db, &id, "reaped").unwrap();
+        achieve_goal(&db, &id, "events inspected", "events inspected").unwrap();
+        assert!(
+            finalize_terminal_subthread_join(&db, &id)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             load_subthread_detail(&db, &id)
                 .unwrap()
@@ -10635,6 +10579,22 @@ mod tests {
                 .as_object()
                 .is_some_and(|properties| !properties.contains_key("id"))
         }));
+        let achieved = goal_tools
+            .iter()
+            .find(|tool| tool["name"] == "achieve_goal")
+            .unwrap();
+        assert_eq!(
+            achieved["parameters"]["required"],
+            json!(["result", "evidence"])
+        );
+        let blocked = goal_tools
+            .iter()
+            .find(|tool| tool["name"] == "block_goal")
+            .unwrap();
+        assert_eq!(
+            blocked["parameters"]["required"],
+            json!(["result", "reason"])
+        );
     }
 
     #[test]
@@ -11898,8 +11858,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "replaced by protocol history subthread replay tests"]
-    async fn achieved_goal_is_handed_off_to_the_single_main_conversation() {
+    async fn terminal_goal_joins_the_main_thread_without_another_subthread_request() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
@@ -11911,17 +11870,12 @@ mod tests {
                     "type":"function_call",
                     "call_id":"achieve",
                     "name":"achieve_goal",
-                    "arguments": serde_json::to_string(&json!({"evidence":"The verification command passed."})).unwrap()
+                    "arguments": serde_json::to_string(&json!({"result":"Background verification passed.","evidence":"The verification command passed."})).unwrap()
                 })
             } else {
-                let text = if requests.len() == 2 {
-                    "Background verification passed."
-                } else {
-                    "I verified the background evidence and completed the next useful step."
-                };
                 json!({
                     "type":"message",
-                    "content":[{"type":"output_text","text":text}]
+                    "content":[{"type":"output_text","text":"The main thread received the subthread result."}]
                 })
             };
             format!(
@@ -11974,10 +11928,10 @@ mod tests {
                     .unwrap()
                     .query_row(
                         "SELECT EXISTS(
-                           SELECT 1 FROM history_records
-                           WHERE thread_id IS NULL
-                             AND kind = 'response_output'
-                             AND json_extract(payload, '$.content[0].text') LIKE '%completed the next useful step%'
+                           SELECT 1 FROM subthreads
+                           WHERE goal_state = 'achieved'
+                             AND status = 'completed'
+                             AND outcome_record_id IS NOT NULL
                          )",
                         [],
                         |row| row.get::<_, bool>(0),
@@ -11991,16 +11945,31 @@ mod tests {
         })
         .await
         .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if requests.lock().await.len() == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         server.abort();
         let goals = load_subthreads(&db).unwrap();
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].goal_state, "achieved");
-        let (status, result, evidence): (String, Option<String>, Option<String>) = open_db(&db)
+        let (status, result, evidence, outcome_record_id): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ) = open_db(&db)
             .unwrap()
             .query_row(
-                "SELECT status, result, goal_evidence FROM subthreads LIMIT 1",
+                "SELECT status, result, goal_evidence, outcome_record_id FROM subthreads LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(status, "completed");
@@ -12009,28 +11978,23 @@ mod tests {
             evidence.as_deref(),
             Some("The verification command passed.")
         );
-        let messages = load_conversation(&db).unwrap();
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.content.contains("Goal achieved"))
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.content.contains("Background verification passed."))
-        );
-        assert!(messages.iter().any(|message| {
-            message
-                .content
-                .contains("I verified the background evidence and completed the next useful step.")
-        }));
+        let outcome_record_id = outcome_record_id.unwrap();
+        let outcome: String = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT json_extract(payload, '$.content') FROM history_records WHERE id = ?1",
+                [outcome_record_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(outcome.contains(&format!("subthread_id: {}", goals[0].id)));
+        assert!(outcome.contains("result:\nBackground verification passed."));
         let requests = requests.lock().await;
-        assert_eq!(requests.len(), 3);
-        assert!(requests[2]["input"].as_array().unwrap().iter().any(|item| {
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]["input"].as_array().unwrap().iter().any(|item| {
             item["content"]
                 .as_str()
-                .is_some_and(|content| content.contains("A background task has just settled"))
+                .is_some_and(|content| content.contains("subthread_id:"))
         }));
     }
 
@@ -12143,9 +12107,18 @@ mod tests {
             .unwrap()
             .to_owned();
         let _ = claim_queued_subthreads(&db).unwrap();
-        block_goal(&db, &id, "Waiting for the service owner to restore access.").unwrap();
-        complete_goal_subthread(&db, &id, "Access is required before the Goal can continue.")
-            .unwrap();
+        block_goal(
+            &db,
+            &id,
+            "Access is required before the Goal can continue.",
+            "Waiting for the service owner to restore access.",
+        )
+        .unwrap();
+        assert!(
+            finalize_terminal_subthread_join(&db, &id)
+                .unwrap()
+                .is_some()
+        );
 
         let goal = load_subthread_detail(&db, &id).unwrap().unwrap().thread;
         assert_eq!(goal.goal_state, "blocked");
@@ -12160,78 +12133,72 @@ mod tests {
     }
 
     #[test]
-    fn user_goals_are_owned_by_their_threads() {
+    fn pending_terminal_subthread_is_recovered_once_after_restart() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
-        assert!(
-            normalize_goal_input(GoalInput {
-                title: " ".to_owned(),
-                task: "Inspect the release".to_owned(),
-                completion_criteria: "A result is recorded".to_owned(),
-            })
-            .is_err()
-        );
-
-        let created = create_user_goal(
+        let user = append_conversation(
             &db,
-            "Release verification".to_owned(),
-            "Inspect the release".to_owned(),
-            "The release is verified with evidence.".to_owned(),
-        )
-        .unwrap();
-        assert_eq!(created.goal_state, "active");
-        assert_eq!(created.status, "queued");
-        assert_eq!(load_thread_index(&db).unwrap().subthreads.len(), 1);
-        append_agent_event(
-            &db,
-            Some(&created.id),
-            &AgentEvent::Status {
-                stage: "queued".to_owned(),
-                message: "Queued for verification".to_owned(),
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("delegate recovery".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
             },
+            None,
         )
         .unwrap();
-        let updated = update_user_goal(
+        let fork = execute_fork_subthread(
             &db,
-            &created.id,
-            "Release smoke test".to_owned(),
-            "Run the release smoke test".to_owned(),
-            "The smoke test passes with a captured response.".to_owned(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(updated.title, "Release smoke test");
-        assert_eq!(updated.goal_state, "active");
-        assert_eq!(updated.status, "queued");
-        let latest_prompt: Value = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT payload FROM history_records
-                 WHERE thread_id = ?1 AND kind = 'input' ORDER BY id DESC LIMIT 1",
-                [&created.id],
-                |row| row.get(0),
-            )
-            .map(|value: String| serde_json::from_str(&value).unwrap())
-            .unwrap();
-        assert!(
-            latest_prompt["content"]
-                .as_str()
-                .unwrap()
-                .contains("Run the release smoke test")
+            user.id,
+            json!({"title":"Recovery","task":"Recover a terminal Goal","completion_criteria":"The terminal handoff is durable."}),
         );
+        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let _ = claim_queued_subthreads(&db).unwrap();
+        achieve_goal(
+            &db,
+            &id,
+            "Verified terminal result.",
+            "Verification passed.",
+        )
+        .unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute("UPDATE subthreads SET result = NULL WHERE id = ?1", [&id])
+            .unwrap();
 
-        assert!(delete_user_goal(&db, &created.id).unwrap());
-        assert!(load_subthread_detail(&db, &created.id).unwrap().is_none());
-        let events: i64 = open_db(&db)
+        bootstrap_database(&db).unwrap();
+        assert_eq!(
+            terminal_subthread_result(&db, &id).unwrap(),
+            "Verification passed."
+        );
+        assert!(
+            finalize_terminal_subthread_join(&db, &id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            finalize_terminal_subthread_join(&db, &id)
+                .unwrap()
+                .is_none()
+        );
+        let (status, outcomes): (String, i64) = open_db(&db)
             .unwrap()
             .query_row(
-                "SELECT COUNT(*) FROM history_records WHERE thread_id = ?1",
-                [&created.id],
-                |row| row.get(0),
+                "SELECT thread.status, COUNT(record.id)
+                 FROM subthreads thread
+                 LEFT JOIN history_records record ON record.id = thread.outcome_record_id
+                 WHERE thread.id = ?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert!(events > 0);
+        assert_eq!(status, "completed");
+        assert_eq!(outcomes, 1);
     }
 
     #[test]
@@ -14746,6 +14713,7 @@ mod tests {
                 .unwrap();
             assert!(!columns.contains(&legacy_execution_column));
         }
+        assert!(has_column(&connection, "subthreads", "outcome_record_id").unwrap());
         let payload: String = connection
             .query_row(
                 "SELECT payload FROM history_records WHERE id = 1",
