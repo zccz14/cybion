@@ -7394,6 +7394,7 @@ fn tool_definitions() -> Value {
         json!({"type":"function","name":"run_bash","description":"Execute a Bash command and return stdout, stderr, and the exit status. Omit target_device, or use an empty string, to use the current device. Set it to an exact available remote device ID only for that remote call.","parameters":{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"target_device":{"type":"string","description":"Optional exact ID from the available remote device list. Omit this field or use an empty string to execute locally."}}}}),
         json!({"type":"function","name":"copy_files","description":"Copy one regular file or directory through the controller relay without putting file contents in model context. source_device is optional: omit it for the controller filesystem, or provide an exact remote device ID. target_device must be an exact remote device ID, or skill-store to install a skill package into the controller-managed skill root. For a remote target, target_path is the destination directory. For skill-store, omit target_path; the copied source basename becomes the skill directory name.","parameters":{"type":"object","additionalProperties":false,"required":["source_path","target_device"],"properties":{"source_path":{"type":"string"},"source_device":{"type":"string","description":"Optional exact remote device ID; omit to read from the controller."},"target_device":{"type":"string","description":"An exact remote device ID or skill-store."},"target_path":{"type":"string","description":"Required destination directory for a remote target; omit for skill-store."}}}}),
         json!({"type":"function","name":"download_file","description":"Save one Cybion file object, including a generated image, to an exact path on this controller or an enrolled remote device. Use the SHA-256 file_id from the File objects or Gallery page. For a remote device, provide its exact target_device ID and an absolute destination path including the filename.","parameters":{"type":"object","additionalProperties":false,"required":["file_id","path"],"properties":{"file_id":{"type":"string","description":"The exact SHA-256 file object ID."},"path":{"type":"string","description":"Exact destination file path, including the filename."},"target_device":{"type":"string","description":"Optional exact remote device ID. Omit for the controller."}}}}),
+        json!({"type":"function","name":"update_cybion","description":"Safely update this Cybion controller: checks and downloads the latest verified release, then queues its managed restart. This is the only allowed path to update or restart the local Cybion service; do not use run_bash to download binaries or restart cybion.service.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
         json!({"type":"web_search"}),
         json!({"type":"image_generation"}),
     ];
@@ -7710,6 +7711,35 @@ async fn read_skill_resource(
     .map_err(Into::into)
 }
 
+async fn update_cybion_tool(client: &reqwest::Client, db_path: &Path) -> ToolExecution {
+    let result: Result<String> = async {
+        let status = update::download_latest(client, db_path).await?;
+        if status.state != "ready" {
+            return serde_json::to_string(&json!({
+                "state": status.state,
+                "current_version": status.current_version,
+                "latest_version": status.latest_version,
+                "detail": status.detail,
+            }))
+            .map_err(Into::into);
+        }
+        // RECOVERY: The tool result must be persisted before this process exits. The delayed
+        // managed restart gives the agent event and protocol tool output time to commit.
+        update::restart_after(db_path, Duration::from_secs(2))?;
+        serde_json::to_string(&json!({
+            "state": "restarting",
+            "current_version": status.current_version,
+            "latest_version": status.latest_version,
+            "detail": "Verified update is queued for managed restart. The result is durable; do not retry this tool after restart.",
+        }))
+        .map_err(Into::into)
+    }
+    .await;
+    result
+        .map(tool_execution)
+        .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     name: &str,
@@ -7770,6 +7800,7 @@ async fn execute_tool(
         "search_thread_history" => search_thread_history_tool(db_path, args),
         "load_skill" => load_skill_tool(skills, args).await,
         "read_skill_resource" => read_skill_resource_tool(skills, args).await,
+        "update_cybion" => update_cybion_tool(client, db_path).await,
         "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
             execute_device_tool(name, args, db_path, executor_tunnels, cancellation).await
         }
@@ -8183,6 +8214,20 @@ async fn execute_local_tool(
     }
 }
 
+fn cybion_self_update_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    let restarts_cybion = command.contains("cybion")
+        && command.contains("systemctl")
+        && ["restart", "try-restart", "stop", "kill"]
+            .iter()
+            .any(|action| command.contains(action));
+    let replaces_cybion_binary = command.contains("/.cybion/bin/cybion")
+        && ["install", "mv ", "cp "]
+            .iter()
+            .any(|operation| command.contains(operation));
+    restarts_cybion || replaces_cybion_binary
+}
+
 async fn execute_local_bash(
     args: Value,
     db_path: &Path,
@@ -8191,6 +8236,11 @@ async fn execute_local_bash(
     let Some(command) = args.get("command").and_then(Value::as_str) else {
         return tool_execution("error: missing bash command");
     };
+    if cybion_self_update_command(command) {
+        return tool_execution(
+            "error: updating or restarting the local Cybion service through run_bash is blocked because it can lose the tool result and replay the command. Use update_cybion instead.",
+        );
+    }
     let target = match local_command_target(db_path) {
         Ok(target) => target,
         Err(cause) => {
@@ -15026,6 +15076,40 @@ mod tests {
         .await;
         assert!(!result.output.starts_with("error:"));
         assert_eq!(std::fs::read(destination).unwrap(), b"durable file");
+    }
+
+    #[test]
+    fn update_tool_is_advertised_as_the_only_local_update_path() {
+        let definitions = tool_definitions();
+        let tools = definitions.as_array().unwrap();
+        let update = tools
+            .iter()
+            .find(|tool| tool["name"] == "update_cybion")
+            .expect("update tool exists");
+        assert_eq!(update["parameters"]["additionalProperties"], false);
+        assert!(
+            update["description"]
+                .as_str()
+                .unwrap()
+                .contains("only allowed path")
+        );
+    }
+
+    #[test]
+    fn local_cybion_restart_commands_are_rejected() {
+        assert!(cybion_self_update_command(
+            "systemctl restart cybion.service"
+        ));
+        assert!(cybion_self_update_command(
+            "sudo systemctl try-restart cybion"
+        ));
+        assert!(cybion_self_update_command(
+            "install -m 0755 next /root/.cybion/bin/cybion.new"
+        ));
+        assert!(!cybion_self_update_command("systemctl restart nginx"));
+        assert!(!cybion_self_update_command(
+            "systemctl reload cybion.service"
+        ));
     }
 
     #[test]

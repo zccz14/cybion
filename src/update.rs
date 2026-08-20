@@ -173,6 +173,10 @@ async fn download_latest_inner(
 }
 
 pub fn restart(database_path: &Path) -> Result<()> {
+    restart_after(database_path, Duration::from_millis(250))
+}
+
+pub fn restart_after(database_path: &Path, exit_delay: Duration) -> Result<()> {
     let candidate =
         candidate_path(database_path)?.ok_or_else(|| anyhow!("no downloaded update is ready"))?;
     if !candidate.is_file() {
@@ -198,8 +202,8 @@ pub fn restart(database_path: &Path) -> Result<()> {
         .arg(candidate_version)
         .spawn()
         .context("cannot start the update helper")?;
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(250));
+    std::thread::spawn(move || {
+        std::thread::sleep(exit_delay);
         std::process::exit(0);
     });
     Ok(())
