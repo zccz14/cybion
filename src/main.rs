@@ -500,9 +500,17 @@ struct ContextCheckpointPredecessor {
     checkpoint_id: i64,
 }
 
+#[derive(Clone, Serialize)]
+struct ProtocolRecordMetadata {
+    record_id: i64,
+    created_at: String,
+    kind: String,
+}
+
 struct CompiledContext {
     items: Vec<Value>,
     record_ids: Vec<i64>,
+    record_metadata: Vec<ProtocolRecordMetadata>,
     idx_head: i64,
     idx_tail: i64,
 }
@@ -516,11 +524,27 @@ impl std::ops::Deref for CompiledContext {
 }
 
 impl CompiledContext {
-    fn from_records(idx_head: i64, idx_tail: i64, records: Vec<(i64, Value)>) -> Self {
-        let (record_ids, items) = records.into_iter().unzip();
+    fn from_records(
+        idx_head: i64,
+        idx_tail: i64,
+        records: Vec<(i64, String, String, Value)>,
+    ) -> Self {
+        let mut record_ids = Vec::with_capacity(records.len());
+        let mut record_metadata = Vec::with_capacity(records.len());
+        let mut items = Vec::with_capacity(records.len());
+        for (record_id, created_at, kind, item) in records {
+            record_ids.push(record_id);
+            record_metadata.push(ProtocolRecordMetadata {
+                record_id,
+                created_at,
+                kind,
+            });
+            items.push(item);
+        }
         Self {
             items,
             record_ids,
+            record_metadata,
             idx_head,
             idx_tail,
         }
@@ -1858,8 +1882,9 @@ async fn compact_checkpoint_context(
     let mut prefix = None;
     let mut raw_items = context.items.as_slice();
     let mut raw_record_ids = context.record_ids.as_slice();
+    let mut raw_record_metadata = context.record_metadata.as_slice();
     loop {
-        let input = checkpoint_compaction_input(prefix.as_ref(), raw_items);
+        let input = checkpoint_compaction_input(prefix.as_ref(), raw_items, raw_record_metadata);
         let overflow = match compact_checkpoint_once(
             client,
             config,
@@ -1887,12 +1912,17 @@ async fn compact_checkpoint_context(
             );
             raw_items = &raw_items[1..];
             raw_record_ids = &raw_record_ids[1..];
+            raw_record_metadata = &raw_record_metadata[1..];
             continue;
         }
 
         let mut left_len = raw_items.len().div_ceil(2);
         loop {
-            let input = checkpoint_compaction_input(prefix.as_ref(), &raw_items[..left_len]);
+            let input = checkpoint_compaction_input(
+                prefix.as_ref(),
+                &raw_items[..left_len],
+                &raw_record_metadata[..left_len],
+            );
             match compact_checkpoint_once(
                 client,
                 config,
@@ -1908,6 +1938,7 @@ async fn compact_checkpoint_context(
                     prefix = Some(compacted_checkpoint_item(&checkpoint));
                     raw_items = &raw_items[left_len..];
                     raw_record_ids = &raw_record_ids[left_len..];
+                    raw_record_metadata = &raw_record_metadata[left_len..];
                     break;
                 }
                 Err(cause) if is_context_overflow(&cause) && left_len > 1 => {
@@ -1922,6 +1953,7 @@ async fn compact_checkpoint_context(
                     );
                     raw_items = &raw_items[1..];
                     raw_record_ids = &raw_record_ids[1..];
+                    raw_record_metadata = &raw_record_metadata[1..];
                     break;
                 }
                 Err(cause) => return Err(cause),
@@ -1930,10 +1962,22 @@ async fn compact_checkpoint_context(
     }
 }
 
-fn checkpoint_compaction_input(prefix: Option<&Value>, raw_items: &[Value]) -> Vec<Value> {
-    let mut input = prefix.into_iter().cloned().collect::<Vec<_>>();
-    input.extend(raw_items.iter().cloned());
-    input
+struct CheckpointCompactionInput {
+    items: Vec<Value>,
+    source_records: Vec<ProtocolRecordMetadata>,
+}
+
+fn checkpoint_compaction_input(
+    prefix: Option<&Value>,
+    raw_items: &[Value],
+    source_records: &[ProtocolRecordMetadata],
+) -> CheckpointCompactionInput {
+    let mut items = prefix.into_iter().cloned().collect::<Vec<_>>();
+    items.extend(raw_items.iter().cloned());
+    CheckpointCompactionInput {
+        items,
+        source_records: source_records.to_vec(),
+    }
 }
 
 async fn compact_checkpoint_once(
@@ -1942,12 +1986,13 @@ async fn compact_checkpoint_once(
     db_path: &Path,
     upstream_thread_id: &str,
     audit: ResponseAuditContext,
-    items: Vec<Value>,
+    input: CheckpointCompactionInput,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<String> {
+    let developer_prompt = checkpoint_developer_prompt(&input.source_records);
     let mut body = json!({
         "model": config.default_model,
-        "input": prepend_developer_message(checkpoint_developer_prompt(), items),
+        "input": prepend_developer_message(&developer_prompt, input.items),
         "store": false,
         "stream": true,
         "max_output_tokens": CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS,
@@ -1979,7 +2024,9 @@ async fn compact_checkpoint_once(
     Ok(checkpoint)
 }
 
-fn checkpoint_developer_prompt() -> &'static str {
+fn checkpoint_developer_prompt(source_records: &[ProtocolRecordMetadata]) -> String {
+    let source_records =
+        serde_json::to_string(source_records).expect("protocol record metadata serializes");
     r#"# Checkpoint compaction
 
 Compact the supplied context into durable working memory for the next agent turn. Do not recap or preserve the complete conversation: raw history is permanent and is discovered later with `search_thread_history`.
@@ -2013,7 +2060,17 @@ Return Markdown only, with these sections in order:
 
 `## Resources and authoritative locations` must be a concise Markdown list of the exact resources required to continue the work. Include paths, symbols, URLs, service names, database tables, migrations, configuration keys, data locations, or commands when they are authoritative. Cite the relevant history record ID beside each nontrivial item.
 
-`## Chronicle timeline` must be a chronological Markdown list of at most 12 causally relevant state changes, decisions, discoveries, failures, validations, or releases. Every bullet must start with a temporal anchor and cite the supporting history record IDs. Use an exact date, time, or duration only when the supplied context explicitly states it. Otherwise express sequence with a record-order anchor such as `[after record #18, before record #27 | inferred]`; never infer a calendar date or duration from record order alone. Merge an inherited timeline with following raw records in chronological order, coalescing superseded events and omitting irrelevant chatter.
+`## Chronicle timeline` must preserve every causally relevant state change, decision, discovery, failure, recovery, validation, or release that remains necessary to understand the current concepts, resources, decisions, constraints, unfinished work, or causal chain. Do not impose a numeric limit and do not omit an event merely because the timeline is long. Every bullet must start with a temporal anchor and cite the supporting history record IDs. Use the exact `created_at` timestamp from the Chronicle source record metadata when available. Otherwise use a record-order anchor such as `[after record #18, before record #27 | inferred]`; never invent a calendar date or duration.
+
+You may coalesce only factual coverage: duplicate reports of the same event, repeated facts that add no new causal meaning, or facts fully superseded by a higher-level conclusion. A coalesced bullet must preserve chronological order and cite every applicable supporting history record ID. Never merge or omit distinct causal events, failures, recoveries, validations, releases, decisions, or constraints.
+
+## Chronicle source record metadata
+
+The raw protocol input items after an optional leading inherited checkpoint correspond to this chronological metadata list in exactly the same order. This metadata is available only for this compaction request: use it to anchor the Chronicle, but do not copy it into any Responses protocol item.
+
+```json
+__CHRONICLE_SOURCE_RECORDS__
+```
 
 `## Open work and evidence routes` must include one fenced `json` array. Each entry must contain exactly `topic_key`, `status`, `message_range`, and `search_keywords`:
 
@@ -2026,6 +2083,7 @@ Include only active work or active constraints; this is a retrieval route, not a
 All sections must omit resolved, uncertain, or irrelevant facts. Do not infer personality or retain credentials, tokens, passwords, API keys, cookies, or secrets.
 
 An input developer item may be an intermediate checkpoint from an earlier compaction pass. It covers earlier history; combine its state with the raw protocol items that follow it into one new checkpoint."#
+        .replace("__CHRONICLE_SOURCE_RECORDS__", &source_records)
 }
 
 async fn compact_context_after_overflow(
@@ -2467,29 +2525,26 @@ fn load_protocol_items(
     thread_id: Option<&str>,
     first_id: i64,
     idx_tail: i64,
-) -> Result<Vec<(i64, Value)>> {
+) -> Result<Vec<(i64, String, String, Value)>> {
     connection
         .prepare(
-            "SELECT id, payload FROM history_records
+            "SELECT id, kind, payload, created_at FROM history_records
              WHERE thread_id IS ?1
                AND id >= ?2 AND id <= ?3
                AND kind IN ('input', 'response_output', 'tool_output', 'checkpoint')
              ORDER BY id",
         )?
         .query_map(params![thread_id, first_id, idx_tail], |row| {
+            let item = serde_json::from_str::<Value>(&row.get::<_, String>(2)?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
             Ok((
                 row.get::<_, i64>(0)?,
-                serde_json::from_str::<Value>(&row.get::<_, String>(1)?)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(1)?,
+                context_tool_output_item(&item),
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map(|items| {
-            items
-                .into_iter()
-                .map(|(id, item)| (id, context_tool_output_item(&item)))
-                .collect()
-        })
         .map_err(Into::into)
 }
 
@@ -9586,6 +9641,8 @@ mod tests {
             .map(|(index, content)| {
                 (
                     i64::try_from(index + 10).unwrap(),
+                    format!("2026-08-20T00:00:{index:02}Z"),
+                    "input".to_owned(),
                     json!({"role":"user","content":content}),
                 )
             })
@@ -11465,8 +11522,26 @@ mod tests {
         assert!(prompt.contains("## Chronicle timeline"));
         assert!(prompt.contains("## Open work and evidence routes"));
         assert!(prompt.contains("search_keywords"));
-        assert!(prompt.contains("at most 12 causally relevant"));
-        assert!(prompt.contains("never infer a calendar date or duration from record order alone"));
+        let first_record_created_at: String = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT created_at FROM history_records WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(prompt.contains("Do not impose a numeric limit"));
+        assert!(prompt.contains("Never merge or omit distinct causal events"));
+        assert!(prompt.contains("\"record_id\":1"));
+        assert!(prompt.contains("\"kind\":\"input\""));
+        assert!(prompt.contains(&first_record_created_at));
+        assert!(!prompt.contains("at most 12 causally relevant"));
+        assert!(
+            !requests[0]["input"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Chronicle source record metadata")
+        );
         assert!(
             prompt.find("## Concepts and terminology").unwrap()
                 < prompt
@@ -13211,12 +13286,42 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_chronicle_prompt_preserves_long_term_events_without_a_numeric_cap() {
+        let prompt = checkpoint_developer_prompt(&[
+            ProtocolRecordMetadata {
+                record_id: 41,
+                created_at: "2026-08-20T01:02:03Z".to_owned(),
+                kind: "response_output".to_owned(),
+            },
+            ProtocolRecordMetadata {
+                record_id: 42,
+                created_at: "2026-08-20T01:02:04Z".to_owned(),
+                kind: "tool_output".to_owned(),
+            },
+        ]);
+
+        assert!(prompt.contains("Do not impose a numeric limit"));
+        assert!(prompt.contains("every causally relevant state change"));
+        assert!(prompt.contains("Never merge or omit distinct causal events"));
+        assert!(prompt.contains("duplicate reports of the same event"));
+        assert!(prompt.contains("\"record_id\":41"));
+        assert!(prompt.contains("2026-08-20T01:02:03Z"));
+        assert!(prompt.contains("\"kind\":\"tool_output\""));
+        assert!(!prompt.contains("at most 12 causally relevant"));
+    }
+
+    #[test]
     fn function_call_output_preserves_the_raw_tool_result() {
         let output = format!("{}终", "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS));
-        let bounded = function_call_output("call-1", &output);
-        let bounded = bounded["output"].as_str().unwrap();
+        let item = function_call_output("call-1", &output);
 
-        assert_eq!(bounded, output);
+        assert_eq!(item["output"].as_str(), Some(output.as_str()));
+        assert_eq!(item.as_object().unwrap().len(), 3);
+        assert_eq!(item["type"], "function_call_output");
+        assert_eq!(item["call_id"], "call-1");
+        assert!(item.get("record_id").is_none());
+        assert!(item.get("created_at").is_none());
+        assert!(item.get("kind").is_none());
     }
 
     #[test]
