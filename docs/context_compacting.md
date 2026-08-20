@@ -14,7 +14,7 @@
 CompiledContext {
   idx_head,
   idx_tail,
-  records: [(record_id, protocol_item), ...]
+  records: [(record_id, created_at, kind, protocol_item), ...]
 }
 ```
 
@@ -44,7 +44,9 @@ checkpoint 是下一轮 Agent 的工作记忆，而不是仅保留当下状态�
 输出必须按此顺序使用 `# Durable working context`、`## Concepts and terminology`、`## Resources and authoritative locations`、`## Chronicle timeline`、`## Active decisions and constraints`、`## Current objective and next step` 和 `## Open work and evidence routes` 标题。
 当空间不足时，应先去除已解决的叙事和短暂的进度细节，不能将前两类工作记忆仅仅因为当前任务已结束而丢弃。除可检索的路由外，每个非平凡事项必须附上准确的 history record ID；当需要回溯更早细节时，同时提供检索关键词。
 
-`## Chronicle timeline` 是按发生顺序排列的 Markdown bullet list，最多 12 条。仅收录状态变化、决策、关键发现、故障、验证和发布等因果相关事件；每条需含时间或顺序锚点与关联的 history record ID。只有原始上下文明确给出时，才能写日期、时间或时长；否则必须以类似 `[after record #18, before record #27 | inferred]` 的顺序锚点标注推断，不能从 record 顺序伪造日历时间或时长。当输入含上一次的 checkpoint 时，需与后续 raw records 按时序合并、合并已被替代的事件并删除无关对话。
+`## Chronicle timeline` 是按发生顺序排列的 Markdown bullet list。它必须尽可能保留所有仍然影响当前概念、资源、决策、约束、未完成工作或因果链的事件；不能因条目数量而截断。只有重复报告同一事件、没有新增因果含义的重复事实，或被更高层结论完整覆盖的事实，才允许缩略合并。合并后必须保持原有时序并引用全部适用的 history record ID；不同的决定、发现、故障、恢复、验证、发布或约束不得合并或省略。
+
+压缩请求会额外提供与 raw protocol records 一一对应的 `record_id`、`created_at` 与 `kind` 元数据。该元数据仅存在于 compaction developer 前缀，绝不能写入 `function_call_output` 或其他正常 Responses replay 协议项。Chronicle 应优先使用这些精确 `created_at` 时间；只有元数据不存在时，才使用类似 `[after record #18, before record #27 | inferred]` 的顺序锚点。不能从 record 顺序伪造日历时间或时长。当输入含上一次的 checkpoint 时，需与后续 raw records 按时序合并、合并已被替代的事实并删除无关对话。
 
 ## 递归前缀压缩
 
