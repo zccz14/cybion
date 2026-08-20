@@ -860,6 +860,66 @@ struct ReasoningAuditQuery {
     request_kind: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+struct InsightsQuery {
+    range: Option<String>,
+    thread_id: Option<String>,
+    model: Option<String>,
+    request_kind: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Insights {
+    range: String,
+    generated_at: String,
+    tokens: InsightTokens,
+    requests: InsightRequests,
+    history: InsightHistory,
+    dimensions: InsightDimensions,
+}
+
+#[derive(Serialize)]
+struct InsightTokens {
+    completed_requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
+    cached_tokens: i64,
+    cache_hit_rate: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct InsightRequests {
+    total: i64,
+    completed: i64,
+    in_flight: i64,
+    failed: i64,
+    cancelled: i64,
+    interrupted: i64,
+}
+
+#[derive(Serialize)]
+struct InsightCount {
+    key: String,
+    count: i64,
+}
+
+#[derive(Serialize)]
+struct InsightHistory {
+    total_records: i64,
+    payload_bytes: i64,
+    checkpoint_count: i64,
+    latest_record_at: Option<String>,
+    kinds: Vec<InsightCount>,
+}
+
+#[derive(Serialize)]
+struct InsightDimensions {
+    thread_ids: Vec<String>,
+    models: Vec<String>,
+    request_kinds: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct ReasoningAuditPage {
     items: Vec<ReasoningAudit>,
@@ -1299,6 +1359,7 @@ fn app(state: AppState) -> Router {
         .route("/api/tools", get(tools))
         .route("/api/commands", get(list_command_runs))
         .route("/api/reasoning-audits", get(reasoning_audits))
+        .route("/api/insights", get(insights))
         .route("/api/skills", get(skills))
         .route("/api/system/resources", get(system_resources))
         .route("/api/update", get(update_status))
@@ -4580,6 +4641,17 @@ async fn reasoning_audits(
                 "cannot read reasoning audits",
             )
         })
+}
+
+async fn insights(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsQuery>,
+) -> ApiResult<Insights> {
+    identity(&state, &headers).await?;
+    load_insights(&state.db_path, &query)
+        .map(Json)
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))
 }
 
 async fn skills(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<SkillsResponse> {
@@ -9507,6 +9579,98 @@ fn load_command_run_page(db_path: &Path, query: &CommandRunQuery) -> Result<Comm
         page,
         page_size,
         target_machines,
+    })
+}
+
+fn insight_range_start(value: Option<&str>) -> Result<(String, Option<String>)> {
+    let range = value.unwrap_or("7d").trim();
+    let duration = match range {
+        "24h" => Some(chrono::Duration::hours(24)),
+        "7d" => Some(chrono::Duration::days(7)),
+        "30d" => Some(chrono::Duration::days(30)),
+        "all" => None,
+        _ => return Err(anyhow!("insight range is invalid")),
+    };
+    Ok((
+        range.to_owned(),
+        duration.map(|duration| (chrono::Utc::now() - duration).to_rfc3339()),
+    ))
+}
+
+fn load_insights(db_path: &Path, query: &InsightsQuery) -> Result<Insights> {
+    let connection = open_db(db_path)?;
+    let (range, started_after) = insight_range_start(query.range.as_deref())?;
+    let thread_id = history_record_filter(query.thread_id.as_deref())?;
+    let model = history_record_filter(query.model.as_deref())?;
+    let request_kind = history_record_filter(query.request_kind.as_deref())?;
+    let audit_where = "(?1 IS NULL OR started_at >= ?1)
+        AND (?2 IS NULL OR (?2 = 'main' AND thread_id IS NULL) OR thread_id = ?2)
+        AND (?3 IS NULL OR model = ?3)
+        AND (?4 IS NULL OR request_kind = ?4)";
+    let history_where = "(?1 IS NULL OR created_at >= ?1)
+        AND (?2 IS NULL OR (?2 = 'main' AND thread_id IS NULL) OR thread_id = ?2)";
+    let (completed_requests, input_tokens, output_tokens, cached_tokens): (i64, i64, i64, i64) = connection.query_row(
+        &format!("SELECT COUNT(*), COALESCE(SUM(COALESCE(input_tokens, 0)), 0), COALESCE(SUM(COALESCE(output_tokens, 0)), 0), COALESCE(SUM(COALESCE(cached_tokens, 0)), 0) FROM responses_request_audits WHERE status = 'completed' AND {audit_where}"),
+        params![started_after, thread_id, model, request_kind],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let (total, completed, in_flight, failed, cancelled, interrupted): (i64, i64, i64, i64, i64, i64) = connection.query_row(
+        &format!("SELECT COUNT(*), COALESCE(SUM(status = 'completed'), 0), COALESCE(SUM(status = 'in_flight'), 0), COALESCE(SUM(status = 'failed'), 0), COALESCE(SUM(status = 'cancelled'), 0), COALESCE(SUM(status = 'interrupted'), 0) FROM responses_request_audits WHERE {audit_where}"),
+        params![started_after, thread_id, model, request_kind],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    )?;
+    let (total_records, payload_bytes, checkpoint_count, latest_record_at): (i64, i64, i64, Option<String>) = connection.query_row(
+        &format!("SELECT COUNT(*), COALESCE(SUM(length(CAST(payload AS BLOB))), 0), COALESCE(SUM(kind = 'checkpoint'), 0), MAX(created_at) FROM history_records WHERE {history_where}"),
+        params![started_after, thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let kinds = connection.prepare(&format!("SELECT kind, COUNT(*) FROM history_records WHERE {history_where} GROUP BY kind ORDER BY kind"))?
+        .query_map(params![started_after, thread_id], |row| Ok(InsightCount { key: row.get(0)?, count: row.get(1)? }))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let thread_ids = connection.prepare("SELECT DISTINCT thread_id FROM responses_request_audits WHERE thread_id IS NOT NULL ORDER BY thread_id")?
+        .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
+    let models = connection
+        .prepare("SELECT DISTINCT model FROM responses_request_audits ORDER BY model")?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    let request_kinds = connection
+        .prepare(
+            "SELECT DISTINCT request_kind FROM responses_request_audits ORDER BY request_kind",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(Insights {
+        range,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        tokens: InsightTokens {
+            completed_requests,
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            cached_tokens,
+            cache_hit_rate: (input_tokens > 0)
+                .then(|| cached_tokens as f64 / input_tokens as f64 * 100.0),
+        },
+        requests: InsightRequests {
+            total,
+            completed,
+            in_flight,
+            failed,
+            cancelled,
+            interrupted,
+        },
+        history: InsightHistory {
+            total_records,
+            payload_bytes,
+            checkpoint_count,
+            latest_record_at,
+            kinds,
+        },
+        dimensions: InsightDimensions {
+            thread_ids,
+            models,
+            request_kinds,
+        },
     })
 }
 
@@ -15631,5 +15795,92 @@ mod tests {
         .await
         .unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn insights_aggregate_completed_usage_and_protocol_history_without_double_counting_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        connection.execute(
+            "INSERT INTO responses_request_audits (thread_id, idx_head, idx_tail, request_kind, model, status, started_at, finished_at, input_tokens, output_tokens, cached_tokens)
+             VALUES (NULL, 1, 2, 'normal', 'gpt-5.6-terra', 'completed', ?1, ?1, 100, 20, 40)",
+            [chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO responses_request_audits (thread_id, idx_head, idx_tail, request_kind, model, status, started_at)
+             VALUES ('child', 3, 4, 'compaction', 'gpt-5.6-sol', 'failed', ?1)",
+            [chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+        history_record_payload(
+            &connection,
+            None,
+            "input",
+            &json!({"role":"user","content":"one"}),
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+        history_record_payload(
+            &connection,
+            None,
+            "tool_output",
+            &function_call_output("call-1", "ok"),
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+        history_record_payload(
+            &connection,
+            Some("child"),
+            "checkpoint",
+            &compacted_checkpoint_item("state"),
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+        let all = load_insights(
+            &db,
+            &InsightsQuery {
+                range: Some("all".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.tokens.completed_requests, 1);
+        assert_eq!(all.tokens.input_tokens, 100);
+        assert_eq!(all.tokens.output_tokens, 20);
+        assert_eq!(all.tokens.total_tokens, 120);
+        assert_eq!(all.tokens.cached_tokens, 40);
+        assert_eq!(all.tokens.cache_hit_rate, Some(40.0));
+        assert_eq!(all.requests.total, 2);
+        assert_eq!(all.requests.failed, 1);
+        assert_eq!(all.history.total_records, 3);
+        assert_eq!(all.history.checkpoint_count, 1);
+        assert!(
+            all.history
+                .kinds
+                .iter()
+                .any(|kind| kind.key == "tool_output" && kind.count == 1)
+        );
+        let main = load_insights(
+            &db,
+            &InsightsQuery {
+                range: Some("all".to_owned()),
+                thread_id: Some("main".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(main.requests.total, 1);
+        assert_eq!(main.history.total_records, 2);
+        assert!(
+            load_insights(
+                &db,
+                &InsightsQuery {
+                    range: Some("forever".to_owned()),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
     }
 }
