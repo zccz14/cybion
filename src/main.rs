@@ -60,6 +60,7 @@ const DEFAULT_MODEL_ID: &str = "gpt-5.6-terra";
 const DEFAULT_SUBTHREAD_MODEL_ID: &str = "gpt-5.6-terra";
 const DEFAULT_VOICE_SCRIPT_MODEL_ID: &str = "gpt-5.6-luna";
 const DEFAULT_VOICE_TURN_MODEL_ID: &str = "gpt-5.6-luna";
+const SUBTHREAD_MODEL_IDS: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const DEFAULT_VOICE_SCRIPT_MAX_CHARS: usize = 150;
 const DEFAULT_EDGE_TTS_ZH_VOICE: &str = "zh-CN-XiaoxiaoNeural";
 const DEFAULT_EDGE_TTS_EN_VOICE: &str = "en-US-JennyNeural";
@@ -5927,6 +5928,10 @@ async fn resend_conversation_message(
     Ok(stream_latest_main_response(state, record_id).await)
 }
 
+fn supported_subthread_model(model_id: &str) -> bool {
+    SUBTHREAD_MODEL_IDS.contains(&model_id)
+}
+
 fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> ToolExecution {
     let title = args
         .get("title")
@@ -5960,13 +5965,25 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
         Ok(false) => return tool_execution("error: subthreads can only fork from the main thread"),
         Err(cause) => return tool_execution(format!("error: {cause}")),
     };
-    let model = match connection.query_row(
+    let default_model = match connection.query_row(
         "SELECT value FROM app_meta WHERE key = 'subthread_model'",
         [],
         |row| row.get::<_, String>(0),
     ) {
         Ok(model) => model,
         Err(cause) => return tool_execution(format!("error: {cause}")),
+    };
+    let model = match args.get("model_id") {
+        None => default_model,
+        Some(Value::String(model_id)) if supported_subthread_model(model_id.trim()) => {
+            model_id.trim().to_owned()
+        }
+        _ => {
+            return tool_execution(format!(
+                "error: model_id must be one of {}",
+                SUBTHREAD_MODEL_IDS.join(", ")
+            ));
+        }
     };
     let goal_prompt = json!({
         "role": "user",
@@ -6012,7 +6029,7 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
             if let Err(cause) = transaction.commit() {
                 return tool_execution(format!("error: cannot prepare subthread run: {cause}"));
             }
-            tool_execution(json!({ "id": id, "status": "queued" }).to_string())
+            tool_execution(json!({ "id": id, "status": "queued", "model_id": model }).to_string())
         }
         Err(cause) => tool_execution(format!("error: {cause}")),
     }
@@ -6889,7 +6906,7 @@ fn scoped_responses_request_body(
             .expect("tool definitions are an array");
         tools.extend([
             json!({"type":"function","name":"list_subthreads","description":"Inspect Cybion's internal persistent Goal loops. They are implementation details of the single user-visible main thread, not user-managed sessions.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
-            json!({"type":"function","name":"fork_subthread","description":"Fork only independently executable, substantial work that benefits from parallel execution. Every fork is one persistent Goal and must state its durable objective and concrete done-when criteria. Use direct tools for brief, localized checks or edits. The Goal inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Cybion resumes the main thread only after the Goal is achieved or blocked.","parameters":{"type":"object","additionalProperties":false,"required":["title","task","completion_criteria"],"properties":{"title":{"type":"string","description":"A short Goal name."},"task":{"type":"string","description":"The durable Goal objective."},"completion_criteria":{"type":"string","description":"Concrete, verifiable conditions that mean the Goal is done."}}}}),
+            json!({"type":"function","name":"fork_subthread","description":"Fork only independently executable, substantial work that benefits from parallel execution. Every fork is one persistent Goal and must state its durable objective and concrete done-when criteria. Use direct tools for brief, localized checks or edits. model_id is optional: use gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. Omit model_id to use the configured subthread default. The Goal inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Cybion resumes the main thread only after the Goal is achieved or blocked.","parameters":{"type":"object","additionalProperties":false,"required":["title","task","completion_criteria"],"properties":{"title":{"type":"string","description":"A short Goal name."},"task":{"type":"string","description":"The durable Goal objective."},"completion_criteria":{"type":"string","description":"Concrete, verifiable conditions that mean the Goal is done."},"model_id":{"type":"string","enum":["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"],"description":"Optional model override. Prefer sol for scientific/deep research, terra for engineering, and luna for operational or simple low-ambiguity work."}}}}),
             json!({"type":"function","name":"cancel_subthread","description":"Cancel an active internal Goal that is no longer relevant or must be rebuilt.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
             json!({"type":"function","name":"retry_subthread","description":"Immediately resume an active Goal that is waiting after an error. This overrides only its current delay; it does not clear the consecutive-error count. Use this when new main-thread evidence makes waiting unnecessary.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
         ]);
@@ -6897,7 +6914,7 @@ fn scoped_responses_request_body(
     }
     let scope_developer_section = match scope {
         AgentScope::Main => {
-            "## Thread role\n\nYou are Cybion's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Fork only independently executable, substantial work that benefits from parallel execution; every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. Inspect existing Goals before replacing work and cancel obsolete ones. Cybion returns only an achieved or blocked Goal handoff and resumes you automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
+            "## Thread role\n\nYou are Cybion's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Fork only independently executable, substantial work that benefits from parallel execution; every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. When selecting an optional fork_subthread model_id, prefer gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. This is guidance, not a substitute for judgment. Inspect existing Goals before replacing work and cancel obsolete ones. Cybion returns only an achieved or blocked Goal handoff and resumes you automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
         }
         AgentScope::Subthread => {
             "## Thread role\n\nYou are an internal Cybion Goal loop forked from a compiled main-thread checkpoint. The inherited Goal prompt defines its objective and done-when criteria. Keep taking the next useful step until every criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. You must call `achieve_goal` with a concise final result and verifiable evidence when the Goal is achieved, or `block_goal` with a concise final result and the concrete blocker when it cannot progress. After either terminal tool, take no further action. Do not ask the user to manage this branch.\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
@@ -10819,6 +10836,79 @@ mod tests {
     }
 
     #[test]
+    fn fork_subthread_accepts_only_supported_model_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("delegate this".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "UPDATE app_meta SET value = 'configured-default' WHERE key = 'subthread_model'",
+                [],
+            )
+            .unwrap();
+        for model_id in SUBTHREAD_MODEL_IDS {
+            let execution = execute_fork_subthread(
+                &db,
+                user.id,
+                json!({
+                    "title": model_id,
+                    "task": "Run the delegated work.",
+                    "completion_criteria": "The work is complete.",
+                    "model_id": model_id,
+                }),
+            );
+            let created: Value = serde_json::from_str(&execution.output).unwrap();
+            assert_eq!(created["model_id"], model_id);
+            let model: String = open_db(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT model FROM subthreads WHERE id = ?1",
+                    [created["id"].as_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(model, model_id);
+        }
+        let default_execution = execute_fork_subthread(
+            &db,
+            user.id,
+            json!({
+                "title": "Default",
+                "task": "Run the delegated work.",
+                "completion_criteria": "The work is complete.",
+            }),
+        );
+        let default_created: Value = serde_json::from_str(&default_execution.output).unwrap();
+        assert_eq!(default_created["model_id"], "configured-default");
+        for invalid in [json!("gpt-5.6-unknown"), json!(""), json!(42), Value::Null] {
+            let execution = execute_fork_subthread(
+                &db,
+                user.id,
+                json!({
+                    "title": "Invalid",
+                    "task": "Run the delegated work.",
+                    "completion_criteria": "The work is complete.",
+                    "model_id": invalid,
+                }),
+            );
+            assert!(execution.output.contains("model_id must be one of"));
+        }
+    }
+
+    #[test]
     fn subthread_fork_persists_compiled_context_and_recovers_after_restart() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -11162,11 +11252,21 @@ mod tests {
             .find(|tool| tool["name"] == "fork_subthread")
             .unwrap();
         assert!(fork.pointer("/parameters/properties/machine_id").is_none());
+        assert_eq!(
+            fork.pointer("/parameters/properties/model_id/enum"),
+            Some(&json!(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])),
+        );
         assert!(
             fork["description"]
                 .as_str()
                 .unwrap()
                 .contains("independently executable, substantial work")
+        );
+        assert!(
+            fork["description"]
+                .as_str()
+                .unwrap()
+                .contains("gpt-5.6-sol")
         );
         let read_file = subthread["tools"]
             .as_array()
@@ -11179,6 +11279,9 @@ mod tests {
             Some(&Value::String("string".to_owned()))
         );
         let developer = main["input"][0]["content"].as_str().unwrap();
+        assert!(developer.contains("scientific or deep research"));
+        assert!(developer.contains("engineering work"));
+        assert!(developer.contains("operational or simple low-ambiguity work"));
         assert!(developer.contains("Available remote execution devices"));
         assert!(developer.contains("\"target_device\":\"machine-build\""));
         assert!(developer.contains("\"description\":\"Build host on build-1 (executor)\""));
@@ -12382,7 +12485,7 @@ mod tests {
         let fork = execute_fork_subthread(
             &db,
             user.id,
-            json!({"title":"Verification","task":"Run verification","completion_criteria":"Verification passes with evidence."}),
+            json!({"title":"Verification","task":"Run verification","completion_criteria":"Verification passes with evidence.","model_id":"gpt-5.6-sol"}),
         );
         assert!(!fork.output.starts_with("error:"));
         let job = claim_queued_subthreads(&db).unwrap().remove(0);
@@ -12420,6 +12523,7 @@ mod tests {
         })
         .await
         .unwrap();
+        assert_eq!(requests.lock().await[0]["model"], "gpt-5.6-sol");
         server.abort();
         let goals = load_subthreads(&db).unwrap();
         assert_eq!(goals.len(), 1);
