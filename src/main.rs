@@ -866,15 +866,24 @@ struct ReasoningAuditPage {
     total: i64,
     page: i64,
     page_size: i64,
-    thread_ids: Vec<String>,
+    threads: Vec<ReasoningAuditThread>,
     models: Vec<String>,
     request_kinds: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ReasoningAuditThread {
+    id: String,
+    title: Option<String>,
+    task: Option<String>,
 }
 
 #[derive(Serialize)]
 struct ReasoningAudit {
     id: i64,
     thread_id: Option<String>,
+    thread_title: Option<String>,
+    thread_task: Option<String>,
     idx_head: Option<i64>,
     idx_tail: Option<i64>,
     request_kind: String,
@@ -9505,18 +9514,20 @@ fn reasoning_audit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reasoni
     Ok(ReasoningAudit {
         id: row.get(0)?,
         thread_id: row.get(1)?,
-        idx_head: row.get(2)?,
-        idx_tail: row.get(3)?,
-        request_kind: row.get(4)?,
-        model: row.get(5)?,
-        status: row.get(6)?,
-        started_at: row.get(7)?,
-        finished_at: row.get(8)?,
-        input_tokens: row.get(9)?,
-        output_tokens: row.get(10)?,
-        cached_tokens: row.get(11)?,
-        openai_lb_request_id: row.get(12)?,
-        error: row.get(13)?,
+        thread_title: row.get(2)?,
+        thread_task: row.get(3)?,
+        idx_head: row.get(4)?,
+        idx_tail: row.get(5)?,
+        request_kind: row.get(6)?,
+        model: row.get(7)?,
+        status: row.get(8)?,
+        started_at: row.get(9)?,
+        finished_at: row.get(10)?,
+        input_tokens: row.get(11)?,
+        output_tokens: row.get(12)?,
+        cached_tokens: row.get(13)?,
+        openai_lb_request_id: row.get(14)?,
+        error: row.get(15)?,
     })
 }
 
@@ -9544,14 +9555,16 @@ fn load_reasoning_audit_page(
     )?;
     let items = connection
         .prepare(
-            "SELECT id, thread_id, idx_head, idx_tail, request_kind, model, status, started_at, finished_at,
-                    input_tokens, output_tokens, cached_tokens, openai_lb_request_id, error
-             FROM responses_request_audits
-             WHERE (?1 IS NULL OR status = ?1)
-               AND (?2 IS NULL OR (?2 = 'main' AND thread_id IS NULL) OR thread_id = ?2)
-               AND (?3 IS NULL OR model = ?3)
-               AND (?4 IS NULL OR request_kind = ?4)
-             ORDER BY CASE status WHEN 'in_flight' THEN 0 ELSE 1 END, started_at DESC, id DESC
+            "SELECT audit.id, audit.thread_id, thread.title, thread.task, audit.idx_head, audit.idx_tail,
+                    audit.request_kind, audit.model, audit.status, audit.started_at, audit.finished_at,
+                    audit.input_tokens, audit.output_tokens, audit.cached_tokens, audit.openai_lb_request_id, audit.error
+             FROM responses_request_audits AS audit
+             LEFT JOIN subthreads AS thread ON thread.id = audit.thread_id
+             WHERE (?1 IS NULL OR audit.status = ?1)
+               AND (?2 IS NULL OR (?2 = 'main' AND audit.thread_id IS NULL) OR audit.thread_id = ?2)
+               AND (?3 IS NULL OR audit.model = ?3)
+               AND (?4 IS NULL OR audit.request_kind = ?4)
+             ORDER BY CASE audit.status WHEN 'in_flight' THEN 0 ELSE 1 END, audit.started_at DESC, audit.id DESC
              LIMIT ?5 OFFSET ?6",
         )?
         .query_map(
@@ -9559,13 +9572,22 @@ fn load_reasoning_audit_page(
             reasoning_audit_from_row,
         )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let thread_ids = connection
+    let threads = connection
         .prepare(
-            "SELECT DISTINCT thread_id FROM responses_request_audits
-             WHERE thread_id IS NOT NULL ORDER BY thread_id",
+            "SELECT DISTINCT audit.thread_id, thread.title, thread.task
+             FROM responses_request_audits AS audit
+             LEFT JOIN subthreads AS thread ON thread.id = audit.thread_id
+             WHERE audit.thread_id IS NOT NULL
+             ORDER BY thread.title, audit.thread_id",
         )?
-        .query_map([], |row| row.get(0))?
-        .collect::<std::result::Result<Vec<String>, _>>()?;
+        .query_map([], |row| {
+            Ok(ReasoningAuditThread {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                task: row.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     let models = connection
         .prepare("SELECT DISTINCT model FROM responses_request_audits ORDER BY model")?
         .query_map([], |row| row.get(0))?
@@ -9581,7 +9603,7 @@ fn load_reasoning_audit_page(
         total,
         page,
         page_size,
-        thread_ids,
+        threads,
         models,
         request_kinds,
     })
@@ -9835,6 +9857,21 @@ mod tests {
             },
         )
         .unwrap();
+        let connection = open_db(&db).unwrap();
+        let fork_record_id = history_record_payload(
+            &connection,
+            None,
+            "input",
+            &json!({"role":"user","content":"Verify the release."}),
+            "now",
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO subthreads (id,title,task,completion_criteria,goal_state,status,model,upstream_thread_id,from_record_id,created_at,updated_at) VALUES ('child-2','Verify release','Check the released artifact','Artifact is verified.','active','running','main-model','00000000-0000-4000-8000-000000000002',?1,'now','now')",
+                [fork_record_id],
+            )
+            .unwrap();
         let in_flight = ResponseAuditContext::for_request(
             "compaction",
             Some("child-2".to_owned()),
@@ -9847,6 +9884,15 @@ mod tests {
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].status, "in_flight");
         assert_eq!(page.items[0].request_kind, "compaction");
+        assert_eq!(
+            page.items[0].thread_title.as_deref(),
+            Some("Verify release")
+        );
+        assert_eq!(
+            page.items[0].thread_task.as_deref(),
+            Some("Check the released artifact")
+        );
+        assert_eq!(page.threads[0].title.as_deref(), Some("Verify release"));
         let filtered = load_reasoning_audit_page(
             &db,
             &ReasoningAuditQuery {
