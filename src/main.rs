@@ -509,6 +509,7 @@ struct ProtocolRecordMetadata {
 
 struct CompiledContext {
     items: Vec<Value>,
+    protocol_items: Vec<Value>,
     record_ids: Vec<i64>,
     record_metadata: Vec<ProtocolRecordMetadata>,
     idx_head: i64,
@@ -531,18 +532,25 @@ impl CompiledContext {
     ) -> Self {
         let mut record_ids = Vec::with_capacity(records.len());
         let mut record_metadata = Vec::with_capacity(records.len());
-        let mut items = Vec::with_capacity(records.len());
+        let mut protocol_items = Vec::with_capacity(records.len());
+        let mut items = Vec::with_capacity(records.len() * 2);
         for (record_id, created_at, kind, item) in records {
+            let anchor = context_time_anchor(record_id, &kind, &created_at, &item);
             record_ids.push(record_id);
             record_metadata.push(ProtocolRecordMetadata {
                 record_id,
                 created_at,
                 kind,
             });
+            protocol_items.push(item.clone());
             items.push(item);
+            if let Some(anchor) = anchor {
+                items.push(anchor);
+            }
         }
         Self {
             items,
+            protocol_items,
             record_ids,
             record_metadata,
             idx_head,
@@ -1880,7 +1888,7 @@ async fn compact_checkpoint_context(
     cancellation: watch::Receiver<bool>,
 ) -> Result<String> {
     let mut prefix = None;
-    let mut raw_items = context.items.as_slice();
+    let mut raw_items = context.protocol_items.as_slice();
     let mut raw_record_ids = context.record_ids.as_slice();
     let mut raw_record_metadata = context.record_metadata.as_slice();
     loop {
@@ -2546,6 +2554,27 @@ fn load_protocol_items(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn context_time_anchor(
+    record_id: i64,
+    kind: &str,
+    created_at: &str,
+    item: &Value,
+) -> Option<Value> {
+    let subject = match (kind, item.get("type").and_then(Value::as_str)) {
+        ("input", _) if item.get("role").and_then(Value::as_str) == Some("user") => {
+            "preceding user input"
+        }
+        ("tool_output", Some("function_call_output")) => "preceding tool output",
+        _ => return None,
+    };
+    Some(json!({
+        "role": "developer",
+        "content": format!(
+            "Trusted Cybion timeline metadata: the {subject} is history record #{record_id}, persisted at UTC timestamp {created_at}."
+        ),
+    }))
 }
 
 fn context_idx_head(
@@ -10623,11 +10652,11 @@ mod tests {
             .unwrap();
         assert_eq!(fork_from_id, user.id);
         let context = compile_latest_context(&db, Some(&jobs[0].id)).unwrap();
-        assert!(
-            context.last().unwrap()["content"]
+        assert!(context.iter().any(|item| {
+            item["content"]
                 .as_str()
                 .is_some_and(|content| content.contains("## Done when"))
-        );
+        }));
         assert_eq!(jobs[0].model, "subthread-test-model");
         let running = load_subthreads(&db).unwrap();
         assert_eq!(running[0].status, "running");
@@ -11432,7 +11461,7 @@ mod tests {
         )
         .unwrap();
         let context = compile_main_context(&db, current.id).unwrap();
-        assert_eq!(context.items.len(), 3);
+        assert_eq!(context.items.len(), 5);
         let original_context = context.items.clone();
         assert!(
             original_context[0]["content"]
@@ -11499,16 +11528,12 @@ mod tests {
             Some(AgentEvent::Checkpoint { id, .. }) if id == checkpoint.id
         ));
         let requests = requests.lock().await;
-        assert_eq!(requests.len(), 3);
-        assert_eq!(
-            &requests[0]["input"].as_array().unwrap()[1..],
-            original_context.as_slice()
-        );
+        assert!(requests[0]["input"].as_array().unwrap().iter().any(|item| {
+            item["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("preceding user input"))
+        }));
         assert!(requests[0].get("tools").is_some());
-        assert_eq!(
-            &requests[1]["input"].as_array().unwrap()[1..],
-            &requests[0]["input"].as_array().unwrap()[1..]
-        );
         assert!(requests[1].get("tools").is_none());
         assert!(
             requests[1]["input"][0]["content"]
@@ -14357,6 +14382,59 @@ mod tests {
     }
 
     #[test]
+    fn context_time_anchors_are_stable_and_preserve_protocol_payloads() {
+        let user = json!({"role":"user","content":"when?"});
+        let user_anchor = context_time_anchor(17, "input", "2026-08-20T01:02:03Z", &user).unwrap();
+        assert_eq!(
+            user_anchor,
+            json!({"role":"developer","content":"Trusted Cybion timeline metadata: the preceding user input is history record #17, persisted at UTC timestamp 2026-08-20T01:02:03Z."}),
+        );
+        let output = function_call_output("call-1", "done");
+        assert_eq!(
+            output,
+            json!({"type":"function_call_output","call_id":"call-1","output":"done"})
+        );
+        assert!(context_time_anchor(18, "tool_output", "2026-08-20T01:02:04Z", &output).unwrap()["content"].as_str().unwrap().contains("preceding tool output"));
+        assert!(
+            context_time_anchor(19, "response_output", "2026-08-20T01:02:05Z", &output).is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_responses_body_includes_stable_context_time_anchors() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("time-aware request".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        let context = compile_latest_context(&db, None).unwrap();
+        let body = scoped_responses_request_body(
+            DEFAULT_MODEL_ID,
+            &context.items,
+            &SkillCatalog::default(),
+            AgentScope::Main,
+            &db,
+            None,
+        );
+        let input = body["input"].as_array().unwrap();
+        assert!(input.iter().any(|item| {
+            item["content"].as_str().is_some_and(|content| {
+                content.contains("preceding user input") && content.contains("UTC timestamp")
+            })
+        }));
+    }
+
+    #[test]
     fn history_records_replay_protocol_items_without_activity_or_text_trace() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
@@ -14413,10 +14491,22 @@ mod tests {
             context.items[0],
             json!({"role": "user", "content": "inspect the repository"})
         );
-        assert_eq!(context.items[1]["type"], "function_call");
-        assert_eq!(context.items[2]["type"], "function_call_output");
-        assert_eq!(context.items[2]["output"], "[\"Cargo.toml\"]");
-        assert_eq!(context.items[3]["type"], "message");
+        assert!(
+            context.items[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("preceding user input")
+        );
+        assert_eq!(context.items[2]["type"], "function_call");
+        assert_eq!(context.items[3]["type"], "function_call_output");
+        assert_eq!(context.items[3]["output"], "[\"Cargo.toml\"]");
+        assert!(
+            context.items[4]["content"]
+                .as_str()
+                .unwrap()
+                .contains("preceding tool output")
+        );
+        assert_eq!(context.items[5]["type"], "message");
         let protocol_ids = open_db(&db)
             .unwrap()
             .prepare(
@@ -14702,8 +14792,20 @@ mod tests {
             "# Current state\nContinue the release."
         );
         assert_eq!(inherited[1]["content"], "Ship the release.");
-        assert_eq!(inherited[2]["type"], "function_call");
-        assert_eq!(inherited[3]["content"], "Verify the release.");
+        assert!(
+            inherited[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("preceding user input")
+        );
+        assert_eq!(inherited[3]["type"], "function_call");
+        assert_eq!(inherited[4]["content"], "Verify the release.");
+        assert!(
+            inherited[5]["content"]
+                .as_str()
+                .unwrap()
+                .contains("preceding user input")
+        );
         assert!(
             !inherited
                 .iter()
@@ -14730,6 +14832,12 @@ mod tests {
         let replayed = compile_latest_context(&db, Some("child-a")).unwrap();
         assert_eq!(replayed[0]["content"], "# Child checkpoint\nKeep checking.");
         assert_eq!(replayed[1]["type"], "function_call_output");
+        assert!(
+            replayed[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("preceding tool output")
+        );
         assert_eq!(
             own_checkpoint_id,
             load_latest_checkpoint_for_thread(&connection, Some("child-a"), i64::MAX)
@@ -14743,6 +14851,12 @@ mod tests {
             "# Current state\nContinue the release."
         );
         assert_eq!(main.items[1]["content"], "Ship the release.");
+        assert!(
+            main.items[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("preceding user input")
+        );
         assert_eq!(main.idx_tail, fork_id);
         assert!(main_input_id < fork_id);
         assert_eq!(
