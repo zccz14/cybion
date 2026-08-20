@@ -44,7 +44,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_tungstenite::{
     connect_async,
@@ -74,8 +74,6 @@ const CONVERSATION_PAGE_DEFAULT: usize = 50;
 const CONVERSATION_PAGE_MAX: usize = 100;
 const HISTORY_RECORD_PAGE_DEFAULT: usize = 50;
 const HISTORY_RECORD_PAGE_MAX: usize = 100;
-const CONVERSATION_OUTPUT_CHUNK_DEFAULT: usize = 16 * 1024;
-const CONVERSATION_OUTPUT_CHUNK_MAX: usize = 64 * 1024;
 const CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_COMPACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const SKILL_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -113,6 +111,7 @@ struct AppState {
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     active_main: Arc<Mutex<Option<ActiveMain>>>,
     active_subthreads: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    subthread_events: Arc<Mutex<HashMap<String, broadcast::Sender<AgentEvent>>>>,
     conversation_mutations: Arc<Mutex<()>>,
     executor_tunnels: ExecutorTunnels,
     checkpoint_write_gate: Arc<RwLock<()>>,
@@ -634,20 +633,6 @@ struct HistoryRecordQuery {
     call_id: Option<String>,
 }
 
-#[derive(Default, Deserialize)]
-struct ConversationEventOutputQuery {
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct ConversationEventOutput {
-    output: String,
-    output_bytes: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_offset: Option<usize>,
-}
-
 #[derive(Serialize)]
 struct Subthread {
     id: String,
@@ -680,30 +665,15 @@ struct ThreadIndex {
 }
 
 #[derive(Serialize)]
-struct SubthreadEvent {
-    id: i64,
-    event: AgentEvent,
-    created_at: String,
-}
-
-#[derive(Serialize)]
 struct SubthreadDetail {
     thread: Subthread,
-    events: Vec<SubthreadEvent>,
-}
-
-#[derive(Deserialize)]
-struct SubthreadEventQuery {
-    #[serde(default)]
-    after: i64,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SubthreadStreamMessage {
-    Event { item: SubthreadEvent },
+    Event { event: AgentEvent },
     Reaped,
-    Error { error: String },
 }
 
 struct QueuedSubthread {
@@ -986,6 +956,7 @@ async fn main() -> Result<()> {
         ))),
         active_main: Arc::new(Mutex::new(None)),
         active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+        subthread_events: Arc::new(Mutex::new(HashMap::new())),
         conversation_mutations: Arc::new(Mutex::new(())),
         executor_tunnels: ExecutorTunnels::default(),
         checkpoint_write_gate: Arc::new(RwLock::new(())),
@@ -1125,8 +1096,18 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
     if !still_running {
         let _ = cancel.send(true);
     }
-    let (events, receiver) = mpsc::channel(1);
-    drop(receiver);
+    let (live_events, _) = broadcast::channel(256);
+    state
+        .subthread_events
+        .lock()
+        .await
+        .insert(job.id.clone(), live_events.clone());
+    let (events, mut receiver) = mpsc::channel(64);
+    tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let _ = live_events.send(event);
+        }
+    });
     let sink = AgentEventSink {
         thread_id: Some(&job.id),
         sender: &events,
@@ -1256,6 +1237,7 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
         }
     }
     state.active_subthreads.lock().await.remove(&job.id);
+    state.subthread_events.lock().await.remove(&job.id);
 }
 
 fn app(state: AppState) -> Router {
@@ -1337,10 +1319,6 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/conversation/messages/{record_id}/resend",
             post(resend_conversation_message),
-        )
-        .route(
-            "/api/history-records/{event_id}/output",
-            get(conversation_event_output),
         )
         .route("/api/threads", get(list_threads))
         .route("/api/threads/{id}/events", get(stream_subthread_events))
@@ -2862,14 +2840,6 @@ fn retry_status_event(schedule: &RetrySchedule) -> AgentEvent {
 }
 
 fn append_agent_event(path: &Path, thread_id: Option<&str>, event: &AgentEvent) -> Result<()> {
-    let connection = open_db(path)?;
-    history_record_payload(
-        &connection,
-        thread_id,
-        "activity",
-        &serde_json::to_value(agent_event_for_console(event))?,
-        &chrono::Utc::now().to_rfc3339(),
-    )?;
     if let AgentEvent::ToolResult {
         call_id,
         name,
@@ -2879,7 +2849,7 @@ fn append_agent_event(path: &Path, thread_id: Option<&str>, event: &AgentEvent) 
         && name != "computer"
     {
         history_record_payload(
-            &connection,
+            &open_db(path)?,
             thread_id,
             "tool_output",
             &function_call_output(call_id, output),
@@ -2924,12 +2894,6 @@ fn conversation_page_limit(value: Option<usize>) -> usize {
     value
         .unwrap_or(CONVERSATION_PAGE_DEFAULT)
         .clamp(1, CONVERSATION_PAGE_MAX)
-}
-
-fn conversation_output_chunk_limit(value: Option<usize>) -> usize {
-    value
-        .unwrap_or(CONVERSATION_OUTPUT_CHUNK_DEFAULT)
-        .clamp(1, CONVERSATION_OUTPUT_CHUNK_MAX)
 }
 
 fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<ConversationState> {
@@ -3013,11 +2977,6 @@ fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<Conve
         focus_message_id: focused_message_id,
         next_before_id,
     })
-}
-
-#[cfg(test)]
-fn load_conversation_state(path: &Path) -> Result<ConversationState> {
-    load_conversation_page(path, ConversationQuery::default())
 }
 
 fn history_record_page_size(value: Option<usize>) -> usize {
@@ -3201,56 +3160,6 @@ fn load_history_record_detail(path: &Path, id: i64) -> Result<Option<HistoryReco
         )
         .optional()
         .map_err(Into::into)
-}
-
-fn load_conversation_event_output(
-    path: &Path,
-    event_id: i64,
-    query: ConversationEventOutputQuery,
-) -> Result<Option<ConversationEventOutput>> {
-    let offset = query.offset.unwrap_or_default();
-    let limit = conversation_output_chunk_limit(query.limit);
-    let offset: i64 = offset.try_into().context("output offset is too large")?;
-    let limit: i64 = limit.try_into().expect("output chunk limit fits in i64");
-    let connection = open_db(path)?;
-    let output = connection
-        .query_row(
-            "SELECT substr(json_extract(tool.payload, '$.output'), ?2, ?3),
-                    length(CAST(json_extract(tool.payload, '$.output') AS BLOB)),
-                    length(json_extract(tool.payload, '$.output'))
-             FROM history_records event
-             JOIN history_records tool
-               ON tool.thread_id IS event.thread_id
-              AND tool.kind = 'tool_output'
-              AND tool.id >= event.id
-              AND json_extract(tool.payload, '$.call_id') = json_extract(event.payload, '$.call_id')
-             WHERE event.id = ?1 AND event.kind = 'activity'
-               AND json_extract(tool.payload, '$.output') IS NOT NULL",
-            params![event_id, offset.saturating_add(1), limit],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    output
-        .map(|(output, output_bytes, output_chars)| {
-            let output_chars_loaded = i64::try_from(output.chars().count())?;
-            let next_offset = if offset + output_chars_loaded < output_chars {
-                Some(usize::try_from(offset + output_chars_loaded)?)
-            } else {
-                None
-            };
-            Ok(ConversationEventOutput {
-                output,
-                output_bytes: usize::try_from(output_bytes)?,
-                next_offset,
-            })
-        })
-        .transpose()
 }
 
 async fn send_agent_event(
@@ -3457,6 +3366,104 @@ fn migrate_peer_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_history_records_without_activity(connection: &Connection) -> Result<()> {
+    let schema = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'history_records'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    if !schema.contains("'activity'") {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         DROP TRIGGER IF EXISTS history_records_immutable_update;
+         DROP TRIGGER IF EXISTS history_records_immutable_delete;
+         DROP INDEX IF EXISTS history_records_thread_id;
+         DROP INDEX IF EXISTS history_records_kind_id;
+         DROP INDEX IF EXISTS history_records_type_id;
+         ALTER TABLE files RENAME TO files_with_activity;
+         ALTER TABLE subthreads RENAME TO subthreads_with_activity;
+         ALTER TABLE history_records RENAME TO history_records_with_activity;
+         CREATE TABLE history_records (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           thread_id TEXT,
+           kind TEXT NOT NULL CHECK(kind IN ('input', 'response_output', 'tool_output', 'checkpoint')),
+           payload TEXT NOT NULL CHECK(json_valid(payload)),
+           created_at TEXT NOT NULL
+         );
+         INSERT INTO history_records (id, thread_id, kind, payload, created_at)
+           SELECT id, thread_id, kind, payload, created_at
+             FROM history_records_with_activity WHERE kind != 'activity';
+         CREATE TABLE files (
+           id TEXT PRIMARY KEY,
+           content BLOB NOT NULL,
+           filename TEXT NOT NULL,
+           mime_type TEXT NOT NULL,
+           preview_content TEXT,
+           history_entry_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
+           created_at TEXT NOT NULL
+         );
+         INSERT INTO files (id, content, filename, mime_type, preview_content, history_entry_id, created_at)
+           SELECT f.id, f.content, f.filename, f.mime_type, f.preview_content,
+                  CASE WHEN h.id IS NULL THEN NULL ELSE f.history_entry_id END, f.created_at
+             FROM files_with_activity f LEFT JOIN history_records h ON h.id = f.history_entry_id;
+         CREATE TABLE subthreads (
+           id TEXT PRIMARY KEY,
+           title TEXT NOT NULL,
+           task TEXT NOT NULL,
+           completion_criteria TEXT NOT NULL,
+           goal_state TEXT NOT NULL CHECK(goal_state IN ('active', 'achieved', 'blocked', 'cancelled')),
+           goal_evidence TEXT,
+           blocked_reason TEXT,
+           status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+           model TEXT NOT NULL,
+           upstream_thread_id TEXT NOT NULL,
+           from_record_id INTEGER NOT NULL REFERENCES history_records(id),
+           result TEXT,
+           outcome_record_id INTEGER REFERENCES history_records(id),
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           retry_attempt INTEGER NOT NULL DEFAULT 0,
+           next_retry_at INTEGER
+         );
+         INSERT INTO subthreads (
+           id, title, task, completion_criteria, goal_state, goal_evidence, blocked_reason,
+           status, model, upstream_thread_id, from_record_id, result, outcome_record_id,
+           created_at, updated_at, retry_attempt, next_retry_at
+         ) SELECT
+           id, title, task, completion_criteria, goal_state, goal_evidence, blocked_reason,
+           status, model, upstream_thread_id, from_record_id, result, outcome_record_id,
+           created_at, updated_at, retry_attempt, next_retry_at
+         FROM subthreads_with_activity;
+         DROP TABLE files_with_activity;
+         DROP TABLE subthreads_with_activity;
+         DROP TABLE history_records_with_activity;
+         CREATE INDEX history_records_thread_id ON history_records(thread_id, id);
+         CREATE INDEX history_records_kind_id ON history_records(kind, id);
+         CREATE INDEX history_records_type_id ON history_records(json_extract(payload, '$.type'), id);
+         CREATE INDEX files_mime_type ON files(mime_type, created_at DESC);
+         CREATE INDEX files_history_entry_id ON files(history_entry_id);
+         CREATE INDEX subthreads_status ON subthreads(status, created_at);
+         PRAGMA foreign_keys = ON;"
+    )?;
+    let violations: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if violations != 0 {
+        return Err(anyhow!(
+            "history activity migration left {violations} foreign-key violations"
+        ));
+    }
+    Ok(())
+}
+
 fn reset_legacy_history_schema(connection: &Connection) -> Result<()> {
     let legacy_history_exists = connection.query_row(
         "SELECT EXISTS(
@@ -3489,6 +3496,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     std::fs::create_dir_all(parent)?;
     let connection = open_db(db)?;
     reset_legacy_history_schema(&connection)?;
+    migrate_history_records_without_activity(&connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS context_memory_facts;
          DROP TABLE IF EXISTS work_item_dependencies;
@@ -3513,7 +3521,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
          CREATE TABLE IF NOT EXISTS history_records (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            thread_id TEXT,
-           kind TEXT NOT NULL CHECK(kind IN ('input', 'response_output', 'tool_output', 'checkpoint', 'activity')),
+           kind TEXT NOT NULL CHECK(kind IN ('input', 'response_output', 'tool_output', 'checkpoint')),
            payload TEXT NOT NULL CHECK(json_valid(payload)),
            created_at TEXT NOT NULL
          );
@@ -5511,24 +5519,6 @@ async fn history_record_detail(
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "history record does not exist"))
 }
 
-async fn conversation_event_output(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(event_id): AxumPath<i64>,
-    Query(query): Query<ConversationEventOutputQuery>,
-) -> ApiResult<ConversationEventOutput> {
-    identity(&state, &headers).await?;
-    let output = load_conversation_event_output(&state.db_path, event_id, query)
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot read event output",
-            )
-        })?
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "event output not found"))?;
-    Ok(Json(output))
-}
-
 fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
     let status = row.get::<_, String>(7)?;
     let retry_attempt: i64 = row.get(12)?;
@@ -5596,67 +5586,23 @@ fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
 }
 
 fn load_subthread_detail(path: &Path, id: &str) -> Result<Option<SubthreadDetail>> {
-    let connection = open_db(path)?;
-    let thread = connection
+    open_db(path)?
         .query_row(
             "SELECT thread.id, thread.title, thread.task,
                     thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                     thread.blocked_reason, thread.status, thread.model, thread.result,
                     thread.created_at, thread.updated_at,
                     thread.retry_attempt, thread.next_retry_at
-             FROM subthreads thread
-             WHERE thread.id = ?1",
+             FROM subthreads thread WHERE thread.id = ?1",
             [id],
-            subthread_from_row,
+            |row| {
+                Ok(SubthreadDetail {
+                    thread: subthread_from_row(row)?,
+                })
+            },
         )
-        .optional()?;
-    let Some(thread) = thread else {
-        return Ok(None);
-    };
-    let events = connection
-        .prepare(
-            "SELECT id, payload, created_at FROM history_records
-             WHERE thread_id = ?1 AND kind = 'activity' ORDER BY id",
-        )?
-        .query_map([id], |row| {
-            let payload = row.get::<_, String>(1)?;
-            Ok((row.get::<_, i64>(0)?, payload, row.get::<_, String>(2)?))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|(id, payload, created_at)| {
-            Ok(SubthreadEvent {
-                id,
-                event: serde_json::from_str(&payload)?,
-                created_at,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Some(SubthreadDetail { thread, events }))
-}
-
-fn load_subthread_events_after(path: &Path, id: &str, after: i64) -> Result<Vec<SubthreadEvent>> {
-    open_db(path)?
-        .prepare(
-            "SELECT event.id, event.payload, event.created_at
-             FROM history_records event
-             WHERE event.thread_id = ?1 AND event.kind = 'activity' AND event.id > ?2
-             ORDER BY event.id",
-        )?
-        .query_map(params![id, after], |row| {
-            let payload = row.get::<_, String>(1)?;
-            Ok((row.get::<_, i64>(0)?, payload, row.get::<_, String>(2)?))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|(id, payload, created_at)| {
-            Ok(SubthreadEvent {
-                id,
-                event: serde_json::from_str(&payload)?,
-                created_at,
-            })
-        })
-        .collect()
+        .optional()
+        .map_err(Into::into)
 }
 
 fn subthread_is_active(path: &Path, id: &str) -> Result<bool> {
@@ -6036,53 +5982,32 @@ async fn stream_subthread_events(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
-    Query(cursor): Query<SubthreadEventQuery>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     identity(&state, &headers).await?;
-    if !subthread_is_active(&state.db_path, &id)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read subthread"))?
-    {
-        return Err(error(StatusCode::NOT_FOUND, "Goal is not active"));
-    }
-    let db_path = state.db_path.clone();
+    let sender = state
+        .subthread_events
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Goal is not running"))?;
+    let mut events = sender.subscribe();
     let (sender, receiver) = mpsc::channel(32);
     tokio::spawn(async move {
-        let mut after = cursor.after;
         loop {
-            match load_subthread_events_after(&db_path, &id, after) {
-                Ok(events) => {
-                    for item in events {
-                        after = item.id;
-                        if sender
-                            .send(SubthreadStreamMessage::Event { item })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
+            match events.recv().await {
+                Ok(event) => {
+                    if sender
+                        .send(SubthreadStreamMessage::Event { event })
+                        .await
+                        .is_err()
+                    {
+                        return;
                     }
                 }
-                Err(cause) => {
-                    let _ = sender
-                        .send(SubthreadStreamMessage::Error {
-                            error: cause.to_string(),
-                        })
-                        .await;
-                    return;
-                }
-            }
-            match subthread_is_active(&db_path, &id) {
-                Ok(true) => tokio::time::sleep(Duration::from_millis(250)).await,
-                Ok(false) => {
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
                     let _ = sender.send(SubthreadStreamMessage::Reaped).await;
-                    return;
-                }
-                Err(cause) => {
-                    let _ = sender
-                        .send(SubthreadStreamMessage::Error {
-                            error: cause.to_string(),
-                        })
-                        .await;
                     return;
                 }
             }
@@ -7487,7 +7412,7 @@ fn read_thread_history_tool(path: &Path, args: Value) -> ToolExecution {
         let mut records = connection
             .prepare(
                 "SELECT id, kind, payload FROM history_records
-                 WHERE thread_id IS NULL AND kind != 'activity'
+                 WHERE thread_id IS NULL
                    AND id >= ?1 AND id <= ?2 ORDER BY id LIMIT ?3",
             )?
             .query_map(
@@ -7548,7 +7473,7 @@ fn search_thread_history_tool(path: &Path, args: Value) -> ToolExecution {
             .prepare(
                 "SELECT id, kind, payload
                  FROM history_records
-                 WHERE thread_id IS NULL AND kind != 'activity' AND payload LIKE ?1
+                 WHERE thread_id IS NULL  AND payload LIKE ?1
                  ORDER BY id DESC
                  LIMIT ?2",
             )?
@@ -9985,12 +9910,87 @@ mod tests {
             auth_verifier: Arc::new(Mutex::new(None)),
             active_main: Arc::new(Mutex::new(None)),
             active_subthreads: Arc::new(Mutex::new(HashMap::new())),
+            subthread_events: Arc::new(Mutex::new(HashMap::new())),
             conversation_mutations: Arc::new(Mutex::new(())),
             executor_tunnels: ExecutorTunnels::default(),
             checkpoint_write_gate: Arc::new(RwLock::new(())),
             checkpoint_write_pending: Arc::new(AtomicBool::new(false)),
             browser_sessions: browser::sessions(),
         }
+    }
+
+    #[test]
+    fn history_activity_migration_discards_execution_events_and_preserves_protocol_references() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        let connection = Connection::open(&db).unwrap();
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE history_records (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               thread_id TEXT,
+               kind TEXT NOT NULL CHECK(kind IN ('input', 'response_output', 'tool_output', 'checkpoint', 'activity')),
+               payload TEXT NOT NULL CHECK(json_valid(payload)),
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE files (
+               id TEXT PRIMARY KEY, content BLOB NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL,
+               preview_content TEXT, history_entry_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE subthreads (
+               id TEXT PRIMARY KEY, title TEXT NOT NULL, task TEXT NOT NULL, completion_criteria TEXT NOT NULL,
+               goal_state TEXT NOT NULL, goal_evidence TEXT, blocked_reason TEXT, status TEXT NOT NULL,
+               model TEXT NOT NULL, upstream_thread_id TEXT NOT NULL,
+               from_record_id INTEGER NOT NULL REFERENCES history_records(id), result TEXT,
+               outcome_record_id INTEGER REFERENCES history_records(id), created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL, retry_attempt INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER
+             );
+             INSERT INTO history_records (id, kind, payload, created_at) VALUES
+               (1, 'input', '{\"role\":\"user\",\"content\":\"keep\"}', 'now'),
+               (2, 'activity', '{\"type\":\"status\",\"stage\":\"running\"}', 'now');
+             INSERT INTO files VALUES ('kept', X'00', 'kept', 'text/plain', NULL, 1, 'now');
+             INSERT INTO files VALUES ('cleared', X'00', 'cleared', 'text/plain', NULL, 2, 'now');
+             INSERT INTO subthreads VALUES ('thread', 'title', 'task', 'done', 'active', NULL, NULL, 'queued', 'model', 'upstream', 1, NULL, NULL, 'now', 'now', 0, NULL);"
+        ).unwrap();
+        migrate_history_records_without_activity(&connection).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM history_records", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT history_entry_id FROM files WHERE id = 'kept'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            connection
+                .query_row(
+                    "SELECT history_entry_id IS NULL FROM files WHERE id = 'cleared'",
+                    [],
+                    |row| row.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT from_record_id FROM subthreads WHERE id = 'thread'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert!(connection.execute("INSERT INTO history_records (kind, payload, created_at) VALUES ('activity', '{}', 'now')", []).is_err());
     }
 
     async fn test_auth_mini_issuer(key: &SigningKey) -> String {
@@ -10615,69 +10615,6 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert!(!columns.iter().any(|column| column == "target_machine_id"));
-    }
-
-    #[test]
-    fn subthread_detail_loads_history_and_event_cursor_until_reaped() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let user = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("inspect history".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        let fork = execute_fork_subthread(
-            &db,
-            user.id,
-            json!({"title":"History","task":"Inspect persisted events","completion_criteria":"The persisted events are inspected."}),
-        );
-        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let _ = claim_queued_subthreads(&db).unwrap();
-        append_agent_event(
-            &db,
-            Some(&id),
-            &AgentEvent::Status {
-                stage: "running".to_owned(),
-                message: "Inspecting".to_owned(),
-            },
-        )
-        .unwrap();
-        append_agent_event(&db, Some(&id), &AgentEvent::Context { input_tokens: 42 }).unwrap();
-        let detail = load_subthread_detail(&db, &id).unwrap().unwrap();
-        assert_eq!(detail.thread.model, DEFAULT_SUBTHREAD_MODEL_ID);
-        assert_eq!(detail.events.len(), 2);
-        let next = load_subthread_events_after(&db, &id, detail.events[0].id).unwrap();
-        assert_eq!(next.len(), 1);
-        assert!(matches!(
-            next[0].event,
-            AgentEvent::Context { input_tokens: 42 }
-        ));
-        achieve_goal(&db, &id, "events inspected", "events inspected").unwrap();
-        assert!(
-            finalize_terminal_subthread_join(&db, &id)
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(
-            load_subthread_detail(&db, &id)
-                .unwrap()
-                .unwrap()
-                .thread
-                .goal_state,
-            "achieved"
-        );
-        assert!(!subthread_is_active(&db, &id).unwrap());
     }
 
     #[test]
@@ -12569,105 +12506,6 @@ mod tests {
     }
 
     #[test]
-    fn conversation_pages_history_and_loads_event_output_on_demand() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        let user = append_conversation(
-            &db,
-            &ChatMessage {
-                role: "user".to_owned(),
-                content: Value::String("inspect the project".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        append_agent_event(
-            &db,
-            None,
-            &AgentEvent::ToolCall {
-                call_id: "call_1".to_owned(),
-                name: "read_file".to_owned(),
-                arguments: json!({"path": "/project/README.md"}),
-                started_at: None,
-            },
-        )
-        .unwrap();
-        append_agent_event(
-            &db,
-            None,
-            &AgentEvent::ToolResult {
-                call_id: "call_1".to_owned(),
-                name: "read_file".to_owned(),
-                added_lines: None,
-                deleted_lines: None,
-                output: Some("README contents for the lazy reader".to_owned()),
-                finished_at: None,
-            },
-        )
-        .unwrap();
-        let state = load_conversation_state(&db).unwrap();
-        assert_eq!(state.messages[0].id, user.id);
-        let event_id: i64 = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT id FROM history_records
-                 WHERE thread_id IS NULL AND kind = 'activity'
-                 ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let output = load_conversation_event_output(
-            &db,
-            event_id,
-            ConversationEventOutputQuery {
-                offset: Some(7),
-                limit: Some(4),
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(output.output, "cont");
-        assert_eq!(
-            output.output_bytes,
-            "README contents for the lazy reader".len()
-        );
-        assert_eq!(output.next_offset, Some(11));
-        append_conversation(
-            &db,
-            &ChatMessage {
-                role: "assistant".to_owned(),
-                content: Value::String("The README was inspected.".to_owned()),
-                images: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            None,
-        )
-        .unwrap();
-        let history = load_conversation(&db).unwrap();
-        let assistant = history
-            .iter()
-            .find(|message| message.role == "assistant")
-            .unwrap();
-        assert_eq!(assistant.content, "The README was inspected.");
-        let tool_output: String = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT json_extract(payload, '$.output') FROM history_records
-                 WHERE kind = 'tool_output'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(tool_output, "README contents for the lazy reader");
-    }
-
-    #[test]
     #[ignore = "replaced by protocol history replay tests"]
     fn compiled_context_truncates_persisted_tool_results() {
         let temp = tempfile::tempdir().unwrap();
@@ -13611,7 +13449,13 @@ mod tests {
         .unwrap();
         let state = test_state(db.clone());
         start_latest_main_response(state.clone(), first.id, None).await;
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while *requests.lock().await == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         let second = append_conversation(
             &db,
             &ChatMessage {
@@ -14482,21 +14326,6 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(context.record_ids, protocol_ids);
-        let activity_id: i64 = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT id FROM history_records WHERE kind = 'activity' ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(compile_main_context(&db, activity_id).is_err());
-        assert!(
-            !context
-                .items
-                .iter()
-                .any(|item| item.to_string().contains("Durable execution trace"))
-        );
         assert!(
             !context
                 .items
@@ -14511,7 +14340,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert!(kinds.contains(&"activity".to_owned()));
+        assert!(!kinds.contains(&"activity".to_owned()));
     }
 
     #[test]
