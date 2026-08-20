@@ -114,7 +114,6 @@ history_records (
 | `response_output` | 上游 Responses `output[]` 中的一个原始输出项，例如 `message`、`function_call` 或 `computer_call` | 是 |
 | `tool_output` | 工具输出项，例如 `function_call_output` 或 `computer_call_output` | 是 |
 | `checkpoint` | 以 `developer` 角色保存的当前状态 | 是 |
-| `activity` | 控制台和运行状态，例如工具开始、进展、错误和 token 统计 | 否 |
 
 完整工具输出以协议项持久化；为满足单次模型上下文的长度限制，编译 `function_call_output`
 时会沿用输出长度上限，保存的原始 `payload` 不会被截断。`response_output` 与
@@ -133,7 +132,7 @@ history_records (
 | 顺序 | 协议项 | 内容 |
 | --- | --- | --- |
 | `input[0]` | `developer` | `# Cybion agent policy`：one-more-step 工作方式和当前安装的技能目录；`## Thread role`：主线程或子线程的职责与终态规则；有已接入设备时附加远程执行设备清单；可用 Browser Control 时附加浏览器控制规则。 |
-| `input[1..]` | 编译出的协议项 | checkpoint 的 `developer` 项，以及按记录顺序排列的 `input`、`response_output` 和 `tool_output`。 |
+| `input[1..]` | 编译出的协议项 | checkpoint 的 `developer` 项，以及按记录顺序排列的 `input`、`response_output` 和 `tool_output`；真实 user input 与 `function_call_output` 后紧随不持久化的 UTC developer 时间锚点。 |
 | 最后一项（仅子线程刚结束而触发主线程续跑时） | `developer` | 要求主线程基于该子线程的证据继续推进原始用户结果的临时续跑指令。 |
 
 固定前缀在每一次 Responses 调用前都会重新放在 `input[0]`。模型产生的
@@ -141,7 +140,7 @@ history_records (
 `function_call` 或 `computer_call`，对应的 `function_call_output` 或
 `computer_call_output` 随后追加，形成下一次 Responses 调用的后缀。所有这些项也会写入
 `history_records`，供下一次上下文编译使用。用户刚提交的输入在运行开始前已作为 `input`
-记录写入，因此保留其原始 `user` 协议角色，而不会被包装成“历史证据”文本。
+记录写入，因此保留其原始 `user` 协议角色，而不会被包装成“历史证据”文本。编译器会在真实用户输入与 `function_call_output` 后追加稳定的 UTC 时间锚点；锚点不持久化，且不改变原始 Responses 协议项。
 
 主线程的常规布局如下，其中 `C` 为当前可见范围内最新 checkpoint，`M` 为本次编译的 `idx_tail`：
 
@@ -161,7 +160,7 @@ history_records (
 
 `response_output` 和 `tool_output` 保持 Responses 协议项回放，而不是转换成文本执行轨迹。
 `function_call_output` 的完整内容保存在 `history_records`；为控制单次请求的长度，只有编译到
-模型输入时才会按工具输出上限截短。`activity` 只用于控制台与运行状态，始终不在 `input[]` 中。
+模型输入时才会按工具输出上限截短。运行状态通过实时 SSE 传递，不写入 `history_records`。时间锚点由不可变记录的 `id` 与 `created_at` 在编译时派生，不写回历史。详见[Time Awareness](docs/time_awareness.md)。
 
 发生上下文窗口溢出时，Cybion 会发起独立的 checkpoint compacting 请求，而不是把压缩提示词
 混入常规 Agent 请求：其 `input[0]` 是 `# Checkpoint compaction` 的 `developer` 提示词，

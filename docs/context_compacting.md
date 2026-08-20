@@ -46,7 +46,7 @@ checkpoint 是下一轮 Agent 的工作记忆，而不是仅保留当下状态�
 
 `## Chronicle timeline` 是按发生顺序排列的 Markdown bullet list。它必须尽可能保留所有仍然影响当前概念、资源、决策、约束、未完成工作或因果链的事件；不能因条目数量而截断。只有重复报告同一事件、没有新增因果含义的重复事实，或被更高层结论完整覆盖的事实，才允许缩略合并。合并后必须保持原有时序并引用全部适用的 history record ID；不同的决定、发现、故障、恢复、验证、发布或约束不得合并或省略。
 
-压缩请求会额外提供与 raw protocol records 一一对应的 `record_id`、`created_at` 与 `kind` 元数据。该元数据仅存在于 compaction developer 前缀，绝不能写入 `function_call_output` 或其他正常 Responses replay 协议项。Chronicle 应优先使用这些精确 `created_at` 时间；只有元数据不存在时，才使用类似 `[after record #18, before record #27 | inferred]` 的顺序锚点。不能从 record 顺序伪造日历时间或时长。当输入含上一次的 checkpoint 时，需与后续 raw records 按时序合并、合并已被替代的事实并删除无关对话。
+普通上下文编译器会在每个真实 user input 与每个 `function_call_output` 后追加由该 raw protocol record 的 `record_id` 和 `created_at` 派生的稳定 UTC developer 时间锚点。时间锚点不写回 `history_records`，也不向 `function_call_output` 或其他原始 Responses 协议项添加字段；压缩请求使用与普通推理相同的已编译项，因此可读取这些锚点。Chronicle 应优先使用锚点中的精确 `created_at` 时间；只有时间锚点不存在时，才使用类似 `[after record #18, before record #27 | inferred]` 的顺序锚点。不能从 record 顺序伪造日历时间或时长。当输入含上一次的 checkpoint 时，需与后续 raw records 按时序合并、合并已被替代的事实并删除无关对话。关于事件时间、缓存稳定性和可信边界，参见[Time Awareness](./time_awareness.md)。
 
 ## 递归前缀压缩
 
