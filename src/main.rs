@@ -2012,6 +2012,7 @@ The primary purpose is to preserve the concepts, terminology, and authoritative 
 
 - Concepts, terminology, domain meanings, identifiers, and established technical behavior needed to understand the work.
 - Authoritative resources needed to complete the work: repositories, files, directories, symbols, URLs, services, databases, migrations, configuration, data locations, and commands. Preserve exact paths and identifiers.
+- A concise chronicle of causally relevant events that explains how the current concepts, resources, decisions, or constraints arose.
 - Active decisions and constraints.
 - The current objective, next useful step, unfinished work, and current verified environment or tool state.
 - Exact Cybion history record IDs for every nontrivial item, plus precise retrieval keywords when older detail may be needed.
@@ -2025,13 +2026,16 @@ Return Markdown only, with these sections in order:
 1. `# Durable working context`
 2. `## Concepts and terminology`
 3. `## Resources and authoritative locations`
-4. `## Active decisions and constraints`
-5. `## Current objective and next step`
-6. `## Open work and evidence routes`
+4. `## Chronicle timeline`
+5. `## Active decisions and constraints`
+6. `## Current objective and next step`
+7. `## Open work and evidence routes`
 
 `## Concepts and terminology` must be a concise Markdown list that defines the project-specific language, domain meanings, identifiers, and behavior an agent needs to interpret the remaining context. Keep concepts that remain useful even after the immediate task is resolved.
 
 `## Resources and authoritative locations` must be a concise Markdown list of the exact resources required to continue the work. Include paths, symbols, URLs, service names, database tables, migrations, configuration keys, data locations, or commands when they are authoritative. Cite the relevant history record ID beside each nontrivial item.
+
+`## Chronicle timeline` must be a chronological Markdown list of at most 12 causally relevant state changes, decisions, discoveries, failures, validations, or releases. Every bullet must start with a temporal anchor and cite the supporting history record IDs. Use an exact date, time, or duration only when the supplied context explicitly states it. Otherwise express sequence with a record-order anchor such as `[after record #18, before record #27 | inferred]`; never infer a calendar date or duration from record order alone. Merge an inherited timeline with following raw records in chronological order, coalescing superseded events and omitting irrelevant chatter.
 
 `## Open work and evidence routes` must include one fenced `json` array. Each entry must contain exactly `topic_key`, `status`, `message_range`, and `search_keywords`:
 
@@ -11311,7 +11315,7 @@ mod tests {
                 return (StatusCode::PAYLOAD_TOO_LARGE, "length limit exceeded").into_response();
             }
             let text = if request_number == 2 {
-                "# Durable working context\n\n## Concepts and terminology\n- Context checkpoint: durable working memory after a context overflow. (record #1)\n\n## Resources and authoritative locations\n- `src/main.rs`: checkpoint compaction implementation. (record #1)\n\n## Current objective and next step\nShip the context-overflow recovery."
+                "# Durable working context\n\n## Concepts and terminology\n- Context checkpoint: durable working memory after a context overflow. (record #1)\n\n## Resources and authoritative locations\n- `src/main.rs`: checkpoint compaction implementation. (record #1)\n\n## Chronicle timeline\n- [after record #1 | inferred] Context overflow triggered checkpoint recovery. (record #1)\n\n## Current objective and next step\nShip the context-overflow recovery."
             } else {
                 "Context recovery completed."
             };
@@ -11441,6 +11445,7 @@ mod tests {
         assert!(checkpoint.id > current.id);
         assert!(checkpoint.summary.contains("context-overflow recovery"));
         assert!(checkpoint.summary.contains("## Concepts and terminology"));
+        assert!(checkpoint.summary.contains("## Chronicle timeline"));
         assert!(matches!(
             received.recv().await,
             Some(AgentEvent::Status { stage, .. }) if stage == "checkpointing"
@@ -11470,8 +11475,11 @@ mod tests {
         let prompt = requests[1]["input"][0]["content"].as_str().unwrap();
         assert!(prompt.contains("## Concepts and terminology"));
         assert!(prompt.contains("## Resources and authoritative locations"));
+        assert!(prompt.contains("## Chronicle timeline"));
         assert!(prompt.contains("## Open work and evidence routes"));
         assert!(prompt.contains("search_keywords"));
+        assert!(prompt.contains("at most 12 causally relevant"));
+        assert!(prompt.contains("never infer a calendar date or duration from record order alone"));
         assert!(
             prompt.find("## Concepts and terminology").unwrap()
                 < prompt
@@ -11482,6 +11490,10 @@ mod tests {
             prompt
                 .find("## Resources and authoritative locations")
                 .unwrap()
+                < prompt.find("## Chronicle timeline").unwrap()
+        );
+        assert!(
+            prompt.find("## Chronicle timeline").unwrap()
                 < prompt.find("## Current objective and next step").unwrap()
         );
         assert_eq!(requests[2]["input"].as_array().unwrap().len(), 2);

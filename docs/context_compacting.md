@@ -38,10 +38,13 @@ checkpoint 是下一轮 Agent 的工作记忆，而不是仅保留当下状态�
 
 1. 概念、术语、领域含义、标识符和已验证的技术行为。
 2. 完成工作所需的权威资源与精确位置：仓库、文件、目录、符号、URL、服务、数据库、迁移、配置、数据位置和命令。
-3. 活跃决策、约束、当前目标、下一步、未完成工作和已验证的环境状态。
+3. 能说明当前概念、资源、决策或约束如何形成的因果相关历程。
+4. 活跃决策、约束、当前目标、下一步、未完成工作和已验证的环境状态。
 
-输出必须按此顺序使用 `# Durable working context`、`## Concepts and terminology`、`## Resources and authoritative locations`、`## Active decisions and constraints`、`## Current objective and next step` 和 `## Open work and evidence routes` 标题。
+输出必须按此顺序使用 `# Durable working context`、`## Concepts and terminology`、`## Resources and authoritative locations`、`## Chronicle timeline`、`## Active decisions and constraints`、`## Current objective and next step` 和 `## Open work and evidence routes` 标题。
 当空间不足时，应先去除已解决的叙事和短暂的进度细节，不能将前两类工作记忆仅仅因为当前任务已结束而丢弃。除可检索的路由外，每个非平凡事项必须附上准确的 history record ID；当需要回溯更早细节时，同时提供检索关键词。
+
+`## Chronicle timeline` 是按发生顺序排列的 Markdown bullet list，最多 12 条。仅收录状态变化、决策、关键发现、故障、验证和发布等因果相关事件；每条需含时间或顺序锚点与关联的 history record ID。只有原始上下文明确给出时，才能写日期、时间或时长；否则必须以类似 `[after record #18, before record #27 | inferred]` 的顺序锚点标注推断，不能从 record 顺序伪造日历时间或时长。当输入含上一次的 checkpoint 时，需与后续 raw records 按时序合并、合并已被替代的事件并删除无关对话。
 
 ## 递归前缀压缩
 
@@ -98,3 +101,4 @@ records。它不会从 `history_records` 删除，仍可由 `search_thread_histo
 5. 单条无法压缩的 record 被排除出 checkpoint 但仍保留在历史中。
 6. 非上下文溢出错误不会被当作递归压缩处理。
 7. 压缩 developer 消息先要求概念术语和资源位置，再要求当前状态和目标。
+8. chronicle timeline 按 record 顺序保留因果相关历程，且不从顺序推断精确时间。
