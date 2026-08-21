@@ -10340,6 +10340,31 @@ mod tests {
     }
 
     #[test]
+    fn thread_history_page_keeps_persisted_final_output_text_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        let record_id = history_record_payload(
+            &connection,
+            None,
+            "response_output",
+            &json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "final reply"}],
+            }),
+            "2026-08-21T08:00:00Z",
+        )
+        .unwrap();
+
+        let page = load_thread_history_page(&db, ThreadHistoryQuery::default()).unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].id, record_id);
+        assert_eq!(page.records[0].payload["content"][0]["text"], "final reply");
+    }
+
+    #[test]
     fn responses_sse_surfaces_failed_terminal_details() {
         let error = completed_response_from_sse(
             "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_request\",\"message\":\"unsupported input item\"}}}\n\n",
