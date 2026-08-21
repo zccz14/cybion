@@ -2114,6 +2114,7 @@ async fn compact_checkpoint_once(
         "input": prepend_developer_message(&developer_prompt, input.items),
         "store": false,
         "stream": true,
+        "tool_choice": "none",
         "max_output_tokens": CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS,
     });
     sanitize_responses_input(&mut body);
@@ -2161,7 +2162,7 @@ The primary purpose is to preserve the concepts, terminology, and authoritative 
 - The current objective, next useful step, unfinished work, and current verified environment or tool state.
 - Exact Cybion history record IDs for every nontrivial item, plus precise retrieval keywords when older detail may be needed.
 
-Remove resolved narrative unless it remains an active constraint. Do not answer the user, call tools, or invent facts.
+Remove resolved narrative unless it remains an active constraint. Do not answer the user, call tools, or invent facts. Tools are unavailable for this request: produce the checkpoint directly from the supplied context.
 
 ## Required output
 
@@ -10861,11 +10862,14 @@ mod tests {
 
     #[tokio::test]
     async fn compact_context_command_commits_a_checkpoint_before_continuing() {
-        async fn responses(State(requests): State<Arc<Mutex<usize>>>) -> String {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> String {
             let request = {
                 let mut requests = requests.lock().await;
-                *requests += 1;
-                *requests
+                requests.push(request);
+                requests.len()
             };
             let item = match request {
                 1 => json!({
@@ -10894,7 +10898,7 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let requests = Arc::new(Mutex::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let server_requests = requests.clone();
         let server = tokio::spawn(async move {
             axum::serve(
@@ -10934,7 +10938,18 @@ mod tests {
         server.abort();
 
         assert_eq!(result.persisted_message.content, "Compaction completed.");
-        assert_eq!(*requests.lock().await, 3);
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].get("tools").is_some());
+        assert!(requests[1].get("tools").is_none());
+        assert_eq!(requests[1]["tool_choice"], "none");
+        assert!(
+            requests[1]["input"][0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("# Checkpoint compaction")
+                    && content.contains("Tools are unavailable for this request"))
+        );
+        drop(requests);
         let connection = open_db(&db).unwrap();
         let checkpoint = load_latest_checkpoint(&connection, i64::MAX)
             .unwrap()
