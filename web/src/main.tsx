@@ -411,6 +411,17 @@ function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
 }
 
 
+function protocolMessageText(payload: Record<string, unknown>) {
+  const content = payload.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.flatMap((part) => {
+    if (!part || typeof part !== 'object') return []
+    const value = part as Record<string, unknown>
+    return value.type === 'output_text' && typeof value.text === 'string' ? [value.text] : []
+  }).join('')
+}
+
 function threadHistoryItems(records: ThreadHistoryRecord[]): ConversationItem[] {
   const items: ConversationItem[] = []
   const tools = new Map<string, Extract<ConversationItem, { kind: 'tool' }>>()
@@ -422,7 +433,7 @@ function threadHistoryItems(records: ThreadHistoryRecord[]): ConversationItem[] 
       continue
     }
     if (record.kind === 'response_output' && type === 'message') {
-      const content = typeof record.payload.content === 'string' ? record.payload.content : ''
+      const content = protocolMessageText(record.payload)
       items.push({ kind: 'message', id: String(record.id), message: { id: record.id, role: typeof record.payload.role === 'string' ? record.payload.role : 'assistant', content, images: record.images, created_at: record.created_at }, queued: false })
       continue
     }
