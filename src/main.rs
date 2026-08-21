@@ -2162,7 +2162,7 @@ The primary purpose is to preserve the concepts, terminology, and authoritative 
 - The current objective, next useful step, unfinished work, and current verified environment or tool state.
 - Exact Cybion history record IDs for every nontrivial item, plus precise retrieval keywords when older detail may be needed.
 
-Remove resolved narrative unless it remains an active constraint. Do not answer the user, call tools, or invent facts.
+Remove resolved narrative unless it remains an active constraint. Do not answer the user, call tools, or invent facts. Tools are unavailable for this request: produce the checkpoint directly from the supplied context.
 
 ## Required output
 
@@ -10946,7 +10946,8 @@ mod tests {
         assert!(
             requests[1]["input"][0]["content"]
                 .as_str()
-                .is_some_and(|content| content.contains("# Checkpoint compaction"))
+                .is_some_and(|content| content.contains("# Checkpoint compaction")
+                    && content.contains("Tools are unavailable for this request"))
         );
         drop(requests);
         let connection = open_db(&db).unwrap();
