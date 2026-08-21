@@ -442,6 +442,7 @@ struct ConversationMessage {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct ConversationState {
     messages: Vec<ConversationMessage>,
     context: ContextState,
@@ -484,6 +485,7 @@ struct HistoryRecordDetail {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct ContextState {
     history_messages: usize,
     checkpoint: Option<ContextCheckpoint>,
@@ -649,10 +651,37 @@ impl fmt::Display for ContextOverflow {
 impl std::error::Error for ContextOverflow {}
 
 #[derive(Default, Deserialize)]
+#[allow(dead_code)]
 struct ConversationQuery {
     before: Option<i64>,
     limit: Option<usize>,
     focus: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct ThreadHistoryQuery {
+    thread_id: Option<String>,
+    after_id: Option<i64>,
+    before_id: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Serialize)]
+struct ThreadHistoryRecord {
+    id: i64,
+    kind: String,
+    payload: Value,
+    created_at: String,
+    images: Vec<GeneratedImage>,
+}
+
+#[derive(Serialize)]
+struct ThreadHistoryPage {
+    records: Vec<ThreadHistoryRecord>,
+    next_after_id: i64,
+    next_before_id: Option<i64>,
+    has_more: bool,
+    active: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -706,6 +735,7 @@ struct SubthreadDetail {
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
 enum SubthreadStreamMessage {
     Event { event: AgentEvent },
     Reaped,
@@ -770,6 +800,11 @@ impl BrowserAgentContext {
 #[derive(Deserialize)]
 struct AgentTurn {
     message: ChatMessage,
+}
+
+#[derive(Serialize)]
+struct AcceptedAgentTurn {
+    record_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -1434,7 +1469,7 @@ fn app(state: AppState) -> Router {
             get(browser_preview_stream),
         )
         .route("/api/browser/sessions/{id}/input", post(browser_user_input))
-        .route("/api/conversation", get(conversation))
+        .route("/api/thread-history", get(thread_history))
         .route("/api/history-records", get(history_records))
         .route("/api/history-records/{id}", get(history_record_detail))
         .route("/api/conversation/clear", post(clear_conversation))
@@ -1443,7 +1478,6 @@ fn app(state: AppState) -> Router {
             post(resend_conversation_message),
         )
         .route("/api/threads", get(list_threads))
-        .route("/api/threads/{id}/events", get(stream_subthread_events))
         .route("/api/threads/{id}", get(subthread_detail))
         .route(
             "/api/agent/turn",
@@ -1740,6 +1774,7 @@ fn archive_generated_images(
         .collect()
 }
 
+#[allow(dead_code)]
 fn generated_images_for_message(
     connection: &Connection,
     message_id: i64,
@@ -1900,6 +1935,7 @@ fn load_checkpoint_by_id(
         .map_err(Into::into)
 }
 
+#[allow(dead_code)]
 fn load_latest_checkpoint(
     connection: &Connection,
     before_id: i64,
@@ -3070,6 +3106,7 @@ fn conversation_page_limit(value: Option<usize>) -> usize {
         .clamp(1, CONVERSATION_PAGE_MAX)
 }
 
+#[allow(dead_code)]
 fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<ConversationState> {
     let connection = open_db(path)?;
     let focused_message_id = query
@@ -5921,6 +5958,168 @@ fn browser_agent_context(state: &AppState) -> BrowserAgentContext {
     BrowserAgentContext::new(state.browser_sessions.clone())
 }
 
+fn load_thread_history_page(path: &Path, query: ThreadHistoryQuery) -> Result<ThreadHistoryPage> {
+    let connection = open_db(path)?;
+    let thread_id = query.thread_id.filter(|id| !id.is_empty());
+    if let Some(thread_id) = thread_id.as_deref() {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM subthreads WHERE id = ?1)",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(anyhow!("thread does not exist"));
+        }
+    }
+    let limit = conversation_page_limit(query.limit);
+    let after_id = query.after_id.filter(|id| *id > 0);
+    let before_id = query.before_id.filter(|id| *id > 0);
+    if after_id.is_some() && before_id.is_some() {
+        return Err(anyhow!("provide at most one cursor"));
+    }
+    let (records, has_more) = if let Some(after_id) = after_id {
+        let rows = connection
+            .prepare(
+                "SELECT id, kind, payload, created_at FROM history_records
+                 WHERE thread_id IS ?1 AND id > ?2
+                   AND kind IN ('input', 'response_output', 'tool_output', 'checkpoint')
+                 ORDER BY id LIMIT ?3",
+            )?
+            .query_map(
+                params![thread_id.as_deref(), after_id, (limit + 1) as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        serde_json::from_str::<Value>(&row.get::<_, String>(2)?)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        (rows.into_iter().take(limit).collect::<Vec<_>>(), has_more)
+    } else {
+        let before_id = before_id.unwrap_or(i64::MAX);
+        let mut rows = connection
+            .prepare(
+                "SELECT id, kind, payload, created_at FROM history_records
+                 WHERE thread_id IS ?1 AND id < ?2
+                   AND kind IN ('input', 'response_output', 'tool_output', 'checkpoint')
+                 ORDER BY id DESC LIMIT ?3",
+            )?
+            .query_map(
+                params![thread_id.as_deref(), before_id, (limit + 1) as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        serde_json::from_str::<Value>(&row.get::<_, String>(2)?)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        rows.reverse();
+        (rows, has_more)
+    };
+    let records = records
+        .into_iter()
+        .map(|(id, kind, payload, created_at)| {
+            let images = if kind == "response_output"
+                && payload.get("type").and_then(Value::as_str) == Some("message")
+            {
+                generated_images_for_protocol_record(&connection, thread_id.as_deref(), id)?
+            } else {
+                Vec::new()
+            };
+            Ok(ThreadHistoryRecord {
+                id,
+                kind,
+                payload,
+                created_at,
+                images,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let next_after_id = records
+        .last()
+        .map(|record| record.id)
+        .or(after_id)
+        .unwrap_or_default();
+    let next_before_id = has_more
+        .then(|| records.first().map(|record| record.id))
+        .flatten();
+    Ok(ThreadHistoryPage {
+        records,
+        next_after_id,
+        next_before_id,
+        has_more,
+        active: false,
+    })
+}
+
+fn generated_images_for_protocol_record(
+    connection: &Connection,
+    thread_id: Option<&str>,
+    message_id: i64,
+) -> Result<Vec<GeneratedImage>> {
+    connection
+        .prepare(
+            "SELECT file.id, file.preview_content, file.history_entry_id
+             FROM files file
+             JOIN history_records source ON source.id = file.history_entry_id
+             WHERE source.thread_id IS ?1 AND source.id <= ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM history_records earlier_message
+                   WHERE earlier_message.thread_id IS ?1
+                     AND earlier_message.id > source.id
+                     AND earlier_message.id < ?2
+                     AND earlier_message.kind = 'response_output'
+                     AND json_extract(earlier_message.payload, '$.type') = 'message'
+               )
+             ORDER BY source.id",
+        )?
+        .query_map(params![thread_id, message_id], |row| {
+            Ok(GeneratedImage {
+                id: row.get(0)?,
+                data: None,
+                preview_content: row.get(1)?,
+                history_entry_id: row.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+async fn thread_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ThreadHistoryQuery>,
+) -> ApiResult<ThreadHistoryPage> {
+    identity(&state, &headers).await?;
+    let thread_id = query.thread_id.clone().filter(|id| !id.is_empty());
+    let mut page = load_thread_history_page(&state.db_path, query)
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    page.active = match thread_id {
+        Some(id) => open_db(&state.db_path)
+            .ok()
+            .and_then(|connection| connection.query_row(
+                "SELECT goal_state = 'active' AND status IN ('queued', 'running', 'retrying') FROM subthreads WHERE id = ?1",
+                [id],
+                |row| row.get::<_, bool>(0),
+            ).ok())
+            .unwrap_or(false),
+        None => state.active_main.lock().await.is_some(),
+    };
+    Ok(Json(page))
+}
+
+#[allow(dead_code)]
 async fn conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6244,7 +6443,7 @@ async fn resend_conversation_message(
     headers: HeaderMap,
     AxumPath(record_id): AxumPath<i64>,
     Json(_input): Json<ResendConversationMessage>,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
+) -> ApiResult<AcceptedAgentTurn> {
     identity(&state, &headers).await?;
     let config = load_config(&state.db_path).map_err(|_| {
         error(
@@ -6282,7 +6481,8 @@ async fn resend_conversation_message(
     })?;
     drop(_conversation);
     drop(checkpoint_writer);
-    Ok(stream_latest_main_response(state, record_id).await)
+    start_latest_main_response(state, record_id, None).await;
+    Ok(Json(AcceptedAgentTurn { record_id }))
 }
 
 fn supported_subthread_model(model_id: &str) -> bool {
@@ -6439,6 +6639,7 @@ async fn subthread_detail(
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "Goal not found"))
 }
 
+#[allow(dead_code)]
 async fn stream_subthread_events(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6673,7 +6874,7 @@ async fn agent_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<AgentTurn>,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
+) -> ApiResult<AcceptedAgentTurn> {
     identity(&state, &headers).await?;
     if input.message.role != "user" || input.message.content.as_str().is_none_or(str::is_empty) {
         return Err(error(
@@ -6702,7 +6903,10 @@ async fn agent_turn(
             )
         })?
     };
-    Ok(stream_latest_main_response(state, user_message.id).await)
+    start_latest_main_response(state, user_message.id, None).await;
+    Ok(Json(AcceptedAgentTurn {
+        record_id: user_message.id,
+    }))
 }
 
 async fn cancel_main_response(
@@ -6716,6 +6920,7 @@ async fn cancel_main_response(
     Ok(Json(json!({ "cancelled": true })))
 }
 
+#[allow(dead_code)]
 async fn stream_latest_main_response(state: AppState, source_record_id: i64) -> Response {
     let (events, receiver) = mpsc::channel(32);
     start_latest_main_response(state, source_record_id, Some(events)).await;

@@ -47,8 +47,11 @@ type VoicePreview = { state: 'armed' | 'listening' | 'transcribing' | 'deciding'
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
 type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { type: 'checkpoint'; id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown>; started_at?: string } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string; output_bytes?: number; finished_at?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
-type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
+type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; output?: string; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
 type ContextCheckpoint = { id: number; predecessors: { hop: number; checkpoint_id: number }[]; summary: string; created_at: string }
+type ThreadHistoryRecord = { id: number; kind: 'input' | 'response_output' | 'tool_output' | 'checkpoint'; payload: Record<string, unknown>; created_at: string; images: GeneratedImage[] }
+type ThreadHistoryPage = { records: ThreadHistoryRecord[]; next_after_id: number; next_before_id?: number; has_more: boolean; active: boolean }
+type AcceptedAgentTurn = { record_id: number }
 type ConversationState = { messages: ChatMessage[]; context: { checkpoint: ContextCheckpoint | null }; has_more: boolean; focus_message_id?: number; next_before_id?: number }
 type HistoryRecordSummary = { id: number; thread_id: string | null; kind: string; created_at: string; payload_bytes: number; role: string | null; item_type: string | null; name: string | null; call_id: string | null; summary: string }
 type HistoryRecordPage = { records: HistoryRecordSummary[]; total: number; page: number; page_size: number }
@@ -236,29 +239,12 @@ async function createSpeech(sdk: AuthMiniApi, text: string, language: Language):
   return audio
 }
 
-async function streamAgentTurn(sdk: AuthMiniApi, message: ChatMessage, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
-  const response = await authenticatedFetch(sdk, '/api/agent/turn', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message }) })
-  return streamAgentEvents(response, onEvent)
+async function startAgentTurn(sdk: AuthMiniApi, message: ChatMessage): Promise<AcceptedAgentTurn> {
+  return api<AcceptedAgentTurn>('/api/agent/turn', sdk, { method: 'POST', body: JSON.stringify({ message }) })
 }
 
-async function streamResentAgentTurn(sdk: AuthMiniApi, recordId: number, signal: AbortSignal, onEvent: (event: AgentEvent) => void) {
-  const response = await authenticatedFetch(sdk, `/api/conversation/messages/${recordId}/resend`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: '{}' })
-  return streamAgentEvents(response, onEvent)
-}
-
-async function streamAgentEvents(response: Response, onEvent: (event: AgentEvent) => void) {
-  if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
-  const reader = response.body?.getReader(); if (!reader) throw new Error('The agent did not start an event stream.')
-  const decoder = new TextDecoder(); let buffer = ''
-  for (;;) { const { done, value } = await reader.read(); if (done) return; buffer += decoder.decode(value, { stream: true }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; for (const line of lines) { if (!line.startsWith('data: ')) continue; onEvent(JSON.parse(line.slice(6)) as AgentEvent) } }
-}
-
-async function streamSubthreadEvents(sdk: AuthMiniApi, threadId: string, signal: AbortSignal, onMessage: (message: SubthreadStreamMessage) => void) {
-  const response = await authenticatedFetch(sdk, `/api/threads/${threadId}/events`, { signal })
-  if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
-  const reader = response.body?.getReader(); if (!reader) throw new Error('The subthread did not start an event stream.')
-  const decoder = new TextDecoder(); let buffer = ''
-  for (;;) { const { done, value } = await reader.read(); if (done) throw new Error('The subthread event stream ended.'); buffer += decoder.decode(value, { stream: true }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; for (const line of lines) { if (!line.startsWith('data: ')) continue; const item = JSON.parse(line.slice(6)) as SubthreadStreamMessage; onMessage(item); if (item.type === 'reaped') return } }
+async function resendAgentTurn(sdk: AuthMiniApi, recordId: number): Promise<AcceptedAgentTurn> {
+  return api<AcceptedAgentTurn>(`/api/conversation/messages/${recordId}/resend`, sdk, { method: 'POST', body: '{}' })
 }
 
 function callbackUrl() { return `${location.origin}${location.pathname}#/auth/callback` }
@@ -415,35 +401,98 @@ function ThreadsPage({ token }: { token: AuthMiniApi }) {
 function ThreadDetailPage({ token }: { token: AuthMiniApi }) {
   const { language, t } = useUi()
   const { id = '' } = useParams()
-  const queryClient = useQueryClient()
-  const [streamError, setStreamError] = useState('')
-  const [events, setEvents] = useState<AgentEvent[]>([])
   const query = useQuery({ queryKey: ['thread', id], queryFn: () => api<SubthreadDetail>(`/api/threads/${id}`, token), enabled: Boolean(id), retry: false })
-  useEffect(() => { setEvents([]) }, [id])
-  useEffect(() => {
-    const detail = query.data
-    if (!detail || detail.thread.goal_state !== 'active') return
-    const threadId = detail.thread.id
-    const controller = new AbortController()
-    setStreamError('')
-    void streamSubthreadEvents(token, threadId, controller.signal, (item) => {
-      if (item.type === 'event') { setEvents((current) => [...current, item.event]); return }
-      if (item.type === 'reaped') {
-        void queryClient.invalidateQueries({ queryKey: ['thread', threadId] })
-        void queryClient.invalidateQueries({ queryKey: ['threads'] })
-      }
-    }).catch((cause) => { if (!controller.signal.aborted) setStreamError(message(cause)) })
-    return () => controller.abort()
-  }, [id, query.data?.thread.goal_state, query.data?.thread.id, queryClient, token])
   const title = goalText(language, 'goals')
   const description = goalText(language, 'description')
   if (query.error) return <Page title={title} description={description}><ErrorAlert error={message(query.error)} /></Page>
   if (!query.data) return <Page title={title} description={description}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t('loadingMachine')}</CardContent></Card></Page>
   const { thread } = query.data
-  const conversation = subthreadConversationItems(thread, events)
-  const eventError = [...events].reverse().find((event) => event.type === 'error')
-  const contextTokens = [...events].reverse().find((event) => event.type === 'context')
-  return <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><Button asChild variant="outline" size="sm"><Link to="/threads"><ArrowLeftIcon data-icon="inline-start" />{goalText(language, 'back')}</Link></Button><div className="min-w-0"><h1 className="truncate font-heading text-lg font-semibold">{thread.title}</h1><p className="text-sm text-muted-foreground">{goalText(language, 'goal')}</p></div><Badge className="ml-auto" variant={thread.goal_state === 'active' ? 'secondary' : 'outline'}>{goalStateLabel(language, thread.goal_state)}</Badge><Badge variant="outline">{threadStatusLabel(t, thread.status)}</Badge><Badge variant="outline">{thread.model}</Badge>{contextTokens?.type === 'context' && <Badge variant="outline">{t('context')}: {contextTokens.input_tokens.toLocaleString()} {t('tokens')}</Badge>}</div><div className="border-b p-4"><dl className="mx-auto grid w-full max-w-4xl gap-3 text-sm"><div><dt className="font-medium">{goalText(language, 'objective')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.task}</dd></div><div><dt className="font-medium">{goalText(language, 'doneWhen')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.completion_criteria}</dd></div>{thread.goal_evidence && <div><dt className="font-medium">{goalText(language, 'evidence')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.goal_evidence}</dd></div>}{thread.blocked_reason && <div><dt className="font-medium">{goalText(language, 'blocker')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.blocked_reason}</dd></div>}{thread.result && <div><dt className="font-medium">{goalText(language, 'outcome')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.result}</dd></div>}</dl></div>{streamError && <div className="px-4 pt-4"><ErrorAlert error={streamError} /></div>}<div className="border-b px-4 py-2"><p className="mx-auto w-full max-w-4xl text-sm font-medium">{goalText(language, 'history')}</p></div><ConversationFeed items={conversation} running={thread.goal_state === 'active' && thread.status === 'running'} />{eventError?.type === 'error' && <div className="px-4 pb-4"><ErrorAlert error={eventError.error} /></div>}</main>
+  return <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><Button asChild variant="outline" size="sm"><Link to="/threads"><ArrowLeftIcon data-icon="inline-start" />{goalText(language, 'back')}</Link></Button><div className="min-w-0"><h1 className="truncate font-heading text-lg font-semibold">{thread.title}</h1><p className="text-sm text-muted-foreground">{goalText(language, 'goal')}</p></div><Badge className="ml-auto" variant={thread.goal_state === 'active' ? 'secondary' : 'outline'}>{goalStateLabel(language, thread.goal_state)}</Badge><Badge variant="outline">{threadStatusLabel(t, thread.status)}</Badge><Badge variant="outline">{thread.model}</Badge></div><div className="border-b p-4"><dl className="mx-auto grid w-full max-w-4xl gap-3 text-sm"><div><dt className="font-medium">{goalText(language, 'objective')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.task}</dd></div><div><dt className="font-medium">{goalText(language, 'doneWhen')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.completion_criteria}</dd></div>{thread.goal_evidence && <div><dt className="font-medium">{goalText(language, 'evidence')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.goal_evidence}</dd></div>}{thread.blocked_reason && <div><dt className="font-medium">{goalText(language, 'blocker')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.blocked_reason}</dd></div>}{thread.result && <div><dt className="font-medium">{goalText(language, 'outcome')}</dt><dd className="whitespace-pre-wrap text-muted-foreground">{thread.result}</dd></div>}</dl></div><div className="border-b px-4 py-2"><p className="mx-auto w-full max-w-4xl text-sm font-medium">{goalText(language, 'history')}</p></div><ThreadHistoryRecordsView threadId={thread.id} /></main>
+}
+
+
+function threadHistoryItems(records: ThreadHistoryRecord[]): ConversationItem[] {
+  const items: ConversationItem[] = []
+  const tools = new Map<string, Extract<ConversationItem, { kind: 'tool' }>>()
+  for (const record of records) {
+    const type = typeof record.payload.type === 'string' ? record.payload.type : ''
+    const role = typeof record.payload.role === 'string' ? record.payload.role : ''
+    if (record.kind === 'input' && (role === 'user' || role === 'assistant')) {
+      items.push({ kind: 'message', id: String(record.id), message: { id: record.id, role, content: typeof record.payload.content === 'string' ? record.payload.content : '', created_at: record.created_at }, queued: false })
+      continue
+    }
+    if (record.kind === 'response_output' && type === 'message') {
+      const content = typeof record.payload.content === 'string' ? record.payload.content : ''
+      items.push({ kind: 'message', id: String(record.id), message: { id: record.id, role: typeof record.payload.role === 'string' ? record.payload.role : 'assistant', content, images: record.images, created_at: record.created_at }, queued: false })
+      continue
+    }
+    if (record.kind === 'response_output' && (type === 'function_call' || type === 'computer_call')) {
+      const callId = typeof record.payload.call_id === 'string' ? record.payload.call_id : String(record.id)
+      const argumentsText = typeof record.payload.arguments === 'string' ? record.payload.arguments : '{}'
+      let arguments_: Record<string, unknown> = {}
+      try { arguments_ = JSON.parse(argumentsText) as Record<string, unknown> } catch {}
+      const tool: Extract<ConversationItem, { kind: 'tool' }> = { kind: 'tool', call_id: callId, name: typeof record.payload.name === 'string' ? record.payload.name : type, arguments: arguments_, complete: false, started_at: record.created_at }
+      tools.set(callId, tool)
+      items.push(tool)
+      continue
+    }
+    if (record.kind === 'tool_output' && type === 'function_call_output') {
+      const callId = typeof record.payload.call_id === 'string' ? record.payload.call_id : ''
+      const tool = tools.get(callId)
+      if (tool) Object.assign(tool, { complete: true, output: typeof record.payload.output === 'string' ? record.payload.output : '', finished_at: record.created_at })
+    }
+  }
+  return items
+}
+
+function ThreadHistoryRecordsView({ threadId, focusRecordId, onResend, resendingMessageId, refreshKey = 0 }: { threadId: string | null; focusRecordId?: number; onResend?: (message: ChatMessage) => void; resendingMessageId?: number | null; refreshKey?: number }) {
+  const token = useAuthToken()
+  const { t } = useUi()
+  const [records, setRecords] = useState<ThreadHistoryRecord[]>([])
+  const [cursor, setCursor] = useState(0)
+  const [before, setBefore] = useState<number | undefined>()
+  const [hasMore, setHasMore] = useState(false)
+  const [active, setActive] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const [error, setError] = useState('')
+  const request = async (params: URLSearchParams) => api<ThreadHistoryPage>(`/api/thread-history?${params}`, token)
+  const reset = async () => {
+    setLoading(true); setError(''); setBefore(undefined)
+    try {
+      const params = new URLSearchParams(); if (threadId) params.set('thread_id', threadId)
+      const page = await request(params)
+      setRecords(page.records); setCursor(page.next_after_id); setHasMore(page.has_more); setActive(page.active)
+    } catch (cause) { setError(message(cause)) } finally { setLoading(false) }
+  }
+  useEffect(() => { void reset() }, [threadId, refreshKey])
+  useEffect(() => {
+    if (!active) return
+    const interval = window.setInterval(() => { void (async () => {
+      try {
+        const params = new URLSearchParams({ after_id: String(cursor) }); if (threadId) params.set('thread_id', threadId)
+        const page = await request(params)
+        if (page.records.length) setRecords((current) => {
+          const known = new Set(current.map((record) => record.id)); return [...current, ...page.records.filter((record) => !known.has(record.id))]
+        })
+        setCursor(page.next_after_id); setActive(page.active)
+      } catch (cause) { setError(message(cause)) }
+    })() }, 1000)
+    return () => window.clearInterval(interval)
+  }, [active, cursor, threadId])
+  useEffect(() => { if (focusRecordId !== undefined) document.getElementById(`history-entry-${focusRecordId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }, [focusRecordId, records])
+  const loadEarlier = async () => {
+    const oldest = records[0]?.id; if (!oldest || loadingEarlier) return
+    setLoadingEarlier(true)
+    try {
+      const params = new URLSearchParams({ before_id: String(oldest) }); if (threadId) params.set('thread_id', threadId)
+      const page = await request(params)
+      setRecords((current) => [...page.records, ...current]); setHasMore(page.has_more); setBefore(page.next_before_id)
+    } catch (cause) { setError(message(cause)) } finally { setLoadingEarlier(false) }
+  }
+  if (loading) return <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>
+  if (error) return <div className="px-4 py-3"><ErrorAlert error={error} /></div>
+  return <ConversationFeed items={threadHistoryItems(records)} running={active} hasMore={hasMore || Boolean(before)} loadingEarlier={loadingEarlier} onLoadEarlier={() => void loadEarlier()} onResend={onResend} resendingMessageId={resendingMessageId} />
 }
 
 function ConversationFeed({ items, running = false, hasMore = false, loadingEarlier = false, onLoadEarlier, onResend, resendingMessageId }: { items: ConversationItem[]; running?: boolean; hasMore?: boolean; loadingEarlier?: boolean; onLoadEarlier?: () => void; onResend?: (message: ChatMessage) => void; resendingMessageId?: number | null }) {
@@ -484,7 +533,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const location = useLocation()
   const focus = new URLSearchParams(location.search).get('focus')
   const queryClient = useQueryClient()
-  const conversationQuery = useQuery({ queryKey: ['conversation', focus], queryFn: () => api<ConversationState>(focus ? `/api/conversation?focus=${encodeURIComponent(focus)}` : '/api/conversation', token), refetchOnWindowFocus: false })
+  const conversationQuery = useQuery<ConversationState>({ queryKey: ['conversation-retired'], queryFn: async () => { throw new Error('retired') }, enabled: false })
   const threadsQuery = useQuery({ queryKey: ['threads'], queryFn: () => api<ThreadIndex>('/api/threads', token), refetchInterval: 1000 })
   const [olderPages, setOlderPages] = useState<ConversationState[]>([])
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -506,6 +555,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
   const [activeStreams, setActiveStreams] = useState<string[]>([])
   const [resendingMessageId, setResendingMessageId] = useState<number | null>(null)
   const [error, setError] = useState('')
+  const [historyRefresh, setHistoryRefresh] = useState(0)
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
   const [continuousVoice, setContinuousVoice] = useState(continuousVoiceRef.current)
@@ -635,7 +685,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     const attachmentContext = attached.length ? `\n\nAttached file objects:\n${attached.map((file) => `- ${file.filename} (${file.mime_type}; SHA-256 ${file.id})`).join('\n')}` : ''
     const entry: Extract<ConversationItem, { kind: 'message' }> = { kind: 'message', id: crypto.randomUUID(), message: { role: 'user', content: `${text}${attachmentContext}`.trim() }, queued: true }
     updateConversation([...conversationRef.current, entry])
-    startStream(entry.id, (signal, onEvent) => streamAgentTurn(token, entry.message, signal, onEvent))
+    void startAgentTurn(token, entry.message).then(() => setHistoryRefresh((value) => value + 1)).catch((cause: unknown) => setError(message(cause)))
   }
 
   const resendMessage = (message: ChatMessage) => {
@@ -649,7 +699,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     setResendingMessageId(recordId)
     setOlderPages([])
     updateConversation(conversationRef.current.slice(0, target + 1))
-    startStream(undefined, (signal, onEvent) => streamResentAgentTurn(token, recordId, signal, onEvent), recordId)
+    void resendAgentTurn(token, recordId).then(() => { setHistoryRefresh((value) => value + 1); setResendingMessageId(null) }).catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : String(cause)); setResendingMessageId(null) })
   }
 
   const attachFiles = async (files: FileList | null) => {
@@ -877,10 +927,10 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
 
   const conversationState = conversationQuery.data ? mergeConversationPages(conversationQuery.data, olderPages) : undefined
   const oldestPage = olderPages.at(-1) ?? conversationQuery.data
-  const unavailable = conversationQuery.isLoading || Boolean(conversationQuery.error) || resendingMessageId !== null
+  const unavailable = resendingMessageId !== null
   const checkpoint = conversationState?.context.checkpoint
-  const mainThreadRunning = activeStreams.length > 0
-  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><div className="ml-auto" />{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{activeStreams.length > 0 && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div>{activeSubthreads.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">{activeSubthreads.map((thread) => <Badge key={thread.id} variant="outline">{thread.title}</Badge>)}</div>}{conversationInitialized ? <ConversationFeed items={conversation} running={mainThreadRunning} hasMore={oldestPage?.has_more} loadingEarlier={loadingOlder} onLoadEarlier={() => void loadOlder()} onResend={resendMessage} resendingMessageId={resendingMessageId} /> : <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>}{conversationQuery.error && <div className="px-4 pb-2"><ErrorAlert error={message(conversationQuery.error)} /></div>}</main>
+  const mainThreadRunning = threadsQuery.data?.main_thread.status === 'running' || threadsQuery.data?.main_thread.status === 'retrying'
+  const consoleSurface = <main className="flex h-full flex-col"><div className="flex flex-wrap items-center gap-2 border-b px-4 py-3"><div><h1 className="font-heading text-lg font-semibold">{t('console')}</h1><p className="text-sm text-muted-foreground">{t('consoleDescription')}</p></div><div className="ml-auto" />{checkpoint && <Badge variant="outline">{t('checkpoint')} #{checkpoint.id}</Badge>}{activeSubthreads.length > 0 && <Badge variant="secondary">{activeSubthreads.length} {t('backgroundWork')}</Badge>}{mainThreadRunning && <Button variant="destructive" size="sm" onClick={() => void stopAll()}><CircleStopIcon data-icon="inline-start" />{t('stop')}</Button>}</div>{activeSubthreads.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">{activeSubthreads.map((thread) => <Badge key={thread.id} variant="outline">{thread.title}</Badge>)}</div>}<ThreadHistoryRecordsView threadId={null} focusRecordId={focus ? Number(focus) : undefined} onResend={resendMessage} resendingMessageId={resendingMessageId} refreshKey={historyRefresh} /></main>
   return <>
     <div className="min-h-0 flex-1 overflow-y-auto">{location.pathname === '/console' ? consoleSurface : children}</div>
     {error && <div className="shrink-0 px-4 pt-2"><ErrorAlert error={error} /></div>}
