@@ -23,3 +23,10 @@ test('thread history renders persisted subthread titles for subthread tools', ()
   assert.match(source, /item\.subthread\?\.title/)
   assert.match(source, /to=\{`\/threads\/\$\{item\.subthread\.id\}`\}/)
 })
+
+test('thread detail reserves a bounded scrollable history viewport', () => {
+  assert.match(source, /<main className="flex h-full min-h-0 flex-col">/)
+  assert.match(source, /max-h-\[35svh\] shrink-0 overflow-y-auto border-b p-4/)
+  assert.match(source, /<div className="min-h-0 flex-1"><ThreadHistoryRecordsView threadId=\{thread\.id\} \/><\/div>/)
+  assert.match(source, /return <div className="min-h-0 flex-1"><ConversationFeed/)
+})
