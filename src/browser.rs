@@ -24,7 +24,7 @@ const VIEWPORT_WIDTH: u32 = 1280;
 const VIEWPORT_HEIGHT: u32 = 800;
 const BROWSER_START_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct BrowserSessionSummary {
     pub id: String,
     pub computer_use_enabled: bool,
@@ -34,7 +34,7 @@ pub struct BrowserSessionSummary {
     pub pending_approval: Option<BrowserApproval>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct BrowserApproval {
     pub id: String,
     pub description: String,
@@ -201,7 +201,7 @@ pub async fn user_input(sessions: &BrowserSessions, id: &str, input: BrowserInpu
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserInput {
     Click { x: f64, y: f64 },

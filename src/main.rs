@@ -781,7 +781,23 @@ struct ClearConversationInput {
 }
 
 #[derive(Deserialize)]
-struct CreateBrowserSession {}
+struct CreateBrowserSession {
+    #[serde(default)]
+    target_device: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BrowserTargetQuery {
+    target_device: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BrowserSessionView {
+    #[serde(flatten)]
+    session: browser::BrowserSessionSummary,
+    target_device: String,
+    target_name: String,
+}
 
 #[derive(Serialize)]
 struct BrowserScreenshot {
@@ -5502,47 +5518,197 @@ fn complete_executor_call(path: &Path, result: &ExecutorToolResult) -> Result<()
     Ok(())
 }
 
+async fn browser_target(
+    state: &AppState,
+    target_device: Option<String>,
+) -> Result<Option<(String, String)>, (StatusCode, Json<ApiError>)> {
+    let Some(target_device) = target_device
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let connection = open_db(&state.db_path)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot open database"))?;
+    let name: Option<String> = connection
+        .query_row(
+            "SELECT name FROM peers WHERE machine_id = ?1",
+            [&target_device],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read machine"))?;
+    let name = name.ok_or_else(|| error(StatusCode::NOT_FOUND, "target_device is not enrolled"))?;
+    if !state
+        .executor_tunnels
+        .sessions
+        .lock()
+        .await
+        .contains_key(&target_device)
+    {
+        return Err(error(StatusCode::CONFLICT, "target_device is offline"));
+    }
+    Ok(Some((target_device, name)))
+}
+
+fn browser_cancellation() -> watch::Receiver<bool> {
+    watch::channel(false).1
+}
+
+async fn remote_browser_http_call(
+    state: &AppState,
+    target_device: &str,
+    name: &str,
+    arguments: Value,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    remote_browser_call(
+        &state.executor_tunnels,
+        &state.db_path,
+        target_device,
+        name,
+        arguments,
+        browser_cancellation(),
+    )
+    .await
+    .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))
+}
+
 async fn list_browser_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> ApiResult<Vec<browser::BrowserSessionSummary>> {
+    Query(query): Query<BrowserTargetQuery>,
+) -> ApiResult<Vec<BrowserSessionView>> {
     identity(&state, &headers).await?;
-    Ok(Json(browser::list(&state.browser_sessions).await))
+    let target = browser_target(&state, query.target_device).await?;
+    match target {
+        None => Ok(Json(
+            browser::list(&state.browser_sessions)
+                .await
+                .into_iter()
+                .map(|session| BrowserSessionView {
+                    session,
+                    target_device: String::new(),
+                    target_name: "Controller".to_owned(),
+                })
+                .collect(),
+        )),
+        Some((target_device, target_name)) => {
+            let output = remote_browser_http_call(
+                &state,
+                &target_device,
+                "browser_list_sessions",
+                json!({}),
+            )
+            .await?;
+            register_remote_browser_sessions(&state.executor_tunnels, &target_device, &output)
+                .await
+                .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))?;
+            let sessions: Vec<browser::BrowserSessionSummary> = serde_json::from_str(&output)
+                .map_err(|_| error(StatusCode::BAD_GATEWAY, "remote browser list is invalid"))?;
+            Ok(Json(
+                sessions
+                    .into_iter()
+                    .map(|session| BrowserSessionView {
+                        session,
+                        target_device: target_device.clone(),
+                        target_name: target_name.clone(),
+                    })
+                    .collect(),
+            ))
+        }
+    }
 }
 
 async fn create_browser_session(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(_): Json<CreateBrowserSession>,
-) -> ApiResult<browser::BrowserSessionSummary> {
+    Json(input): Json<CreateBrowserSession>,
+) -> ApiResult<BrowserSessionView> {
     identity(&state, &headers).await?;
-    let config = load_config(&state.db_path).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot read configuration",
-        )
-    })?;
-    if config.deployment_role != "controller" {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Browser Control runs on a controller machine",
-        ));
+    let target = browser_target(&state, input.target_device).await?;
+    match target {
+        None => {
+            let session = browser::create(&state.browser_sessions, &state.client, false)
+                .await
+                .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))?;
+            Ok(Json(BrowserSessionView {
+                session,
+                target_device: String::new(),
+                target_name: "Controller".to_owned(),
+            }))
+        }
+        Some((target_device, target_name)) => {
+            let output = remote_browser_http_call(
+                &state,
+                &target_device,
+                "browser_create_session",
+                json!({}),
+            )
+            .await?;
+            let session: browser::BrowserSessionSummary = serde_json::from_str(&output)
+                .map_err(|_| error(StatusCode::BAD_GATEWAY, "remote browser session is invalid"))?;
+            state
+                .executor_tunnels
+                .browser_sessions
+                .lock()
+                .await
+                .insert(session.id.clone(), target_device.clone());
+            Ok(Json(BrowserSessionView {
+                session,
+                target_device,
+                target_name,
+            }))
+        }
     }
-    let session = browser::create(&state.browser_sessions, &state.client, false)
-        .await
-        .map_err(|cause| error(StatusCode::BAD_GATEWAY, cause.to_string()))?;
-    Ok(Json(session))
+}
+
+async fn remote_browser_session(
+    state: &AppState,
+    id: &str,
+    target_device: Option<String>,
+    name: &str,
+    arguments: Value,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    let target =
+        verify_remote_browser_session(&state.executor_tunnels, target_device.as_deref(), id)
+            .await
+            .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    if let Some(target) = target {
+        return remote_browser_http_call(state, &target, name, arguments)
+            .await
+            .map(Some);
+    }
+    Ok(None)
 }
 
 async fn close_browser_session(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<BrowserTargetQuery>,
 ) -> ApiResult<Value> {
     identity(&state, &headers).await?;
-    browser::close(&state.browser_sessions, &id)
-        .await
-        .map_err(|cause| error(StatusCode::NOT_FOUND, cause.to_string()))?;
+    if remote_browser_session(
+        &state,
+        &id,
+        query.target_device,
+        "browser_close_session",
+        json!({"session_id": id}),
+    )
+    .await?
+    .is_some()
+    {
+        state
+            .executor_tunnels
+            .browser_sessions
+            .lock()
+            .await
+            .remove(&id);
+    } else {
+        browser::close(&state.browser_sessions, &id)
+            .await
+            .map_err(|cause| error(StatusCode::NOT_FOUND, cause.to_string()))?;
+    }
     Ok(Json(json!({"closed":true})))
 }
 
@@ -5550,11 +5716,23 @@ async fn approve_browser_action(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<BrowserTargetQuery>,
 ) -> ApiResult<Value> {
     identity(&state, &headers).await?;
-    browser::approve(&state.browser_sessions, &id)
-        .await
-        .map_err(|cause| error(StatusCode::CONFLICT, cause.to_string()))?;
+    if remote_browser_session(
+        &state,
+        &id,
+        query.target_device,
+        "browser_approve",
+        json!({"session_id": id}),
+    )
+    .await?
+    .is_none()
+    {
+        browser::approve(&state.browser_sessions, &id)
+            .await
+            .map_err(|cause| error(StatusCode::CONFLICT, cause.to_string()))?;
+    }
     Ok(Json(json!({"approved":true})))
 }
 
@@ -5562,8 +5740,28 @@ async fn browser_screenshot(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<BrowserTargetQuery>,
 ) -> ApiResult<BrowserScreenshot> {
     identity(&state, &headers).await?;
+    if let Some(output) = remote_browser_session(
+        &state,
+        &id,
+        query.target_device,
+        "browser_screenshot",
+        json!({"session_id": id}),
+    )
+    .await?
+    {
+        let value: Value = serde_json::from_str(&output)
+            .map_err(|_| error(StatusCode::BAD_GATEWAY, "remote screenshot is invalid"))?;
+        let data_url = value
+            .get("image")
+            .and_then(Value::as_str)
+            .ok_or_else(|| error(StatusCode::BAD_GATEWAY, "remote screenshot is missing"))?;
+        return Ok(Json(BrowserScreenshot {
+            data_url: data_url.to_owned(),
+        }));
+    }
     let image = browser::screenshot(&state.browser_sessions, &id)
         .await
         .map_err(|cause| error(StatusCode::NOT_FOUND, cause.to_string()))?;
@@ -5576,8 +5774,68 @@ async fn browser_preview_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<BrowserTargetQuery>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     identity(&state, &headers).await?;
+    if let Some(target) =
+        verify_remote_browser_session(&state.executor_tunnels, query.target_device.as_deref(), &id)
+            .await
+            .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?
+    {
+        let state = state.clone();
+        let (sender, receiver) = mpsc::channel(1);
+        tokio::spawn(async move {
+            loop {
+                let output = remote_browser_http_call(
+                    &state,
+                    &target,
+                    "browser_screenshot",
+                    json!({"session_id": id}),
+                )
+                .await;
+                let frame = output
+                    .ok()
+                    .and_then(|output| serde_json::from_str::<Value>(&output).ok())
+                    .and_then(|value| {
+                        value
+                            .get("image")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+                let Some(frame) = frame else {
+                    return;
+                };
+                let Some(encoded) = frame.strip_prefix("data:image/png;base64,") else {
+                    return;
+                };
+                let Ok(bytes) = BASE64.decode(encoded) else {
+                    return;
+                };
+                if sender
+                    .send(Ok::<_, Infallible>(multipart_browser_frame_with_type(
+                        &bytes,
+                        "image/png",
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+        return Ok((
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "multipart/x-mixed-replace; boundary=cybion-frame",
+                ),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Body::from_stream(ReceiverStream::new(receiver)),
+        )
+            .into_response());
+    }
     let mut frames = browser::preview_stream(&state.browser_sessions, &id)
         .await
         .map_err(|cause| error(StatusCode::NOT_FOUND, cause.to_string()))?;
@@ -5617,28 +5875,46 @@ async fn browser_preview_stream(
         .into_response())
 }
 
+async fn browser_user_input(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<BrowserTargetQuery>,
+    Json(input): Json<browser::BrowserInput>,
+) -> ApiResult<Value> {
+    identity(&state, &headers).await?;
+    let arguments = serde_json::to_value(&input)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid browser input"))?;
+    if remote_browser_session(
+        &state,
+        &id,
+        query.target_device,
+        "browser_user_input",
+        json!({"session_id":id,"input":arguments}),
+    )
+    .await?
+    .is_none()
+    {
+        browser::user_input(&state.browser_sessions, &id, input)
+            .await
+            .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
+    }
+    Ok(Json(json!({"accepted":true})))
+}
+
 fn multipart_browser_frame(frame: &[u8]) -> Bytes {
+    multipart_browser_frame_with_type(frame, "image/jpeg")
+}
+
+fn multipart_browser_frame_with_type(frame: &[u8], content_type: &str) -> Bytes {
     let mut message = format!(
-        "--cybion-frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+        "--cybion-frame\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
         frame.len()
     )
     .into_bytes();
     message.extend_from_slice(frame);
     message.extend_from_slice(b"\r\n");
     Bytes::from(message)
-}
-
-async fn browser_user_input(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-    Json(input): Json<browser::BrowserInput>,
-) -> ApiResult<Value> {
-    identity(&state, &headers).await?;
-    browser::user_input(&state.browser_sessions, &id, input)
-        .await
-        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))?;
-    Ok(Json(json!({"accepted":true})))
 }
 
 fn browser_agent_context(state: &AppState) -> BrowserAgentContext {

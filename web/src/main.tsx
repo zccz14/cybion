@@ -64,7 +64,7 @@ type Language = 'en' | 'zh'
 type ToolDefinition = { type: string; name?: string; description?: string; parameters?: unknown }
 type ToolCatalog = { tools: ToolDefinition[] }
 type BrowserApproval = { id: string; description: string }
-type BrowserSession = { id: string; computer_use_enabled: boolean; created_at: string; url: string; pending_approval?: BrowserApproval }
+type BrowserSession = { id: string; computer_use_enabled: boolean; created_at: string; url: string; pending_approval?: BrowserApproval; target_device: string; target_name: string }
 type CommandRun = { id: string; command: string; target_machine_id: string; target_machine_name: string; started_at: string; completed_at: string | null; result: string | null; exit_code: number | null; status: 'running' | 'cancelled' | 'complete' }
 type CommandTarget = { id: string; name: string }
 type CommandRunPage = { items: CommandRun[]; total: number; page: number; page_size: number; target_machines: CommandTarget[] }
@@ -909,159 +909,60 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
 }
 
 function BrowserPage({ token }: { token: AuthMiniApi }) {
-  const { t } = useUi()
+  const { language, t } = useUi()
   const queryClient = useQueryClient()
   const previewRef = useRef<HTMLDivElement>(null)
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const sendInputRef = useRef<(input: Record<string, unknown>) => Promise<void>>(async () => {})
-  const sessions = useQuery({ queryKey: ['browser-sessions'], queryFn: () => api<BrowserSession[]>('/api/browser/sessions', token), refetchInterval: 1000 })
+  const [targetDevice, setTargetDevice] = useState('__controller__')
+  const effectiveTargetDevice = targetDevice === '__controller__' ? '' : targetDevice
+  const peers = useQuery({ queryKey: ['peers'], queryFn: () => api<Peer[]>('/api/peers', token), refetchInterval: 3000 })
+  const targetQuery = effectiveTargetDevice ? `?target_device=${encodeURIComponent(effectiveTargetDevice)}` : ''
+  const sessions = useQuery({ queryKey: ['browser-sessions', effectiveTargetDevice], queryFn: () => api<BrowserSession[]>(`/api/browser/sessions${targetQuery}`, token), refetchInterval: 1000 })
   const [selectedId, setSelectedId] = useState('')
   const [browserInput, setBrowserInput] = useState('')
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
   const [previewReady, setPreviewReady] = useState(false)
   const selected = sessions.data?.find((session) => session.id === selectedId) ?? sessions.data?.[0]
+  const targets = [{ machine_id: '', name: t('controller'), online: true }, ...(peers.data ?? []).filter((peer) => peer.online)]
 
+  useEffect(() => { setSelectedId('') }, [targetDevice])
   useEffect(() => { if (selected && selected.id !== selectedId) setSelectedId(selected.id) }, [selected, selectedId])
-
-  const refresh = async () => { await queryClient.invalidateQueries({ queryKey: ['browser-sessions'] }) }
+  const refresh = async () => { await queryClient.invalidateQueries({ queryKey: ['browser-sessions', effectiveTargetDevice] }) }
   const create = async (event: FormEvent) => {
-    event.preventDefault()
-    setCreating(true)
-    setError('')
-    try {
-      const session = await api<BrowserSession>('/api/browser/sessions', token, { method: 'POST', body: JSON.stringify({}) })
-      setSelectedId(session.id)
-      await refresh()
-    } catch (cause) {
-      setError(message(cause))
-    } finally {
-      setCreating(false)
-    }
+    event.preventDefault(); setCreating(true); setError('')
+    try { const session = await api<BrowserSession>('/api/browser/sessions', token, { method: 'POST', body: JSON.stringify({ target_device: effectiveTargetDevice }) }); setSelectedId(session.id); await refresh() }
+    catch (cause) { setError(message(cause)) } finally { setCreating(false) }
   }
   const sendInput = async (input: Record<string, unknown>) => {
     if (!selected) return
     setError('')
-    try {
-      await api(`/api/browser/sessions/${selected.id}/input`, token, { method: 'POST', body: JSON.stringify(input) })
-    } catch (cause) {
-      setError(message(cause))
-    }
+    try { await api(`/api/browser/sessions/${selected.id}/input${targetQuery}`, token, { method: 'POST', body: JSON.stringify(input) }) }
+    catch (cause) { setError(message(cause)) }
   }
   sendInputRef.current = sendInput
   useEffect(() => {
     if (!selected) return
-    const controller = new AbortController()
-    let active = true
-    let decoding = false
-    let latest: Uint8Array<ArrayBufferLike> | undefined
-    let buffered: Uint8Array<ArrayBufferLike> = new Uint8Array()
+    const controller = new AbortController(); let active = true; let decoding = false; let latest: Uint8Array<ArrayBufferLike> | undefined; let buffered: Uint8Array<ArrayBufferLike> = new Uint8Array()
     setPreviewReady(false)
-    const drawLatest = async () => {
-      if (decoding || !latest) return
-      decoding = true
-      const frame = latest
-      latest = undefined
-      try {
-        const bytes = new Uint8Array(frame.byteLength)
-        bytes.set(frame)
-        const bitmap = await createImageBitmap(new Blob([bytes.buffer], { type: 'image/jpeg' }))
-        if (active) {
-          const canvas = previewCanvasRef.current
-          const context = canvas?.getContext('2d')
-          if (canvas && context) {
-            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-            setPreviewReady(true)
-          }
-        }
-        bitmap.close()
-      } finally {
-        decoding = false
-        if (active && latest) void drawLatest()
-      }
-    }
-    const receive = async () => {
-      const response = await authenticatedFetch(token, `/api/browser/sessions/${selected.id}/stream`, { signal: controller.signal })
-      if (!response.ok) throw new Error(response.statusText)
-      const reader = response.body?.getReader()
-      if (!reader) throw new Error('Browser preview stream is unavailable.')
-      while (active) {
-        const { done, value } = await reader.read()
-        if (done) return
-        const appended = new Uint8Array(buffered.length + value.length)
-        appended.set(buffered)
-        appended.set(value, buffered.length)
-        buffered = appended
-        while (active) {
-          const [frame, remainder] = nextBrowserFrame(buffered)
-          buffered = remainder
-          if (!frame) break
-          latest = frame
-          void drawLatest()
-        }
-      }
-    }
+    const drawLatest = async () => { if (decoding || !latest) return; decoding = true; const frame = latest; latest = undefined; try { const bytes = new Uint8Array(frame.byteLength); bytes.set(frame); const bitmap = await createImageBitmap(new Blob([bytes.buffer], { type: 'image/png' })); if (active) { const canvas = previewCanvasRef.current; const context = canvas?.getContext('2d'); if (canvas && context) { context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); setPreviewReady(true) } } bitmap.close() } finally { decoding = false; if (active && latest) void drawLatest() } }
+    const receive = async () => { const response = await authenticatedFetch(token, `/api/browser/sessions/${selected.id}/stream${targetQuery}`, { signal: controller.signal }); if (!response.ok) throw new Error(response.statusText); const reader = response.body?.getReader(); if (!reader) throw new Error('Browser preview stream is unavailable.'); while (active) { const { done, value } = await reader.read(); if (done) return; const appended = new Uint8Array(buffered.length + value.length); appended.set(buffered); appended.set(value, buffered.length); buffered = appended; while (active) { const [frame, remainder] = nextBrowserFrame(buffered); buffered = remainder; if (!frame) break; latest = frame; void drawLatest() } } }
     void receive().catch((cause) => { if (active && !controller.signal.aborted) setError(message(cause)) })
     return () => { active = false; controller.abort() }
-  }, [selected?.id, token])
+  }, [selected?.id, targetQuery, token])
   useEffect(() => {
-    const preview = previewRef.current
-    if (!preview) return
-    let scrollContainer = preview.parentElement
-    while (scrollContainer && scrollContainer.scrollHeight <= scrollContainer.clientHeight) scrollContainer = scrollContainer.parentElement
-    let pendingDelta = 0
-    let sending = false
-    let scheduled = false
-    const flushScroll = () => {
-      scheduled = false
-      if (sending || pendingDelta === 0) return
-      const deltaY = pendingDelta
-      pendingDelta = 0
-      sending = true
-      void sendInputRef.current({ type: 'scroll', delta_y: deltaY }).finally(() => {
-        sending = false
-        if (pendingDelta !== 0 && !scheduled) { scheduled = true; requestAnimationFrame(flushScroll) }
-      })
-    }
-    const onWheel = (event: WheelEvent) => {
-      const scrollTop = scrollContainer?.scrollTop
-      event.preventDefault()
-      event.stopPropagation()
-      requestAnimationFrame(() => { if (scrollContainer && scrollTop !== undefined) scrollContainer.scrollTop = scrollTop })
-      pendingDelta += event.deltaY
-      if (!scheduled) { scheduled = true; requestAnimationFrame(flushScroll) }
-    }
-    preview.addEventListener('wheel', onWheel, { passive: false, capture: true })
-    return () => preview.removeEventListener('wheel', onWheel, true)
+    const preview = previewRef.current; if (!preview) return
+    let pendingDelta = 0; let sending = false; let scheduled = false
+    const flush = () => { scheduled = false; if (sending || pendingDelta === 0) return; const delta_y = pendingDelta; pendingDelta = 0; sending = true; void sendInputRef.current({ type: 'scroll', delta_y }).finally(() => { sending = false; if (pendingDelta && !scheduled) { scheduled = true; requestAnimationFrame(flush) } }) }
+    const onWheel = (event: WheelEvent) => { event.preventDefault(); pendingDelta += event.deltaY; if (!scheduled) { scheduled = true; requestAnimationFrame(flush) } }
+    preview.addEventListener('wheel', onWheel, { passive: false }); return () => preview.removeEventListener('wheel', onWheel)
   }, [selected?.id])
-  const typeInput = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!browserInput.trim()) return
-    await sendInput({ type: 'type', text: browserInput })
-    setBrowserInput('')
-  }
-  const close = async () => {
-    if (!selected) return
-    try {
-      await api(`/api/browser/sessions/${selected.id}`, token, { method: 'DELETE' })
-      setSelectedId('')
-      await refresh()
-    } catch (cause) {
-      setError(message(cause))
-    }
-  }
-  const approve = async () => {
-    if (!selected) return
-    try {
-      await api(`/api/browser/sessions/${selected.id}/approve`, token, { method: 'POST' })
-      await refresh()
-    } catch (cause) {
-      setError(message(cause))
-    }
-  }
-
-  if (sessions.error) return <Page title={t('browserTitle')} description={t('browserDescription')}><ErrorAlert error={message(sessions.error)} /></Page>
-  return <Page title={t('browserTitle')} description={t('browserDescription')}><Card><CardHeader><CardTitle>{t('createBrowser')}</CardTitle><CardDescription>{t('browserCreateHint')}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-4" onSubmit={create}>{error && <ErrorAlert error={error} />}<Button className="w-fit" disabled={creating}>{creating && <Spinner data-icon="inline-start" />}{t('createBrowser')}</Button></form></CardContent></Card>{sessions.data && sessions.data.length > 0 ? <div className="grid gap-6 lg:grid-cols-[18rem_minmax(0,1fr)]"><Card><CardHeader><CardTitle>{t('selectBrowser')}</CardTitle></CardHeader><CardContent className="flex flex-col gap-2">{sessions.data.map((session) => <Button key={session.id} variant={selected?.id === session.id ? 'secondary' : 'outline'} className="h-auto justify-start whitespace-normal text-left" onClick={() => setSelectedId(session.id)}><span><strong>{session.url}</strong><br /><span className="text-xs text-muted-foreground">{session.id.slice(0, 8)} · Browser Control</span></span></Button>)}</CardContent></Card><Card><CardHeader><div className="flex flex-wrap items-center gap-2"><div className="flex-1"><CardTitle>{t('browserLiveView')}</CardTitle><CardDescription>{selected?.url}</CardDescription></div>{selected?.pending_approval && <Button onClick={() => void approve()}>{t('approveAction')}</Button>}<Button variant="outline" onClick={() => void close()}>{t('closeBrowser')}</Button></div>{selected?.pending_approval && <Alert><AlertTitle>{t('approveAction')}</AlertTitle><AlertDescription>{selected.pending_approval.description}</AlertDescription></Alert>}</CardHeader><CardContent className="flex flex-col gap-4"><div ref={previewRef} className="relative overflow-hidden rounded-md border bg-muted"><canvas ref={previewCanvasRef} aria-label={t('browserLiveView')} className="block aspect-[8/5] w-full cursor-crosshair" height={800} width={1280} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); void sendInput({ type: 'click', x: (event.clientX - bounds.left) * 1280 / bounds.width, y: (event.clientY - bounds.top) * 800 / bounds.height }) }} />{!previewReady && <div className="absolute inset-0 grid place-items-center"><Spinner /></div>}</div><p className="text-xs text-muted-foreground">{t('browserClickHint')}</p><form className="flex gap-2" onSubmit={(event) => void typeInput(event)}><Input value={browserInput} onChange={(event) => setBrowserInput(event.target.value)} placeholder={t('browserInput')} /><Button type="submit">{t('sendBrowserInput')}</Button></form></CardContent></Card></div> : <Card><CardContent className="pt-6 text-sm text-muted-foreground">{t('noBrowserSessions')}</CardContent></Card>}</Page>
+  const typeInput = async (event: FormEvent) => { event.preventDefault(); if (!browserInput.trim()) return; await sendInput({ type: 'type', text: browserInput }); setBrowserInput('') }
+  const close = async () => { if (!selected) return; try { await api(`/api/browser/sessions/${selected.id}${targetQuery}`, token, { method: 'DELETE' }); setSelectedId(''); await refresh() } catch (cause) { setError(message(cause)) } }
+  const approve = async () => { if (!selected) return; try { await api(`/api/browser/sessions/${selected.id}/approve${targetQuery}`, token, { method: 'POST' }); await refresh() } catch (cause) { setError(message(cause)) } }
+  if (sessions.error || peers.error) return <Page title={t('browserTitle')} description={t('browserDescription')}><ErrorAlert error={message(sessions.error || peers.error)} /></Page>
+  return <Page title={t('browserTitle')} description={t('browserDescription')}><Card><CardHeader><CardTitle>{t('createBrowser')}</CardTitle><CardDescription>{t('browserCreateHint')}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-4" onSubmit={create}>{error && <ErrorAlert error={error} />}<Field><FieldLabel htmlFor="browser-target">{t('machine')}</FieldLabel><Select value={targetDevice} onValueChange={setTargetDevice}><SelectTrigger id="browser-target"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectLabel>{t('machine')}</SelectLabel>{targets.map((target) => <SelectItem key={target.machine_id || 'controller'} value={target.machine_id || '__controller__'}>{target.name}</SelectItem>)}</SelectGroup></SelectContent></Select></Field><Button className="w-fit" disabled={creating}>{creating && <Spinner data-icon="inline-start" />}{t('createBrowser')}</Button></form></CardContent></Card>{sessions.data && sessions.data.length > 0 ? <div className="grid gap-6 lg:grid-cols-[18rem_minmax(0,1fr)]"><Card><CardHeader><CardTitle>{t('selectBrowser')}</CardTitle></CardHeader><CardContent className="flex flex-col gap-2">{sessions.data.map((session) => <Button key={session.id} variant={selected?.id === session.id ? 'secondary' : 'outline'} className="h-auto justify-start whitespace-normal text-left" onClick={() => setSelectedId(session.id)}><span><strong>{session.url}</strong><br /><span className="text-xs text-muted-foreground">{session.target_name} · {formatTimestamp(language, session.created_at)}</span></span></Button>)}</CardContent></Card><Card><CardHeader><div className="flex flex-wrap items-center gap-2"><div className="flex-1"><CardTitle>{t('browserLiveView')}</CardTitle><CardDescription>{selected?.target_name} · {selected?.url}</CardDescription></div>{selected?.pending_approval && <Button onClick={() => void approve()}>{t('approveAction')}</Button>}<Button variant="outline" onClick={() => void close()}>{t('closeBrowser')}</Button></div>{selected?.pending_approval && <Alert><AlertTitle>{t('approveAction')}</AlertTitle><AlertDescription>{selected.pending_approval.description}</AlertDescription></Alert>}</CardHeader><CardContent className="flex flex-col gap-4"><div ref={previewRef} className="relative overflow-hidden rounded-md border bg-muted"><canvas ref={previewCanvasRef} aria-label={t('browserLiveView')} className="block aspect-[8/5] w-full cursor-crosshair" height={800} width={1280} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); void sendInput({ type: 'click', x: (event.clientX - bounds.left) * 1280 / bounds.width, y: (event.clientY - bounds.top) * 800 / bounds.height }) }} />{!previewReady && <div className="absolute inset-0 grid place-items-center"><Spinner /></div>}</div><p className="text-xs text-muted-foreground">{t('browserClickHint')}</p><form className="flex gap-2" onSubmit={(event) => void typeInput(event)}><Input value={browserInput} onChange={(event) => setBrowserInput(event.target.value)} placeholder={t('browserInput')} /><Button type="submit">{t('sendBrowserInput')}</Button></form></CardContent></Card></div> : <Card><CardContent className="pt-6 text-sm text-muted-foreground">{t('noBrowserSessions')}</CardContent></Card>}</Page>
 }
 
 function ConversationEntry({ item, now, peers, onResend, resendingMessageId }: { item: ConversationItem; now: number; peers: Peer[]; onResend?: (message: ChatMessage) => void; resendingMessageId?: number | null }) {
