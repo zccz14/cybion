@@ -9087,14 +9087,49 @@ async fn execute_executor_tool_call(
                 .map(tool_execution)
                 .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
         }
-        "browser_close_session"
-        | "browser_snapshot"
-        | "browser_screenshot"
-        | "browser_navigate"
-        | "browser_click"
-        | "browser_type"
-        | "browser_keypress"
-        | "browser_scroll" => browser::execute_tool(
+        "browser_close_session" => {
+            let id = call
+                .arguments
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            browser::close(&runtime.browser_sessions, id)
+                .await
+                .map(|_| tool_execution("closed browser session".to_owned()))
+                .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+        }
+        "browser_approve" => {
+            let id = call
+                .arguments
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            browser::approve(&runtime.browser_sessions, id)
+                .await
+                .map(|_| tool_execution("approved browser action".to_owned()))
+                .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+        }
+        "browser_user_input" => {
+            let id = call
+                .arguments
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let input = call
+                .arguments
+                .get("input")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
+            match input {
+                Some(input) => browser::user_input(&runtime.browser_sessions, id, input)
+                    .await
+                    .map(|_| tool_execution("accepted browser input".to_owned()))
+                    .unwrap_or_else(|cause| tool_execution(format!("error: {cause}"))),
+                None => tool_execution("error: invalid browser input".to_owned()),
+            }
+        }
+        "browser_snapshot" | "browser_screenshot" | "browser_navigate" | "browser_click"
+        | "browser_type" | "browser_keypress" | "browser_scroll" => browser::execute_tool(
             &runtime.browser_sessions,
             &call.name,
             call.arguments,
