@@ -442,18 +442,6 @@ struct ConversationMessage {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
-struct ConversationState {
-    messages: Vec<ConversationMessage>,
-    context: ContextState,
-    has_more: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    focus_message_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_before_id: Option<i64>,
-}
-
-#[derive(Serialize)]
 struct HistoryRecordPage {
     records: Vec<HistoryRecordSummary>,
     total: usize,
@@ -482,13 +470,6 @@ struct HistoryRecordDetail {
     kind: String,
     created_at: String,
     payload: Value,
-}
-
-#[derive(Serialize)]
-#[allow(dead_code)]
-struct ContextState {
-    history_messages: usize,
-    checkpoint: Option<ContextCheckpoint>,
 }
 
 #[derive(Clone, Serialize)]
@@ -649,14 +630,6 @@ impl fmt::Display for ContextOverflow {
 }
 
 impl std::error::Error for ContextOverflow {}
-
-#[derive(Default, Deserialize)]
-#[allow(dead_code)]
-struct ConversationQuery {
-    before: Option<i64>,
-    limit: Option<usize>,
-    focus: Option<i64>,
-}
 
 #[derive(Default, Deserialize)]
 struct ThreadHistoryQuery {
@@ -3107,89 +3080,6 @@ fn conversation_page_limit(value: Option<usize>) -> usize {
 }
 
 #[allow(dead_code)]
-fn load_conversation_page(path: &Path, query: ConversationQuery) -> Result<ConversationState> {
-    let connection = open_db(path)?;
-    let focused_message_id = query
-        .focus
-        .filter(|id| *id > 0)
-        .map(|focus| {
-            connection.query_row(
-                "SELECT COALESCE(
-                     (SELECT later.id
-                      FROM history_records source
-                      JOIN history_records later ON later.thread_id IS NULL
-                      WHERE source.id = ?1 AND source.thread_id IS NULL
-                        AND later.id >= source.id
-                        AND later.kind = 'response_output'
-                        AND json_extract(later.payload, '$.type') = 'message'
-                      ORDER BY later.id LIMIT 1),
-                     ?1
-                 )",
-                [focus],
-                |row| row.get::<_, i64>(0),
-            )
-        })
-        .transpose()?;
-    let before = query
-        .before
-        .filter(|id| *id > 0)
-        .or_else(|| focused_message_id.map(|id| id.saturating_add(1)))
-        .unwrap_or(i64::MAX);
-    let limit = conversation_page_limit(query.limit);
-    let records = connection
-        .prepare(
-            "SELECT id, payload, created_at FROM history_records
-             WHERE thread_id IS NULL AND id < ?1
-               AND ((kind = 'input' AND json_extract(payload, '$.role') IN ('user', 'assistant'))
-                 OR (kind = 'response_output' AND json_extract(payload, '$.type') = 'message'))
-             ORDER BY id DESC LIMIT ?2",
-        )?
-        .query_map(params![before, (limit + 1) as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                serde_json::from_str::<Value>(&row.get::<_, String>(1)?)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut messages = Vec::with_capacity(records.len());
-    for (id, payload, created_at) in records {
-        let Some(mut message) = conversation_message_from_protocol(id, &payload, created_at) else {
-            continue;
-        };
-        if message.role == "assistant" {
-            message.images = generated_images_for_message(&connection, id)?;
-        }
-        messages.push(message);
-    }
-    let has_more = messages.len() > limit;
-    messages.truncate(limit);
-    messages.reverse();
-    let next_before_id = has_more
-        .then(|| messages.first().map(|message| message.id))
-        .flatten();
-    let history_messages = connection.query_row(
-        "SELECT COUNT(*) FROM history_records
-         WHERE thread_id IS NULL
-           AND ((kind = 'input' AND json_extract(payload, '$.role') IN ('user', 'assistant'))
-             OR (kind = 'response_output' AND json_extract(payload, '$.type') = 'message'))",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    let checkpoint = load_latest_checkpoint(&connection, i64::MAX)?;
-    Ok(ConversationState {
-        context: ContextState {
-            history_messages: history_messages.try_into().unwrap_or(usize::MAX),
-            checkpoint,
-        },
-        messages,
-        has_more,
-        focus_message_id: focused_message_id,
-        next_before_id,
-    })
-}
-
 fn history_record_page_size(value: Option<usize>) -> usize {
     value
         .unwrap_or(HISTORY_RECORD_PAGE_DEFAULT)
@@ -6119,22 +6009,6 @@ async fn thread_history(
     Ok(Json(page))
 }
 
-#[allow(dead_code)]
-async fn conversation(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<ConversationQuery>,
-) -> ApiResult<ConversationState> {
-    identity(&state, &headers).await?;
-    let conversation = load_conversation_page(&state.db_path, query).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot read conversation",
-        )
-    })?;
-    Ok(Json(conversation))
-}
-
 async fn history_records(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6592,31 +6466,61 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
     }
 }
 
+fn persist_subthread_terminal_message(
+    transaction: &rusqlite::Transaction<'_>,
+    thread_id: &str,
+    result: &str,
+    created_at: &str,
+) -> Result<()> {
+    history_record_payload(
+        transaction,
+        Some(thread_id),
+        "response_output",
+        &json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": result }],
+        }),
+        created_at,
+    )?;
+    Ok(())
+}
+
 fn achieve_goal(path: &Path, thread_id: &str, result: &str, evidence: &str) -> Result<()> {
-    let changed = open_db(path)?.execute(
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let changed = transaction.execute(
         "UPDATE subthreads
          SET goal_state = 'achieved', result = ?1, goal_evidence = ?2,
              blocked_reason = NULL, updated_at = ?3
          WHERE id = ?4 AND status = 'running' AND goal_state = 'active'",
-        params![result, evidence, chrono::Utc::now().to_rfc3339(), thread_id],
+        params![result, evidence, now, thread_id],
     )?;
     if changed != 1 {
         return Err(anyhow!("the current Goal is not active"));
     }
+    persist_subthread_terminal_message(&transaction, thread_id, result, &now)?;
+    transaction.commit()?;
     Ok(())
 }
 
 fn block_goal(path: &Path, thread_id: &str, result: &str, reason: &str) -> Result<()> {
-    let changed = open_db(path)?.execute(
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let changed = transaction.execute(
         "UPDATE subthreads
          SET goal_state = 'blocked', result = ?1, blocked_reason = ?2,
              goal_evidence = NULL, updated_at = ?3
          WHERE id = ?4 AND status = 'running' AND goal_state = 'active'",
-        params![result, reason, chrono::Utc::now().to_rfc3339(), thread_id],
+        params![result, reason, now, thread_id],
     )?;
     if changed != 1 {
         return Err(anyhow!("the current Goal is not active"));
     }
+    persist_subthread_terminal_message(&transaction, thread_id, result, &now)?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -13309,6 +13213,21 @@ mod tests {
             .unwrap();
         assert!(outcome.contains(&format!("subthread_id: {}", goals[0].id)));
         assert!(outcome.contains("result:\nBackground verification passed."));
+        let own_history = load_thread_history_page(
+            &db,
+            ThreadHistoryQuery {
+                thread_id: Some(goals[0].id.clone()),
+                after_id: None,
+                before_id: None,
+                limit: None,
+            },
+        )
+        .unwrap();
+        assert!(own_history.records.iter().any(|record| {
+            record.kind == "response_output"
+                && output_text(std::slice::from_ref(&record.payload))
+                    == "Background verification passed."
+        }));
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 2);
         assert!(requests[1]["input"].as_array().unwrap().iter().any(|item| {
@@ -13450,6 +13369,21 @@ mod tests {
             goal.result.as_deref(),
             Some("Access is required before the Goal can continue.")
         );
+        let own_history = load_thread_history_page(
+            &db,
+            ThreadHistoryQuery {
+                thread_id: Some(id),
+                after_id: None,
+                before_id: None,
+                limit: None,
+            },
+        )
+        .unwrap();
+        assert!(own_history.records.iter().any(|record| {
+            record.kind == "response_output"
+                && output_text(std::slice::from_ref(&record.payload))
+                    == "Access is required before the Goal can continue."
+        }));
     }
 
     #[test]
@@ -13843,43 +13777,6 @@ mod tests {
             .unwrap();
         assert!(image.get("action").is_none());
         assert!(image.get("size").is_none());
-    }
-
-    #[test]
-    fn conversation_page_uses_a_cursor_without_loading_prior_messages() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("default.sqlite3");
-        bootstrap_database(&db).unwrap();
-        for index in 0..=CONVERSATION_PAGE_DEFAULT {
-            append_conversation(
-                &db,
-                &ChatMessage {
-                    role: "user".to_owned(),
-                    content: Value::String(format!("message {index}")),
-                    images: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                },
-                None,
-            )
-            .unwrap();
-        }
-        let newest = load_conversation_page(&db, ConversationQuery::default()).unwrap();
-        assert_eq!(newest.messages.len(), CONVERSATION_PAGE_DEFAULT);
-        assert!(newest.has_more);
-        assert_eq!(newest.messages.first().unwrap().content, "message 1");
-        let oldest = load_conversation_page(
-            &db,
-            ConversationQuery {
-                before: newest.next_before_id,
-                limit: None,
-                focus: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(oldest.messages.len(), 1);
-        assert_eq!(oldest.messages[0].content, "message 0");
-        assert!(!oldest.has_more);
     }
 
     #[test]
@@ -16155,18 +16052,9 @@ mod tests {
         assert_eq!(archived.len(), 1);
         assert_eq!(archived[0].history_entry_id, Some(record_ids[0]));
 
-        let page = load_conversation_page(
-            &db,
-            ConversationQuery {
-                before: None,
-                limit: None,
-                focus: Some(record_ids[0]),
-            },
-        )
-        .unwrap();
-        assert_eq!(page.focus_message_id, Some(record_ids[1]));
-        let message = page.messages.last().unwrap();
-        assert_eq!(message.content, "Here is the pixel.");
+        let page = load_thread_history_page(&db, ThreadHistoryQuery::default()).unwrap();
+        let message = page.records.last().unwrap();
+        assert_eq!(message.id, record_ids[1]);
         assert_eq!(message.images[0].id, archived[0].id);
     }
 
