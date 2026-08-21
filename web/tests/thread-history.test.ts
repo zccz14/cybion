@@ -13,3 +13,13 @@ test('thread history renders persisted Responses output_text content as assistan
 test('thread history preserves legacy string message content', () => {
   assert.match(source, /if \(typeof content === 'string'\) return content/)
 })
+
+test('thread history renders persisted subthread titles for subthread tools', () => {
+  assert.match(source, /subthreads: SubthreadReference\[\]/)
+  assert.match(source, /const subthreadById = new Map\(subthreads\.map/)
+  assert.match(source, /const subthreadByForkRecordId = new Map\(subthreads\.map/)
+  assert.match(source, /subthreadByForkRecordId\.get\(record\.id\)/)
+  assert.match(source, /function SubthreadToolEntry/)
+  assert.match(source, /item\.subthread\?\.title/)
+  assert.match(source, /to=\{`\/threads\/\$\{item\.subthread\.id\}`\}/)
+})

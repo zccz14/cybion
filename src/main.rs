@@ -648,9 +648,21 @@ struct ThreadHistoryRecord {
     images: Vec<GeneratedImage>,
 }
 
+#[derive(Clone, Serialize)]
+struct ThreadHistorySubthread {
+    id: String,
+    from_record_id: i64,
+    title: String,
+    task: String,
+    model: String,
+    goal_state: String,
+    status: String,
+}
+
 #[derive(Serialize)]
 struct ThreadHistoryPage {
     records: Vec<ThreadHistoryRecord>,
+    subthreads: Vec<ThreadHistorySubthread>,
     next_after_id: i64,
     next_before_id: Option<i64>,
     has_more: bool,
@@ -5936,6 +5948,7 @@ fn load_thread_history_page(path: &Path, query: ThreadHistoryQuery) -> Result<Th
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let subthreads = thread_history_subthreads(&connection, &records)?;
     let next_after_id = records
         .last()
         .map(|record| record.id)
@@ -5946,11 +5959,107 @@ fn load_thread_history_page(path: &Path, query: ThreadHistoryQuery) -> Result<Th
         .flatten();
     Ok(ThreadHistoryPage {
         records,
+        subthreads,
         next_after_id,
         next_before_id,
         has_more,
         active: false,
     })
+}
+
+fn thread_history_subthread_ids(records: &[ThreadHistoryRecord]) -> HashSet<String> {
+    records
+        .iter()
+        .filter_map(|record| {
+            if record.kind == "response_output"
+                && record
+                    .payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| matches!(name, "cancel_subthread" | "retry_subthread"))
+            {
+                return record
+                    .payload
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                    .and_then(|arguments| {
+                        arguments
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+            }
+            if record.kind == "tool_output" {
+                return record
+                    .payload
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .and_then(|output| serde_json::from_str::<Value>(output).ok())
+                    .and_then(|output| {
+                        output.get("id").and_then(Value::as_str).map(str::to_owned)
+                    });
+            }
+            None
+        })
+        .collect()
+}
+
+fn thread_history_subthreads(
+    connection: &Connection,
+    records: &[ThreadHistoryRecord],
+) -> Result<Vec<ThreadHistorySubthread>> {
+    let mut subthreads = HashMap::new();
+    for id in thread_history_subthread_ids(records) {
+        if let Some(subthread) = connection
+            .query_row(
+                "SELECT id, from_record_id, title, task, model, goal_state, status
+                 FROM subthreads WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(ThreadHistorySubthread {
+                        id: row.get(0)?,
+                        from_record_id: row.get(1)?,
+                        title: row.get(2)?,
+                        task: row.get(3)?,
+                        model: row.get(4)?,
+                        goal_state: row.get(5)?,
+                        status: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?
+        {
+            subthreads.insert(subthread.id.clone(), subthread);
+        }
+    }
+    for record in records.iter().filter(|record| {
+        record.kind == "response_output"
+            && record.payload.get("name").and_then(Value::as_str) == Some("fork_subthread")
+    }) {
+        if let Some(subthread) = connection
+            .query_row(
+                "SELECT id, from_record_id, title, task, model, goal_state, status
+                 FROM subthreads WHERE from_record_id = ?1",
+                [record.id],
+                |row| {
+                    Ok(ThreadHistorySubthread {
+                        id: row.get(0)?,
+                        from_record_id: row.get(1)?,
+                        title: row.get(2)?,
+                        task: row.get(3)?,
+                        model: row.get(4)?,
+                        goal_state: row.get(5)?,
+                        status: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?
+        {
+            subthreads.insert(subthread.id.clone(), subthread);
+        }
+    }
+    Ok(subthreads.into_values().collect())
 }
 
 fn generated_images_for_protocol_record(
@@ -10266,6 +10375,71 @@ mod tests {
         assert_eq!(page.records.len(), 1);
         assert_eq!(page.records[0].id, record_id);
         assert_eq!(page.records[0].payload["content"][0]["text"], "final reply");
+    }
+
+    #[test]
+    fn thread_history_page_includes_referenced_subthread_details() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        let cancel_record_id = history_record_payload(
+            &connection,
+            None,
+            "response_output",
+            &json!({
+                "type": "function_call",
+                "call_id": "cancel-child",
+                "name": "cancel_subthread",
+                "arguments": "{\"id\":\"child-a\"}",
+            }),
+            "2026-08-21T08:00:00Z",
+        )
+        .unwrap();
+        let fork_record_id = history_record_payload(
+            &connection,
+            None,
+            "response_output",
+            &json!({
+                "type": "function_call",
+                "call_id": "fork-child",
+                "name": "fork_subthread",
+                "arguments": "{\"title\":\"Audit dependencies\",\"task\":\"Audit locked dependencies\",\"completion_criteria\":\"Audit complete\"}",
+            }),
+            "2026-08-21T08:00:01Z",
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO subthreads (
+                   id, title, task, completion_criteria, goal_state, status, model, upstream_thread_id,
+                   from_record_id, created_at, updated_at
+                 ) VALUES
+                   ('child-a', 'Verify release', 'Check the production release', 'Release verified',
+                    'active', 'running', 'gpt-5.6-terra', 'upstream', ?1, 'now', 'now'),
+                   ('child-b', 'Audit dependencies', 'Audit locked dependencies', 'Audit complete',
+                    'achieved', 'completed', 'gpt-5.6-luna', 'upstream', ?2, 'now', 'now')",
+                params![cancel_record_id, fork_record_id],
+            )
+            .unwrap();
+
+        let page = load_thread_history_page(&db, ThreadHistoryQuery::default()).unwrap();
+        assert_eq!(page.subthreads.len(), 2);
+        let child_a = page
+            .subthreads
+            .iter()
+            .find(|subthread| subthread.id == "child-a")
+            .unwrap();
+        assert_eq!(child_a.title, "Verify release");
+        assert_eq!(child_a.task, "Check the production release");
+        assert_eq!(child_a.model, "gpt-5.6-terra");
+        assert_eq!(child_a.status, "running");
+        assert!(
+            page.subthreads
+                .iter()
+                .any(|subthread| subthread.id == "child-b"
+                    && subthread.title == "Audit dependencies")
+        );
     }
 
     #[test]

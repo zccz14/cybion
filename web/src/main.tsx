@@ -47,9 +47,10 @@ type VoicePreview = { state: 'armed' | 'listening' | 'transcribing' | 'deciding'
 type Skill = { name: string; description: string; directory: string }
 type Skills = { directory: string; skills: Skill[] }
 type AgentEvent = { type: 'status'; stage: 'queued' | 'running' | 'checkpointing' | 'retrying'; message: string } | { type: 'checkpoint'; id: number } | { type: 'tool_call'; call_id: string; name: string; arguments: Record<string, unknown>; started_at?: string } | { type: 'tool_result'; call_id: string; name: string; added_lines: number | null; deleted_lines: number | null; output?: string; output_bytes?: number; finished_at?: string } | { type: 'context'; input_tokens: number } | { type: 'complete'; message: ChatMessage } | { type: 'error'; error: string }
-type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; output?: string; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null }
+type SubthreadReference = { id: string; from_record_id: number; title: string; task: string; model: string; goal_state: GoalState; status: Subthread['status'] }
+type ConversationItem = { kind: 'message'; id: string; message: ChatMessage; queued: boolean } | { kind: 'tool'; call_id: string; name: string; arguments: Record<string, unknown>; complete: boolean; output?: string; started_at?: string; finished_at?: string; added_lines?: number | null; deleted_lines?: number | null; subthread?: SubthreadReference; subthreadAction?: 'fork' | 'cancel' | 'retry' }
 type ThreadHistoryRecord = { id: number; kind: 'input' | 'response_output' | 'tool_output' | 'checkpoint'; payload: Record<string, unknown>; created_at: string; images: GeneratedImage[] }
-type ThreadHistoryPage = { records: ThreadHistoryRecord[]; next_after_id: number; next_before_id?: number; has_more: boolean; active: boolean }
+type ThreadHistoryPage = { records: ThreadHistoryRecord[]; subthreads: SubthreadReference[]; next_after_id: number; next_before_id?: number; has_more: boolean; active: boolean }
 type AcceptedAgentTurn = { record_id: number }
 type HistoryRecordSummary = { id: number; thread_id: string | null; kind: string; created_at: string; payload_bytes: number; role: string | null; item_type: string | null; name: string | null; call_id: string | null; summary: string }
 type HistoryRecordPage = { records: HistoryRecordSummary[]; total: number; page: number; page_size: number }
@@ -408,9 +409,19 @@ function protocolMessageText(payload: Record<string, unknown>) {
   }).join('')
 }
 
-function threadHistoryItems(records: ThreadHistoryRecord[]): ConversationItem[] {
+function parsedToolOutput(output: string | undefined): Record<string, unknown> | undefined {
+  if (!output) return undefined
+  try {
+    const value: unknown = JSON.parse(output)
+    return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined
+  } catch { return undefined }
+}
+
+function threadHistoryItems(records: ThreadHistoryRecord[], subthreads: SubthreadReference[]): ConversationItem[] {
   const items: ConversationItem[] = []
   const tools = new Map<string, Extract<ConversationItem, { kind: 'tool' }>>()
+  const subthreadById = new Map(subthreads.map((thread) => [thread.id, thread]))
+  const subthreadByForkRecordId = new Map(subthreads.map((thread) => [thread.from_record_id, thread]))
   for (const record of records) {
     const type = typeof record.payload.type === 'string' ? record.payload.type : ''
     const role = typeof record.payload.role === 'string' ? record.payload.role : ''
@@ -428,7 +439,10 @@ function threadHistoryItems(records: ThreadHistoryRecord[]): ConversationItem[] 
       const argumentsText = typeof record.payload.arguments === 'string' ? record.payload.arguments : '{}'
       let arguments_: Record<string, unknown> = {}
       try { arguments_ = JSON.parse(argumentsText) as Record<string, unknown> } catch {}
-      const tool: Extract<ConversationItem, { kind: 'tool' }> = { kind: 'tool', call_id: callId, name: typeof record.payload.name === 'string' ? record.payload.name : type, arguments: arguments_, complete: false, started_at: record.created_at }
+      const name = typeof record.payload.name === 'string' ? record.payload.name : type
+      const subthreadId = typeof arguments_.id === 'string' ? arguments_.id : undefined
+      const subthreadAction = name === 'fork_subthread' ? 'fork' : name === 'cancel_subthread' ? 'cancel' : name === 'retry_subthread' ? 'retry' : undefined
+      const tool: Extract<ConversationItem, { kind: 'tool' }> = { kind: 'tool', call_id: callId, name, arguments: arguments_, complete: false, started_at: record.created_at, subthread: subthreadId ? subthreadById.get(subthreadId) : subthreadAction === 'fork' ? subthreadByForkRecordId.get(record.id) : undefined, subthreadAction }
       tools.set(callId, tool)
       items.push(tool)
       continue
@@ -436,7 +450,11 @@ function threadHistoryItems(records: ThreadHistoryRecord[]): ConversationItem[] 
     if (record.kind === 'tool_output' && type === 'function_call_output') {
       const callId = typeof record.payload.call_id === 'string' ? record.payload.call_id : ''
       const tool = tools.get(callId)
-      if (tool) Object.assign(tool, { complete: true, output: typeof record.payload.output === 'string' ? record.payload.output : '', finished_at: record.created_at })
+      if (tool) {
+        const output = typeof record.payload.output === 'string' ? record.payload.output : ''
+        const subthreadId = parsedToolOutput(output)?.id
+        Object.assign(tool, { complete: true, output, finished_at: record.created_at, subthread: typeof subthreadId === 'string' ? subthreadById.get(subthreadId) : tool.subthread })
+      }
     }
   }
   return items
@@ -446,6 +464,7 @@ function ThreadHistoryRecordsView({ threadId, focusRecordId, onResend, resending
   const token = useAuthToken()
   const { t } = useUi()
   const [records, setRecords] = useState<ThreadHistoryRecord[]>([])
+  const [subthreads, setSubthreads] = useState<SubthreadReference[]>([])
   const [cursor, setCursor] = useState(0)
   const [before, setBefore] = useState<number | undefined>()
   const [hasMore, setHasMore] = useState(false)
@@ -459,7 +478,7 @@ function ThreadHistoryRecordsView({ threadId, focusRecordId, onResend, resending
     try {
       const params = new URLSearchParams(); if (threadId) params.set('thread_id', threadId)
       const page = await request(params)
-      setRecords(page.records); setCursor(page.next_after_id); setHasMore(page.has_more); setActive(page.active)
+      setRecords(page.records); setSubthreads(page.subthreads); setCursor(page.next_after_id); setHasMore(page.has_more); setActive(page.active)
     } catch (cause) { setError(message(cause)) } finally { setLoading(false) }
   }
   useEffect(() => { void reset() }, [threadId, refreshKey])
@@ -472,6 +491,7 @@ function ThreadHistoryRecordsView({ threadId, focusRecordId, onResend, resending
         if (page.records.length) setRecords((current) => {
           const known = new Set(current.map((record) => record.id)); return [...current, ...page.records.filter((record) => !known.has(record.id))]
         })
+        if (page.subthreads.length) setSubthreads((current) => { const byId = new Map(current.map((thread) => [thread.id, thread])); page.subthreads.forEach((thread) => byId.set(thread.id, thread)); return [...byId.values()] })
         setCursor(page.next_after_id); setActive(page.active)
       } catch (cause) { setError(message(cause)) }
     })() }, 1000)
@@ -484,12 +504,12 @@ function ThreadHistoryRecordsView({ threadId, focusRecordId, onResend, resending
     try {
       const params = new URLSearchParams({ before_id: String(oldest) }); if (threadId) params.set('thread_id', threadId)
       const page = await request(params)
-      setRecords((current) => [...page.records, ...current]); setHasMore(page.has_more); setBefore(page.next_before_id)
+      setRecords((current) => [...page.records, ...current]); if (page.subthreads.length) setSubthreads((current) => { const byId = new Map(current.map((thread) => [thread.id, thread])); page.subthreads.forEach((thread) => byId.set(thread.id, thread)); return [...byId.values()] }); setHasMore(page.has_more); setBefore(page.next_before_id)
     } catch (cause) { setError(message(cause)) } finally { setLoadingEarlier(false) }
   }
   if (loading) return <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>
   if (error) return <div className="px-4 py-3"><ErrorAlert error={error} /></div>
-  return <ConversationFeed items={threadHistoryItems(records)} running={active} hasMore={hasMore || Boolean(before)} loadingEarlier={loadingEarlier} onLoadEarlier={() => void loadEarlier()} onResend={onResend} resendingMessageId={resendingMessageId} />
+  return <ConversationFeed items={threadHistoryItems(records, subthreads)} running={active} hasMore={hasMore || Boolean(before)} loadingEarlier={loadingEarlier} onLoadEarlier={() => void loadEarlier()} onResend={onResend} resendingMessageId={resendingMessageId} />
 }
 
 function ConversationFeed({ items, running = false, hasMore = false, loadingEarlier = false, onLoadEarlier, onResend, resendingMessageId }: { items: ConversationItem[]; running?: boolean; hasMore?: boolean; loadingEarlier?: boolean; onLoadEarlier?: () => void; onResend?: (message: ChatMessage) => void; resendingMessageId?: number | null }) {
@@ -953,6 +973,7 @@ function ConversationEntry({ item, now, peers, onResend, resendingMessageId }: {
     const finished = item.finished_at ? Date.parse(item.finished_at) : now
     const elapsed = Number.isNaN(started) ? null : Math.max(0, Math.floor((finished - started) / 1000))
     const duration = elapsed === null ? '' : ` · ${t('duration')}: ${elapsed} ${t('seconds')}`
+    if (item.subthreadAction) return <SubthreadToolEntry item={item} />
     return <div className="flex items-start gap-2 text-sm text-muted-foreground">
       {item.complete ? item.name === 'run_bash' ? <TerminalSquareIcon className="mt-0.5 size-5 shrink-0 text-foreground" /> : <CheckIcon className={`mt-0.5 text-foreground ${item.name === 'web_search' ? 'size-5 shrink-0' : 'size-4'}`} /> : <Spinner className="mt-0.5" />}
       <div className="min-w-0 break-all">
@@ -965,6 +986,15 @@ function ConversationEntry({ item, now, peers, onResend, resendingMessageId }: {
   const duration = item.message.duration_ms === undefined ? null : `${t('duration')}: ${(item.message.duration_ms / 1000).toLocaleString(language === 'zh' ? 'zh-CN' : 'en', { maximumFractionDigits: 1 })} ${t('seconds')}`
   const tokens = item.message.input_tokens === undefined || item.message.output_tokens === undefined ? null : `${(item.message.input_tokens + item.message.output_tokens).toLocaleString()} ${t('tokens')}`
   return <Message><MessageContent className="gap-1.5"><div className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.message.content ?? ''}</ReactMarkdown></div>{item.message.images?.map((image) => { const source = image.preview_content ?? (image.data ? `data:image/png;base64,${image.data}` : ''); return source ? <Card key={image.id} size="sm"><CardContent className="p-0"><img alt={t('generatedImage')} className="max-w-full" src={source} /></CardContent></Card> : null })}<MessageFooter className="gap-2 px-0 font-normal">{[timestamp, duration, tokens].filter(Boolean).map((detail) => <span key={detail}>{detail}</span>)}{item.message.content && <ManualAnnouncementButton content={item.message.content} />}</MessageFooter></MessageContent></Message>
+}
+
+function SubthreadToolEntry({ item }: { item: Extract<ConversationItem, { kind: 'tool' }> }) {
+  const { t } = useUi()
+  const title = item.subthread?.title ?? (typeof item.arguments.title === 'string' ? item.arguments.title : t('threads'))
+  const task = item.subthread?.task ?? (typeof item.arguments.task === 'string' ? item.arguments.task : '')
+  const action = item.subthreadAction === 'fork' ? t('calling') : item.subthreadAction === 'cancel' ? t('commandCancelled') : t('retrying')
+  const content = <><span className="text-xs text-muted-foreground">{action}</span><strong className="block truncate text-foreground">{title}</strong>{task && <span className="mt-0.5 line-clamp-2 block text-xs text-muted-foreground">{task}</span>}{item.subthread && <span className="mt-1 flex flex-wrap gap-1"><Badge variant="outline">{item.subthread.model}</Badge><Badge variant={item.subthread.goal_state === 'active' ? 'secondary' : 'outline'}>{item.subthread.status}</Badge></span>}</>
+  return <div className="flex items-start gap-2 text-sm text-muted-foreground"><GitForkIcon className="mt-0.5 size-4 shrink-0 text-foreground" /><div className="min-w-0">{item.subthread ? <Link className="block rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring" to={`/threads/${item.subthread.id}`}>{content}</Link> : <div>{content}</div>}</div></div>
 }
 
 function ResendMessageButton({ message, disabled, resending, onResend }: { message: ChatMessage; disabled: boolean; resending: boolean; onResend: (message: ChatMessage) => void }) {
