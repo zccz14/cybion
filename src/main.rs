@@ -2205,6 +2205,47 @@ An input developer item may be an intermediate checkpoint from an earlier compac
         .replace("__CHRONICLE_SOURCE_RECORDS__", &source_records)
 }
 
+async fn compact_main_context(
+    runtime: ResponsesRuntime<'_>,
+    events: &AgentEventSink<'_>,
+    cancellation: watch::Receiver<bool>,
+    idx_tail: i64,
+    checkpoint_write_gate: &Arc<RwLock<()>>,
+    checkpoint_write_pending: &Arc<AtomicBool>,
+) -> Result<ContextCheckpoint> {
+    checkpoint_write_pending.store(true, Ordering::Release);
+    let result = async {
+        let _checkpoint_writer = checkpoint_write_gate.write().await;
+        let snapshot = compile_main_context(runtime.db_path, idx_tail)?;
+        let checkpoint_audit = ResponseAuditContext::for_request(
+            "compaction",
+            None,
+            Some(snapshot.idx_head),
+            Some(snapshot.idx_tail),
+        );
+        let checkpoint_content = compact_checkpoint_context(
+            runtime.client,
+            runtime.config,
+            runtime.db_path,
+            runtime.upstream_thread_id,
+            checkpoint_audit,
+            &snapshot,
+            cancellation,
+        )
+        .await?;
+        persist_main_checkpoint(
+            runtime.db_path,
+            events,
+            snapshot.idx_tail,
+            &checkpoint_content,
+        )
+        .await
+    }
+    .await;
+    checkpoint_write_pending.store(false, Ordering::Release);
+    result
+}
+
 async fn compact_context_after_overflow(
     runtime: ResponsesRuntime<'_>,
     context: &CompiledContext,
@@ -2227,39 +2268,16 @@ async fn compact_context_after_overflow(
             checkpoint_write_pending,
             ..
         } => {
-            checkpoint_write_pending.store(true, Ordering::Release);
-            let result = async {
-                let _checkpoint_writer = checkpoint_write_gate.write().await;
-                let snapshot = compile_main_context(runtime.db_path, context.idx_tail)?;
-                let checkpoint_audit = ResponseAuditContext::for_request(
-                    "compaction",
-                    None,
-                    Some(snapshot.idx_head),
-                    Some(snapshot.idx_tail),
-                );
-                let checkpoint_content = compact_checkpoint_context(
-                    runtime.client,
-                    runtime.config,
-                    runtime.db_path,
-                    runtime.upstream_thread_id,
-                    checkpoint_audit,
-                    &snapshot,
-                    cancellation,
-                )
-                .await?;
-                reset_subthread_retry_after_success(runtime.db_path, events.thread_id)?;
-                persist_main_checkpoint(
-                    runtime.db_path,
-                    events,
-                    snapshot.idx_tail,
-                    &checkpoint_content,
-                )
-                .await?;
-                Ok(())
-            }
-            .await;
-            checkpoint_write_pending.store(false, Ordering::Release);
-            result
+            compact_main_context(
+                runtime,
+                events,
+                cancellation,
+                context.idx_tail,
+                checkpoint_write_gate,
+                checkpoint_write_pending,
+            )
+            .await?;
+            Ok(())
         }
         ContextCheckpointTarget::Subthread { id } => {
             let checkpoint_content = compact_checkpoint_context(
@@ -7328,21 +7346,56 @@ async fn run_agent_items(
             .await?;
             let terminal_tool =
                 scope == AgentScope::Subthread && matches!(name, "achieve_goal" | "block_goal");
-            let execution = execute_tool(
-                name,
-                args,
-                db_path,
-                client,
-                Some(output_record_ids[call_index]),
-                history_thread_id,
-                scope,
-                active_subthreads,
-                cancellation.clone(),
-                browser.as_mut(),
-                executor_tunnels,
-                skills,
-            )
-            .await;
+            let execution = if name == "compact_context" && scope == AgentScope::Main {
+                let ContextCheckpointTarget::Main {
+                    checkpoint_write_gate,
+                    checkpoint_write_pending,
+                    ..
+                } = &checkpoint_target
+                else {
+                    unreachable!("main scope has a main checkpoint target");
+                };
+                compact_main_context(
+                    ResponsesRuntime {
+                        client,
+                        config,
+                        db_path,
+                        upstream_thread_id,
+                    },
+                    &events,
+                    cancellation.clone(),
+                    output_record_ids[call_index],
+                    checkpoint_write_gate,
+                    checkpoint_write_pending,
+                )
+                .await
+                .map(|checkpoint| {
+                    tool_execution(
+                        json!({
+                            "checkpoint_id": checkpoint.id,
+                            "created_at": checkpoint.created_at,
+                        })
+                        .to_string(),
+                    )
+                })
+                .unwrap_or_else(|cause| tool_execution(format!("error: {cause}")))
+            } else {
+                execute_tool(
+                    name,
+                    args,
+                    db_path,
+                    client,
+                    Some(output_record_ids[call_index]),
+                    history_thread_id,
+                    scope,
+                    active_subthreads,
+                    cancellation.clone(),
+                    browser.as_mut(),
+                    executor_tunnels,
+                    skills,
+                )
+                .await
+            };
             send_agent_event(
                 db_path,
                 &events,
@@ -7484,6 +7537,7 @@ fn scoped_responses_request_body(
             json!({"type":"function","name":"fork_subthread","description":"Fork only independently executable, substantial work that benefits from parallel execution. Every fork is one persistent Goal and must state its durable objective and concrete done-when criteria. Use direct tools for brief, localized checks or edits. model_id is optional: use gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. Omit model_id to use the configured subthread default. The Goal inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Cybion resumes the main thread only after the Goal is achieved or blocked.","parameters":{"type":"object","additionalProperties":false,"required":["title","task","completion_criteria"],"properties":{"title":{"type":"string","description":"A short Goal name."},"task":{"type":"string","description":"The durable Goal objective."},"completion_criteria":{"type":"string","description":"Concrete, verifiable conditions that mean the Goal is done."},"model_id":{"type":"string","enum":["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"],"description":"Optional model override. Prefer sol for scientific/deep research, terra for engineering, and luna for operational or simple low-ambiguity work."}}}}),
             json!({"type":"function","name":"cancel_subthread","description":"Cancel an active internal Goal that is no longer relevant or must be rebuilt.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
             json!({"type":"function","name":"retry_subthread","description":"Immediately resume an active Goal that is waiting after an error. This overrides only its current delay; it does not clear the consecutive-error count. Use this when new main-thread evidence makes waiting unnecessary.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
+            json!({"type":"function","name":"compact_context","description":"Create and persist a durable main-thread context checkpoint from the current conversation. Call this when deliberate compaction is useful; it returns only after the checkpoint record is committed and provides its immutable checkpoint ID. This is not a summary-only action.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
         ]);
         body["tool_choice"] = Value::String("auto".to_owned());
     }
@@ -10732,6 +10786,215 @@ mod tests {
             })
             .collect::<Vec<_>>();
         CompiledContext::from_records(10, i64::try_from(contents.len() + 9).unwrap(), records)
+    }
+
+    #[tokio::test]
+    async fn manual_main_compaction_persists_an_immutable_checkpoint() {
+        async fn responses() -> String {
+            checkpoint_compaction_response(
+                "# Durable working context\n\nPersisted by compact_context.",
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/responses", post(responses)))
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let input = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Preserve this durable state.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        let (events, mut received) = mpsc::channel(1);
+        let checkpoint_write_gate = Arc::new(RwLock::new(()));
+        let checkpoint_write_pending = Arc::new(AtomicBool::new(false));
+        let (_cancel, cancellation) = watch::channel(false);
+        let checkpoint = compact_main_context(
+            ResponsesRuntime {
+                client: &reqwest::Client::new(),
+                config: &checkpoint_compaction_test_config(format!("http://{address}")),
+                db_path: &db,
+                upstream_thread_id: "11111111-1111-4111-8111-111111111111",
+            },
+            &AgentEventSink {
+                thread_id: None,
+                sender: &events,
+            },
+            cancellation,
+            input.id,
+            &checkpoint_write_gate,
+            &checkpoint_write_pending,
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert!(!checkpoint_write_pending.load(Ordering::Acquire));
+        assert_eq!(
+            load_checkpoint_by_id(&open_db(&db).unwrap(), checkpoint.id)
+                .unwrap()
+                .unwrap()
+                .summary,
+            "# Durable working context\n\nPersisted by compact_context."
+        );
+        let compiled = compile_main_context(&db, checkpoint.id).unwrap();
+        assert_eq!(compiled.idx_head, checkpoint.id);
+        assert_eq!(compiled.protocol_items[0]["content"], checkpoint.summary);
+        assert!(matches!(
+            received.recv().await,
+            Some(AgentEvent::Checkpoint { id }) if id == checkpoint.id
+        ));
+    }
+
+    #[tokio::test]
+    async fn compact_context_command_commits_a_checkpoint_before_continuing() {
+        async fn responses(State(requests): State<Arc<Mutex<usize>>>) -> String {
+            let request = {
+                let mut requests = requests.lock().await;
+                *requests += 1;
+                *requests
+            };
+            let item = match request {
+                1 => json!({
+                    "type": "function_call",
+                    "call_id": "call_compact",
+                    "name": "compact_context",
+                    "arguments": "{}",
+                }),
+                2 => json!({
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "# Durable working context\n\nCommitted by command."}],
+                }),
+                3 => json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Compaction completed."}],
+                }),
+                _ => panic!("unexpected Responses request"),
+            };
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}}),
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let (events, _received) = mpsc::channel(8);
+        let (_cancel, cancellation) = watch::channel(false);
+        let result = run_agent(
+            &reqwest::Client::new(),
+            &checkpoint_compaction_test_config(format!("http://{address}")),
+            vec![ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Compact now.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            &db,
+            &Arc::new(StdRwLock::new(SkillCatalog::default())),
+            AgentEventSink {
+                thread_id: None,
+                sender: &events,
+            },
+            cancellation,
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(result.persisted_message.content, "Compaction completed.");
+        assert_eq!(*requests.lock().await, 3);
+        let connection = open_db(&db).unwrap();
+        let checkpoint = load_latest_checkpoint(&connection, i64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            checkpoint.summary,
+            "# Durable working context\n\nCommitted by command."
+        );
+        let tool_output: Value = connection
+            .query_row(
+                "SELECT payload FROM history_records WHERE kind = 'tool_output' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| serde_json::from_str(&row.get::<_, String>(0)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery),
+            )
+            .unwrap();
+        let output: Value = serde_json::from_str(tool_output["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["checkpoint_id"], checkpoint.id);
+    }
+
+    #[test]
+    fn compact_context_is_a_main_thread_only_persistent_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let main = scoped_responses_request_body(
+            "gpt-5",
+            &[],
+            &SkillCatalog::default(),
+            AgentScope::Main,
+            &db,
+            None,
+        );
+        let subthread = scoped_responses_request_body(
+            "gpt-5",
+            &[],
+            &SkillCatalog::default(),
+            AgentScope::Subthread,
+            &db,
+            None,
+        );
+        let main_tool = main["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "compact_context")
+            .unwrap();
+        assert!(
+            main_tool["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("persist")
+                    && description.contains("checkpoint"))
+        );
+        assert!(
+            !subthread["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "compact_context")
+        );
     }
 
     #[tokio::test]
