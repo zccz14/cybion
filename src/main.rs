@@ -3352,20 +3352,23 @@ async fn terminal_subthread_handoff(
     id: &str,
 ) -> Result<TerminalSubthreadHandoff> {
     let connection = open_db(&state.db_path)?;
-    let upstream_thread_id: String = connection.query_row(
-        "SELECT upstream_thread_id FROM subthreads WHERE id=?1",
+    let (upstream_thread_id, model): (String, String) = connection.query_row(
+        "SELECT upstream_thread_id, model FROM subthreads WHERE id=?1",
         [id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let idx_tail = latest_protocol_record_id(&connection, Some(id))?;
     drop(connection);
     let context = compile_subthread_context(&state.db_path, id, idx_tail)?;
-    let config = load_config(&state.db_path)?;
+    let mut config = load_config(&state.db_path)?;
     if config.deployment_role != "controller" {
         return Err(anyhow!(
             "tool-executor machines cannot compact terminal subthread handoffs"
         ));
     }
+    // INVARIANT: terminal handoff compaction replays the child thread through the same
+    // upstream thread-id and model as its ordinary turns, preserving provider affinity and cache.
+    config.default_model = model;
     let (_sender, cancellation) = watch::channel(false);
     let output = compact_checkpoint_context_with_purpose(
         ResponsesRuntime {
@@ -14109,7 +14112,10 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(requests.lock().await[0]["model"], "gpt-5.6-sol");
+        let recorded_requests = requests.lock().await;
+        assert_eq!(recorded_requests[0]["model"], "gpt-5.6-sol");
+        assert_eq!(recorded_requests[1]["model"], "gpt-5.6-sol");
+        drop(recorded_requests);
         server.abort();
         let goals = load_subthreads(&db).unwrap();
         assert_eq!(goals.len(), 1);
