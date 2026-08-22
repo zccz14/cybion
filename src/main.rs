@@ -99,6 +99,9 @@ const TRANSFER_LENGTH_HEADER: &str = "x-cybion-transfer-length";
 const TRANSFER_SHA256_HEADER: &str = "x-cybion-transfer-sha256";
 const EXECUTOR_PAIRING_TTL: chrono::Duration = chrono::Duration::minutes(15);
 const EXECUTOR_PAIRING_HEADER: &str = "x-cybion-pairing-token";
+const EXECUTOR_TUNNEL_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const EXECUTOR_TUNNEL_BACKOFF_MAX: Duration = Duration::from_secs(60);
+const EXECUTOR_TUNNEL_STABLE_CONNECTION: Duration = Duration::from_secs(30);
 
 static FILE_READS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_FILE_READS)));
@@ -1159,7 +1162,7 @@ async fn run_executor_daemon(db_path: PathBuf) -> Result<()> {
         db_path: db_path.clone(),
         browser_sessions: browser::sessions(),
     };
-    schedule_auto_update(runtime.client.clone(), runtime.db_path.clone());
+    schedule_executor_auto_update(runtime.client.clone(), runtime.db_path.clone());
     schedule_executor_tunnel(runtime);
     update::record_startup(&db_path)?;
     std::future::pending::<()>().await;
@@ -1174,6 +1177,30 @@ fn schedule_auto_update(client: reqwest::Client, db_path: PathBuf) {
             tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
         }
     });
+}
+
+fn schedule_executor_auto_update(client: reqwest::Client, db_path: PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            match update::download_latest(&client, &db_path).await {
+                Ok(status) if executor_update_should_activate(&status) => {
+                    info!(version = ?status.latest_version, "executor activating verified update");
+                    if let Err(cause) = update::restart_after(&db_path, Duration::from_secs(2)) {
+                        tracing::warn!(%cause, "executor cannot activate verified update");
+                    } else {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(cause) => tracing::warn!(%cause, "executor automatic update check failed"),
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+        }
+    });
+}
+
+fn executor_update_should_activate(status: &update::UpdateStatus) -> bool {
+    status.state == "ready"
 }
 
 fn schedule_subthreads(state: AppState) {
@@ -9736,13 +9763,35 @@ async fn wait_for_executor_result(
 
 fn schedule_executor_tunnel(runtime: ExecutorRuntime) {
     tokio::spawn(async move {
+        let mut failures = 0_u32;
         loop {
+            let connected_at = Instant::now();
             if let Err(cause) = run_executor_tunnel(&runtime).await {
                 tracing::warn!(%cause, "executor tunnel disconnected");
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            if connected_at.elapsed() >= EXECUTOR_TUNNEL_STABLE_CONNECTION {
+                failures = 0;
+            }
+            failures = failures.saturating_add(1);
+            let delay = executor_tunnel_retry_delay(failures, Uuid::new_v4().as_u128() as u64);
+            tracing::warn!(
+                attempt = failures,
+                delay_ms = delay.as_millis(),
+                "executor tunnel reconnect scheduled"
+            );
+            tokio::time::sleep(delay).await;
         }
     });
+}
+
+fn executor_tunnel_retry_delay(attempt: u32, entropy: u64) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(6);
+    let base = EXECUTOR_TUNNEL_BACKOFF_BASE
+        .checked_mul(1_u32 << exponent)
+        .unwrap_or(EXECUTOR_TUNNEL_BACKOFF_MAX)
+        .min(EXECUTOR_TUNNEL_BACKOFF_MAX);
+    let jitter_limit = base.as_millis().div_ceil(4).max(1) as u64;
+    base.saturating_add(Duration::from_millis(entropy % jitter_limit))
 }
 
 async fn run_executor_tunnel(runtime: &ExecutorRuntime) -> Result<()> {
@@ -17337,6 +17386,37 @@ mod tests {
         .await;
         assert!(!result.output.starts_with("error:"));
         assert_eq!(std::fs::read(destination).unwrap(), b"durable file");
+    }
+
+    #[test]
+    fn executor_tunnel_backoff_is_bounded_and_jittered() {
+        assert_eq!(
+            executor_tunnel_retry_delay(1, 0),
+            EXECUTOR_TUNNEL_BACKOFF_BASE
+        );
+        assert!(executor_tunnel_retry_delay(2, 1) > EXECUTOR_TUNNEL_BACKOFF_BASE);
+        assert!(
+            executor_tunnel_retry_delay(100, u64::MAX)
+                <= EXECUTOR_TUNNEL_BACKOFF_MAX.saturating_add(Duration::from_secs(15))
+        );
+    }
+
+    #[test]
+    fn executor_only_activates_verified_ready_updates() {
+        let ready = update::UpdateStatus {
+            current_version: "0.2.43".to_owned(),
+            latest_version: Some("v0.2.44".to_owned()),
+            state: "ready".to_owned(),
+            detail: "verified".to_owned(),
+        };
+        let current = update::UpdateStatus {
+            current_version: "0.2.43".to_owned(),
+            latest_version: Some("v0.2.44".to_owned()),
+            state: "current".to_owned(),
+            detail: "current".to_owned(),
+        };
+        assert!(executor_update_should_activate(&ready));
+        assert!(!executor_update_should_activate(&current));
     }
 
     #[test]
