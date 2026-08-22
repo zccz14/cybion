@@ -101,3 +101,7 @@ raw_records[idx_mid 之后..]
 6. 非上下文溢出错误不会被当作递归压缩处理。
 7. 压缩 developer 消息先要求概念术语和资源位置，再要求当前状态和目标。
 8. chronicle timeline 按 record 顺序保留因果相关历程，且不从顺序推断精确时间。
+
+## Terminal subthread handoff
+
+Terminal subthread compaction uses the normal recursive controller-managed compaction path with a terminal-handoff output contract. The final checkpoint belongs to the child thread and never changes the main thread’s checkpoint head. The main thread receives a separate paired `subthread_handoff` evidence record, preserving function-call replay pairing and allowing normal main compaction to absorb the handoff later.
