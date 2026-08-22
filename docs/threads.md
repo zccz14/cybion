@@ -89,3 +89,11 @@ sequenceDiagram
 4. 子线程完成事件逐个处理，不以其他子线程的状态为条件。
 5. 用户新消息不会隐式改变任何子线程的生命周期；改变必须由主线程显式调用工具。
 6. 主线程推理被更新请求取消时，已经持久化的主线程协议记录和子线程结果记录不得回滚或删除。
+
+## Terminal handoff checkpoints
+
+When a Goal reaches `achieved`, `blocked`, or `cancelled`, Cybion first persists the child thread's terminal assistant result. The controller then compacts the child’s applicable compiled context using the same recursive checkpointing algorithm used for overflow recovery. This can reduce arbitrarily long child histories, including oversized records, without making a child summary a main-thread checkpoint.
+
+A successful terminal compaction writes its checkpoint only to the child thread. Cybion then appends a distinct, paired internal `subthread_handoff` function-call/output evidence record to the main history. Its output contains the terminal state, exact child checkpoint Markdown, checkpoint ID, source range, compaction-output provenance, and history retrieval route. The original `fork_subthread` call keeps its own one-to-one output pair.
+
+If compaction fails, Cybion still appends the terminal handoff evidence with `handoff_checkpoint_status: unavailable` and deterministic child-thread retrieval metadata. The parent can continue; raw child history remains immutable and queryable. Only a later main-thread compaction may fold this join evidence into a true main checkpoint.
