@@ -2253,6 +2253,21 @@ async fn compact_oversized_record(
     }
 }
 
+fn checkpoint_compaction_request_body(model: &str, items: Vec<Value>) -> Value {
+    let mut body = json!({
+        "model": model,
+        "input": items,
+        "store": false,
+        "stream": true,
+        "tool_choice": "none",
+        "max_output_tokens": CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS,
+    });
+    // INVARIANT: Compaction replays protocol history directly, so it must use the same final
+    // request sanitizer as normal agent turns after appending its terminal instruction.
+    sanitize_responses_input(&mut body);
+    body
+}
+
 async fn compact_checkpoint_once(
     runtime: &CompactionRuntime<'_>,
     audit: ResponseAuditContext,
@@ -2265,14 +2280,7 @@ async fn compact_checkpoint_once(
     items.push(
         json!({"role":"developer","content":checkpoint_developer_prompt(&input.source_records, input.terminal_handoff)}),
     );
-    let body = json!({
-        "model": runtime.responses.config.default_model,
-        "input": items,
-        "store": false,
-        "stream": true,
-        "tool_choice": "none",
-        "max_output_tokens": CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS,
-    });
+    let body = checkpoint_compaction_request_body(&runtime.responses.config.default_model, items);
     let request = runtime
         .responses
         .client
@@ -11209,6 +11217,127 @@ mod tests {
         CompiledContext::from_records(10, i64::try_from(contents.len() + 9).unwrap(), records)
     }
 
+    #[test]
+    fn checkpoint_compaction_request_sanitizes_orphaned_protocol_calls() {
+        let request = checkpoint_compaction_request_body(
+            "test-model",
+            vec![
+                json!({"type":"function_call","call_id":"orphan-call","name":"run_bash","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":"orphan-output","output":"ignored"}),
+                json!({"type":"function_call","call_id":"paired","name":"read_file","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":"paired","output":"kept"}),
+                json!({"role":"developer","content":"# Checkpoint compaction"}),
+            ],
+        );
+        let input = request["input"].as_array().unwrap();
+        assert_eq!(request["tool_choice"], "none");
+        assert!(input.iter().all(|item| item["call_id"] != "orphan-call"));
+        assert!(input.iter().all(|item| item["call_id"] != "orphan-output"));
+        let paired = input
+            .iter()
+            .filter(|item| item["call_id"] == "paired")
+            .collect::<Vec<_>>();
+        assert_eq!(paired.len(), 2);
+        assert_eq!(paired[0]["type"], "function_call");
+        assert_eq!(paired[1]["type"], "function_call_output");
+    }
+
+    fn orphan_function_call_compaction_test_context() -> CompiledContext {
+        CompiledContext::from_records(
+            10,
+            13,
+            vec![
+                (
+                    10,
+                    "2026-08-20T00:00:00Z".to_owned(),
+                    "input".to_owned(),
+                    json!({"role":"user","content":"before"}),
+                ),
+                (
+                    11,
+                    "2026-08-20T00:00:01Z".to_owned(),
+                    "response_output".to_owned(),
+                    json!({"type":"function_call","call_id":"orphan-call","name":"run_bash","arguments":"{}"}),
+                ),
+                (
+                    12,
+                    "2026-08-20T00:00:02Z".to_owned(),
+                    "response_output".to_owned(),
+                    json!({"type":"function_call","call_id":"paired","name":"read_file","arguments":"{}"}),
+                ),
+                (
+                    13,
+                    "2026-08-20T00:00:03Z".to_owned(),
+                    "tool_output".to_owned(),
+                    json!({"type":"function_call_output","call_id":"paired","output":"kept"}),
+                ),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn terminal_handoff_compaction_sanitizes_replayed_orphan_calls() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            requests.lock().await.push(request);
+            checkpoint_compaction_response("terminal handoff").into_response()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let (_sender, cancellation) = watch::channel(false);
+        compact_checkpoint_context_with_purpose(
+            ResponsesRuntime {
+                client: &reqwest::Client::new(),
+                config: &checkpoint_compaction_test_config(format!("http://{address}")),
+                db_path: &db,
+                upstream_thread_id: "11111111-1111-4111-8111-111111111111",
+            },
+            ResponseAuditContext::for_request(
+                "compaction",
+                Some("child".to_owned()),
+                Some(10),
+                Some(13),
+            ),
+            &orphan_function_call_compaction_test_context(),
+            cancellation,
+            true,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        let request = requests.lock().await.pop().unwrap();
+        assert!(
+            request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["call_id"] != "orphan-call")
+        );
+        assert!(
+            request["input"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("terminal subthread handoff")
+        );
+    }
+
     #[tokio::test]
     async fn manual_main_compaction_persists_an_immutable_checkpoint() {
         async fn responses() -> String {
@@ -11476,6 +11605,13 @@ mod tests {
         assert!(result.text.contains("empty checkpoint"));
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["call_id"] != "orphan-call")
+        }));
         assert_eq!(requests[1]["input"].as_array().unwrap().len(), 2);
         assert!(
             requests[1]["input"].as_array().unwrap().last().unwrap()["content"]
