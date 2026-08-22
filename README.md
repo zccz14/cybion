@@ -165,10 +165,7 @@ history_records (
 `function_call_output` 的完整内容保存在 `history_records`；为控制单次请求的长度，只有编译到
 模型输入时才会按工具输出上限截短。运行状态通过实时 SSE 传递，不写入 `history_records`。时间锚点由不可变记录的 `id` 与 `created_at` 在编译时派生，不写回历史。详见[Time Awareness](docs/time_awareness.md)。
 
-发生上下文窗口溢出时，Cybion 会发起独立的 checkpoint compacting 请求，而不是把压缩提示词
-混入常规 Agent 请求：其 `input[0]` 是 `# Checkpoint compaction` 的 `developer` 提示词，
-后面是待压缩的已编译协议项。返回的 Markdown 随即以 `developer` 角色写为新的 checkpoint，
-成为之后常规 Context Layout 中的当前状态起点。
+发生上下文窗口溢出时，Controller 发起无工具的 checkpoint compacting 请求：它保持稳定 developer 前缀和已编译历史不变，只在历史末尾追加 terminal `developer` compaction instruction。模型 output 先作为不可变 `response_output` 保存，Controller 验证后才把该 exact text promotion 为新的 checkpoint；中间 compaction nodes 永不进入普通 checkpoint 链。
 
 ```mermaid
 flowchart LR

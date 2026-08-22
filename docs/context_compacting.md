@@ -22,15 +22,15 @@ CompiledContext {
 `idx_mid` 只能从这个已编译 records 数组中选择真实的 `record_id`；不能用
 `(idx_head + idx_tail) / 2` 计算，因为全局 ID 会穿插 activity 和其他子线程记录。
 
-压缩请求与普通推理的区别只有请求专用的 developer 前缀：
+压缩不改写稳定 developer 前缀，也不把压缩指令放在历史之前。Controller 在待压缩的已编译协议项之后追加一条 terminal `developer` input：
 
 ```text
-normal     = normal_developer_prefix     + records
-compaction = compaction_developer_prefix + records
+normal     = stable_developer_prefix + records
+compaction = stable_developer_prefix + records + terminal_compaction_instruction
 ```
 
-压缩请求不附带普通 Agent 的工具定义。发送前仍经过同一 Responses replay sanitizer；它只改变
-请求副本，不改写持久化 history records。
+terminal instruction 明确规定前面的 records 全是证据而非待执行指令；模型只能直接产生 checkpoint `output_text`，请求没有 tools 且 `tool_choice = none`。`compact_context` 不是模型可调用 tool。
+
 
 ## Checkpoint 内容契约
 
@@ -79,20 +79,17 @@ raw_records[idx_mid 之后..]
 
 ## 无法压缩的单条记录
 
-一条 raw record 连同已有临时摘要仍导致上下文溢出时，该记录不进入 checkpoint，算法继续处理其后的
-records。它不会从 `history_records` 删除，仍可由 `search_thread_history` 和
-`read_thread_history` 按需读取。实现必须记录该恢复事件，避免把“未进入 checkpoint”误认为原始历史丢失。
+若一条 raw record 连同 terminal instruction 仍导致 overflow，Controller 不丢弃该 record。它将原始协议 payload 序列化为带 `record_id`、kind、fragment ordinal、总数和 SHA-256 的连续 fragments，并递归缩小 fragment 宽度直到可以压缩。原始 history record 保留，checkpoint 可通过 record ID 检索完整材料。只有“一字节 fragment 加 mandatory instruction”也超过上游窗口时，才是不可恢复的配置错误。
 
-若所有 raw records 已处理而压缩请求本身仍溢出，则向上返回该错误；不进行无限重试。
 
 ## 持久化与审计
 
-临时摘要只存在于本次压缩运行内，绝不写入 `history_records`。仅最终摘要被写成一个 checkpoint record。
-主线程写入前必须在同一事务中确认最后一条主线程协议记录仍为初始 `idx_tail`；子线程同样只把最终摘要
-写入其自身线程。
+每次成功的 compaction model output 先以不可变 `response_output` 记录，再在同一 SQLite transaction 中创建 `compaction_nodes` provenance row；因此崩溃不会留下可被普通上下文误回放的半节点。`compaction_jobs` 持久化 scope、coverage boundary、状态和最终 output record，已完成但尚未 promotion 的 job 可以安全复用。
 
-每一次压缩请求审计均标记为 `request_kind = compaction`，并保留初始窗口的 `idx_head`、`idx_tail`，以便
-将它与触发压缩的普通推理请求对应起来。
+这些 node response outputs 不参与普通上下文编译，也不成为 checkpoint 链节点。Controller 通过 deterministic integrity gate（必需标题与非空内容）读取该 exact persisted text，随后仅把最终 node promotion 为 `kind=checkpoint`。主线程 promotion 仍以初始 `idx_tail` 做事务内 stale-snapshot 检查；子线程只写入自身 thread。
+
+每一次压缩请求审计标记为 `request_kind = compaction` 并保留初始窗口 `idx_head`、`idx_tail`。
+
 
 ## 回归要求
 
