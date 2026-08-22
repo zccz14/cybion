@@ -749,7 +749,6 @@ struct PendingSubthreadJoin {
 }
 
 struct TerminalSubthreadHandoff {
-    checkpoint_id: i64,
     markdown: String,
     idx_head: i64,
     idx_tail: i64,
@@ -2381,16 +2380,28 @@ fn create_or_resume_compaction_job(
     } else {
         "context"
     };
-    if let Some(id) = connection
-        .query_row(
-            "SELECT id FROM compaction_jobs
-         WHERE thread_id IS ?1 AND idx_head IS ?2 AND idx_tail IS ?3 AND purpose=?4
-           AND status IN ('running', 'completed') ORDER BY id DESC LIMIT 1",
-            params![audit.thread_id, audit.idx_head, audit.idx_tail, purpose],
-            |row| row.get(0),
-        )
-        .optional()?
-    {
+    let existing = if terminal_handoff {
+        connection
+            .query_row(
+                "SELECT id FROM compaction_jobs
+                 WHERE thread_id IS ?1 AND purpose='terminal_handoff'
+                 ORDER BY id DESC LIMIT 1",
+                [&audit.thread_id],
+                |row| row.get(0),
+            )
+            .optional()?
+    } else {
+        connection
+            .query_row(
+                "SELECT id FROM compaction_jobs
+                 WHERE thread_id IS ?1 AND idx_head IS ?2 AND idx_tail IS ?3 AND purpose=?4
+                   AND status IN ('running', 'completed') ORDER BY id DESC LIMIT 1",
+                params![audit.thread_id, audit.idx_head, audit.idx_tail, purpose],
+                |row| row.get(0),
+            )
+            .optional()?
+    };
+    if let Some(id) = existing {
         return Ok(id);
     }
     connection.execute(
@@ -3177,6 +3188,7 @@ fn terminal_subthread_join_call_id(
 fn terminal_subthread_handoff_output(
     join: &PendingSubthreadJoin,
     handoff: Option<&TerminalSubthreadHandoff>,
+    checkpoint_id: Option<i64>,
 ) -> Result<String> {
     Ok(serde_json::to_string(&json!({
         "type": "subthread_handoff",
@@ -3184,17 +3196,17 @@ fn terminal_subthread_handoff_output(
         "terminal_state": join.goal_state,
         "terminal_result": join.result,
         "terminal_detail": terminal_subthread_state_detail(join),
-        "handoff_checkpoint": handoff.map(|value| json!({
-            "checkpoint_id": value.checkpoint_id,
+        "handoff_checkpoint": handoff.zip(checkpoint_id).map(|(value, checkpoint_id)| json!({
+            "checkpoint_id": checkpoint_id,
             "markdown": value.markdown,
             "source_range": [value.idx_head, value.idx_tail],
             "compaction_output_record_id": value.output_record_id,
         })),
-        "handoff_checkpoint_status": if handoff.is_some() { "available" } else { "unavailable" },
+        "handoff_checkpoint_status": if checkpoint_id.is_some() { "available" } else { "unavailable" },
         "retrieval": {
             "thread_id": join.id,
             "fork_record_id": join.from_record_id,
-            "history_range": [join.from_record_id, handoff.map(|value| value.idx_tail).unwrap_or(join.from_record_id)],
+            "history_range": [join.from_record_id, handoff.zip(checkpoint_id).map(|(value, _)| value.idx_tail).unwrap_or(join.from_record_id)],
             "tools": ["get_checkpoint", "search_thread_history", "read_thread_history"]
         }
     }))?)
@@ -3214,7 +3226,8 @@ fn finalize_terminal_subthread_join(
              WHERE id = ?1
                AND goal_state IN ('achieved', 'blocked', 'cancelled')
                AND status != 'completed'
-               AND outcome_record_id IS NULL",
+               AND outcome_record_id IS NULL
+               AND terminal_join_started_at IS NOT NULL",
             [id],
             |row| {
                 Ok(PendingSubthreadJoin {
@@ -3234,10 +3247,24 @@ fn finalize_terminal_subthread_join(
     if pending.result.trim().is_empty() {
         return Err(anyhow!("terminal subthread result is missing"));
     }
+    let checkpoint_id = match handoff {
+        Some(handoff) if latest_protocol_record_id(&transaction, Some(id))? == handoff.idx_tail => {
+            let summary =
+                checkpoint_text_from_output_record(&transaction, handoff.output_record_id)?;
+            Some(history_record_payload(
+                &transaction,
+                Some(id),
+                "checkpoint",
+                &compacted_checkpoint_item(&summary),
+                &chrono::Utc::now().to_rfc3339(),
+            )?)
+        }
+        _ => None,
+    };
     let originating_fork_call_id =
         terminal_subthread_join_call_id(&transaction, pending.from_record_id)?;
     let now = chrono::Utc::now().to_rfc3339();
-    let output = terminal_subthread_handoff_output(&pending, handoff)?;
+    let output = terminal_subthread_handoff_output(&pending, handoff, checkpoint_id)?;
     // The fork call already has its own tool output. Create a distinct internal call/output pair
     // so replay sanitation retains the handoff evidence without corrupting the fork pairing.
     let handoff_call_id = format!("subthread-handoff-{}", pending.id);
@@ -3265,17 +3292,13 @@ fn finalize_terminal_subthread_join(
     let changed = transaction.execute(
         "UPDATE subthreads
          SET status = 'completed', outcome_record_id = ?1, handoff_checkpoint_id = ?2,
-             next_retry_at = NULL, retry_attempt = 0, updated_at = ?3
+             terminal_join_started_at = NULL, next_retry_at = NULL, retry_attempt = 0, updated_at = ?3
          WHERE id = ?4
            AND goal_state IN ('achieved', 'blocked', 'cancelled')
            AND status != 'completed'
-           AND outcome_record_id IS NULL",
-        params![
-            outcome_record_id,
-            handoff.map(|value| value.checkpoint_id),
-            now,
-            id
-        ],
+           AND outcome_record_id IS NULL
+           AND terminal_join_started_at IS NOT NULL",
+        params![outcome_record_id, checkpoint_id, now, id],
     )?;
     if changed != 1 {
         return Err(anyhow!("terminal subthread join changed unexpectedly"));
@@ -3284,12 +3307,26 @@ fn finalize_terminal_subthread_join(
     Ok(Some(outcome_record_id))
 }
 
+fn claim_terminal_subthread_join(path: &Path, id: &str) -> Result<bool> {
+    let changed = open_db(path)?.execute(
+        "UPDATE subthreads SET terminal_join_started_at = ?1, updated_at = ?1
+         WHERE id = ?2
+           AND goal_state IN ('achieved', 'blocked', 'cancelled')
+           AND status != 'completed'
+           AND outcome_record_id IS NULL
+           AND terminal_join_started_at IS NULL",
+        params![chrono::Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(changed == 1)
+}
+
 fn pending_terminal_subthread_ids(path: &Path) -> Result<Vec<String>> {
     open_db(path)?
         .prepare(
             "SELECT id FROM subthreads
              WHERE goal_state IN ('achieved', 'blocked', 'cancelled')
                AND status != 'completed' AND outcome_record_id IS NULL
+               AND terminal_join_started_at IS NULL
              ORDER BY updated_at, id",
         )?
         .query_map([], |row| row.get(0))?
@@ -3348,14 +3385,7 @@ async fn terminal_subthread_handoff(
         true,
     )
     .await?;
-    let checkpoint_id = persist_subthread_checkpoint_at(
-        &state.db_path,
-        id,
-        context.idx_tail,
-        output.output_record_id,
-    )?;
     Ok(TerminalSubthreadHandoff {
-        checkpoint_id,
         markdown: checkpoint_text_from_output_record(
             &open_db(&state.db_path)?,
             output.output_record_id,
@@ -3367,10 +3397,7 @@ async fn terminal_subthread_handoff(
 }
 
 async fn start_terminal_subthread_join(state: &AppState, id: &str) -> Result<bool> {
-    if !pending_terminal_subthread_ids(&state.db_path)?
-        .iter()
-        .any(|pending| pending == id)
-    {
+    if !claim_terminal_subthread_join(&state.db_path, id)? {
         return Ok(false);
     }
     let handoff = match terminal_subthread_handoff(state, id).await {
@@ -3737,6 +3764,21 @@ fn migrate_subthread_scheduler_schema(connection: &Connection) -> Result<()> {
         connection
             .execute_batch("ALTER TABLE subthreads ADD COLUMN handoff_checkpoint_id INTEGER;")?;
     }
+    if !columns
+        .iter()
+        .any(|column| column == "terminal_join_started_at")
+    {
+        connection
+            .execute_batch("ALTER TABLE subthreads ADD COLUMN terminal_join_started_at TEXT;")?;
+    }
+    // RECOVERY: a process cannot retain an in-flight terminal handoff across restart. The
+    // completed compaction job is durable and will be reused when reconciliation claims it again.
+    connection.execute(
+        "UPDATE subthreads SET terminal_join_started_at = NULL
+         WHERE terminal_join_started_at IS NOT NULL
+           AND status != 'completed' AND outcome_record_id IS NULL",
+        [],
+    )?;
     if !columns.iter().any(|column| column == "upstream_thread_id") {
         connection.execute_batch("ALTER TABLE subthreads ADD COLUMN upstream_thread_id TEXT;")?;
         let mut statement =
@@ -3766,6 +3808,21 @@ fn migrate_compaction_schema(connection: &Connection) -> Result<()> {
             "ALTER TABLE compaction_jobs ADD COLUMN purpose TEXT NOT NULL DEFAULT 'context';",
         )?;
     }
+    // Keep all historical nodes for provenance, but only the newest terminal-handoff job is
+    // eligible for resumption. Older duplicate rows were created by the pre-claim scheduler bug.
+    connection.execute_batch(
+        "UPDATE compaction_jobs AS stale
+         SET purpose = 'terminal_handoff_superseded'
+         WHERE stale.purpose = 'terminal_handoff'
+           AND EXISTS (
+             SELECT 1 FROM compaction_jobs AS newer
+             WHERE newer.purpose = 'terminal_handoff'
+               AND newer.thread_id IS stale.thread_id
+               AND newer.id > stale.id
+           );
+         CREATE UNIQUE INDEX IF NOT EXISTS compaction_terminal_handoff_thread
+           ON compaction_jobs(thread_id) WHERE purpose = 'terminal_handoff';",
+    )?;
     Ok(())
 }
 
@@ -3977,6 +4034,7 @@ fn migrate_history_records_without_activity(connection: &Connection) -> Result<(
            result TEXT,
            outcome_record_id INTEGER REFERENCES history_records(id),
            handoff_checkpoint_id INTEGER REFERENCES history_records(id),
+           terminal_join_started_at TEXT,
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL,
            retry_attempt INTEGER NOT NULL DEFAULT 0,
@@ -4110,6 +4168,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            result TEXT,
            outcome_record_id INTEGER REFERENCES history_records(id),
            handoff_checkpoint_id INTEGER REFERENCES history_records(id),
+           terminal_join_started_at TEXT,
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL,
            retry_attempt INTEGER NOT NULL DEFAULT 0,
@@ -14232,6 +14291,7 @@ mod tests {
             "Waiting for the service owner to restore access.",
         )
         .unwrap();
+        assert!(claim_terminal_subthread_join(&db, &id).unwrap());
         assert!(
             finalize_terminal_subthread_join(&db, &id, None)
                 .unwrap()
@@ -14289,22 +14349,40 @@ mod tests {
         let _ = claim_queued_subthreads(&db).unwrap();
         achieve_goal(&db, &id, "Detailed work completed.", "Verified locally.").unwrap();
         let child_tail = latest_protocol_record_id(&open_db(&db).unwrap(), Some(&id)).unwrap();
-        let checkpoint_id = history_record_payload(
-            &open_db(&db).unwrap(), Some(&id), "checkpoint",
-            &compacted_checkpoint_item("# Durable working context\n\n## Concepts and terminology\n- Handoff.\n\n## Resources and authoritative locations\n- child.\n\n## Chronicle timeline\n- terminal.\n\n## Active decisions and constraints\n- preserve.\n\n## Current objective and next step\n- parent continues.\n\n## Open work and evidence routes\n```json\n[]\n```"),
+        let checkpoint_markdown = "# Durable working context\n\n## Concepts and terminology\n- Handoff.\n\n## Resources and authoritative locations\n- child.\n\n## Chronicle timeline\n- terminal.\n\n## Active decisions and constraints\n- preserve.\n\n## Current objective and next step\n- parent continues.\n\n## Open work and evidence routes\n```json\n[]\n```";
+        let connection = open_db(&db).unwrap();
+        let output_record_id = history_record_payload(
+            &connection, Some(&id), "response_output",
+            &json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":checkpoint_markdown}]}),
             "2026-08-22T00:00:01Z",
         ).unwrap();
+        connection.execute(
+            "INSERT INTO compaction_jobs (thread_id,idx_head,idx_tail,status,purpose,final_output_record_id,created_at,updated_at) VALUES (?1,?2,?3,'completed','terminal_handoff',?4,'now','now')",
+            params![id, fork_record_id, child_tail, output_record_id],
+        ).unwrap();
+        let job_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO compaction_nodes (job_id,output_record_id,source_records_json,created_at) VALUES (?1,?2,'[]','now')",
+            params![job_id, output_record_id],
+        ).unwrap();
         let handoff = TerminalSubthreadHandoff {
-            checkpoint_id,
-            markdown: "# Durable working context\nchild handoff".to_owned(),
+            markdown: checkpoint_markdown.to_owned(),
             idx_head: fork_record_id,
             idx_tail: child_tail,
-            output_record_id: child_tail,
+            output_record_id,
         };
+        assert!(claim_terminal_subthread_join(&db, &id).unwrap());
         let outcome = finalize_terminal_subthread_join(&db, &id, Some(&handoff))
             .unwrap()
             .unwrap();
         let connection = open_db(&db).unwrap();
+        let checkpoint_id: i64 = connection
+            .query_row(
+                "SELECT handoff_checkpoint_id FROM subthreads WHERE id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
         let child_checkpoint_thread: String = connection
             .query_row(
                 "SELECT thread_id FROM history_records WHERE id=?1",
@@ -14337,6 +14415,91 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn terminal_handoff_claim_allows_one_join_and_one_job_per_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let fork_record_id = history_record_payload(
+            &open_db(&db).unwrap(),
+            None,
+            "response_output",
+            &json!({"type":"function_call","call_id":"fork","name":"fork_subthread","arguments":"{}"}),
+            "2026-08-22T00:00:00Z",
+        )
+        .unwrap();
+        let fork = execute_fork_subthread(
+            &db,
+            fork_record_id,
+            json!({"title":"One handoff","task":"Stop after one handoff","completion_criteria":"One join."}),
+        );
+        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let _ = claim_queued_subthreads(&db).unwrap();
+        block_goal(&db, &id, "External decision required.", "Waiting.").unwrap();
+
+        assert!(claim_terminal_subthread_join(&db, &id).unwrap());
+        assert!(!claim_terminal_subthread_join(&db, &id).unwrap());
+        assert!(pending_terminal_subthread_ids(&db).unwrap().is_empty());
+
+        let audit = ResponseAuditContext::for_request(
+            "compaction",
+            Some(id.clone()),
+            Some(fork_record_id),
+            Some(fork_record_id),
+        );
+        let job = create_or_resume_compaction_job(&db, &audit, true).unwrap();
+        let later = ResponseAuditContext::for_request(
+            "compaction",
+            Some(id.clone()),
+            Some(fork_record_id + 1),
+            Some(fork_record_id + 1),
+        );
+        assert_eq!(
+            create_or_resume_compaction_job(&db, &later, true).unwrap(),
+            job
+        );
+        assert_eq!(
+            open_db(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM compaction_jobs WHERE thread_id=?1 AND purpose='terminal_handoff'",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn terminal_handoff_claim_is_recovered_only_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let fork_record_id = history_record_payload(
+            &open_db(&db).unwrap(), None, "response_output",
+            &json!({"type":"function_call","call_id":"fork","name":"fork_subthread","arguments":"{}"}), "2026-08-22T00:00:00Z",
+        ).unwrap();
+        let fork = execute_fork_subthread(
+            &db,
+            fork_record_id,
+            json!({"title":"Recover","task":"Recover once","completion_criteria":"One retry."}),
+        );
+        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let _ = claim_queued_subthreads(&db).unwrap();
+        achieve_goal(&db, &id, "Done.", "Verified.").unwrap();
+        assert!(claim_terminal_subthread_join(&db, &id).unwrap());
+        assert!(pending_terminal_subthread_ids(&db).unwrap().is_empty());
+        bootstrap_database(&db).unwrap();
+        assert_eq!(pending_terminal_subthread_ids(&db).unwrap(), vec![id]);
     }
 
     #[test]
@@ -14383,6 +14546,7 @@ mod tests {
             terminal_subthread_result(&db, &id).unwrap(),
             "Verification passed."
         );
+        assert!(claim_terminal_subthread_join(&db, &id).unwrap());
         assert!(
             finalize_terminal_subthread_join(&db, &id, None)
                 .unwrap()
