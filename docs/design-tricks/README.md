@@ -14,10 +14,11 @@
 8. [远端 Browser session 所有权绑定](./08-browser-session-ownership.md)
 9. [安全 update helper](./09-safe-update-helper.md)
 10. [持久 Goal 子线程终态 join](./10-goal-terminal-join.md)
+11. [末尾控制指令](./11-terminal-control-instruction.md)
 
 ## 阅读建议
 
 - 先读[推理 Controller 与工具 Executor 分离](./01-controller-executor.md)，理解设备角色。
 - 再读[Append-only protocol history](./05-append-only-history.md)和[稳定时间锚点](./06-time-awareness.md)，理解长期上下文。
 - 如果要维护远程设备，读[只出站的 Executor](./02-outbound-executor.md)、[幂等 ledger](./03-call-id-ledger.md)和[文件传输](./04-file-transfer.md)。
-- 如果要维护长期任务，读[稳定 upstream `thread-id`](./07-upstream-thread-id.md)、[安全 update helper](./09-safe-update-helper.md)和[Goal 子线程终态 join](./10-goal-terminal-join.md)。
+- 如果要维护长期任务，读[稳定 upstream `thread-id`](./07-upstream-thread-id.md)、[安全 update helper](./09-safe-update-helper.md)、[Goal 子线程终态 join](./10-goal-terminal-join.md)和[末尾控制指令](./11-terminal-control-instruction.md)。
