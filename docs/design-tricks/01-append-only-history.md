@@ -1,12 +1,12 @@
-# Append-only protocol history
+# Append-only protocol history：线程模型的事实基础
 
 ## 结论
 
 `history_records` 是 Cybion 对话协议事实的持久来源。当前只保存四类可重放记录：`input`、`response_output`、`tool_output`、`checkpoint`；记录默认不可变。
 
-## 作用
+## 线程模型
 
-每轮推理依据 thread、`idx_head` 和 `idx_tail` 从 SQLite 重新编译上下文，而不是依赖易失的内存对话数组。服务重启、页面刷新和子线程详情重开时，仍可以从同一批记录恢复。
+每轮推理依据 thread、`idx_head` 和 `idx_tail` 从 SQLite 重新编译上下文，而不是依赖易失的内存对话数组。主线程、子线程、重试、checkpoint、terminal handoff 都围绕同一组不可变 records 建模；服务重启、页面刷新和子线程详情重开时，仍从同一事实源恢复。
 
 ```text
 immutable protocol records → context compilation → upstream Responses request → new records
