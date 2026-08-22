@@ -786,6 +786,23 @@ struct AgentResult {
     message: ChatMessage,
 }
 
+#[derive(Debug)]
+struct EmptyCompletedResponse;
+
+impl fmt::Display for EmptyCompletedResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "upstream completed without tool calls, images, or non-whitespace output text",
+        )
+    }
+}
+
+impl std::error::Error for EmptyCompletedResponse {}
+
+fn is_empty_completed_response(cause: &anyhow::Error) -> bool {
+    cause.downcast_ref::<EmptyCompletedResponse>().is_some()
+}
+
 struct BrowserAgentContext {
     sessions: browser::BrowserSessions,
     computer_session: Option<browser::BrowserRunScope>,
@@ -1388,6 +1405,14 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
                     state.active_subthreads.lock().await.remove(&job.id);
                     return;
                 }
+            }
+            if is_empty_completed_response(&cause) {
+                let result = "Upstream completed without a usable response; this Goal was blocked to prevent an empty-response retry loop.";
+                let reason = "The upstream Responses completion contained no tool calls, generated images, or non-whitespace output text. Review the linked reasoning audit/request before retrying this Goal.";
+                let _ = block_goal(&state.db_path, &job.id, result, reason);
+                let _ = start_terminal_subthread_join(&state, &job.id).await;
+                state.active_subthreads.lock().await.remove(&job.id);
+                return;
             }
             if detail == "agent stopped" {
                 if subthread_is_active(&state.db_path, &job.id).unwrap_or(false) {
@@ -7742,7 +7767,10 @@ async fn run_agent_items(
             .get("output")
             .and_then(Value::as_array)
             .cloned()
-            .ok_or_else(|| anyhow!("upstream returned no Responses output"))?;
+            .unwrap_or_default();
+        if !completed_response_has_progress(&output) {
+            return Err(EmptyCompletedResponse.into());
+        }
         let output_record_ids = append_response_output_items(db_path, history_thread_id, &output)?;
         reset_subthread_retry_after_success(db_path, history_thread_id)?;
         images.extend(archive_generated_images(
@@ -8461,6 +8489,15 @@ fn upstream_sse_failure(event_type: &str, event: &Value) -> anyhow::Error {
         Some(code) => anyhow!("upstream {event_type} ({code}): {detail}"),
         None => anyhow!("upstream {event_type}: {detail}"),
     }
+}
+
+fn completed_response_has_progress(output: &[Value]) -> bool {
+    output.iter().any(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call" | "computer_call" | "image_generation_call")
+        )
+    }) || !output_text(output).trim().is_empty()
 }
 
 fn output_text(output: &[Value]) -> String {
@@ -10919,6 +10956,35 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::*;
+
+    #[test]
+    fn completed_response_progress_requires_a_tool_image_or_non_whitespace_text() {
+        assert!(!completed_response_has_progress(&[]));
+        assert!(!completed_response_has_progress(&[json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "  \n\t"}],
+        })]));
+        assert!(!completed_response_has_progress(&[
+            json!({"type":"reasoning","summary":[]})
+        ]));
+        assert!(completed_response_has_progress(&[json!({
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "list_files",
+            "arguments": "{}",
+        })]));
+        assert!(completed_response_has_progress(&[json!({
+            "type": "image_generation_call",
+            "id": "image-1",
+            "result": "image",
+        })]));
+        assert!(completed_response_has_progress(&[json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "complete"}],
+        })]));
+    }
 
     #[test]
     fn responses_sse_accepts_standard_data_without_a_space() {
@@ -14228,6 +14294,102 @@ mod tests {
                 .as_str()
                 .is_some_and(|output| output.contains("subthread_handoff"))
         }));
+    }
+
+    #[tokio::test]
+    async fn empty_completed_subthread_response_blocks_once_without_persisting_empty_progress() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<usize>>>,
+            Json(_request): Json<Value>,
+        ) -> String {
+            *requests.lock().await += 1;
+            let item = json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "   "}],
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+        }
+        let requests = Arc::new(Mutex::new(0usize));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("migrate the component".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        let fork = execute_fork_subthread(
+            &db,
+            user.id,
+            json!({"title":"Empty completion","task":"Complete work","completion_criteria":"Deliver a result."}),
+        );
+        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let job = claim_queued_subthreads(&db).unwrap().remove(0);
+        run_subthread(test_state(db.clone()), job).await;
+        server.abort();
+
+        let goal = load_subthread_detail(&db, &id).unwrap().unwrap().thread;
+        assert_eq!(goal.goal_state, "blocked");
+        assert_eq!(goal.status, "completed");
+        assert!(
+            goal.result
+                .as_deref()
+                .is_some_and(|result| result.contains("empty-response retry loop"))
+        );
+        let records: Vec<Value> = open_db(&db)
+            .unwrap()
+            .prepare("SELECT payload FROM history_records WHERE thread_id=?1 AND kind='response_output' ORDER BY id")
+            .unwrap()
+            .query_map([&id], |row| serde_json::from_str::<Value>(&row.get::<_, String>(0)?).map_err(|_| rusqlite::Error::InvalidQuery))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !records
+                .iter()
+                .any(|record| output_text(std::slice::from_ref(record)).trim().is_empty())
+        );
+        assert_eq!(*requests.lock().await, 2);
+        assert_eq!(
+            open_db(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM responses_request_audits WHERE thread_id=?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2,
+        );
     }
 
     #[tokio::test]
