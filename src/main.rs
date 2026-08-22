@@ -4147,8 +4147,6 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            updated_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS compaction_jobs_lookup ON compaction_jobs(thread_id, idx_head, idx_tail, status);
-         CREATE UNIQUE INDEX IF NOT EXISTS compaction_jobs_running_unique
-           ON compaction_jobs(thread_id, idx_head, idx_tail, purpose) WHERE status = 'running';
          CREATE TABLE IF NOT EXISTS compaction_nodes (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            job_id INTEGER NOT NULL REFERENCES compaction_jobs(id),
@@ -4171,6 +4169,10 @@ fn bootstrap_database(db: &Path) -> Result<()> {
     migrate_execution_ownership_schema(&connection)?;
     migrate_subthread_scheduler_schema(&connection)?;
     migrate_compaction_schema(&connection)?;
+    connection.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS compaction_jobs_running_unique
+           ON compaction_jobs(thread_id, idx_head, idx_tail, purpose) WHERE status = 'running';",
+    )?;
     backfill_pending_terminal_subthread_results(&connection)?;
     connection.execute_batch(
         "DROP TRIGGER IF EXISTS history_records_immutable_delete;
@@ -15084,6 +15086,45 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "read_thread_history")
         );
+    }
+
+    #[test]
+    fn legacy_compaction_jobs_are_upgraded_before_the_running_index_is_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        open_db(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE compaction_jobs (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   thread_id TEXT,
+                   idx_head INTEGER NOT NULL,
+                   idx_tail INTEGER NOT NULL,
+                   status TEXT NOT NULL CHECK(status IN ('running', 'completed')),
+                   final_output_record_id INTEGER,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX compaction_jobs_lookup
+                   ON compaction_jobs(thread_id, idx_head, idx_tail, status);",
+            )
+            .unwrap();
+
+        bootstrap_database(&db).unwrap();
+
+        let connection = open_db(&db).unwrap();
+        assert!(has_column(&connection, "compaction_jobs", "purpose").unwrap());
+        let running_index_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_master
+                   WHERE type = 'index' AND name = 'compaction_jobs_running_unique'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(running_index_exists);
     }
 
     #[test]
