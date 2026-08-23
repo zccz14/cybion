@@ -7088,7 +7088,7 @@ fn load_thread_index(path: &Path, query: ThreadQuery) -> Result<ThreadIndex> {
                         thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                         thread.blocked_reason, thread.status, thread.model, thread.result,
                         thread.created_at, thread.updated_at,
-                        thread.retry_attempt, thread.next_retry_at
+                        thread.retry_attempt, thread.next_retry_at, thread.context_window_limit
                  FROM subthreads thread WHERE {predicate}
                  ORDER BY thread.updated_at DESC LIMIT ? OFFSET ?"
             ))?
