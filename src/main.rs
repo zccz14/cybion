@@ -75,6 +75,8 @@ const CONVERSATION_PAGE_DEFAULT: usize = 50;
 const CONVERSATION_PAGE_MAX: usize = 100;
 const HISTORY_RECORD_PAGE_DEFAULT: usize = 50;
 const HISTORY_RECORD_PAGE_MAX: usize = 100;
+const THREAD_PAGE_DEFAULT: usize = 20;
+const THREAD_PAGE_MAX: usize = 100;
 const CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS: usize = 8_192;
 const CHECKPOINT_COMPACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const CHECKPOINT_FRAGMENT_CHARS: usize = 24 * 1024;
@@ -717,10 +719,21 @@ struct MainThreadSummary {
     updated_at: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+struct ThreadQuery {
+    status: Option<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
+
 #[derive(Serialize)]
 struct ThreadIndex {
     main_thread: MainThreadSummary,
     subthreads: Vec<Subthread>,
+    total: usize,
+    page: usize,
+    page_size: usize,
+    has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -6870,24 +6883,80 @@ fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
 }
 
 fn load_subthreads(path: &Path) -> Result<Vec<Subthread>> {
+    load_subthreads_matching(path, "1 = 1", &[])
+}
+
+fn load_subthreads_matching(
+    path: &Path,
+    predicate: &str,
+    values: &[SqlValue],
+) -> Result<Vec<Subthread>> {
     open_db(path)?
-        .prepare(
+        .prepare(&format!(
             "SELECT thread.id, thread.title, thread.task,
                     thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                     thread.blocked_reason, thread.status, thread.model, thread.result,
                     thread.created_at, thread.updated_at,
                     thread.retry_attempt, thread.next_retry_at
-             FROM subthreads thread
-             ORDER BY CASE thread.goal_state WHEN 'active' THEN 0 ELSE 1 END,
-                      thread.updated_at DESC",
-        )?
-        .query_map([], subthread_from_row)?
+             FROM subthreads thread WHERE {predicate}
+             ORDER BY thread.updated_at DESC"
+        ))?
+        .query_map(params_from_iter(values.iter()), subthread_from_row)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
-fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
+fn thread_page_size(value: Option<usize>) -> Result<usize> {
+    let page_size = value.unwrap_or(THREAD_PAGE_DEFAULT);
+    if !(1..=THREAD_PAGE_MAX).contains(&page_size) {
+        return Err(anyhow!("page_size must be between 1 and {THREAD_PAGE_MAX}"));
+    }
+    Ok(page_size)
+}
+
+fn thread_page(value: Option<usize>) -> Result<usize> {
+    let page = value.unwrap_or(1);
+    if page == 0 {
+        return Err(anyhow!("page must be at least 1"));
+    }
+    Ok(page)
+}
+
+fn thread_filter(status: Option<&str>) -> Result<(&'static str, bool)> {
+    match status.unwrap_or("active") {
+        "active" => Ok(("thread.goal_state = 'active'", true)),
+        "terminal" => Ok((
+            "thread.goal_state IN ('achieved', 'blocked', 'cancelled')",
+            false,
+        )),
+        "completed" => Ok(("thread.goal_state = 'achieved'", false)),
+        "blocked" => Ok(("thread.goal_state = 'blocked'", false)),
+        "cancelled" => Ok(("thread.goal_state = 'cancelled'", false)),
+        other => Err(anyhow!(
+            "status must be active, terminal, completed, blocked, or cancelled; got {other:?}"
+        )),
+    }
+}
+
+fn load_thread_index(path: &Path, query: ThreadQuery) -> Result<ThreadIndex> {
+    let (predicate, active) = thread_filter(query.status.as_deref())?;
+    if active && (query.page.is_some() || query.page_size.is_some()) {
+        return Err(anyhow!(
+            "page and page_size are only valid for terminal thread queries"
+        ));
+    }
+    let page = if active { 1 } else { thread_page(query.page)? };
+    let page_size = if active {
+        THREAD_PAGE_DEFAULT
+    } else {
+        thread_page_size(query.page_size)?
+    };
     let connection = open_db(path)?;
+    let total: i64 = connection.query_row(
+        &format!("SELECT COUNT(*) FROM subthreads thread WHERE {predicate}"),
+        [],
+        |row| row.get(0),
+    )?;
     let model = connection.query_row(
         "SELECT value FROM app_meta WHERE key = 'default_model'",
         [],
@@ -6898,14 +6967,38 @@ fn load_thread_index(path: &Path) -> Result<ThreadIndex> {
         [],
         |row| row.get(0),
     )?;
+    let main_thread = MainThreadSummary {
+        status: "idle".to_owned(),
+        model,
+        updated_at,
+    };
     drop(connection);
+    let subthreads = if active {
+        load_subthreads_matching(path, predicate, &[])?
+    } else {
+        let offset = (page - 1).saturating_mul(page_size);
+        open_db(path)?
+            .prepare(&format!(
+                "SELECT thread.id, thread.title, thread.task,
+                        thread.completion_criteria, thread.goal_state, thread.goal_evidence,
+                        thread.blocked_reason, thread.status, thread.model, thread.result,
+                        thread.created_at, thread.updated_at,
+                        thread.retry_attempt, thread.next_retry_at
+                 FROM subthreads thread WHERE {predicate}
+                 ORDER BY thread.updated_at DESC LIMIT ? OFFSET ?"
+            ))?
+            .query_map(params![page_size, offset], subthread_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let total = usize::try_from(total).unwrap_or(usize::MAX);
+    let page_size = if active { total.max(1) } else { page_size };
     Ok(ThreadIndex {
-        main_thread: MainThreadSummary {
-            status: "idle".to_owned(),
-            model,
-            updated_at,
-        },
-        subthreads: load_subthreads(path)?,
+        main_thread,
+        has_more: !active && page.saturating_mul(page_size) < total,
+        subthreads,
+        total,
+        page,
+        page_size,
     })
 }
 
@@ -7341,11 +7434,15 @@ fn block_goal(path: &Path, thread_id: &str, result: &str, reason: &str) -> Resul
     Ok(())
 }
 
-async fn list_threads(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<ThreadIndex> {
+async fn list_threads(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ThreadQuery>,
+) -> ApiResult<ThreadIndex> {
     identity(&state, &headers).await?;
-    load_thread_index(&state.db_path)
+    load_thread_index(&state.db_path, query)
         .map(Json)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read threads"))
+        .map_err(|cause| error(StatusCode::BAD_REQUEST, cause.to_string()))
 }
 
 async fn subthread_detail(
@@ -12906,7 +13003,7 @@ mod tests {
             )
             .unwrap();
 
-        let empty = load_thread_index(&db).unwrap();
+        let empty = load_thread_index(&db, ThreadQuery::default()).unwrap();
         assert_eq!(empty.main_thread.status, "idle");
         assert_eq!(empty.main_thread.model, "main-index-model");
         assert!(empty.main_thread.updated_at.is_none());
@@ -12934,7 +13031,7 @@ mod tests {
             "queued"
         );
 
-        let active = load_thread_index(&db).unwrap();
+        let active = load_thread_index(&db, ThreadQuery::default()).unwrap();
         assert_eq!(active.main_thread.status, "idle");
         assert_eq!(active.main_thread.model, "main-index-model");
         assert_eq!(
@@ -12944,7 +13041,126 @@ mod tests {
         assert_eq!(active.subthreads.len(), 1);
         assert_eq!(active.subthreads[0].model, "sub-index-model");
 
-        assert_eq!(load_thread_index(&db).unwrap().main_thread.status, "idle");
+        assert_eq!(
+            load_thread_index(&db, ThreadQuery::default())
+                .unwrap()
+                .main_thread
+                .status,
+            "idle"
+        );
+    }
+
+    #[test]
+    fn thread_status_queries_separate_active_from_paginated_terminal_goals() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("create goals".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        for (title, state, updated_at) in [
+            ("Active", "active", "2026-08-23T00:00:03Z"),
+            ("Done", "achieved", "2026-08-23T00:00:02Z"),
+            ("Blocked", "blocked", "2026-08-23T00:00:01Z"),
+        ] {
+            let output = execute_fork_subthread(
+                &db,
+                user.id,
+                json!({"title":title,"task":format!("{title} task"),"completion_criteria":"finish"}),
+            );
+            let id = serde_json::from_str::<Value>(&output.output).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if state != "active" {
+                open_db(&db).unwrap().execute("UPDATE subthreads SET goal_state=?1,status='completed',updated_at=?2,result='terminal payload' WHERE id=?3", params![state, updated_at, id]).unwrap();
+            }
+        }
+        let active = load_thread_index(
+            &db,
+            ThreadQuery {
+                status: Some("active".to_owned()),
+                page: None,
+                page_size: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(active.total, 1);
+        assert_eq!(active.subthreads.len(), 1);
+        assert_eq!(active.subthreads[0].goal_state, "active");
+        assert!(!active.has_more);
+        assert_eq!(active.page_size, 1);
+        assert!(
+            !serde_json::to_string(&active)
+                .unwrap()
+                .contains("terminal payload")
+        );
+        let terminal = load_thread_index(
+            &db,
+            ThreadQuery {
+                status: Some("terminal".to_owned()),
+                page: Some(1),
+                page_size: Some(1),
+            },
+        )
+        .unwrap();
+        assert_eq!(terminal.total, 2);
+        assert_eq!(terminal.subthreads.len(), 1);
+        assert_eq!(terminal.subthreads[0].goal_state, "achieved");
+        assert!(terminal.has_more);
+        let blocked = load_thread_index(
+            &db,
+            ThreadQuery {
+                status: Some("blocked".to_owned()),
+                page: Some(1),
+                page_size: Some(20),
+            },
+        )
+        .unwrap();
+        assert_eq!(blocked.total, 1);
+        assert_eq!(blocked.subthreads[0].goal_state, "blocked");
+        assert!(
+            load_thread_index(
+                &db,
+                ThreadQuery {
+                    status: Some("unexpected".to_owned()),
+                    page: None,
+                    page_size: None
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            load_thread_index(
+                &db,
+                ThreadQuery {
+                    status: Some("active".to_owned()),
+                    page: Some(1),
+                    page_size: None
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            load_thread_index(
+                &db,
+                ThreadQuery {
+                    status: Some("terminal".to_owned()),
+                    page: Some(0),
+                    page_size: None
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
