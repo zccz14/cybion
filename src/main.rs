@@ -7,7 +7,7 @@ use std::{
     convert::Infallible,
     fmt,
     io::{Cursor, Read, Seek, SeekFrom, Write},
-    net::SocketAddr,
+    net::{SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock, RwLock as StdRwLock,
@@ -51,7 +51,7 @@ use tokio_tungstenite::{
     tungstenite::{Message as WebSocketMessage, client::IntoClientRequest},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{info, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -5774,15 +5774,22 @@ async fn executor_tunnel(
     let machine_id = executor_machine_id(&state, &headers)?;
     let session_id = Uuid::new_v4().to_string();
     let (sender, receiver) = mpsc::channel(16);
-    state.executor_tunnels.sessions.lock().await.insert(
+    let replaced = state.executor_tunnels.sessions.lock().await.insert(
         machine_id.clone(),
         ExecutorSession {
             id: session_id.clone(),
             sender: sender.clone(),
         },
     );
+    info!(
+        machine_id = %machine_id,
+        session_id = %session_id,
+        replaced = replaced.is_some(),
+        "executor tunnel registered"
+    );
     let tunnels = state.executor_tunnels.clone();
     let cleanup_machine_id = machine_id.clone();
+    let session_started_at = Instant::now();
     tokio::spawn(async move {
         sender.closed().await;
         let mut sessions = tunnels.sessions.lock().await;
@@ -5791,6 +5798,12 @@ async fn executor_tunnel(
             .is_some_and(|session| session.id == session_id)
         {
             sessions.remove(&cleanup_machine_id);
+            info!(
+                machine_id = %cleanup_machine_id,
+                session_id = %session_id,
+                lifetime_ms = session_started_at.elapsed().as_millis(),
+                "executor tunnel cleaned up"
+            );
         }
     });
     open_db(&state.db_path)
@@ -5828,22 +5841,39 @@ async fn executor_tunnel_result(
 ) -> ApiResult<Value> {
     let machine_id = executor_machine_id(&state, &headers)?;
     let result = decode_executor_result(&headers, &body)?;
-    let pending = state
-        .executor_tunnels
-        .results
-        .lock()
-        .await
-        .remove(&result.call_id);
-    let Some(pending) = pending else {
+    let mut pending_results = state.executor_tunnels.results.lock().await;
+    let Some(pending) = pending_results.get(&result.call_id) else {
+        info!(
+            machine_id = %machine_id,
+            call_id = %result.call_id,
+            "executor result duplicate or no longer pending"
+        );
         return Ok(Json(json!({"accepted": true})));
     };
     if pending.machine_id != machine_id {
+        warn!(
+            machine_id = %machine_id,
+            call_id = %result.call_id,
+            expected_machine_id = %pending.machine_id,
+            "executor result rejected for another machine"
+        );
         return Err(error(
             StatusCode::FORBIDDEN,
             "result belongs to another executor",
         ));
     }
-    let _ = pending.sender.send(result);
+    let pending = pending_results
+        .remove(&result.call_id)
+        .expect("pending executor result was checked while locked");
+    let call_id = result.call_id.clone();
+    drop(pending_results);
+    let delivered = pending.sender.send(result).is_ok();
+    info!(
+        machine_id = %machine_id,
+        call_id = %call_id,
+        delivered,
+        "executor result received"
+    );
     Ok(Json(json!({"accepted": true})))
 }
 
@@ -9863,6 +9893,13 @@ async fn execute_remote_device_with_timeout(
             sender,
         },
     );
+    info!(
+        machine_id = %target_device,
+        call_id = %call_id,
+        tool,
+        timeout_ms = timeout.as_millis(),
+        "executor tool call pending"
+    );
     let call = ExecutorToolCall {
         call_id: call_id.clone(),
         name: tool.to_owned(),
@@ -9879,12 +9916,18 @@ async fn execute_remote_device_with_timeout(
     .await;
     tunnels.results.lock().await.remove(&call_id);
     match response {
-        Ok(response) => ToolExecution {
-            output: response.output,
-            added_lines: response.added_lines,
-            deleted_lines: response.deleted_lines,
-        },
-        Err(_) => tool_execution("error: remote executor disconnected before returning a result"),
+        Ok(response) => {
+            info!(machine_id = %target_device, call_id = %call_id, tool, "executor tool result correlated");
+            ToolExecution {
+                output: response.output,
+                added_lines: response.added_lines,
+                deleted_lines: response.deleted_lines,
+            }
+        }
+        Err(cause) => {
+            warn!(machine_id = %target_device, call_id = %call_id, tool, reason = cause, "executor tool result not received");
+            tool_execution("error: remote executor disconnected before returning a result")
+        }
     }
 }
 
@@ -9951,7 +9994,16 @@ fn executor_tunnel_retry_delay(attempt: u32, entropy: u64) -> Duration {
 
 async fn run_executor_tunnel(runtime: &ExecutorRuntime) -> Result<()> {
     let config = load_executor_config(&runtime.db_path)?;
-    info!(machine_id = %config.machine_id, controller = %config.controller_url, "executor tunnel connecting");
+    let (proxy_configured, proxy_reachable) = executor_network_path_snapshot();
+    info!(
+        machine_id = %config.machine_id,
+        controller = %config.controller_url,
+        network_path = if proxy_configured { "proxy" } else { "direct" },
+        proxy_configured,
+        proxy_reachable,
+        "executor tunnel connecting"
+    );
+    let connected_at = Instant::now();
     let response = runtime
         .client
         .get(format!("{}/api/executors/tunnel", config.controller_url))
@@ -9960,6 +10012,12 @@ async fn run_executor_tunnel(runtime: &ExecutorRuntime) -> Result<()> {
         .send()
         .await?
         .error_for_status()?;
+    info!(
+        machine_id = %config.machine_id,
+        controller = %config.controller_url,
+        connect_ms = connected_at.elapsed().as_millis(),
+        "executor tunnel connected"
+    );
     let mut stream = response.bytes_stream();
     let mut pending = Vec::new();
     loop {
@@ -9983,6 +10041,26 @@ async fn run_executor_tunnel(runtime: &ExecutorRuntime) -> Result<()> {
             }
         }
     }
+}
+
+fn executor_network_path_snapshot() -> (bool, Option<bool>) {
+    let proxy = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+    let Some(proxy) = proxy else {
+        return (false, None);
+    };
+    let reachable = Url::parse(&proxy)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?;
+            let port = url.port_or_known_default()?;
+            (host, port).to_socket_addrs().ok()?.next()
+        })
+        .map(|address| {
+            std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_ok()
+        });
+    (true, reachable)
 }
 
 fn parse_executor_tool_call(event: &str) -> Result<Option<ExecutorToolCall>> {
@@ -10540,10 +10618,12 @@ async fn send_executor_result(
     result: &ExecutorToolResult,
 ) -> Result<()> {
     let payload = serde_json::to_vec(result)?;
+    let payload_bytes = payload.len();
+    let compressed = payload_bytes >= EXECUTOR_RESULT_GZIP_THRESHOLD;
     let request = client
         .post(format!("{controller_url}/api/executors/tunnel/results"))
         .bearer_auth(token);
-    let request = if payload.len() >= EXECUTOR_RESULT_GZIP_THRESHOLD {
+    let request = if compressed {
         let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
         gzip.write_all(&payload)?;
         request
@@ -10555,8 +10635,34 @@ async fn send_executor_result(
             .header(header::CONTENT_TYPE, "application/json")
             .body(payload)
     };
-    request.send().await?.error_for_status()?;
-    Ok(())
+    let started_at = Instant::now();
+    match request
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+    {
+        Ok(_) => {
+            info!(
+                call_id = %result.call_id,
+                payload_bytes,
+                compressed,
+                duration_ms = started_at.elapsed().as_millis(),
+                "executor result post succeeded"
+            );
+            Ok(())
+        }
+        Err(cause) => {
+            warn!(
+                call_id = %result.call_id,
+                payload_bytes,
+                compressed,
+                duration_ms = started_at.elapsed().as_millis(),
+                %cause,
+                "executor result post failed"
+            );
+            Err(cause.into())
+        }
+    }
 }
 
 fn sse_event_boundary(source: &[u8]) -> Option<(usize, usize)> {
@@ -13398,6 +13504,112 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "unknown");
+    }
+
+    #[tokio::test]
+    async fn executor_results_remain_pending_after_another_machine_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let state = test_state(db.clone());
+        for (machine_id, token) in [("machine-a", "token-a"), ("machine-b", "token-b")] {
+            open_db(&db)
+                .unwrap()
+                .execute(
+                    "INSERT INTO peers (id, name, machine_id, hostname, access_token_hash, deployment_role, created_at)
+                     VALUES (?1, ?1, ?1, ?1, ?2, 'executor', ?3)",
+                    params![machine_id, token_hash(token), chrono::Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+        }
+        let (sender, receiver) = oneshot::channel();
+        state.executor_tunnels.results.lock().await.insert(
+            "call-1".to_owned(),
+            PendingExecutorResult {
+                machine_id: "machine-a".to_owned(),
+                sender,
+            },
+        );
+        let result = ExecutorToolResult {
+            call_id: "call-1".to_owned(),
+            output: "done".to_owned(),
+            added_lines: None,
+            deleted_lines: None,
+        };
+        let body = Bytes::from(serde_json::to_vec(&result).unwrap());
+        let mut wrong_headers = HeaderMap::new();
+        wrong_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token-b"),
+        );
+        let rejected = executor_tunnel_result(State(state.clone()), wrong_headers, body.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.0, StatusCode::FORBIDDEN);
+        assert!(
+            state
+                .executor_tunnels
+                .results
+                .lock()
+                .await
+                .contains_key("call-1")
+        );
+
+        let mut right_headers = HeaderMap::new();
+        right_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token-a"),
+        );
+        assert_eq!(
+            executor_tunnel_result(State(state.clone()), right_headers.clone(), body.clone())
+                .await
+                .unwrap()
+                .0["accepted"],
+            true
+        );
+        assert_eq!(receiver.await.unwrap().output, "done");
+        assert_eq!(
+            executor_tunnel_result(State(state), right_headers, body)
+                .await
+                .unwrap()
+                .0["accepted"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_result_post_failure_is_returned_without_reexecution() {
+        async fn unavailable() -> StatusCode {
+            StatusCode::BAD_GATEWAY
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/executors/tunnel/results", post(unavailable)),
+            )
+            .await
+            .unwrap();
+        });
+        let result = ExecutorToolResult {
+            call_id: "call-post-failure".to_owned(),
+            output: "completed once".to_owned(),
+            added_lines: None,
+            deleted_lines: None,
+        };
+        assert!(
+            send_executor_result(
+                &reqwest::Client::new(),
+                &format!("http://{address}"),
+                "test-token",
+                &result,
+            )
+            .await
+            .is_err()
+        );
+        server.abort();
     }
 
     #[test]
