@@ -1139,6 +1139,7 @@ async fn main() -> Result<()> {
         browser_sessions: browser::sessions(),
     };
     schedule_subthreads(state.clone());
+    schedule_running_main_compaction_resume(state.clone());
     schedule_auto_update(state.client.clone(), state.db_path.clone());
     let addr: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     info!(%addr, "cybion server listening");
@@ -1238,6 +1239,59 @@ fn schedule_subthreads(state: AppState) {
                 Err(cause) => tracing::warn!(%cause, "cannot claim queued subthreads"),
             }
             tokio::time::sleep(RETRY_SCHEDULER_INTERVAL).await;
+        }
+    });
+}
+
+fn schedule_running_main_compaction_resume(state: AppState) {
+    tokio::spawn(async move {
+        let idx_tail = match resumable_main_compaction_tail(&state.db_path) {
+            Ok(Some(idx_tail)) => idx_tail,
+            Ok(None) => return,
+            Err(cause) => {
+                tracing::warn!(%cause, "cannot find a resumable main-thread compaction");
+                return;
+            }
+        };
+        let config = match load_config(&state.db_path) {
+            Ok(config) => config,
+            Err(cause) => {
+                tracing::warn!(%cause, "cannot load configuration to resume main-thread compaction");
+                return;
+            }
+        };
+        let upstream_thread_id = match main_upstream_thread_id(&state.db_path) {
+            Ok(upstream_thread_id) => upstream_thread_id,
+            Err(cause) => {
+                tracing::warn!(%cause, "cannot load upstream thread to resume main-thread compaction");
+                return;
+            }
+        };
+        let (events, _receiver) = mpsc::channel(1);
+        let (_cancellation_sender, cancellation) = watch::channel(false);
+        match compact_main_context(
+            ResponsesRuntime {
+                client: &state.client,
+                config: &config,
+                db_path: &state.db_path,
+                upstream_thread_id: &upstream_thread_id,
+            },
+            &AgentEventSink {
+                thread_id: None,
+                sender: &events,
+            },
+            cancellation,
+            idx_tail,
+            &state.checkpoint_write_gate,
+            &state.checkpoint_write_pending,
+        )
+        .await
+        {
+            Ok(checkpoint) => info!(
+                checkpoint_id = checkpoint.id,
+                "resumed main-thread compaction"
+            ),
+            Err(cause) => tracing::warn!(%cause, "cannot resume main-thread compaction"),
         }
     });
 }
@@ -3111,6 +3165,23 @@ fn latest_protocol_record_id(connection: &Connection, thread_id: Option<&str>) -
             |row| row.get::<_, Option<i64>>(0),
         )?
         .ok_or_else(|| anyhow!("thread context has no protocol records"))
+}
+
+fn resumable_main_compaction_tail(path: &Path) -> Result<Option<i64>> {
+    let connection = open_db(path)?;
+    let idx_tail = connection
+        .query_row(
+            "SELECT idx_tail FROM compaction_jobs
+             WHERE thread_id IS NULL AND purpose='context' AND status='running'
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(idx_tail) = idx_tail else {
+        return Ok(None);
+    };
+    Ok((latest_protocol_record_id(&connection, None)? == idx_tail).then_some(idx_tail))
 }
 
 fn compile_main_context(db_path: &Path, idx_tail: i64) -> Result<CompiledContext> {
@@ -15808,6 +15879,48 @@ mod tests {
         assert_eq!(context.idx_tail, source.id);
         assert_eq!(context.protocol_items.len(), 1);
         assert_eq!(context.protocol_items[0]["content"], "durable source");
+    }
+
+    #[test]
+    fn only_the_latest_main_record_can_resume_a_running_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let source = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("resume this context".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        let audit =
+            ResponseAuditContext::for_request("compaction", None, Some(source.id), Some(source.id));
+        create_or_resume_compaction_job(&db, &audit, false).unwrap();
+        assert_eq!(
+            resumable_main_compaction_tail(&db).unwrap(),
+            Some(source.id)
+        );
+
+        append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String(
+                    "newer work must not be compacted by the stale job".to_owned(),
+                ),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumable_main_compaction_tail(&db).unwrap(), None);
     }
 
     #[tokio::test]
