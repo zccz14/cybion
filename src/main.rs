@@ -75,8 +75,8 @@ const CONVERSATION_PAGE_DEFAULT: usize = 50;
 const CONVERSATION_PAGE_MAX: usize = 100;
 const HISTORY_RECORD_PAGE_DEFAULT: usize = 50;
 const HISTORY_RECORD_PAGE_MAX: usize = 100;
-const CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS: usize = 4_096;
-const CHECKPOINT_COMPACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const CHECKPOINT_COMPACTION_MAX_OUTPUT_TOKENS: usize = 8_192;
+const CHECKPOINT_COMPACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const CHECKPOINT_FRAGMENT_CHARS: usize = 24 * 1024;
 const SKILL_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 const COMMAND_RUNS_PAGE_DEFAULT: i64 = 20;
@@ -2332,6 +2332,12 @@ async fn compact_checkpoint_once(
         json!({"role":"developer","content":checkpoint_developer_prompt(&input.source_records, input.terminal_handoff)}),
     );
     let body = checkpoint_compaction_request_body(&runtime.responses.config.default_model, items);
+    let input_hash = compaction_input_hash(&body)?;
+    if let Some(output) =
+        cached_compaction_output(runtime.responses.db_path, runtime.job_id, &input_hash)?
+    {
+        return Ok(output);
+    }
     let request = runtime
         .responses
         .client
@@ -2367,6 +2373,7 @@ async fn compact_checkpoint_once(
         runtime.job_id,
         output_item,
         &input.source_records,
+        &input_hash,
     )?;
     Ok(CompactionOutput {
         text: checkpoint,
@@ -2374,11 +2381,41 @@ async fn compact_checkpoint_once(
     })
 }
 
+fn compaction_input_hash(body: &Value) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(body)?)))
+}
+
+fn cached_compaction_output(
+    db_path: &Path,
+    job_id: i64,
+    input_hash: &str,
+) -> Result<Option<CompactionOutput>> {
+    let connection = open_db(db_path)?;
+    let output_record_id = connection
+        .query_row(
+            "SELECT output_record_id FROM compaction_nodes
+             WHERE job_id=?1 AND input_hash=?2
+             ORDER BY id DESC LIMIT 1",
+            params![job_id, input_hash],
+            |row| row.get(0),
+        )
+        .optional()?;
+    output_record_id
+        .map(|output_record_id| {
+            Ok(CompactionOutput {
+                text: checkpoint_text_from_output_record(&connection, output_record_id)?,
+                output_record_id,
+            })
+        })
+        .transpose()
+}
+
 fn persist_compaction_output(
     db_path: &Path,
     job_id: i64,
     output: &Value,
     source_records: &[ProtocolRecordMetadata],
+    input_hash: &str,
 ) -> Result<i64> {
     let mut connection = open_db(db_path)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2394,8 +2431,12 @@ fn persist_compaction_output(
     )?;
     let output_record_id = transaction.last_insert_rowid();
     transaction.execute(
-        "INSERT INTO compaction_nodes (job_id, output_record_id, source_records_json, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![job_id, output_record_id, serde_json::to_string(source_records)?, created_at],
+        "INSERT INTO compaction_nodes (job_id, output_record_id, source_records_json, input_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![job_id, output_record_id, serde_json::to_string(source_records)?, input_hash, created_at],
+    )?;
+    transaction.execute(
+        "UPDATE compaction_jobs SET updated_at=?1 WHERE id=?2",
+        params![created_at, job_id],
     )?;
     transaction.commit()?;
     Ok(output_record_id)
@@ -3863,6 +3904,9 @@ fn migrate_compaction_schema(connection: &Connection) -> Result<()> {
             "ALTER TABLE compaction_jobs ADD COLUMN purpose TEXT NOT NULL DEFAULT 'context';",
         )?;
     }
+    if !has_column(connection, "compaction_nodes", "input_hash")? {
+        connection.execute_batch("ALTER TABLE compaction_nodes ADD COLUMN input_hash TEXT;")?;
+    }
     // Keep all historical nodes for provenance, but only the newest terminal-handoff job is
     // eligible for resumption. Older duplicate rows were created by the pre-claim scheduler bug.
     connection.execute_batch(
@@ -3876,7 +3920,9 @@ fn migrate_compaction_schema(connection: &Connection) -> Result<()> {
                AND newer.id > stale.id
            );
          CREATE UNIQUE INDEX IF NOT EXISTS compaction_terminal_handoff_thread
-           ON compaction_jobs(thread_id) WHERE purpose = 'terminal_handoff';",
+           ON compaction_jobs(thread_id) WHERE purpose = 'terminal_handoff';
+         CREATE INDEX IF NOT EXISTS compaction_nodes_input_hash
+           ON compaction_nodes(job_id, input_hash) WHERE input_hash IS NOT NULL;",
     )?;
     Ok(())
 }
@@ -4274,6 +4320,7 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            job_id INTEGER NOT NULL REFERENCES compaction_jobs(id),
            output_record_id INTEGER NOT NULL UNIQUE REFERENCES history_records(id),
            source_records_json TEXT NOT NULL CHECK(json_valid(source_records_json)),
+           input_hash TEXT,
            created_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS compaction_nodes_job ON compaction_nodes(job_id);
@@ -11657,6 +11704,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_compaction_resumes_from_a_persisted_intermediate_output() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            let request_number = {
+                let mut requests = requests.lock().await;
+                requests.push(request);
+                requests.len() - 1
+            };
+            match request_number {
+                0 | 3 => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({"error":{"code":"context_length_exceeded","message":"context too large"}})),
+                )
+                    .into_response(),
+                1 => checkpoint_compaction_response("left checkpoint").into_response(),
+                2 => (StatusCode::BAD_GATEWAY, "temporary upstream failure").into_response(),
+                4 => checkpoint_compaction_response("final checkpoint").into_response(),
+                _ => panic!("unexpected compaction request {request_number}"),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let config = checkpoint_compaction_test_config(format!("http://{address}"));
+        let context = checkpoint_compaction_test_context(&["one", "two", "three", "four"]);
+        let audit = ResponseAuditContext::for_request("compaction", None, Some(10), Some(13));
+
+        let first = compact_checkpoint_context(
+            &reqwest::Client::new(),
+            &config,
+            &db,
+            "11111111-1111-4111-8111-111111111111",
+            audit.clone(),
+            &context,
+            watch::channel(false).1,
+        )
+        .await
+        .unwrap_err();
+        assert!(first.to_string().contains("HTTP 502"));
+
+        let resumed = compact_checkpoint_context(
+            &reqwest::Client::new(),
+            &config,
+            &db,
+            "11111111-1111-4111-8111-111111111111",
+            audit,
+            &context,
+            watch::channel(false).1,
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert!(resumed.text.contains("final checkpoint"));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[1]["max_output_tokens"], 8_192);
+    }
+
+    #[tokio::test]
     async fn checkpoint_compaction_shrinks_the_left_window_before_continuing() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
@@ -15631,6 +15755,7 @@ mod tests {
 
         let connection = open_db(&db).unwrap();
         assert!(has_column(&connection, "compaction_jobs", "purpose").unwrap());
+        assert!(has_column(&connection, "compaction_nodes", "input_hash").unwrap());
         let running_index_exists: bool = connection
             .query_row(
                 "SELECT EXISTS(
@@ -15665,7 +15790,8 @@ mod tests {
             ResponseAuditContext::for_request("compaction", None, Some(source.id), Some(source.id));
         let job_id = create_or_resume_compaction_job(&db, &audit, false).unwrap();
         let checkpoint = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"# Durable working context\n\n## Concepts and terminology\n- source\n\n## Resources and authoritative locations\n- none\n\n## Chronicle timeline\n- none\n\n## Active decisions and constraints\n- none\n\n## Current objective and next step\n- none\n\n## Open work and evidence routes\n```json\n[]\n```"}]});
-        let output_id = persist_compaction_output(&db, job_id, &checkpoint, &[]).unwrap();
+        let output_id =
+            persist_compaction_output(&db, job_id, &checkpoint, &[], "completed-input").unwrap();
         complete_compaction_job(&db, job_id, output_id).unwrap();
         assert_eq!(
             create_or_resume_compaction_job(&db, &audit, false).unwrap(),
