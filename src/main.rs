@@ -721,8 +721,11 @@ struct MainThreadSummary {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ThreadQuery {
     status: Option<String>,
+    query: Option<String>,
+    model: Option<String>,
     page: Option<usize>,
     page_size: Option<usize>,
 }
@@ -735,6 +738,7 @@ struct ThreadIndex {
     page: usize,
     page_size: usize,
     has_more: bool,
+    models: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -4095,7 +4099,9 @@ fn migrate_execution_ownership_schema(connection: &Connection) -> Result<()> {
              FROM subthreads;
              DROP TABLE subthreads;
              ALTER TABLE subthreads_without_execution_ownership RENAME TO subthreads;
-             CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);",
+             CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);
+         CREATE INDEX IF NOT EXISTS subthreads_goal_state_updated ON subthreads(goal_state, updated_at DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS subthreads_model ON subthreads(model);",
         )?;
     }
     let audit_has_legacy_start = has_column(
@@ -4268,6 +4274,8 @@ fn migrate_history_records_without_activity(connection: &Connection) -> Result<(
          CREATE INDEX files_mime_type ON files(mime_type, created_at DESC);
          CREATE INDEX files_history_entry_id ON files(history_entry_id);
          CREATE INDEX subthreads_status ON subthreads(status, created_at);
+         CREATE INDEX subthreads_goal_state_updated ON subthreads(goal_state, updated_at DESC, id DESC);
+         CREATE INDEX subthreads_model ON subthreads(model);
          PRAGMA foreign_keys = ON;"
     )?;
     let violations: i64 =
@@ -4385,6 +4393,8 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            next_retry_at INTEGER
          );
          CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);
+         CREATE INDEX IF NOT EXISTS subthreads_goal_state_updated ON subthreads(goal_state, updated_at DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS subthreads_model ON subthreads(model);
          CREATE TABLE IF NOT EXISTS command_runs (
            id TEXT PRIMARY KEY,
            command TEXT NOT NULL,
@@ -7004,7 +7014,7 @@ fn load_subthreads_matching(
                     thread.created_at, thread.updated_at,
                     thread.retry_attempt, thread.next_retry_at, thread.context_window_limit
              FROM subthreads thread WHERE {predicate}
-             ORDER BY thread.updated_at DESC"
+             ORDER BY thread.updated_at DESC, thread.id DESC"
         ))?
         .query_map(params_from_iter(values.iter()), subthread_from_row)?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -7027,39 +7037,80 @@ fn thread_page(value: Option<usize>) -> Result<usize> {
     Ok(page)
 }
 
-fn thread_filter(status: Option<&str>) -> Result<(&'static str, bool)> {
+fn thread_filter(status: Option<&str>) -> Result<&'static str> {
     match status.unwrap_or("active") {
-        "active" => Ok(("thread.goal_state = 'active'", true)),
-        "terminal" => Ok((
-            "thread.goal_state IN ('achieved', 'blocked', 'cancelled')",
-            false,
-        )),
-        "completed" => Ok(("thread.goal_state = 'achieved'", false)),
-        "blocked" => Ok(("thread.goal_state = 'blocked'", false)),
-        "cancelled" => Ok(("thread.goal_state = 'cancelled'", false)),
+        "active" => Ok("thread.goal_state = 'active'"),
+        "all" => Ok("1 = 1"),
+        "terminal" => Ok("thread.goal_state IN ('achieved', 'blocked', 'cancelled')"),
+        "completed" => Ok("thread.goal_state = 'achieved'"),
+        "blocked" => Ok("thread.goal_state = 'blocked'"),
+        "cancelled" => Ok("thread.goal_state = 'cancelled'"),
         other => Err(anyhow!(
-            "status must be active, terminal, completed, blocked, or cancelled; got {other:?}"
+            "status must be active, all, terminal, completed, blocked, or cancelled; got {other:?}"
         )),
     }
 }
 
-fn load_thread_index(path: &Path, query: ThreadQuery) -> Result<ThreadIndex> {
-    let (predicate, active) = thread_filter(query.status.as_deref())?;
-    if active && (query.page.is_some() || query.page_size.is_some()) {
-        return Err(anyhow!(
-            "page and page_size are only valid for terminal thread queries"
-        ));
+fn thread_query_value(value: Option<String>, field: &str) -> Result<Option<String>> {
+    let value = value.unwrap_or_default().trim().to_owned();
+    if value.len() > 256 {
+        return Err(anyhow!("{field} must be at most 256 characters"));
     }
-    let page = if active { 1 } else { thread_page(query.page)? };
-    let page_size = if active {
+    Ok((!value.is_empty()).then_some(value))
+}
+
+fn escape_sqlite_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn thread_models(connection: &Connection) -> Result<Vec<String>> {
+    connection
+        .prepare("SELECT DISTINCT model FROM subthreads ORDER BY model COLLATE NOCASE ASC")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn load_thread_index(path: &Path, query: ThreadQuery) -> Result<ThreadIndex> {
+    let status = query.status.as_deref().unwrap_or("active");
+    let status_predicate = thread_filter(Some(status))?;
+    let keyword = thread_query_value(query.query, "query")?;
+    let model_filter = thread_query_value(query.model, "model")?;
+    let live_active = status == "active"
+        && keyword.is_none()
+        && model_filter.is_none()
+        && query.page.is_none()
+        && query.page_size.is_none();
+    let page = if live_active {
+        1
+    } else {
+        thread_page(query.page)?
+    };
+    let requested_page_size = if live_active {
         THREAD_PAGE_DEFAULT
     } else {
         thread_page_size(query.page_size)?
     };
+    let mut predicates = vec![status_predicate.to_owned()];
+    let mut values = Vec::new();
+    if let Some(keyword) = keyword {
+        predicates.push("(thread.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR thread.task LIKE ? ESCAPE '\\' COLLATE NOCASE)".to_owned());
+        let pattern = format!("%{}%", escape_sqlite_like(&keyword));
+        values.push(SqlValue::Text(pattern.clone()));
+        values.push(SqlValue::Text(pattern));
+    }
+    if let Some(model) = model_filter {
+        predicates.push("thread.model = ?".to_owned());
+        values.push(SqlValue::Text(model));
+    }
+    let where_clause = predicates.join(" AND ");
     let connection = open_db(path)?;
     let total: i64 = connection.query_row(
-        &format!("SELECT COUNT(*) FROM subthreads thread WHERE {predicate}"),
-        [],
+        &format!("SELECT COUNT(*) FROM subthreads thread WHERE {where_clause}"),
+        params_from_iter(values.iter()),
         |row| row.get(0),
     )?;
     let model = connection.query_row(
@@ -7072,16 +7123,23 @@ fn load_thread_index(path: &Path, query: ThreadQuery) -> Result<ThreadIndex> {
         [],
         |row| row.get(0),
     )?;
-    let main_thread = MainThreadSummary {
-        status: "idle".to_owned(),
-        model,
-        updated_at,
-    };
+    let models = thread_models(&connection)?;
     drop(connection);
-    let subthreads = if active {
-        load_subthreads_matching(path, predicate, &[])?
+    let total = usize::try_from(total).unwrap_or(usize::MAX);
+    let page_size = if live_active {
+        total.max(1)
+    } else {
+        requested_page_size
+    };
+    let subthreads = if live_active {
+        load_subthreads_matching(path, &where_clause, &values)?
     } else {
         let offset = (page - 1).saturating_mul(page_size);
+        let mut page_values = values;
+        page_values.push(SqlValue::Integer(
+            i64::try_from(page_size).unwrap_or(i64::MAX),
+        ));
+        page_values.push(SqlValue::Integer(i64::try_from(offset).unwrap_or(i64::MAX)));
         open_db(path)?
             .prepare(&format!(
                 "SELECT thread.id, thread.title, thread.task,
@@ -7089,21 +7147,24 @@ fn load_thread_index(path: &Path, query: ThreadQuery) -> Result<ThreadIndex> {
                         thread.blocked_reason, thread.status, thread.model, thread.result,
                         thread.created_at, thread.updated_at,
                         thread.retry_attempt, thread.next_retry_at, thread.context_window_limit
-                 FROM subthreads thread WHERE {predicate}
-                 ORDER BY thread.updated_at DESC LIMIT ? OFFSET ?"
+                 FROM subthreads thread WHERE {where_clause}
+                 ORDER BY thread.updated_at DESC, thread.id DESC LIMIT ? OFFSET ?"
             ))?
-            .query_map(params![page_size, offset], subthread_from_row)?
+            .query_map(params_from_iter(page_values.iter()), subthread_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?
     };
-    let total = usize::try_from(total).unwrap_or(usize::MAX);
-    let page_size = if active { total.max(1) } else { page_size };
     Ok(ThreadIndex {
-        main_thread,
-        has_more: !active && page.saturating_mul(page_size) < total,
+        main_thread: MainThreadSummary {
+            status: "idle".to_owned(),
+            model,
+            updated_at,
+        },
+        has_more: !live_active && page.saturating_mul(page_size) < total,
         subthreads,
         total,
         page,
         page_size,
+        models,
     })
 }
 
@@ -13320,7 +13381,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_status_queries_separate_active_from_paginated_terminal_goals() {
+    fn thread_status_queries_filter_and_paginate_goals_server_side() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
@@ -13336,60 +13397,117 @@ mod tests {
             None,
         )
         .unwrap();
-        for (title, state, updated_at) in [
-            ("Active", "active", "2026-08-23T00:00:03Z"),
-            ("Done", "achieved", "2026-08-23T00:00:02Z"),
-            ("Blocked", "blocked", "2026-08-23T00:00:01Z"),
+        for (title, task, state, model, updated_at) in [
+            (
+                "Active %_ goal",
+                "match literal %_ task",
+                "active",
+                "model-a",
+                "2026-08-23T00:00:04Z",
+            ),
+            (
+                "Done",
+                "release artifact",
+                "achieved",
+                "model-b",
+                "2026-08-23T00:00:03Z",
+            ),
+            (
+                "Blocked",
+                "needs decision",
+                "blocked",
+                "model-a",
+                "2026-08-23T00:00:02Z",
+            ),
+            (
+                "Cancelled",
+                "no longer needed",
+                "cancelled",
+                "model-b",
+                "2026-08-23T00:00:01Z",
+            ),
         ] {
             let output = execute_fork_subthread(
                 &db,
                 user.id,
-                json!({"title":title,"task":format!("{title} task"),"completion_criteria":"finish"}),
+                json!({"title":title,"task":task,"completion_criteria":"finish","model_id":"gpt-5.6-terra"}),
             );
             let id = serde_json::from_str::<Value>(&output.output).unwrap()["id"]
                 .as_str()
                 .unwrap()
                 .to_owned();
-            if state != "active" {
-                open_db(&db).unwrap().execute("UPDATE subthreads SET goal_state=?1,status='completed',updated_at=?2,result='terminal payload' WHERE id=?3", params![state, updated_at, id]).unwrap();
-            }
+            open_db(&db)
+                .unwrap()
+                .execute(
+                    "UPDATE subthreads SET goal_state=?1,status=?2,model=?3,updated_at=?4,result=CASE WHEN ?1='active' THEN NULL ELSE 'terminal payload' END WHERE id=?5",
+                    params![state, if state == "active" { "running" } else { "completed" }, model, updated_at, id],
+                )
+                .unwrap();
         }
-        let active = load_thread_index(
-            &db,
-            ThreadQuery {
-                status: Some("active".to_owned()),
-                page: None,
-                page_size: None,
-            },
-        )
-        .unwrap();
+        let active = load_thread_index(&db, ThreadQuery::default()).unwrap();
         assert_eq!(active.total, 1);
         assert_eq!(active.subthreads.len(), 1);
         assert_eq!(active.subthreads[0].goal_state, "active");
         assert!(!active.has_more);
         assert_eq!(active.page_size, 1);
+        assert!(active.models.contains(&"model-a".to_owned()));
+        assert!(active.models.contains(&"model-b".to_owned()));
         assert!(
             !serde_json::to_string(&active)
                 .unwrap()
                 .contains("terminal payload")
         );
+
         let terminal = load_thread_index(
             &db,
             ThreadQuery {
                 status: Some("terminal".to_owned()),
+                query: None,
+                model: None,
                 page: Some(1),
-                page_size: Some(1),
+                page_size: Some(2),
             },
         )
         .unwrap();
-        assert_eq!(terminal.total, 2);
-        assert_eq!(terminal.subthreads.len(), 1);
+        assert_eq!(terminal.total, 3);
+        assert_eq!(terminal.subthreads.len(), 2);
         assert_eq!(terminal.subthreads[0].goal_state, "achieved");
         assert!(terminal.has_more);
+
+        let all = load_thread_index(
+            &db,
+            ThreadQuery {
+                status: Some("all".to_owned()),
+                query: Some(" release ".to_owned()),
+                model: Some("model-b".to_owned()),
+                page: Some(1),
+                page_size: Some(20),
+            },
+        )
+        .unwrap();
+        assert_eq!(all.total, 1);
+        assert_eq!(all.subthreads[0].title, "Done");
+
+        let escaped = load_thread_index(
+            &db,
+            ThreadQuery {
+                status: Some("all".to_owned()),
+                query: Some("%_".to_owned()),
+                model: None,
+                page: Some(1),
+                page_size: Some(20),
+            },
+        )
+        .unwrap();
+        assert_eq!(escaped.total, 1);
+        assert_eq!(escaped.subthreads[0].title, "Active %_ goal");
+
         let blocked = load_thread_index(
             &db,
             ThreadQuery {
                 status: Some("blocked".to_owned()),
+                query: None,
+                model: None,
                 page: Some(1),
                 page_size: Some(20),
             },
@@ -13402,19 +13520,7 @@ mod tests {
                 &db,
                 ThreadQuery {
                     status: Some("unexpected".to_owned()),
-                    page: None,
-                    page_size: None
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            load_thread_index(
-                &db,
-                ThreadQuery {
-                    status: Some("active".to_owned()),
-                    page: Some(1),
-                    page_size: None
+                    ..ThreadQuery::default()
                 }
             )
             .is_err()
@@ -13425,7 +13531,29 @@ mod tests {
                 ThreadQuery {
                     status: Some("terminal".to_owned()),
                     page: Some(0),
-                    page_size: None
+                    ..ThreadQuery::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            load_thread_index(
+                &db,
+                ThreadQuery {
+                    status: Some("all".to_owned()),
+                    page_size: Some(THREAD_PAGE_MAX + 1),
+                    ..ThreadQuery::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            load_thread_index(
+                &db,
+                ThreadQuery {
+                    status: Some("all".to_owned()),
+                    query: Some("x".repeat(257)),
+                    ..ThreadQuery::default()
                 }
             )
             .is_err()
