@@ -26,6 +26,7 @@ import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { audioFileName, preferredAudioMimeType } from './audio'
 import './styles.css'
 
 declare global { interface Window { __CYBION_AUTH_URL: string | null } }
@@ -217,7 +218,7 @@ async function bootstrapApi<T>(path: string, token: string, init?: RequestInit):
 
 async function transcribeAudio(sdk: AuthMiniApi, audio: Blob): Promise<Transcription> {
   const form = new FormData()
-  form.append('file', audio, `recording.${audio.type.includes('mp4') || audio.type.includes('m4a') ? 'm4a' : 'webm'}`)
+  form.append('file', audio, audioFileName(audio.type))
   const response = await authenticatedFetch(sdk, '/api/audio/transcriptions', { method: 'POST', body: form })
   if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
   return response.json() as Promise<Transcription>
@@ -732,7 +733,15 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     try {
       const recordingStream = await navigator.mediaDevices.getUserMedia({ audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true } })
       stream = recordingStream
-      const recorder = new MediaRecorder(recordingStream)
+      const mimeType = typeof MediaRecorder.isTypeSupported === 'function'
+        ? preferredAudioMimeType(MediaRecorder.isTypeSupported.bind(MediaRecorder))
+        : undefined
+      let recorder: MediaRecorder
+      try {
+        recorder = mimeType ? new MediaRecorder(recordingStream, { mimeType }) : new MediaRecorder(recordingStream)
+      } catch {
+        recorder = new MediaRecorder(recordingStream)
+      }
       const chunks: Blob[] = []
       let frame = 0
       let audioContext: AudioContext | null = null
