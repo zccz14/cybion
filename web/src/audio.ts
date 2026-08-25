@@ -1,12 +1,20 @@
-const preferredMimeTypes = ['audio/webm; codecs=opus', 'audio/webm'] as const
+export const WEBM_OPUS_MIME_TYPE = 'audio/webm;codecs=opus'
+export const WEBM_OPUS_UNSUPPORTED_MESSAGE = 'This browser does not support WebM/Opus audio recording.'
 
-export function preferredAudioMimeType(isTypeSupported: (mimeType: string) => boolean): string | undefined {
-  return preferredMimeTypes.find(isTypeSupported)
+export function requireWebmOpusMimeType(isTypeSupported: (mimeType: string) => boolean): string {
+  if (!isTypeSupported(WEBM_OPUS_MIME_TYPE)) throw new Error(WEBM_OPUS_UNSUPPORTED_MESSAGE)
+  return WEBM_OPUS_MIME_TYPE
 }
 
 export function audioFileName(mimeType: string): string {
-  const normalized = mimeType.toLowerCase()
-  if (normalized.includes('mp4') || normalized.includes('m4a') || normalized.includes('aac')) return 'recording.m4a'
-  if (normalized.includes('ogg')) return 'recording.ogg'
+  if (mimeType.toLowerCase().split(';', 1)[0] !== 'audio/webm') {
+    throw new Error('Unsupported recorded audio format.')
+  }
   return 'recording.webm'
+}
+
+export function transcriptionFormData(audio: Blob): FormData {
+  const form = new FormData()
+  form.append('file', audio, audioFileName(audio.type))
+  return form
 }

@@ -1,27 +1,34 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { audioFileName, preferredAudioMimeType } from '../src/audio.ts'
+import {
+  audioFileName,
+  requireWebmOpusMimeType,
+  transcriptionFormData,
+  WEBM_OPUS_MIME_TYPE,
+  WEBM_OPUS_UNSUPPORTED_MESSAGE,
+} from '../src/audio.ts'
 
-test('prefers a supported WebM/Opus recorder format', () => {
+test('requires the exact WebM/Opus recorder MIME type', () => {
   assert.equal(
-    preferredAudioMimeType((mimeType) => mimeType === 'audio/webm; codecs=opus'),
-    'audio/webm; codecs=opus',
+    requireWebmOpusMimeType((mimeType) => mimeType === WEBM_OPUS_MIME_TYPE),
+    WEBM_OPUS_MIME_TYPE,
   )
 })
 
-test('uses plain WebM when the Opus-specific MIME type is unavailable', () => {
-  assert.equal(
-    preferredAudioMimeType((mimeType) => mimeType === 'audio/webm'),
-    'audio/webm',
+test('rejects recording when WebM/Opus is unavailable instead of falling back to a browser default', () => {
+  assert.throws(
+    () => requireWebmOpusMimeType(() => false),
+    new Error(WEBM_OPUS_UNSUPPORTED_MESSAGE),
   )
 })
 
-test('lets MediaRecorder select its default format when no preferred type is supported', () => {
-  assert.equal(preferredAudioMimeType(() => false), undefined)
+test('transcription upload forwards a WebM filename and the recorded Blob MIME type', () => {
+  const audio = new Blob(['audio bytes'], { type: WEBM_OPUS_MIME_TYPE })
+  const file = transcriptionFormData(audio).get('file') as File
+  assert.equal(file.name, 'recording.webm')
+  assert.equal(file.type, WEBM_OPUS_MIME_TYPE)
 })
 
-test('keeps uploaded filename extensions aligned with recorded audio MIME types', () => {
-  assert.equal(audioFileName('audio/webm; codecs=opus'), 'recording.webm')
-  assert.equal(audioFileName('audio/ogg; codecs=opus'), 'recording.ogg')
-  assert.equal(audioFileName('audio/mp4'), 'recording.m4a')
+test('does not mislabel an unexpected recorded format as WebM', () => {
+  assert.throws(() => audioFileName('audio/ogg;codecs=opus'), /Unsupported recorded audio format/)
 })

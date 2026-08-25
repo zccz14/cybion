@@ -51,7 +51,7 @@ use tokio_tungstenite::{
     tungstenite::{Message as WebSocketMessage, client::IntoClientRequest},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::{info, warn};
+use tracing::info;
 use url::Url;
 use uuid::Uuid;
 
@@ -7725,27 +7725,9 @@ async fn transcribe_audio(
         .multipart(form)
         .send()
         .await
-        .map_err(|cause| {
-            warn!(%cause, "audio transcription request failed");
-            error(
-                StatusCode::BAD_GATEWAY,
-                "cannot reach transcription upstream",
-            )
-        })?;
-    if !response.status().is_success() {
-        let upstream_status = response.status();
-        let detail = safe_transcription_upstream_error(&response.text().await.unwrap_or_default());
-        if let Some(detail) = &detail {
-            warn!(%upstream_status, upstream_error = %detail, "audio transcription upstream returned an error");
-        } else {
-            warn!(%upstream_status, "audio transcription upstream returned an error without a safe diagnostic");
-        }
-        return Err(error(
-            StatusCode::BAD_GATEWAY,
-            transcription_upstream_error_message(upstream_status, detail),
-        ));
-    }
-    let response = response
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot transcribe audio"))?
+        .error_for_status()
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "cannot transcribe audio"))?
         .json::<Value>()
         .await
         .map_err(|_| error(StatusCode::BAD_GATEWAY, "invalid transcription response"))?;
@@ -9033,43 +9015,6 @@ async fn emit_response_process_events(
         .await?;
     }
     Ok(())
-}
-
-fn transcription_upstream_error_message(status: StatusCode, detail: Option<String>) -> String {
-    match detail {
-        Some(detail) => format!("transcription upstream returned HTTP {status}: {detail}"),
-        None => format!("transcription upstream returned HTTP {status}"),
-    }
-}
-
-fn safe_transcription_upstream_error(body: &str) -> Option<String> {
-    let body = serde_json::from_str::<Value>(body).ok()?;
-    let detail = body
-        .get("detail")
-        .and_then(Value::as_str)
-        .or_else(|| body.get("message").and_then(Value::as_str))
-        .or_else(|| body.pointer("/error/message").and_then(Value::as_str))?
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if detail.is_empty() || detail.len() > 240 {
-        return None;
-    }
-    let lower = detail.to_ascii_lowercase();
-    if [
-        "authorization",
-        "bearer ",
-        "api key",
-        "api_key",
-        "token",
-        "://",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-    {
-        return None;
-    }
-    Some(detail)
 }
 
 fn transcription_text(response: &Value) -> Result<String> {
@@ -17381,51 +17326,6 @@ mod tests {
             "transcribed"
         );
         assert!(transcription_text(&json!({})).is_err());
-    }
-
-    #[test]
-    fn transcription_upstream_error_keeps_a_short_json_diagnostic() {
-        assert_eq!(
-            safe_transcription_upstream_error(r#"{"detail":"Error in ASR API"}"#),
-            Some("Error in ASR API".to_owned())
-        );
-        assert_eq!(
-            safe_transcription_upstream_error(
-                r#"{"error":{"message":"unsupported audio format"}}"#
-            ),
-            Some("unsupported audio format".to_owned())
-        );
-    }
-
-    #[test]
-    fn transcription_upstream_error_message_includes_status_and_only_safe_detail() {
-        assert_eq!(
-            transcription_upstream_error_message(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                safe_transcription_upstream_error(r#"{"detail":"Error in ASR API"}"#),
-            ),
-            "transcription upstream returned HTTP 500 Internal Server Error: Error in ASR API"
-        );
-        assert_eq!(
-            transcription_upstream_error_message(
-                StatusCode::BAD_REQUEST,
-                safe_transcription_upstream_error(r#"{"detail":"Bearer private-token"}"#),
-            ),
-            "transcription upstream returned HTTP 400 Bad Request"
-        );
-    }
-
-    #[test]
-    fn transcription_upstream_error_drops_sensitive_or_unbounded_diagnostics() {
-        assert_eq!(
-            safe_transcription_upstream_error(r#"{"detail":"Bearer private-token"}"#),
-            None
-        );
-        assert_eq!(
-            safe_transcription_upstream_error(&format!(r#"{{"detail":"{}"}}"#, "x".repeat(241))),
-            None
-        );
-        assert_eq!(safe_transcription_upstream_error("not json"), None);
     }
 
     #[test]

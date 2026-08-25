@@ -26,7 +26,7 @@ import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { audioFileName, preferredAudioMimeType } from './audio'
+import { requireWebmOpusMimeType, transcriptionFormData } from './audio'
 import './styles.css'
 
 declare global { interface Window { __CYBION_AUTH_URL: string | null } }
@@ -217,8 +217,7 @@ async function bootstrapApi<T>(path: string, token: string, init?: RequestInit):
 }
 
 async function transcribeAudio(sdk: AuthMiniApi, audio: Blob): Promise<Transcription> {
-  const form = new FormData()
-  form.append('file', audio, audioFileName(audio.type))
+  const form = transcriptionFormData(audio)
   const response = await authenticatedFetch(sdk, '/api/audio/transcriptions', { method: 'POST', body: form })
   if (!response.ok) { const body = await response.json().catch(() => ({ error: response.statusText })); throw new Error(body.error ?? response.statusText) }
   return response.json() as Promise<Transcription>
@@ -731,17 +730,11 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
     if (recorderRef.current || voiceAwaitingConfirmationRef.current) return
     let stream: MediaStream | null = null
     try {
+      if (typeof MediaRecorder.isTypeSupported !== 'function') throw new Error('This browser does not support WebM/Opus audio recording.')
+      const mimeType = requireWebmOpusMimeType(MediaRecorder.isTypeSupported.bind(MediaRecorder))
       const recordingStream = await navigator.mediaDevices.getUserMedia({ audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true } })
       stream = recordingStream
-      const mimeType = typeof MediaRecorder.isTypeSupported === 'function'
-        ? preferredAudioMimeType(MediaRecorder.isTypeSupported.bind(MediaRecorder))
-        : undefined
-      let recorder: MediaRecorder
-      try {
-        recorder = mimeType ? new MediaRecorder(recordingStream, { mimeType }) : new MediaRecorder(recordingStream)
-      } catch {
-        recorder = new MediaRecorder(recordingStream)
-      }
+      const recorder = new MediaRecorder(recordingStream, { mimeType })
       const chunks: Blob[] = []
       let frame = 0
       let audioContext: AudioContext | null = null
@@ -753,7 +746,7 @@ function Console({ children, token }: { children: ReactNode; token: AuthMiniApi 
         void audioContext?.close()
         recordingStream.getTracks().forEach((track) => track.stop())
         setRecording(false)
-        const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
+        const audio = new Blob(chunks, { type: recorder.mimeType })
         if (!audio.size || (continuousVoiceRef.current && !heardSpeech)) {
           if (continuousVoiceRef.current && !voiceAwaitingConfirmationRef.current) {
             setVoicePreview({ state: 'armed', transcript: voiceTranscriptRef.current })
