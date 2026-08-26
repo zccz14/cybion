@@ -8399,6 +8399,7 @@ async fn run_agent_items(
         }
     );
     let mut retried_after_context_overflow = false;
+    let mut reasoning_continuation_used = false;
     loop {
         if *cancellation.borrow() {
             return Err(anyhow!("agent stopped"));
@@ -8410,7 +8411,7 @@ async fn run_agent_items(
             Some(context.idx_head),
             Some(context.idx_tail),
         );
-        let body = scoped_responses_request_body(
+        let mut body = scoped_responses_request_body(
             &config.default_model,
             &context.items,
             &skills
@@ -8421,6 +8422,16 @@ async fn run_agent_items(
             db_path,
             browser.as_ref(),
         );
+        if reasoning_continuation_used {
+            body["input"]
+                .as_array_mut()
+                .expect("Responses request input is an array")
+                .push(json!({
+                    "role": "developer",
+                    "content": "The preceding response contains persisted reasoning but no usable action or final text. Continue that reasoning now. This turn must produce at least one concrete function/computer call, generated image, non-empty final text, achieve_goal, or block_goal. Do not return an empty final message."
+                }));
+            sanitize_responses_input(&mut body);
+        }
         let request = client
             .post(format!("{}/responses", config.openai_base_url))
             .bearer_auth(&config.openai_api_key)
@@ -8487,7 +8498,22 @@ async fn run_agent_items(
             .cloned()
             .unwrap_or_default();
         if !completed_response_has_progress(&output) {
-            return Err(EmptyCompletedResponse.into());
+            let reasoning = output
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+                .cloned()
+                .collect::<Vec<_>>();
+            if reasoning.is_empty() || reasoning_continuation_used {
+                if !reasoning.is_empty() {
+                    append_response_output_items(db_path, history_thread_id, &reasoning)?;
+                    emit_response_process_events(&reasoning, db_path, &events).await?;
+                }
+                return Err(EmptyCompletedResponse.into());
+            }
+            append_response_output_items(db_path, history_thread_id, &reasoning)?;
+            emit_response_process_events(&reasoning, db_path, &events).await?;
+            reasoning_continuation_used = true;
+            continue;
         }
         let output_record_ids = append_response_output_items(db_path, history_thread_id, &output)?;
         reset_subthread_retry_after_success(db_path, history_thread_id)?;
@@ -16347,6 +16373,269 @@ mod tests {
                 .as_str()
                 .is_some_and(|output| output.contains("subthread_handoff"))
         }));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_empty_completion_persists_reasoning_then_continues_once() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> String {
+            let mut requests = requests.lock().await;
+            let first = requests.is_empty();
+            requests.push(request);
+            let output = if first {
+                vec![
+                    json!({
+                        "id": "reasoning-1",
+                        "type": "reasoning",
+                        "content": [],
+                        "encrypted_content": "encrypted-reasoning",
+                        "summary": [],
+                    }),
+                    json!({
+                        "id": "message-empty",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": ""}],
+                    }),
+                ]
+            } else {
+                vec![json!({
+                    "id": "message-final",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "继续后的有效结果。"}],
+                })]
+            };
+            let events = output
+                .iter()
+                .map(|item| {
+                    format!(
+                        "event: response.output_item.done\ndata: {}\n\n",
+                        json!({"type":"response.output_item.done","item":item})
+                    )
+                })
+                .collect::<String>();
+            format!(
+                "{events}event: response.completed\ndata: {}\n\n",
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+        }
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let config = load_config(&db).unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let (events, _receiver) = mpsc::channel(32);
+        let result = run_agent(
+            &reqwest::Client::new(),
+            &config,
+            vec![ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("继续任务".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            &db,
+            &Arc::new(StdRwLock::new(SkillCatalog::default())),
+            AgentEventSink {
+                thread_id: None,
+                sender: &events,
+            },
+            cancellation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.persisted_message.content, "继续后的有效结果。");
+        let records: Vec<Value> = open_db(&db)
+            .unwrap()
+            .prepare("SELECT payload FROM history_records WHERE kind='response_output' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                serde_json::from_str::<Value>(&row.get::<_, String>(0)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(records.iter().any(|record| {
+            record["type"] == "reasoning"
+                && record["id"] == "reasoning-1"
+                && record["encrypted_content"] == "encrypted-reasoning"
+        }));
+        assert!(!records.iter().any(|record| record["id"] == "message-empty"));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]["input"].as_array().unwrap().iter().any(|item| {
+            item["type"] == "reasoning"
+                && item["id"] == "reasoning-1"
+                && item["encrypted_content"] == "encrypted-reasoning"
+        }));
+        assert!(requests[1]["input"].as_array().unwrap().iter().any(|item| {
+            item["role"] == "developer"
+                && item["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Continue that reasoning now"))
+        }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn second_reasoning_only_empty_completion_persists_reasoning_and_blocks_without_a_third_request()
+     {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> String {
+            let mut requests = requests.lock().await;
+            let attempt = requests.len() + 1;
+            requests.push(request);
+            let output = [
+                json!({
+                    "id": format!("reasoning-{attempt}"),
+                    "type": "reasoning",
+                    "content": [],
+                    "encrypted_content": format!("encrypted-reasoning-{attempt}"),
+                    "summary": [],
+                }),
+                json!({
+                    "id": format!("message-empty-{attempt}"),
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": ""}],
+                }),
+            ];
+            let events = output
+                .iter()
+                .map(|item| {
+                    format!(
+                        "event: response.output_item.done\ndata: {}\n\n",
+                        json!({"type":"response.output_item.done","item":item})
+                    )
+                })
+                .collect::<String>();
+            format!(
+                "{events}event: response.completed\ndata: {}\n\n",
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+        }
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let config = load_config(&db).unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let (events, _receiver) = mpsc::channel(32);
+        let result = run_agent(
+            &reqwest::Client::new(),
+            &config,
+            vec![ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("继续任务".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            &db,
+            &Arc::new(StdRwLock::new(SkillCatalog::default())),
+            AgentEventSink {
+                thread_id: None,
+                sender: &events,
+            },
+            cancellation,
+        )
+        .await;
+        assert!(matches!(result, Err(ref cause) if is_empty_completed_response(cause)));
+        let records: Vec<Value> = open_db(&db)
+            .unwrap()
+            .prepare("SELECT payload FROM history_records WHERE kind='response_output' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                serde_json::from_str::<Value>(&row.get::<_, String>(0)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        for attempt in 1..=2 {
+            assert!(records.iter().any(|record| {
+                record["type"] == "reasoning"
+                    && record["id"] == format!("reasoning-{attempt}")
+                    && record["encrypted_content"] == format!("encrypted-reasoning-{attempt}")
+            }));
+            assert!(
+                !records
+                    .iter()
+                    .any(|record| record["id"] == format!("message-empty-{attempt}"))
+            );
+        }
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        let first_continuations = requests[0]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                item["role"] == "developer"
+                    && item["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Continue that reasoning now"))
+            })
+            .count();
+        assert_eq!(first_continuations, 0);
+        let second_input = requests[1]["input"].as_array().unwrap();
+        let continuation_positions = second_input
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                (item["role"] == "developer"
+                    && item["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Continue that reasoning now")))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(continuation_positions.len(), 1);
+        let reasoning_position = second_input
+            .iter()
+            .position(|item| item["type"] == "reasoning" && item["id"] == "reasoning-1")
+            .unwrap();
+        assert!(reasoning_position < continuation_positions[0]);
+        server.abort();
     }
 
     #[tokio::test]
