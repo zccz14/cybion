@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Result;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, Disks, Networks, Pid, ProcessesToUpdate, System};
 
 #[derive(Serialize)]
@@ -20,13 +20,13 @@ pub struct SystemResourcesSnapshot {
     pub sqlite: SqliteSnapshot,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CpuSnapshot {
     pub usage_percent: f32,
     pub load_1m: f64,
     pub logical_cpus: usize,
 }
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct MemorySnapshot {
     pub used_bytes: u64,
     pub total_bytes: u64,
@@ -37,13 +37,13 @@ pub struct MemorySnapshot {
     pub swap_used_bytes: u64,
     pub swap_total_bytes: u64,
 }
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct NetworkSnapshot {
     pub receive_bytes_per_second: u64,
     pub transmit_bytes_per_second: u64,
     pub interfaces: usize,
 }
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct DiskSnapshot {
     pub mount_point: String,
     pub used_bytes: u64,
@@ -59,6 +59,51 @@ pub struct SqliteSnapshot {
     pub total_bytes: u64,
     pub freelist_bytes: u64,
     pub freelist_percent: f64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ExecutorResourcesSnapshot {
+    pub cpu: CpuSnapshot,
+    pub memory: ExecutorMemorySnapshot,
+    pub network: NetworkSnapshot,
+    pub disk: Option<ExecutorDiskSnapshot>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ExecutorMemorySnapshot {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub usage_percent: f64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ExecutorDiskSnapshot {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub usage_percent: f64,
+}
+
+impl From<&SystemResourcesSnapshot> for ExecutorResourcesSnapshot {
+    fn from(snapshot: &SystemResourcesSnapshot) -> Self {
+        Self {
+            cpu: snapshot.cpu.clone(),
+            memory: ExecutorMemorySnapshot {
+                used_bytes: snapshot.memory.used_bytes,
+                total_bytes: snapshot.memory.total_bytes,
+                available_bytes: snapshot.memory.available_bytes,
+                usage_percent: snapshot.memory.usage_percent,
+            },
+            network: snapshot.network.clone(),
+            disk: snapshot.disk.as_ref().map(|disk| ExecutorDiskSnapshot {
+                used_bytes: disk.used_bytes,
+                total_bytes: disk.total_bytes,
+                available_bytes: disk.available_bytes,
+                usage_percent: disk.usage_percent,
+            }),
+        }
+    }
 }
 
 pub struct ResourceMonitor {

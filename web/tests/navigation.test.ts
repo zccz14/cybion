@@ -34,3 +34,27 @@ test("audit navigation preserves its routes and active NavLink behavior", () => 
   assert.match(source, /onClick=\{\(\) => setOpenMobile\(false\)\}/)
   assert.match(source, /const auditNav = \[/)
 })
+
+test("active task status uses one shared top-bar query and accessible popup navigation", () => {
+  const workspace = source.match(/function Workspace[\s\S]*?function reasoningSummary/)?.[0] ?? ""
+  assert.equal((workspace.match(/queryKey: \['threads', 'active'\]/g) ?? []).length, 1)
+  assert.match(source, /function AppHeader\(\{ language, threads, tasksLoading, tasksError \}/)
+  assert.match(source, /aria-label=\{`\$\{t\('activeTasks'\)\}: \$\{threads\.length\}`\}/)
+  assert.match(source, /<DropdownMenuItem asChild key=\{thread\.id\}><Link[^>]+to=\{`\/threads\/\$\{thread\.id\}`\}/)
+  assert.match(source, /activeTasksLoading/)
+  assert.match(source, /activeTasksError/)
+  assert.match(source, /noActiveTasks/)
+  const consoleSource = source.match(/function Console[\s\S]*?function VoicePreviewPanel/)?.[0] ?? ""
+  assert.doesNotMatch(consoleSource, /queryKey: \['threads', 'active'\]/)
+  assert.doesNotMatch(consoleSource, /activeSubthreads\.map\(\(thread\) => <Badge/)
+})
+
+test("machines poll safe executor resource snapshots every five seconds", () => {
+  const machines = source.match(/function Machines[\s\S]*?function StoredFilePreview/)?.[0] ?? ""
+  assert.match(machines, /queryKey: \['peers'\][\s\S]*refetchInterval: 5000/)
+  assert.match(machines, /resource_status/)
+  assert.match(machines, /resource_sampled_at/)
+  assert.match(machines, /peer\.resource\.cpu\.usage_percent/)
+  assert.match(machines, /peer\.resource\.network\.receive_bytes_per_second/)
+  assert.doesNotMatch(machines, /mount_point|sqlite|process_used_bytes/)
+})
