@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
     fmt,
-    io::{Cursor, Read, Seek, SeekFrom, Write},
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -91,6 +91,7 @@ const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
 const MAX_EXECUTOR_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const EXECUTOR_RESULT_GZIP_THRESHOLD: usize = 4 * 1024;
+const EXECUTOR_RESULT_POST_MAX_ATTEMPTS: u32 = 7;
 const EXECUTOR_RESULT_TIMEOUT: Duration = Duration::from_secs(75);
 const TRANSFER_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TRANSFER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -103,7 +104,8 @@ const EXECUTOR_PAIRING_TTL: chrono::Duration = chrono::Duration::minutes(15);
 const EXECUTOR_PAIRING_HEADER: &str = "x-cybion-pairing-token";
 const EXECUTOR_TUNNEL_BACKOFF_BASE: Duration = Duration::from_secs(1);
 const EXECUTOR_TUNNEL_BACKOFF_MAX: Duration = Duration::from_secs(60);
-const EXECUTOR_TUNNEL_STABLE_CONNECTION: Duration = Duration::from_secs(30);
+const EXECUTOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const EXECUTOR_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 static FILE_READS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_FILE_READS)));
@@ -167,7 +169,25 @@ enum TransferTarget {
 #[derive(Clone)]
 struct ExecutorSession {
     id: String,
-    sender: mpsc::Sender<ExecutorToolCall>,
+    sender: mpsc::Sender<ExecutorTunnelMessage>,
+    disconnect: watch::Sender<bool>,
+    last_heartbeat: Instant,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ExecutorHeartbeat {
+    epoch: String,
+}
+
+#[derive(Deserialize)]
+struct ExecutorHeartbeatAck {
+    epoch: String,
+}
+
+#[derive(Clone)]
+enum ExecutorTunnelMessage {
+    ToolCall(ExecutorToolCall),
+    Heartbeat(ExecutorHeartbeat),
 }
 
 struct PendingExecutorResult {
@@ -1564,6 +1584,10 @@ fn app(state: AppState) -> Router {
         .route("/api/executors/pairings", post(create_executor_pairing))
         .route("/api/executors/pair", post(pair_executor))
         .route("/api/executors/tunnel", get(executor_tunnel))
+        .route(
+            "/api/executors/tunnel/heartbeats",
+            post(executor_tunnel_heartbeat),
+        )
         .route(
             "/api/executors/tunnel/results",
             post(executor_tunnel_result),
@@ -4675,6 +4699,7 @@ struct Config {
     deployment_role: String,
 }
 
+#[derive(Clone)]
 struct ExecutorConfig {
     machine_id: String,
     controller_url: String,
@@ -5894,18 +5919,40 @@ async fn executor_tunnel(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> std::result::Result<
-    Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>,
+    Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, io::Error>>>,
     (StatusCode, Json<ApiError>),
 > {
     let machine_id = executor_machine_id(&state, &headers)?;
     let session_id = Uuid::new_v4().to_string();
     let (sender, receiver) = mpsc::channel(16);
-    state.executor_tunnels.sessions.lock().await.insert(
+    let (disconnect, disconnect_receiver) = watch::channel(false);
+    let replaced = state.executor_tunnels.sessions.lock().await.insert(
         machine_id.clone(),
         ExecutorSession {
             id: session_id.clone(),
             sender: sender.clone(),
+            disconnect,
+            last_heartbeat: Instant::now(),
         },
+    );
+    if let Some(replaced) = replaced {
+        let _ = replaced.disconnect.send(true);
+        info!(
+            machine_id = %machine_id,
+            connection_epoch = %replaced.id,
+            disconnect_reason = "session_replaced",
+            "executor tunnel removed"
+        );
+    }
+    info!(
+        machine_id = %machine_id,
+        connection_epoch = %session_id,
+        "executor tunnel registered"
+    );
+    schedule_controller_heartbeats(
+        state.executor_tunnels.clone(),
+        machine_id.clone(),
+        session_id.clone(),
     );
     let tunnels = state.executor_tunnels.clone();
     let cleanup_machine_id = machine_id.clone();
@@ -5917,6 +5964,7 @@ async fn executor_tunnel(
             .is_some_and(|session| session.id == session_id)
         {
             sessions.remove(&cleanup_machine_id);
+            info!(machine_id = %cleanup_machine_id, connection_epoch = %session_id, disconnect_reason = "stream_closed", "executor tunnel removed");
         }
     });
     open_db(&state.db_path)
@@ -5934,17 +5982,124 @@ async fn executor_tunnel(
                 "cannot update executor status",
             )
         })?;
-    let stream = ReceiverStream::new(receiver).map(move |call| {
-        Ok(Event::default()
-            .event("tool_call")
-            .json_data(call)
-            .expect("tool call is serializable"))
-    });
+    let stream = futures_util::stream::unfold(
+        (receiver, disconnect_receiver),
+        |(mut receiver, mut disconnect)| async move {
+            tokio::select! {
+                message = receiver.recv() => message.map(|message| {
+                    let event = match message {
+                        ExecutorTunnelMessage::ToolCall(call) => Event::default()
+                            .event("tool_call")
+                            .json_data(call)
+                            .expect("tool call is serializable"),
+                        ExecutorTunnelMessage::Heartbeat(heartbeat) => Event::default()
+                            .event("heartbeat")
+                            .json_data(heartbeat)
+                            .expect("heartbeat is serializable"),
+                    };
+                    (Ok(event), (receiver, disconnect))
+                }),
+                changed = disconnect.changed() => match changed {
+                    Ok(()) if *disconnect.borrow() => Some((
+                        Err(io::Error::other("executor session is stale")),
+                        (receiver, disconnect),
+                    )),
+                    Ok(()) => None,
+                    Err(_) => None,
+                },
+            }
+        },
+    );
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+fn heartbeat_is_stale(elapsed: Duration) -> bool {
+    elapsed >= EXECUTOR_HEARTBEAT_TIMEOUT
+}
+
+fn schedule_controller_heartbeats(
+    tunnels: ExecutorTunnels,
+    machine_id: String,
+    connection_epoch: String,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(EXECUTOR_HEARTBEAT_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let session = tunnels.sessions.lock().await.get(&machine_id).cloned();
+            let Some(session) = session else {
+                return;
+            };
+            if session.id != connection_epoch {
+                return;
+            }
+            if heartbeat_is_stale(session.last_heartbeat.elapsed()) {
+                let removed =
+                    remove_stale_executor_session(&tunnels, &machine_id, &connection_epoch).await;
+                if removed {
+                    info!(machine_id = %machine_id, connection_epoch = %connection_epoch, disconnect_reason = "heartbeat_timeout", "executor tunnel removed");
+                }
+                return;
+            }
+            if matches!(
+                session
+                    .sender
+                    .try_send(ExecutorTunnelMessage::Heartbeat(ExecutorHeartbeat {
+                        epoch: connection_epoch.clone(),
+                    })),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ) {
+                return;
+            }
+        }
+    });
+}
+
+async fn remove_stale_executor_session(
+    tunnels: &ExecutorTunnels,
+    machine_id: &str,
+    connection_epoch: &str,
+) -> bool {
+    let session = {
+        let mut sessions = tunnels.sessions.lock().await;
+        if !sessions.get(machine_id).is_some_and(|session| {
+            session.id == connection_epoch && heartbeat_is_stale(session.last_heartbeat.elapsed())
+        }) {
+            return false;
+        }
+        sessions.remove(machine_id)
+    };
+    if let Some(session) = session {
+        let _ = session.disconnect.send(true);
+        true
+    } else {
+        false
+    }
+}
+
+async fn executor_tunnel_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(ack): Json<ExecutorHeartbeatAck>,
+) -> ApiResult<Value> {
+    let machine_id = executor_machine_id(&state, &headers)?;
+    let mut sessions = state.executor_tunnels.sessions.lock().await;
+    let accepted = sessions.get_mut(&machine_id).is_some_and(|session| {
+        if session.id != ack.epoch {
+            return false;
+        }
+        session.last_heartbeat = Instant::now();
+        true
+    });
+    if !accepted {
+        info!(machine_id = %machine_id, connection_epoch = %ack.epoch, disconnect_reason = "unknown_epoch", "executor heartbeat ignored");
+    }
+    Ok(Json(json!({"accepted": accepted})))
 }
 
 async fn executor_tunnel_result(
@@ -5954,13 +6109,9 @@ async fn executor_tunnel_result(
 ) -> ApiResult<Value> {
     let machine_id = executor_machine_id(&state, &headers)?;
     let result = decode_executor_result(&headers, &body)?;
-    let pending = state
-        .executor_tunnels
-        .results
-        .lock()
-        .await
-        .remove(&result.call_id);
-    let Some(pending) = pending else {
+    let mut pending_results = state.executor_tunnels.results.lock().await;
+    let Some(pending) = pending_results.get(&result.call_id) else {
+        info!(machine_id = %machine_id, call_id = %result.call_id, "executor result duplicate or no longer pending");
         return Ok(Json(json!({"accepted": true})));
     };
     if pending.machine_id != machine_id {
@@ -5969,7 +6120,13 @@ async fn executor_tunnel_result(
             "result belongs to another executor",
         ));
     }
-    let _ = pending.sender.send(result);
+    let pending = pending_results
+        .remove(&result.call_id)
+        .expect("pending executor result was checked while locked");
+    let call_id = result.call_id.clone();
+    drop(pending_results);
+    let delivered = pending.sender.send(result).is_ok();
+    info!(machine_id = %machine_id, call_id = %call_id, delivered, "executor result received");
     Ok(Json(json!({"accepted": true})))
 }
 
@@ -10214,14 +10371,19 @@ async fn wait_for_executor_result(
     timeout: Duration,
 ) -> std::result::Result<ExecutorToolResult, &'static str> {
     let deadline = Instant::now() + timeout;
+    let mut delivered_epoch = None;
     loop {
         let session = tunnels.sessions.lock().await.get(machine_id).cloned();
         let Some(session) = session else {
             return Err("remote executor is offline");
         };
-        if session.sender.send(call.clone()).await.is_err() {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            continue;
+        if delivered_epoch.as_deref() != Some(session.id.as_str()) {
+            session
+                .sender
+                .send(ExecutorTunnelMessage::ToolCall(call.clone()))
+                .await
+                .map_err(|_| "remote executor disconnected before receiving a result")?;
+            delivered_epoch = Some(session.id);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         tokio::select! {
@@ -10237,14 +10399,14 @@ fn schedule_executor_tunnel(runtime: ExecutorRuntime) {
     tokio::spawn(async move {
         let mut failures = 0_u32;
         loop {
-            let connected_at = Instant::now();
-            if let Err(cause) = run_executor_tunnel(&runtime).await {
-                tracing::warn!(%cause, "executor tunnel disconnected");
-            }
-            if connected_at.elapsed() >= EXECUTOR_TUNNEL_STABLE_CONNECTION {
-                failures = 0;
-            }
-            failures = failures.saturating_add(1);
+            let had_valid_heartbeat = match run_executor_tunnel(&runtime).await {
+                Ok(had_valid_heartbeat) => had_valid_heartbeat,
+                Err((cause, had_valid_heartbeat)) => {
+                    tracing::warn!(%cause, "executor tunnel disconnected");
+                    had_valid_heartbeat
+                }
+            };
+            failures = next_executor_tunnel_failure_count(failures, had_valid_heartbeat);
             let delay = executor_tunnel_retry_delay(failures, Uuid::new_v4().as_u128() as u64);
             tracing::warn!(
                 attempt = failures,
@@ -10254,6 +10416,14 @@ fn schedule_executor_tunnel(runtime: ExecutorRuntime) {
             tokio::time::sleep(delay).await;
         }
     });
+}
+
+fn next_executor_tunnel_failure_count(failures: u32, had_valid_heartbeat: bool) -> u32 {
+    if had_valid_heartbeat {
+        1
+    } else {
+        failures.saturating_add(1)
+    }
 }
 
 fn executor_tunnel_retry_delay(attempt: u32, entropy: u64) -> Duration {
@@ -10266,43 +10436,88 @@ fn executor_tunnel_retry_delay(attempt: u32, entropy: u64) -> Duration {
     base.saturating_add(Duration::from_millis(entropy % jitter_limit))
 }
 
-async fn run_executor_tunnel(runtime: &ExecutorRuntime) -> Result<()> {
-    let config = load_executor_config(&runtime.db_path)?;
-    info!(machine_id = %config.machine_id, controller = %config.controller_url, "executor tunnel connecting");
+async fn run_executor_tunnel(
+    runtime: &ExecutorRuntime,
+) -> std::result::Result<bool, (anyhow::Error, bool)> {
+    let config = load_executor_config(&runtime.db_path).map_err(|cause| (cause, false))?;
+    info!(machine_id = %config.machine_id, "executor tunnel connecting");
     let response = runtime
         .client
         .get(format!("{}/api/executors/tunnel", config.controller_url))
         .bearer_auth(&config.access_token)
         .header(header::ACCEPT, "text/event-stream")
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(|cause| (cause.into(), false))?
+        .error_for_status()
+        .map_err(|cause| (cause.into(), false))?;
     let mut stream = response.bytes_stream();
     let mut pending = Vec::new();
+    let mut last_heartbeat = Instant::now();
+    let mut had_valid_heartbeat = false;
     loop {
-        {
-            let chunk = futures_util::StreamExt::next(&mut stream).await;
-            let chunk = chunk.context("executor tunnel stream ended")??;
-            pending.extend_from_slice(&chunk);
-            while let Some((boundary, separator_len)) = sse_event_boundary(&pending) {
-                let event = std::str::from_utf8(&pending[..boundary])?.to_owned();
-                pending.drain(..boundary + separator_len);
-                if let Some(call) = parse_executor_tool_call(&event)? {
-                    let result = execute_executor_tool_call(runtime, &config, call).await;
-                    send_executor_result(
+        let remaining = EXECUTOR_HEARTBEAT_TIMEOUT.saturating_sub(last_heartbeat.elapsed());
+        let chunk = tokio::time::timeout(remaining, futures_util::StreamExt::next(&mut stream))
+            .await
+            .map_err(|_| {
+                (
+                    anyhow!("controller heartbeat timed out"),
+                    had_valid_heartbeat,
+                )
+            })?;
+        let chunk = chunk
+            .context("executor tunnel stream ended")
+            .map_err(|cause| (cause, had_valid_heartbeat))?
+            .map_err(|cause| (cause.into(), had_valid_heartbeat))?;
+        pending.extend_from_slice(&chunk);
+        while let Some((boundary, separator_len)) = sse_event_boundary(&pending) {
+            let event = std::str::from_utf8(&pending[..boundary])
+                .map_err(|cause| (cause.into(), had_valid_heartbeat))?
+                .to_owned();
+            pending.drain(..boundary + separator_len);
+            match parse_executor_tunnel_event(&event)
+                .map_err(|cause| (cause, had_valid_heartbeat))?
+            {
+                Some(ExecutorTunnelMessage::ToolCall(call)) => {
+                    let runtime = runtime.clone();
+                    let config = config.clone();
+                    tokio::spawn(async move {
+                        let Some(result) =
+                            execute_executor_tool_call(&runtime, &config, call).await
+                        else {
+                            return;
+                        };
+                        if let Err(cause) = send_executor_result_with_retry(
+                            &runtime.client,
+                            &config.controller_url,
+                            &config.access_token,
+                            &result,
+                        )
+                        .await
+                        {
+                            tracing::warn!(call_id = %result.call_id, %cause, "executor result post abandoned after bounded retries");
+                        }
+                    });
+                }
+                Some(ExecutorTunnelMessage::Heartbeat(heartbeat)) => {
+                    send_executor_heartbeat(
                         &runtime.client,
                         &config.controller_url,
                         &config.access_token,
-                        &result,
+                        &heartbeat,
                     )
-                    .await?;
+                    .await
+                    .map_err(|cause| (cause, had_valid_heartbeat))?;
+                    last_heartbeat = Instant::now();
+                    had_valid_heartbeat = true;
                 }
+                None => {}
             }
         }
     }
 }
 
-fn parse_executor_tool_call(event: &str) -> Result<Option<ExecutorToolCall>> {
+fn parse_executor_tunnel_event(event: &str) -> Result<Option<ExecutorTunnelMessage>> {
     let mut event_name = None;
     let mut data = None;
     for line in event.lines() {
@@ -10313,12 +10528,14 @@ fn parse_executor_tool_call(event: &str) -> Result<Option<ExecutorToolCall>> {
             data = Some(value);
         }
     }
-    if event_name == Some("tool_call") {
-        Ok(Some(serde_json::from_str(
+    match event_name {
+        Some("tool_call") => Ok(Some(ExecutorTunnelMessage::ToolCall(serde_json::from_str(
             data.context("tool call has no data")?,
-        )?))
-    } else {
-        Ok(None)
+        )?))),
+        Some("heartbeat") => Ok(Some(ExecutorTunnelMessage::Heartbeat(
+            serde_json::from_str(data.context("heartbeat has no data")?)?,
+        ))),
+        _ => Ok(None),
     }
 }
 
@@ -10326,21 +10543,22 @@ async fn execute_executor_tool_call(
     runtime: &ExecutorRuntime,
     config: &ExecutorConfig,
     call: ExecutorToolCall,
-) -> ExecutorToolResult {
+) -> Option<ExecutorToolResult> {
     if let Ok(Some(result)) = executor_call_result_from_db(&runtime.db_path, &call.call_id) {
-        return result;
+        return Some(result);
     }
-    if !matches!(
-        claim_executor_call(&runtime.db_path, &call.call_id),
-        Ok(true)
-    ) {
-        return ExecutorToolResult {
-            call_id: call.call_id,
-            output: "error: remote call outcome is unknown; refusing to execute it again"
-                .to_owned(),
-            added_lines: None,
-            deleted_lines: None,
-        };
+    match claim_executor_call(&runtime.db_path, &call.call_id) {
+        Ok(true) => {}
+        Ok(false) if executor_call_is_running(&runtime.db_path, &call.call_id) => return None,
+        Ok(false) | Err(_) => {
+            return Some(ExecutorToolResult {
+                call_id: call.call_id,
+                output: "error: remote call outcome is unknown; refusing to execute it again"
+                    .to_owned(),
+                added_lines: None,
+                deleted_lines: None,
+            });
+        }
     }
     let execution = match call.name.as_str() {
         "list_files" | "read_file" | "write_file" | "edit_file" | "run_bash" => {
@@ -10430,7 +10648,24 @@ async fn execute_executor_tool_call(
         deleted_lines: execution.deleted_lines,
     };
     let _ = complete_executor_call(&runtime.db_path, &result);
-    result
+    Some(result)
+}
+
+fn executor_call_is_running(path: &Path, call_id: &str) -> bool {
+    open_db(path)
+        .and_then(|connection| {
+            connection
+                .query_row(
+                    "SELECT status = 'running' FROM executor_tool_calls WHERE call_id = ?1",
+                    [call_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Into::into)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
 async fn upload_executor_transfer_archive(
@@ -10848,6 +11083,64 @@ fn sha256_file(path: &Path) -> Result<String> {
         digest.update(&buffer[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+async fn send_executor_heartbeat(
+    client: &reqwest::Client,
+    controller_url: &str,
+    token: &str,
+    heartbeat: &ExecutorHeartbeat,
+) -> Result<()> {
+    let response = client
+        .post(format!("{controller_url}/api/executors/tunnel/heartbeats"))
+        .bearer_auth(token)
+        .json(heartbeat)
+        .send()
+        .await?
+        .error_for_status()?;
+    let accepted = response
+        .json::<Value>()
+        .await?
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !accepted {
+        return Err(anyhow!("controller rejected executor heartbeat"));
+    }
+    Ok(())
+}
+
+fn should_retry_executor_result_post(failures: u32) -> bool {
+    failures < EXECUTOR_RESULT_POST_MAX_ATTEMPTS
+}
+
+async fn send_executor_result_with_retry(
+    client: &reqwest::Client,
+    controller_url: &str,
+    token: &str,
+    result: &ExecutorToolResult,
+) -> Result<()> {
+    let mut failures = 0_u32;
+    loop {
+        match send_executor_result(client, controller_url, token, result).await {
+            Ok(()) => return Ok(()),
+            Err(cause) => {
+                failures = failures.saturating_add(1);
+                if !should_retry_executor_result_post(failures) {
+                    return Err(cause);
+                }
+                let delay = executor_tunnel_retry_delay(failures, Uuid::new_v4().as_u128() as u64);
+                tracing::warn!(
+                    call_id = %result.call_id,
+                    attempt = failures,
+                    delay_ms = delay.as_millis(),
+                    %cause,
+                    "executor result post retry scheduled"
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
 }
 
 async fn send_executor_result(
@@ -13861,6 +14154,8 @@ mod tests {
             ExecutorSession {
                 id: "test".to_owned(),
                 sender,
+                disconnect: watch::channel(false).0,
+                last_heartbeat: Instant::now(),
             },
         );
         let local_file = temp.path().join("local.txt");
@@ -13906,7 +14201,9 @@ mod tests {
             )
             .await
         });
-        let call = receiver.recv().await.unwrap();
+        let ExecutorTunnelMessage::ToolCall(call) = receiver.recv().await.unwrap() else {
+            panic!("expected a tool call");
+        };
         let pending = tunnels.results.lock().await.remove(&call.call_id).unwrap();
         pending
             .sender
@@ -13921,6 +14218,346 @@ mod tests {
         assert_eq!(remote.output, "remote evidence");
         assert_eq!(call.name, "read_file");
         assert_eq!(call.arguments, json!({"path": "/remote/evidence.txt"}));
+    }
+
+    #[tokio::test]
+    async fn executor_result_for_another_machine_remains_pending_for_its_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        for (machine_id, token) in [("machine-a", "token-a"), ("machine-b", "token-b")] {
+            open_db(&db)
+                .unwrap()
+                .execute(
+                    "INSERT INTO peers (id, name, machine_id, hostname, access_token_hash, deployment_role, created_at)
+                     VALUES (?1, ?1, ?1, ?1, ?2, 'executor', 'now')",
+                    params![machine_id, token_hash(token)],
+                )
+                .unwrap();
+        }
+        let state = test_state(db);
+        let (sender, receiver) = oneshot::channel();
+        state.executor_tunnels.results.lock().await.insert(
+            "call-1".to_owned(),
+            PendingExecutorResult {
+                machine_id: "machine-a".to_owned(),
+                sender,
+            },
+        );
+        let result = ExecutorToolResult {
+            call_id: "call-1".to_owned(),
+            output: "done".to_owned(),
+            added_lines: None,
+            deleted_lines: None,
+        };
+        let rejected = executor_tunnel_result(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Bytes::from(serde_json::to_vec(&result).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.0, StatusCode::FORBIDDEN);
+        assert!(
+            state
+                .executor_tunnels
+                .results
+                .lock()
+                .await
+                .contains_key("call-1")
+        );
+        assert_eq!(
+            executor_tunnel_result(
+                State(state),
+                auth_headers("token-a"),
+                Bytes::from(serde_json::to_vec(&result).unwrap()),
+            )
+            .await
+            .unwrap()
+            .0["accepted"],
+            true
+        );
+        assert_eq!(receiver.await.unwrap().output, "done");
+    }
+
+    #[tokio::test]
+    async fn replacing_a_session_cancels_the_old_stream_without_touching_the_new_epoch() {
+        let tunnels = ExecutorTunnels::default();
+        let (old_sender, _old_receiver) = mpsc::channel(1);
+        let (old_disconnect, mut old_disconnected) = watch::channel(false);
+        tunnels.sessions.lock().await.insert(
+            "machine-a".to_owned(),
+            ExecutorSession {
+                id: "old-epoch".to_owned(),
+                sender: old_sender,
+                disconnect: old_disconnect,
+                last_heartbeat: Instant::now(),
+            },
+        );
+        let (new_sender, _new_receiver) = mpsc::channel(1);
+        let (new_disconnect, new_disconnected) = watch::channel(false);
+        let replaced = tunnels.sessions.lock().await.insert(
+            "machine-a".to_owned(),
+            ExecutorSession {
+                id: "new-epoch".to_owned(),
+                sender: new_sender,
+                disconnect: new_disconnect,
+                last_heartbeat: Instant::now(),
+            },
+        );
+        replaced.unwrap().disconnect.send(true).unwrap();
+        old_disconnected.changed().await.unwrap();
+        assert!(*old_disconnected.borrow());
+        assert!(!*new_disconnected.borrow());
+        assert_eq!(tunnels.sessions.lock().await["machine-a"].id, "new-epoch");
+    }
+
+    #[tokio::test]
+    async fn stale_executor_session_is_removed_and_stream_is_cancelled() {
+        let tunnels = ExecutorTunnels::default();
+        let (sender, _receiver) = mpsc::channel(1);
+        let (disconnect, mut disconnected) = watch::channel(false);
+        tunnels.sessions.lock().await.insert(
+            "machine-a".to_owned(),
+            ExecutorSession {
+                id: "epoch-a".to_owned(),
+                sender,
+                disconnect,
+                last_heartbeat: Instant::now() - EXECUTOR_HEARTBEAT_TIMEOUT,
+            },
+        );
+
+        assert!(remove_stale_executor_session(&tunnels, "machine-a", "epoch-a").await);
+        assert!(!tunnels.sessions.lock().await.contains_key("machine-a"));
+        disconnected.changed().await.unwrap();
+        assert!(*disconnected.borrow());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_post_failure_ends_the_executor_tunnel() {
+        async fn tunnel() -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+            Sse::new(tokio_stream::iter([Ok(Event::default()
+                .event("heartbeat")
+                .data(r#"{"epoch":"test-epoch"}"#))]))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/api/executors/tunnel", get(tunnel))
+                    .route(
+                        "/api/executors/tunnel/heartbeats",
+                        post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+                    ),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        for (key, value) in [
+            ("deployment_role", "executor"),
+            ("controller_url", &format!("http://{address}")),
+            ("executor_access_token", "token"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let runtime = ExecutorRuntime {
+            db_path: db,
+            client: reqwest::Client::new(),
+            browser_sessions: browser::sessions(),
+        };
+
+        let result = run_executor_tunnel(&runtime).await;
+        server.abort();
+        assert!(result.is_err());
+        assert!(!result.unwrap_err().1);
+    }
+
+    #[tokio::test]
+    async fn valid_heartbeat_marks_a_short_stream_interruption_as_stable() {
+        async fn tunnel() -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+            Sse::new(tokio_stream::iter([Ok(Event::default()
+                .event("heartbeat")
+                .data(r#"{"epoch":"test-epoch"}"#))]))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/api/executors/tunnel", get(tunnel))
+                    .route(
+                        "/api/executors/tunnel/heartbeats",
+                        post(|| async { Json(json!({"accepted": true})) }),
+                    ),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        for (key, value) in [
+            ("deployment_role", "executor"),
+            ("controller_url", &format!("http://{address}")),
+            ("executor_access_token", "token"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let runtime = ExecutorRuntime {
+            db_path: db,
+            client: reqwest::Client::new(),
+            browser_sessions: browser::sessions(),
+        };
+
+        let result = run_executor_tunnel(&runtime).await;
+        server.abort();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().1);
+    }
+
+    #[test]
+    fn comments_and_malformed_heartbeats_do_not_count_as_valid_heartbeats() {
+        assert!(
+            parse_executor_tunnel_event(": keep-alive")
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_executor_tunnel_event("event: heartbeat\ndata: not-json").is_err());
+    }
+
+    #[test]
+    fn executor_result_post_retries_have_a_bounded_exit() {
+        assert!(should_retry_executor_result_post(6));
+        assert!(!should_retry_executor_result_post(7));
+        assert!(!should_retry_executor_result_post(u32::MAX));
+    }
+
+    #[tokio::test]
+    async fn duplicate_running_executor_call_does_not_execute_or_emit_an_unknown_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        assert!(claim_executor_call(&db, "call-running").unwrap());
+        let runtime = ExecutorRuntime {
+            db_path: db.clone(),
+            client: reqwest::Client::new(),
+            browser_sessions: browser::sessions(),
+        };
+        let config = ExecutorConfig {
+            machine_id: "machine-a".to_owned(),
+            controller_url: "http://127.0.0.1".to_owned(),
+            access_token: "token".to_owned(),
+        };
+        let result = execute_executor_tool_call(
+            &runtime,
+            &config,
+            ExecutorToolCall {
+                call_id: "call-running".to_owned(),
+                name: "run_bash".to_owned(),
+                arguments: json!({"command":"exit 1"}),
+            },
+        )
+        .await;
+        assert!(result.is_none());
+        assert!(executor_call_is_running(&db, "call-running"));
+    }
+
+    #[test]
+    fn valid_heartbeat_resets_executor_reconnect_backoff() {
+        assert_eq!(next_executor_tunnel_failure_count(4, false), 5);
+        assert_eq!(next_executor_tunnel_failure_count(4, true), 1);
+    }
+
+    #[test]
+    fn executor_heartbeat_timeout_is_exactly_thirty_seconds() {
+        assert!(!heartbeat_is_stale(Duration::from_secs(29)));
+        assert!(heartbeat_is_stale(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn executor_heartbeat_rejects_an_old_connection_epoch_after_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO peers (id, name, machine_id, hostname, access_token_hash, deployment_role, created_at)
+                 VALUES ('peer', 'Executor', 'machine-a', 'host-a', ?1, 'executor', 'now')",
+                [token_hash("token-a")],
+            )
+            .unwrap();
+        let state = test_state(db);
+        let (old_sender, _old_receiver) = mpsc::channel(1);
+        state.executor_tunnels.sessions.lock().await.insert(
+            "machine-a".to_owned(),
+            ExecutorSession {
+                id: "old-epoch".to_owned(),
+                sender: old_sender,
+                disconnect: watch::channel(false).0,
+                last_heartbeat: Instant::now(),
+            },
+        );
+        let (new_sender, _new_receiver) = mpsc::channel(1);
+        state.executor_tunnels.sessions.lock().await.insert(
+            "machine-a".to_owned(),
+            ExecutorSession {
+                id: "new-epoch".to_owned(),
+                sender: new_sender,
+                disconnect: watch::channel(false).0,
+                last_heartbeat: Instant::now() - EXECUTOR_HEARTBEAT_TIMEOUT,
+            },
+        );
+        let headers = auth_headers("token-a");
+        let old = executor_tunnel_heartbeat(
+            State(state.clone()),
+            headers.clone(),
+            Json(ExecutorHeartbeatAck {
+                epoch: "old-epoch".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(old.0["accepted"], false);
+        let current = executor_tunnel_heartbeat(
+            State(state.clone()),
+            headers,
+            Json(ExecutorHeartbeatAck {
+                epoch: "new-epoch".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current.0["accepted"], true);
+        assert!(!heartbeat_is_stale(
+            state.executor_tunnels.sessions.lock().await["machine-a"]
+                .last_heartbeat
+                .elapsed()
+        ));
     }
 
     #[test]
