@@ -106,6 +106,8 @@ const EXECUTOR_TUNNEL_BACKOFF_BASE: Duration = Duration::from_secs(1);
 const EXECUTOR_TUNNEL_BACKOFF_MAX: Duration = Duration::from_secs(60);
 const EXECUTOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const EXECUTOR_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+const EXECUTOR_RESOURCE_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+const EXECUTOR_RESOURCE_STALE_AFTER: Duration = Duration::from_secs(15);
 
 static FILE_READS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_FILE_READS)));
@@ -133,11 +135,14 @@ struct ExecutorRuntime {
     db_path: PathBuf,
     client: reqwest::Client,
     browser_sessions: browser::BrowserSessions,
+    resources: Arc<Mutex<resources::ResourceMonitor>>,
+    connection_epoch: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Default)]
 struct ExecutorTunnels {
     sessions: Arc<Mutex<HashMap<String, ExecutorSession>>>,
+    resources: Arc<Mutex<HashMap<String, ExecutorResourceRecord>>>,
     results: Arc<Mutex<HashMap<String, PendingExecutorResult>>>,
     transfers: FileTransfers,
     browser_sessions: Arc<Mutex<HashMap<String, String>>>,
@@ -174,6 +179,13 @@ struct ExecutorSession {
     last_heartbeat: Instant,
 }
 
+#[derive(Clone)]
+struct ExecutorResourceRecord {
+    epoch: String,
+    received_at: chrono::DateTime<chrono::Utc>,
+    snapshot: resources::ExecutorResourcesSnapshot,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct ExecutorHeartbeat {
     epoch: String,
@@ -182,6 +194,12 @@ struct ExecutorHeartbeat {
 #[derive(Deserialize)]
 struct ExecutorHeartbeatAck {
     epoch: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ExecutorResourceReport {
+    epoch: String,
+    snapshot: resources::ExecutorResourcesSnapshot,
 }
 
 #[derive(Clone)]
@@ -380,6 +398,17 @@ struct Peer {
     created_at: String,
     last_seen_at: Option<String>,
     online: bool,
+    resource_status: ExecutorResourceStatus,
+    resource: Option<resources::ExecutorResourcesSnapshot>,
+    resource_sampled_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExecutorResourceStatus {
+    Online,
+    Stale,
+    Unavailable,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -1219,8 +1248,11 @@ async fn run_executor_daemon(db_path: PathBuf) -> Result<()> {
             .build()?,
         db_path: db_path.clone(),
         browser_sessions: browser::sessions(),
+        resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(db_path.clone()))),
+        connection_epoch: Arc::new(Mutex::new(None)),
     };
     schedule_executor_auto_update(runtime.client.clone(), runtime.db_path.clone());
+    schedule_executor_resource_reports(runtime.clone());
     schedule_executor_tunnel(runtime);
     update::record_startup(&db_path)?;
     std::future::pending::<()>().await;
@@ -1591,6 +1623,10 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/executors/tunnel/results",
             post(executor_tunnel_result),
+        )
+        .route(
+            "/api/executors/tunnel/resources",
+            post(executor_tunnel_resource),
         )
         .route(
             "/api/executors/transfers/{id}/upload",
@@ -5683,16 +5719,26 @@ async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
                 created_at: row.get(5)?,
                 last_seen_at: row.get(6)?,
                 online: false,
+                resource_status: ExecutorResourceStatus::Unavailable,
+                resource: None,
+                resource_sampled_at: None,
             })
         })
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot read peers"))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot decode peers"))?;
     let sessions = state.executor_tunnels.sessions.lock().await;
+    let resource_records = state.executor_tunnels.resources.lock().await;
     let peers = peers
         .into_iter()
         .map(|mut peer| {
-            peer.online = sessions.contains_key(&peer.machine_id);
+            let session = sessions.get(&peer.machine_id);
+            let resource = resource_records.get(&peer.machine_id);
+            peer.online = session.is_some();
+            let (status, snapshot, sampled_at) = executor_resource_view(session, resource);
+            peer.resource_status = status;
+            peer.resource = snapshot;
+            peer.resource_sampled_at = sampled_at;
             peer
         })
         .collect();
@@ -5789,6 +5835,9 @@ async fn pair_executor(
         created_at: chrono::Utc::now().to_rfc3339(),
         last_seen_at: None,
         online: false,
+        resource_status: ExecutorResourceStatus::Unavailable,
+        resource: None,
+        resource_sampled_at: None,
     };
     let paired = consume_executor_pairing(&state.db_path, pairing_token, &peer, access_token)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot pair executor"))?;
@@ -5911,6 +5960,12 @@ async fn delete_peer(
             .lock()
             .await
             .remove(&machine_id);
+        state
+            .executor_tunnels
+            .resources
+            .lock()
+            .await
+            .remove(&machine_id);
     }
     Ok(Json(json!({"deleted": true})))
 }
@@ -5926,7 +5981,8 @@ async fn executor_tunnel(
     let session_id = Uuid::new_v4().to_string();
     let (sender, receiver) = mpsc::channel(16);
     let (disconnect, disconnect_receiver) = watch::channel(false);
-    let replaced = state.executor_tunnels.sessions.lock().await.insert(
+    let replaced = replace_executor_session(
+        &state.executor_tunnels,
         machine_id.clone(),
         ExecutorSession {
             id: session_id.clone(),
@@ -5934,7 +5990,8 @@ async fn executor_tunnel(
             disconnect,
             last_heartbeat: Instant::now(),
         },
-    );
+    )
+    .await;
     if let Some(replaced) = replaced {
         let _ = replaced.disconnect.send(true);
         info!(
@@ -6017,6 +6074,20 @@ async fn executor_tunnel(
     ))
 }
 
+async fn replace_executor_session(
+    tunnels: &ExecutorTunnels,
+    machine_id: String,
+    session: ExecutorSession,
+) -> Option<ExecutorSession> {
+    let replaced = tunnels
+        .sessions
+        .lock()
+        .await
+        .insert(machine_id.clone(), session);
+    tunnels.resources.lock().await.remove(&machine_id);
+    replaced
+}
+
 fn heartbeat_is_stale(elapsed: Duration) -> bool {
     elapsed >= EXECUTOR_HEARTBEAT_TIMEOUT
 }
@@ -6080,6 +6151,92 @@ async fn remove_stale_executor_session(
     } else {
         false
     }
+}
+
+fn executor_resource_view(
+    session: Option<&ExecutorSession>,
+    record: Option<&ExecutorResourceRecord>,
+) -> (
+    ExecutorResourceStatus,
+    Option<resources::ExecutorResourcesSnapshot>,
+    Option<String>,
+) {
+    let Some(record) = record else {
+        return (ExecutorResourceStatus::Unavailable, None, None);
+    };
+    let current = session.is_some_and(|session| session.id == record.epoch);
+    let fresh = chrono::Utc::now()
+        .signed_duration_since(record.received_at)
+        .to_std()
+        .is_ok_and(|age| age < EXECUTOR_RESOURCE_STALE_AFTER);
+    let status = if current && fresh {
+        ExecutorResourceStatus::Online
+    } else {
+        ExecutorResourceStatus::Stale
+    };
+    (
+        status,
+        Some(record.snapshot.clone()),
+        Some(record.received_at.to_rfc3339()),
+    )
+}
+
+fn valid_executor_resource_snapshot(snapshot: &resources::ExecutorResourcesSnapshot) -> bool {
+    let cpu = &snapshot.cpu;
+    let memory = &snapshot.memory;
+    let network = &snapshot.network;
+    let finite_percentage = |value: f64| value.is_finite() && (0.0..=100.0).contains(&value);
+    let cpu_usage = f64::from(cpu.usage_percent);
+    if !finite_percentage(cpu_usage)
+        || !cpu.load_1m.is_finite()
+        || cpu.logical_cpus == 0
+        || memory.total_bytes == 0
+        || memory.used_bytes > memory.total_bytes
+        || memory.available_bytes > memory.total_bytes
+        || !finite_percentage(memory.usage_percent)
+        || network.interfaces > 4096
+    {
+        return false;
+    }
+    snapshot.disk.as_ref().is_none_or(|disk| {
+        disk.total_bytes > 0
+            && disk.used_bytes <= disk.total_bytes
+            && disk.available_bytes <= disk.total_bytes
+            && finite_percentage(disk.usage_percent)
+    })
+}
+
+async fn executor_tunnel_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(report): Json<ExecutorResourceReport>,
+) -> ApiResult<Value> {
+    let machine_id = executor_machine_id(&state, &headers)?;
+    if !valid_executor_resource_snapshot(&report.snapshot) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "executor resource report is invalid",
+        ));
+    }
+    let sessions = state.executor_tunnels.sessions.lock().await;
+    if !sessions
+        .get(&machine_id)
+        .is_some_and(|session| session.id == report.epoch)
+    {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "resource report is not for the current executor session",
+        ));
+    }
+    state.executor_tunnels.resources.lock().await.insert(
+        machine_id,
+        ExecutorResourceRecord {
+            epoch: report.epoch,
+            received_at: chrono::Utc::now(),
+            snapshot: report.snapshot,
+        },
+    );
+    Ok(Json(json!({"accepted": true})))
 }
 
 async fn executor_tunnel_heartbeat(
@@ -10395,11 +10552,74 @@ async fn wait_for_executor_result(
     }
 }
 
+fn schedule_executor_resource_reports(runtime: ExecutorRuntime) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(EXECUTOR_RESOURCE_REPORT_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let epoch = runtime.connection_epoch.lock().await.clone();
+            let Some(epoch) = epoch else {
+                continue;
+            };
+            let snapshot = {
+                let mut monitor = runtime.resources.lock().await;
+                monitor
+                    .sample()
+                    .map(|snapshot| resources::ExecutorResourcesSnapshot::from(&snapshot))
+            };
+            let snapshot = match snapshot {
+                Ok(snapshot) => snapshot,
+                Err(cause) => {
+                    tracing::warn!(%cause, "executor resource sample failed");
+                    continue;
+                }
+            };
+            let config = match load_executor_config(&runtime.db_path) {
+                Ok(config) => config,
+                Err(cause) => {
+                    tracing::warn!(%cause, "executor resource report configuration unavailable");
+                    continue;
+                }
+            };
+            let report = ExecutorResourceReport { epoch, snapshot };
+            if let Err(cause) = send_executor_resource_report(
+                &runtime.client,
+                &config.controller_url,
+                &config.access_token,
+                &report,
+            )
+            .await
+            {
+                tracing::warn!(%cause, "executor resource report failed");
+            }
+        }
+    });
+}
+
+async fn send_executor_resource_report(
+    client: &reqwest::Client,
+    controller_url: &str,
+    token: &str,
+    report: &ExecutorResourceReport,
+) -> Result<()> {
+    client
+        .post(format!("{controller_url}/api/executors/tunnel/resources"))
+        .bearer_auth(token)
+        .json(report)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 fn schedule_executor_tunnel(runtime: ExecutorRuntime) {
     tokio::spawn(async move {
         let mut failures = 0_u32;
         loop {
-            let had_valid_heartbeat = match run_executor_tunnel(&runtime).await {
+            let tunnel = run_executor_tunnel(&runtime).await;
+            *runtime.connection_epoch.lock().await = None;
+            let had_valid_heartbeat = match tunnel {
                 Ok(had_valid_heartbeat) => had_valid_heartbeat,
                 Err((cause, had_valid_heartbeat)) => {
                     tracing::warn!(%cause, "executor tunnel disconnected");
@@ -10508,6 +10728,7 @@ async fn run_executor_tunnel(
                     )
                     .await
                     .map_err(|cause| (cause, had_valid_heartbeat))?;
+                    *runtime.connection_epoch.lock().await = Some(heartbeat.epoch);
                     last_heartbeat = Instant::now();
                     had_valid_heartbeat = true;
                 }
@@ -14375,9 +14596,11 @@ mod tests {
         }
         drop(connection);
         let runtime = ExecutorRuntime {
-            db_path: db,
+            db_path: db.clone(),
             client: reqwest::Client::new(),
             browser_sessions: browser::sessions(),
+            resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(db.clone()))),
+            connection_epoch: Arc::new(Mutex::new(None)),
         };
 
         let result = run_executor_tunnel(&runtime).await;
@@ -14428,9 +14651,11 @@ mod tests {
         }
         drop(connection);
         let runtime = ExecutorRuntime {
-            db_path: db,
+            db_path: db.clone(),
             client: reqwest::Client::new(),
             browser_sessions: browser::sessions(),
+            resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(db.clone()))),
+            connection_epoch: Arc::new(Mutex::new(None)),
         };
 
         let result = run_executor_tunnel(&runtime).await;
@@ -14466,6 +14691,8 @@ mod tests {
             db_path: db.clone(),
             client: reqwest::Client::new(),
             browser_sessions: browser::sessions(),
+            resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(db.clone()))),
+            connection_epoch: Arc::new(Mutex::new(None)),
         };
         let config = ExecutorConfig {
             machine_id: "machine-a".to_owned(),
@@ -14560,6 +14787,221 @@ mod tests {
         ));
     }
 
+    fn test_executor_resource_snapshot() -> resources::ExecutorResourcesSnapshot {
+        resources::ExecutorResourcesSnapshot {
+            cpu: resources::CpuSnapshot {
+                usage_percent: 42.0,
+                load_1m: 1.5,
+                logical_cpus: 8,
+            },
+            memory: resources::ExecutorMemorySnapshot {
+                used_bytes: 400,
+                total_bytes: 1_000,
+                available_bytes: 600,
+                usage_percent: 40.0,
+            },
+            network: resources::NetworkSnapshot {
+                receive_bytes_per_second: 0,
+                transmit_bytes_per_second: 0,
+                interfaces: 1,
+            },
+            disk: Some(resources::ExecutorDiskSnapshot {
+                used_bytes: 500,
+                total_bytes: 1_000,
+                available_bytes: 500,
+                usage_percent: 50.0,
+            }),
+        }
+    }
+
+    async fn insert_executor_test_session(state: &AppState, machine_id: &str, epoch: &str) {
+        let (sender, _receiver) = mpsc::channel(1);
+        state.executor_tunnels.sessions.lock().await.insert(
+            machine_id.to_owned(),
+            ExecutorSession {
+                id: epoch.to_owned(),
+                sender,
+                disconnect: watch::channel(false).0,
+                last_heartbeat: Instant::now(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_resource_report_accepts_only_the_current_authenticated_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO peers (id, name, machine_id, hostname, access_token_hash, deployment_role, created_at)
+                 VALUES ('peer-a', 'Executor A', 'machine-a', 'host-a', ?1, 'executor', 'now')",
+                [token_hash("token-a")],
+            )
+            .unwrap();
+        let state = test_state(db);
+        insert_executor_test_session(&state, "machine-a", "current").await;
+        let old = executor_tunnel_resource(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(ExecutorResourceReport {
+                epoch: "old".to_owned(),
+                snapshot: test_executor_resource_snapshot(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(old.0, StatusCode::CONFLICT);
+        let _ = executor_tunnel_resource(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(ExecutorResourceReport {
+                epoch: "current".to_owned(),
+                snapshot: test_executor_resource_snapshot(),
+            }),
+        )
+        .await
+        .unwrap();
+        let record = state.executor_tunnels.resources.lock().await["machine-a"].clone();
+        assert_eq!(record.epoch, "current");
+        assert_eq!(record.snapshot.disk.unwrap().total_bytes, 1_000);
+    }
+
+    #[tokio::test]
+    async fn executor_resource_report_rejects_foreign_machine_and_malformed_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let connection = open_db(&db).unwrap();
+        for (id, machine_id, token) in [
+            ("peer-a", "machine-a", "token-a"),
+            ("peer-b", "machine-b", "token-b"),
+        ] {
+            connection.execute(
+                "INSERT INTO peers (id, name, machine_id, hostname, access_token_hash, deployment_role, created_at)
+                 VALUES (?1, ?1, ?2, ?1, ?3, 'executor', 'now')",
+                params![id, machine_id, token_hash(token)],
+            ).unwrap();
+        }
+        drop(connection);
+        let state = test_state(db);
+        insert_executor_test_session(&state, "machine-a", "current").await;
+        let foreign = executor_tunnel_resource(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(ExecutorResourceReport {
+                epoch: "current".to_owned(),
+                snapshot: test_executor_resource_snapshot(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(foreign.0, StatusCode::CONFLICT);
+        let mut malformed = test_executor_resource_snapshot();
+        malformed.memory.total_bytes = 0;
+        let malformed = executor_tunnel_resource(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(ExecutorResourceReport {
+                epoch: "current".to_owned(),
+                snapshot: malformed,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(malformed.0, StatusCode::BAD_REQUEST);
+        assert!(state.executor_tunnels.resources.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn executor_session_replacement_cannot_be_overwritten_by_the_old_resource_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        open_db(&db).unwrap().execute(
+            "INSERT INTO peers (id, name, machine_id, hostname, access_token_hash, deployment_role, created_at)
+             VALUES ('peer-a', 'Executor A', 'machine-a', 'host-a', ?1, 'executor', 'now')",
+            [token_hash("token-a")],
+        ).unwrap();
+        let state = test_state(db);
+        insert_executor_test_session(&state, "machine-a", "old").await;
+        let _ = executor_tunnel_resource(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(ExecutorResourceReport {
+                epoch: "old".to_owned(),
+                snapshot: test_executor_resource_snapshot(),
+            }),
+        )
+        .await
+        .unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        replace_executor_session(
+            &state.executor_tunnels,
+            "machine-a".to_owned(),
+            ExecutorSession {
+                id: "new".to_owned(),
+                sender,
+                disconnect: watch::channel(false).0,
+                last_heartbeat: Instant::now(),
+            },
+        )
+        .await;
+        let rejected = executor_tunnel_resource(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(ExecutorResourceReport {
+                epoch: "old".to_owned(),
+                snapshot: test_executor_resource_snapshot(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.0, StatusCode::CONFLICT);
+        assert!(state.executor_tunnels.resources.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn executor_resource_view_reports_online_stale_and_unavailable() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let session = ExecutorSession {
+            id: "current".to_owned(),
+            sender,
+            disconnect: watch::channel(false).0,
+            last_heartbeat: Instant::now(),
+        };
+        let current = ExecutorResourceRecord {
+            epoch: "current".to_owned(),
+            received_at: chrono::Utc::now(),
+            snapshot: test_executor_resource_snapshot(),
+        };
+        assert!(matches!(
+            executor_resource_view(Some(&session), Some(&current)).0,
+            ExecutorResourceStatus::Online
+        ));
+        let stale = ExecutorResourceRecord {
+            received_at: chrono::Utc::now() - chrono::Duration::seconds(16),
+            ..current.clone()
+        };
+        assert!(matches!(
+            executor_resource_view(Some(&session), Some(&stale)).0,
+            ExecutorResourceStatus::Stale
+        ));
+        assert!(matches!(
+            executor_resource_view(Some(&session), None).0,
+            ExecutorResourceStatus::Unavailable
+        ));
+        let replacement = ExecutorSession {
+            id: "replacement".to_owned(),
+            ..session
+        };
+        assert!(matches!(
+            executor_resource_view(Some(&replacement), Some(&current)).0,
+            ExecutorResourceStatus::Stale
+        ));
+    }
+
     #[test]
     fn device_token_hash_never_contains_the_bearer_secret() {
         let secret = "cybion_device_secret";
@@ -14602,6 +15044,9 @@ mod tests {
             created_at: "now".to_owned(),
             last_seen_at: None,
             online: false,
+            resource_status: ExecutorResourceStatus::Unavailable,
+            resource: None,
+            resource_sampled_at: None,
         };
         assert!(consume_executor_pairing(&db, &pairing_token, &peer, &first).unwrap());
         assert!(!consume_executor_pairing(&db, &pairing_token, &peer, &second).unwrap());
@@ -14721,6 +15166,9 @@ mod tests {
             created_at: "now".to_owned(),
             last_seen_at: None,
             online: false,
+            resource_status: ExecutorResourceStatus::Unavailable,
+            resource: None,
+            resource_sampled_at: None,
         };
         assert!(!consume_executor_pairing(&db, &pairing_token, &peer, "token").unwrap());
         let count: i64 = open_db(&db)
@@ -14744,6 +15192,9 @@ mod tests {
             created_at: "now".to_owned(),
             last_seen_at: None,
             online: false,
+            resource_status: ExecutorResourceStatus::Unavailable,
+            resource: None,
+            resource_sampled_at: None,
         };
         for (id, access_token) in [("first", "one"), ("second", "two")] {
             let pairing_token = executor_pairing_token();
