@@ -8827,19 +8827,20 @@ fn scoped_responses_request_body(
             .expect("tool definitions are an array");
         tools.extend([
             json!({"type":"function","name":"list_subthreads","description":"Inspect Cybion's internal persistent Goal loops. They are implementation details of the single user-visible main thread, not user-managed sessions.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
-            json!({"type":"function","name":"fork_subthread","description":"For independently executable, substantial work, actively use near-unlimited parallel subthreads instead of arbitrarily limiting work to a small number or serializing it out of caution. Fork only when tasks do not contend for the same worktree, branch, code area, or release chain and when execution resources, dependencies, safety requirements, and user constraints permit it. Every fork is one persistent Goal and must state its durable objective and concrete done-when criteria. Use direct tools for brief, localized checks or edits. model_id is optional: use gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. Omit model_id to use the configured subthread default. The Goal inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Cybion resumes the main thread only after the Goal is achieved or blocked.","parameters":{"type":"object","additionalProperties":false,"required":["title","task","completion_criteria"],"properties":{"title":{"type":"string","description":"A short Goal name."},"task":{"type":"string","description":"The durable Goal objective."},"completion_criteria":{"type":"string","description":"Concrete, verifiable conditions that mean the Goal is done."},"model_id":{"type":"string","enum":["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"],"description":"Optional model override. Prefer sol for scientific/deep research, terra for engineering, and luna for operational or simple low-ambiguity work."},"context_window_limit":{"type":["integer","null"],"minimum":1,"description":"Optional Cybion proactive context-compaction threshold in input tokens, not the model context window. null/omitted keeps only the upstream overflow fallback. Practical guidance: 16k–32k short explicit low-tool tasks; 32k–64k typical engineering/operations/multi-step tool work; 64k–96k complex debugging/cross-file work; 96k–128k deep research that truly needs long source evidence. When actual normal-request input_tokens strictly exceeds this threshold, Cybion compacts before the next normal request. This preserves context deliberately because OpenAI Responses truncation=auto can discard oldest conversation items after a model window is exceeded."}}}}),
+            json!({"type":"function","name":"fork_subthread","description":"For independently executable, substantial work, actively use near-unlimited parallel subthreads instead of arbitrarily limiting work to a small number or serializing it out of caution. Fork only when tasks do not contend for the same worktree, branch, code area, or release chain and when execution resources, dependencies, safety requirements, and user constraints permit it. Every fork is one persistent Goal and must state its durable objective and concrete done-when criteria. Infer the user-preferred language from the current conversation context, including the user’s current language and any explicit preference; use it for title, task, and completion_criteria. Do not derive it from the UI locale or source-code language, and do not add a caller-provided language field. Use direct tools for brief, localized checks or edits. model_id is optional: use gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. Omit model_id to use the configured subthread default. The Goal inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Cybion resumes the main thread only after the Goal is achieved or blocked.","parameters":{"type":"object","additionalProperties":false,"required":["title","task","completion_criteria"],"properties":{"title":{"type":"string","description":"A short Goal name in the user-preferred language inferred from the current conversation context."},"task":{"type":"string","description":"The durable Goal objective in the user-preferred language inferred from the current conversation context."},"completion_criteria":{"type":"string","description":"Concrete, verifiable done-when conditions in the user-preferred language inferred from the current conversation context."},"model_id":{"type":"string","enum":["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"],"description":"Optional model override. Prefer sol for scientific/deep research, terra for engineering, and luna for operational or simple low-ambiguity work."},"context_window_limit":{"type":["integer","null"],"minimum":1,"description":"Optional Cybion proactive context-compaction threshold in input tokens, not the model context window. null/omitted keeps only the upstream overflow fallback. Practical guidance: 16k–32k short explicit low-tool tasks; 32k–64k typical engineering/operations/multi-step tool work; 64k–96k complex debugging/cross-file work; 96k–128k deep research that truly needs long source evidence. When actual normal-request input_tokens strictly exceeds this threshold, Cybion compacts before the next normal request. This preserves context deliberately because OpenAI Responses truncation=auto can discard oldest conversation items after a model window is exceeded."}}}}),
             json!({"type":"function","name":"cancel_subthread","description":"Cancel an active internal Goal that is no longer relevant or must be rebuilt.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
             json!({"type":"function","name":"retry_subthread","description":"Immediately resume an active Goal that is waiting after an error. This overrides only its current delay; it does not clear the consecutive-error count. Use this when new main-thread evidence makes waiting unnecessary.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
         ]);
         body["tool_choice"] = Value::String("auto".to_owned());
     }
+    let subthread_language_policy = "## Subthread language\n\nInfer the user-preferred language from the current conversation context, including the user’s current language and any explicit preference. For every fork, use it for title, task, and completion_criteria. Do not derive it from the UI locale or source-code language, and do not add a caller-provided language field. When a subthread calls achieve_goal or block_goal, write its user-visible result, evidence, or reason in that same inferred language so the terminal handoff remains consistent.\n\n";
     let subthread_parallelism_policy = "## Subthread parallelism\n\nFor independently executable work, treat parallel subthreads as a high-priority default: actively fork all independent substantial tasks that can make useful progress in parallel, using near-unlimited parallelism rather than arbitrarily limiting work to a small number of subthreads or serializing it out of caution. Do so only when each task has no contention for the same worktree, branch, code area, or release chain and when available execution resources, dependencies, safety requirements, and user constraints permit it. Parallelism never substitutes for correct isolation, verification, or delivery sequencing.";
     let scope_developer_section = match scope {
         AgentScope::Main => format!(
-            "## Thread role\n\nYou are Cybion's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. When selecting an optional fork_subthread model_id, prefer gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. This is guidance, not a substitute for judgment. Inspect existing Goals before replacing work and cancel obsolete ones. Cybion returns only an achieved or blocked Goal handoff and resumes you automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\n{subthread_parallelism_policy}\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
+            "{subthread_language_policy}## Thread role\n\nYou are Cybion's single user-visible main thread. Accept every user input as part of one durable conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. When selecting an optional fork_subthread model_id, prefer gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. This is guidance, not a substitute for judgment. Inspect existing Goals before replacing work and cancel obsolete ones. Cybion returns only an achieved or blocked Goal handoff and resumes you automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\n{subthread_parallelism_policy}\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
         ),
         AgentScope::Subthread => format!(
-            "## Thread role\n\nYou are an internal Cybion Goal loop forked from a compiled main-thread checkpoint. The inherited Goal prompt defines its objective and done-when criteria. Keep taking the next useful step until every criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. You must call `achieve_goal` with a concise final result and verifiable evidence when the Goal is achieved, or `block_goal` with a concise final result and the concrete blocker when it cannot progress. After either terminal tool, take no further action. Do not ask the user to manage this branch.\n\n{subthread_parallelism_policy}\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
+            "{subthread_language_policy}## Thread role\n\nYou are an internal Cybion Goal loop forked from a compiled main-thread checkpoint. The inherited Goal prompt defines its objective and done-when criteria. Keep taking the next useful step until every criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. You must call `achieve_goal` with a concise final result and verifiable evidence when the Goal is achieved, or `block_goal` with a concise final result and the concrete blocker when it cannot progress. After either terminal tool, take no further action. Do not ask the user to manage this branch.\n\n{subthread_parallelism_policy}\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
         ),
     };
     let mut developer_sections = vec![
@@ -8873,8 +8874,8 @@ fn scoped_responses_request_body(
             .as_array_mut()
             .expect("tool definitions are an array");
         tools.extend([
-            json!({"type":"function","name":"achieve_goal","description":"Mark your own persistent Goal achieved. Call this only when every done-when criterion is met. result is the concise terminal handoff; evidence must be concise and verifiable. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["result","evidence"],"properties":{"result":{"type":"string"},"evidence":{"type":"string"}}}}),
-            json!({"type":"function","name":"block_goal","description":"Mark your own persistent Goal blocked. Call this only when an external change or decision is required before progress can continue. result is the concise terminal handoff. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["result","reason"],"properties":{"result":{"type":"string"},"reason":{"type":"string"}}}}),
+            json!({"type":"function","name":"achieve_goal","description":"Mark your own persistent Goal achieved. Call this only when every done-when criterion is met. Write result and evidence in the user-preferred language inferred from the inherited conversation context. result is the concise terminal handoff; evidence must be concise and verifiable. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["result","evidence"],"properties":{"result":{"type":"string"},"evidence":{"type":"string"}}}}),
+            json!({"type":"function","name":"block_goal","description":"Mark your own persistent Goal blocked. Call this only when an external change or decision is required before progress can continue. Write result and reason in the user-preferred language inferred from the inherited conversation context. result is the concise terminal handoff. This tool has no Goal ID because it always applies to your current Goal.","parameters":{"type":"object","additionalProperties":false,"required":["result","reason"],"properties":{"result":{"type":"string"},"reason":{"type":"string"}}}}),
         ]);
     }
     body["input"] = Value::Array(prepend_developer_message(
@@ -13643,6 +13644,73 @@ mod tests {
             Some(16_384)
         );
         assert!(execute_fork_subthread(&db, user.id, json!({"title":"bad","task":"bad","completion_criteria":"bad","context_window_limit":0})).output.contains("positive integer"));
+    }
+
+    #[test]
+    fn fork_subthread_uses_the_user_preferred_language_without_a_language_parameter() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        let main = scoped_responses_request_body(
+            DEFAULT_MODEL_ID,
+            &[],
+            &SkillCatalog::default(),
+            AgentScope::Main,
+            &db,
+            None,
+        );
+        let subthread = scoped_responses_request_body(
+            DEFAULT_MODEL_ID,
+            &[],
+            &SkillCatalog::default(),
+            AgentScope::Subthread,
+            &db,
+            None,
+        );
+        let main_developer = main["input"][0]["content"].as_str().unwrap();
+        let subthread_developer = subthread["input"][0]["content"].as_str().unwrap();
+        for prompt in [main_developer, subthread_developer] {
+            assert!(prompt.contains(
+                "Infer the user-preferred language from the current conversation context"
+            ));
+            assert!(prompt.contains("user’s current language and any explicit preference"));
+            assert!(prompt.contains("Do not derive it from the UI locale or source-code language"));
+            assert!(prompt.contains("do not add a caller-provided language field"));
+        }
+        assert!(subthread_developer.contains("user-visible result, evidence, or reason"));
+
+        let main_tools = main["tools"].as_array().unwrap();
+        let subthread_tools = subthread["tools"].as_array().unwrap();
+        let fork = main_tools
+            .iter()
+            .find(|tool| tool["name"] == "fork_subthread")
+            .unwrap();
+        assert!(
+            fork["description"]
+                .as_str()
+                .unwrap()
+                .contains("use it for title, task, and completion_criteria")
+        );
+        let properties = fork["parameters"]["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("language"));
+        for field in ["title", "task", "completion_criteria"] {
+            assert!(properties[field]["description"].as_str().unwrap().contains(
+                "user-preferred language inferred from the current conversation context"
+            ));
+        }
+        for name in ["achieve_goal", "block_goal"] {
+            assert!(
+                subthread_tools
+                    .iter()
+                    .find(|tool| tool["name"] == name)
+                    .unwrap()["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains(
+                        "user-preferred language inferred from the inherited conversation context"
+                    )
+            );
+        }
     }
 
     #[test]
