@@ -74,3 +74,30 @@ test('thread detail reserves a bounded scrollable history viewport', () => {
   assert.match(source, /<div className="min-h-0 flex-1"><ThreadHistoryRecordsView threadId=\{thread\.id\} \/><\/div>/)
   assert.match(source, /return <div className="min-h-0 flex-1"><ConversationFeed/)
 })
+
+test('thread history polls every mounted thread without depending on active state', () => {
+  const view = source.match(/function ThreadHistoryRecordsView[\s\S]*?\n}\n\nfunction ConversationFeed/)?.[0] ?? ''
+  assert.match(view, /void poll\(true\)/)
+  assert.match(view, /window\.setInterval\(\(\) => \{ void poll\(\) \}, 1000\)/)
+  assert.match(view, /new URLSearchParams\(\{ after_id: String\(cursorRef\.current\) \}\)/)
+  assert.doesNotMatch(view, /if \(!active\) return/)
+})
+
+test('thread history serializes polling and ignores stale or unmounted responses', () => {
+  const view = source.match(/function ThreadHistoryRecordsView[\s\S]*?\n}\n\nfunction ConversationFeed/)?.[0] ?? ''
+  assert.match(view, /let polling = false/)
+  assert.match(view, /if \(polling\) return/)
+  assert.match(view, /const current = \(\) => !cancelled && generationRef\.current === generation/)
+  assert.match(view, /if \(!current\(\)\) return/)
+  assert.match(view, /return \(\) => \{ cancelled = true; window\.clearInterval\(interval\) \}/)
+})
+
+test('thread history resets switched threads and deduplicates later records', () => {
+  assert.match(source, /function mergeThreadHistoryRecords/)
+  assert.match(source, /next\.filter\(\(record\) => !known\.has\(record\.id\)\)/)
+  const view = source.match(/function ThreadHistoryRecordsView[\s\S]*?\n}\n\nfunction ConversationFeed/)?.[0] ?? ''
+  assert.match(view, /cursorRef\.current = 0/)
+  assert.match(view, /setRecords\(\[\]\); setSubthreads\(\[\]\); setCursor\(0\)/)
+  assert.match(view, /applyPage\(await request\(params\), initial\)/)
+  assert.match(view, /generation !== generationRef\.current/)
+})

@@ -506,6 +506,17 @@ function threadHistoryItems(records: ThreadHistoryRecord[], subthreads: Subthrea
   return items
 }
 
+function mergeThreadHistoryRecords(current: ThreadHistoryRecord[], next: ThreadHistoryRecord[]) {
+  const known = new Set(current.map((record) => record.id))
+  return [...current, ...next.filter((record) => !known.has(record.id))]
+}
+
+function mergeThreadHistorySubthreads(current: SubthreadReference[], next: SubthreadReference[]) {
+  const byId = new Map(current.map((thread) => [thread.id, thread]))
+  next.forEach((thread) => byId.set(thread.id, thread))
+  return [...byId.values()]
+}
+
 function ThreadHistoryRecordsView({ threadId, focusRecordId, onResend, resendingMessageId, refreshKey = 0 }: { threadId: string | null; focusRecordId?: number; onResend?: (message: ChatMessage) => void; resendingMessageId?: number | null; refreshKey?: number }) {
   const token = useAuthToken()
   const { t } = useUi()
@@ -518,40 +529,52 @@ function ThreadHistoryRecordsView({ threadId, focusRecordId, onResend, resending
   const [loading, setLoading] = useState(true)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [error, setError] = useState('')
+  const cursorRef = useRef(0)
+  const generationRef = useRef(0)
   const request = async (params: URLSearchParams) => api<ThreadHistoryPage>(`/api/thread-history?${params}`, token)
-  const reset = async () => {
-    setLoading(true); setError(''); setBefore(undefined)
-    try {
-      const params = new URLSearchParams(); if (threadId) params.set('thread_id', threadId)
-      const page = await request(params)
-      setRecords(page.records); setSubthreads(page.subthreads); setCursor(page.next_after_id); setHasMore(page.has_more); setActive(page.active)
-    } catch (cause) { setError(message(cause)) } finally { setLoading(false) }
-  }
-  useEffect(() => { void reset() }, [threadId, refreshKey])
   useEffect(() => {
-    if (!active) return
-    const interval = window.setInterval(() => { void (async () => {
+    const generation = ++generationRef.current
+    let cancelled = false
+    let polling = false
+    cursorRef.current = 0
+    setRecords([]); setSubthreads([]); setCursor(0); setBefore(undefined); setHasMore(false); setActive(false); setLoading(true); setLoadingEarlier(false); setError('')
+    const current = () => !cancelled && generationRef.current === generation
+    const applyPage = (page: ThreadHistoryPage, reset = false) => {
+      if (!current()) return
+      setRecords((existing) => reset ? mergeThreadHistoryRecords([], page.records) : mergeThreadHistoryRecords(existing, page.records))
+      setSubthreads((existing) => reset ? mergeThreadHistorySubthreads([], page.subthreads) : mergeThreadHistorySubthreads(existing, page.subthreads))
+      cursorRef.current = page.next_after_id
+      setCursor(page.next_after_id); setHasMore(page.has_more); setActive(page.active); setError('')
+    }
+    const poll = async (initial = false) => {
+      if (polling) return
+      polling = true
       try {
-        const params = new URLSearchParams({ after_id: String(cursor) }); if (threadId) params.set('thread_id', threadId)
-        const page = await request(params)
-        if (page.records.length) setRecords((current) => {
-          const known = new Set(current.map((record) => record.id)); return [...current, ...page.records.filter((record) => !known.has(record.id))]
-        })
-        if (page.subthreads.length) setSubthreads((current) => { const byId = new Map(current.map((thread) => [thread.id, thread])); page.subthreads.forEach((thread) => byId.set(thread.id, thread)); return [...byId.values()] })
-        setCursor(page.next_after_id); setActive(page.active)
-      } catch (cause) { setError(message(cause)) }
-    })() }, 1000)
-    return () => window.clearInterval(interval)
-  }, [active, cursor, threadId])
+        const params = initial ? new URLSearchParams() : new URLSearchParams({ after_id: String(cursorRef.current) })
+        if (threadId) params.set('thread_id', threadId)
+        applyPage(await request(params), initial)
+      } catch (cause) {
+        if (current()) setError(message(cause))
+      } finally {
+        if (current() && initial) setLoading(false)
+        polling = false
+      }
+    }
+    void poll(true)
+    const interval = window.setInterval(() => { void poll() }, 1000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [threadId, refreshKey])
   useEffect(() => { if (focusRecordId !== undefined) document.getElementById(`history-entry-${focusRecordId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }, [focusRecordId, records])
   const loadEarlier = async () => {
     const oldest = records[0]?.id; if (!oldest || loadingEarlier) return
+    const generation = generationRef.current
     setLoadingEarlier(true)
     try {
       const params = new URLSearchParams({ before_id: String(oldest) }); if (threadId) params.set('thread_id', threadId)
       const page = await request(params)
-      setRecords((current) => [...page.records, ...current]); if (page.subthreads.length) setSubthreads((current) => { const byId = new Map(current.map((thread) => [thread.id, thread])); page.subthreads.forEach((thread) => byId.set(thread.id, thread)); return [...byId.values()] }); setHasMore(page.has_more); setBefore(page.next_before_id)
-    } catch (cause) { setError(message(cause)) } finally { setLoadingEarlier(false) }
+      if (generation !== generationRef.current) return
+      setRecords((current) => mergeThreadHistoryRecords(page.records, current)); if (page.subthreads.length) setSubthreads((current) => mergeThreadHistorySubthreads(current, page.subthreads)); setHasMore(page.has_more); setBefore(page.next_before_id)
+    } catch (cause) { if (generation === generationRef.current) setError(message(cause)) } finally { if (generation === generationRef.current) setLoadingEarlier(false) }
   }
   if (loading) return <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{t('loadingMachine')}</div>
   if (error) return <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3"><ErrorAlert error={error} /></div>
