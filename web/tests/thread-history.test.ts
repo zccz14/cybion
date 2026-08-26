@@ -68,6 +68,16 @@ test('thread history renders persisted subthread titles for subthread tools', ()
   assert.match(source, /to=\{`\/threads\/\$\{item\.subthread\.id\}`\}/)
 })
 
+test('thread history labels completed fork calls as scheduled without changing terminal or other subthread actions', () => {
+  const entry = source.match(/function SubthreadToolEntry[\s\S]*?\n}\n\nfunction ResendMessageButton/)?.[0] ?? ''
+  assert.match(entry, /item\.subthreadAction === 'fork' \? item\.complete \? t\('goalScheduled'\) : t\('calling'\)/)
+  assert.match(entry, /: item\.complete \? t\('completed'\) : item\.subthreadAction === 'cancel' \? t\('commandCancelled'\) : t\('retrying'\)/)
+  assert.match(source, /goalScheduled: 'Scheduled'/)
+  assert.match(source, /goalScheduled: '已调度'/)
+  assert.match(source, /function SubthreadHandoffEntry/)
+  assert.match(source, /goalStateLabel\(language, item\.terminalState as GoalState\)/)
+})
+
 test('thread detail reserves a bounded scrollable history viewport', () => {
   assert.match(source, /<main className="flex h-full min-h-0 flex-col">/)
   assert.match(source, /max-h-\[35svh\] shrink-0 overflow-y-auto border-b p-4/)
