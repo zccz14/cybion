@@ -7134,7 +7134,11 @@ fn thread_history_subthread_ids(records: &[ThreadHistoryRecord]) -> HashSet<Stri
                     .and_then(Value::as_str)
                     .and_then(|output| serde_json::from_str::<Value>(output).ok())
                     .and_then(|output| {
-                        output.get("id").and_then(Value::as_str).map(str::to_owned)
+                        output
+                            .get("id")
+                            .or_else(|| output.get("subthread_id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
                     });
             }
             None
@@ -16518,6 +16522,8 @@ mod tests {
         assert!(call_id.starts_with("subthread-handoff-"));
         assert!(output.contains("\"checkpoint_id\":"));
         assert!(output.contains("\"handoff_checkpoint_status\":\"available\""));
+        let history = load_thread_history_page(&db, ThreadHistoryQuery::default()).unwrap();
+        assert!(history.subthreads.iter().any(|thread| thread.id == id));
         let main = compile_main_context(&db, outcome).unwrap();
         assert!(
             main.protocol_items

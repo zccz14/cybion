@@ -36,7 +36,7 @@ test("audit navigation preserves its routes and active NavLink behavior", () => 
 })
 
 test("active task status uses one shared top-bar query and accessible popup navigation", () => {
-  const workspace = source.match(/function Workspace[\s\S]*?function reasoningSummary/)?.[0] ?? ""
+  const workspace = source.match(/function Workspace[\s\S]*?function formatTimestamp/)?.[0] ?? ""
   assert.equal((workspace.match(/queryKey: \['threads', 'active'\]/g) ?? []).length, 1)
   assert.match(source, /function AppHeader\(\{ language, threads, tasksLoading, tasksError \}/)
   assert.match(source, /aria-label=\{`\$\{t\('activeTasks'\)\}: \$\{threads\.length\}`\}/)

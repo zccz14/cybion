@@ -7,11 +7,55 @@ const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
 test('thread history renders persisted Responses output_text content as assistant text', () => {
   assert.match(source, /function protocolMessageText/)
   assert.match(source, /value\.type === 'output_text' && typeof value\.text === 'string'/)
-  assert.match(source, /const content = protocolMessageText\(record\.payload\)/)
+  assert.match(source, /content: protocolMessageText\(record\.payload\)/)
 })
 
 test('thread history preserves legacy string message content', () => {
   assert.match(source, /if \(typeof content === 'string'\) return content/)
+})
+
+test('thread history preserves record order and record granularity', () => {
+  const classifier = source.match(/function threadHistoryItems[\s\S]*?\n}\n\nfunction ThreadHistoryRecordsView/)?.[0] ?? ''
+  assert.match(classifier, /for \(const record of records\)/)
+  assert.match(classifier, /id: String\(record\.id\)/)
+  assert.match(classifier, /items\.push\(\{ kind: 'tool', id: String\(record\.id\)/)
+  assert.match(classifier, /items\.push\(\{ kind: 'fallback', id: String\(record\.id\)/)
+  assert.doesNotMatch(classifier, /Object\.assign\(tool/)
+})
+
+test('thread history preserves malformed records as concise unavailable details', () => {
+  const classifier = source.match(/function threadHistoryItems[\s\S]*?\n}\n\nfunction ThreadHistoryRecordsView/)?.[0] ?? ''
+  assert.match(classifier, /items\.push\(\{ kind: 'fallback', id: String\(record\.id\), label: record\.kind === 'checkpoint' \? 'checkpoint' : type \|\| record\.kind \}\)/)
+  assert.match(source, /item\.kind === 'fallback'/)
+  assert.match(source, /t\('detailsUnavailable'\)/)
+})
+
+test('thread history classifies skill tools without rendering resource content', () => {
+  assert.match(source, /item\.name === 'load_skill' \|\| item\.name === 'read_skill_resource'/)
+  assert.match(source, /const resourcePath = stringValue\(item\.arguments\.relative_path\)\.replace/)
+  assert.match(source, /const parameters = knownSkillTool \? ''/)
+  assert.match(source, /skillLoading: 'Loading skill'/)
+  assert.match(source, /resourceRead: 'Resource read'/)
+  assert.match(source, /skillLoading: '正在加载技能'/)
+  assert.match(source, /resourceRead: '已读取资源'/)
+})
+
+test('thread history summarizes terminal handoffs and links referenced child threads', () => {
+  assert.match(source, /outputPayload\?\.type === 'subthread_handoff'/)
+  assert.match(source, /function SubthreadHandoffEntry/)
+  assert.match(source, /goalStateLabel\(language, item\.terminalState as GoalState\)/)
+  assert.match(source, /item\.subthread\.model/)
+  assert.match(source, /to=\{`\/threads\/\$\{item\.subthread\.id\}`\}/)
+})
+
+test('thread history only uses stored reasoning summaries and never encrypted reasoning content', () => {
+  const classifier = source.match(/function safeReasoningSummary[\s\S]*?\n}\n\nfunction threadHistoryItems/)?.[0] ?? ''
+  assert.match(classifier, /const summary = payload\.summary/)
+  assert.doesNotMatch(classifier, /encrypted_content/)
+  assert.match(source, /reasoningSummaryUnavailable: 'Reasoning summary unavailable'/)
+  assert.match(source, /reasoningWithheld: 'Reasoning withheld'/)
+  assert.match(source, /reasoningSummaryUnavailable: '推理摘要不可用'/)
+  assert.match(source, /reasoningWithheld: '推理内容已保留'/)
 })
 
 test('thread history renders persisted subthread titles for subthread tools', () => {
