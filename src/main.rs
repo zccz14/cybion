@@ -762,7 +762,6 @@ struct Subthread {
     result: Option<String>,
     retry_attempt: i64,
     next_retry_at: Option<i64>,
-    context_window_limit: Option<u64>,
     created_at: String,
     updated_at: String,
 }
@@ -943,7 +942,6 @@ struct SettingsResponse {
     edge_tts_en_voice: String,
     openai_base_url: String,
     openai_api_key: String,
-    context_window_limit: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -957,7 +955,6 @@ struct UpdateSettings {
     edge_tts_en_voice: String,
     openai_base_url: String,
     openai_api_key: String,
-    context_window_limit: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -2839,20 +2836,6 @@ async fn compact_context_after_overflow(
     }
 }
 
-async fn compact_context_after_limit(
-    runtime: ResponsesRuntime<'_>,
-    events: &AgentEventSink<'_>,
-    cancellation: watch::Receiver<bool>,
-    target: &ContextCheckpointTarget,
-) -> Result<()> {
-    let history_thread_id = match target {
-        ContextCheckpointTarget::Main { .. } => None,
-        ContextCheckpointTarget::Subthread { id } => Some(id.as_str()),
-    };
-    let context = compile_latest_context(runtime.db_path, history_thread_id)?;
-    compact_context_after_overflow(runtime, &context, events, cancellation, target).await
-}
-
 fn checkpoint_text_from_output_record(
     connection: &Connection,
     output_record_id: i64,
@@ -4233,13 +4216,6 @@ fn migrate_subthread_scheduler_schema(connection: &Connection) -> Result<()> {
     if !columns.iter().any(|column| column == "next_retry_at") {
         connection.execute_batch("ALTER TABLE subthreads ADD COLUMN next_retry_at INTEGER;")?;
     }
-    if !columns
-        .iter()
-        .any(|column| column == "context_window_limit")
-    {
-        connection
-            .execute_batch("ALTER TABLE subthreads ADD COLUMN context_window_limit INTEGER;")?;
-    }
     if !columns.iter().any(|column| column == "no_progress_attempt") {
         connection.execute_batch(
             "ALTER TABLE subthreads ADD COLUMN no_progress_attempt INTEGER NOT NULL DEFAULT 0;",
@@ -4537,8 +4513,7 @@ fn migrate_history_records_without_activity(connection: &Connection) -> Result<(
            updated_at TEXT NOT NULL,
            retry_attempt INTEGER NOT NULL DEFAULT 0,
            next_retry_at INTEGER,
-           no_progress_attempt INTEGER NOT NULL DEFAULT 0,
-           context_window_limit INTEGER
+           no_progress_attempt INTEGER NOT NULL DEFAULT 0
          );
          INSERT INTO subthreads (
            id, title, task, completion_criteria, goal_state, goal_evidence, blocked_reason,
@@ -4955,7 +4930,6 @@ struct Config {
     voice_script_max_chars: usize,
     edge_tts_zh_voice: String,
     edge_tts_en_voice: String,
-    context_window_limit: Option<u64>,
     machine_id: String,
     deployment_role: String,
 }
@@ -4992,63 +4966,9 @@ fn load_config(path: &Path) -> Result<Config> {
             .context("invalid voice_script_max_chars in app_meta")?,
         edge_tts_zh_voice: required("edge_tts_zh_voice")?,
         edge_tts_en_voice: required("edge_tts_en_voice")?,
-        context_window_limit: optional_context_window_limit(&values)?,
         machine_id: required("machine_id")?,
         deployment_role: required("deployment_role")?,
     })
-}
-
-fn optional_context_window_limit(values: &HashMap<String, String>) -> Result<Option<u64>> {
-    values
-        .get("context_window_limit")
-        .map(|value| {
-            let limit = value
-                .parse::<u64>()
-                .context("invalid context_window_limit in app_meta")?;
-            if limit == 0 {
-                return Err(anyhow!(
-                    "context_window_limit in app_meta must be greater than zero"
-                ));
-            }
-            Ok(limit)
-        })
-        .transpose()
-}
-
-fn main_context_window_limit(path: &Path) -> Result<Option<u64>> {
-    let values: HashMap<String, String> = open_db(path)?
-        .prepare("SELECT key, value FROM app_meta WHERE key = 'context_window_limit'")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<std::result::Result<_, _>>()?;
-    optional_context_window_limit(&values)
-}
-
-fn subthread_context_window_limit(path: &Path, id: &str) -> Result<Option<u64>> {
-    open_db(path)?
-        .query_row(
-            "SELECT context_window_limit FROM subthreads WHERE id = ?1",
-            [id],
-            |row| row.get::<_, Option<u64>>(0),
-        )
-        .optional()
-        .map(|value| value.flatten())
-        .map_err(Into::into)
-}
-
-fn effective_context_window_limit(
-    path: &Path,
-    target: &ContextCheckpointTarget,
-) -> Result<Option<u64>> {
-    match target {
-        ContextCheckpointTarget::Main { .. } => main_context_window_limit(path),
-        ContextCheckpointTarget::Subthread { id } => subthread_context_window_limit(path, id),
-    }
-}
-
-fn context_window_limit_exceeded(input_tokens: Option<u64>, limit: Option<u64>) -> bool {
-    input_tokens
-        .zip(limit)
-        .is_some_and(|(input_tokens, limit)| input_tokens > limit)
 }
 
 fn load_executor_config(path: &Path) -> Result<ExecutorConfig> {
@@ -5454,7 +5374,6 @@ async fn settings(
         edge_tts_en_voice: config.edge_tts_en_voice,
         openai_base_url: config.openai_base_url,
         openai_api_key: config.openai_api_key,
-        context_window_limit: config.context_window_limit,
     }))
 }
 
@@ -5503,12 +5422,6 @@ fn save_settings(
         return Err(error(
             StatusCode::BAD_REQUEST,
             "voice_script_max_chars must be greater than zero",
-        ));
-    }
-    if input.context_window_limit == Some(0) {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "context_window_limit must be greater than zero when configured",
         ));
     }
     let edge_tts_zh_voice = input.edge_tts_zh_voice.trim();
@@ -5579,21 +5492,6 @@ fn save_settings(
             [input.voice_script_max_chars.to_string()],
         )
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?;
-    match input.context_window_limit {
-        Some(limit) => transaction
-            .execute(
-                "INSERT INTO app_meta (key, value) VALUES ('context_window_limit', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [limit.to_string()],
-            )
-            .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?,
-        None => transaction
-            .execute(
-                "DELETE FROM app_meta WHERE key = 'context_window_limit'",
-                [],
-            )
-            .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "cannot save settings"))?,
-    };
     transaction
         .execute(
             "INSERT INTO app_meta (key, value) VALUES ('edge_tts_zh_voice', ?1)
@@ -5636,7 +5534,6 @@ fn save_settings(
         edge_tts_en_voice: edge_tts_en_voice.to_owned(),
         openai_base_url: openai_base_url.to_owned(),
         openai_api_key: openai_api_key.to_owned(),
-        context_window_limit: input.context_window_limit,
     };
     Ok(settings)
 }
@@ -7516,7 +7413,6 @@ fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
     let status = row.get::<_, String>(7)?;
     let retry_attempt: i64 = row.get(12)?;
     let next_retry_at: Option<i64> = row.get(13)?;
-    let context_window_limit: Option<u64> = row.get(14)?;
     Ok(Subthread {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -7534,7 +7430,6 @@ fn subthread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subthread> {
         result: row.get(9)?,
         retry_attempt,
         next_retry_at,
-        context_window_limit,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
@@ -7555,7 +7450,7 @@ fn load_subthreads_matching(
                     thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                     thread.blocked_reason, thread.status, thread.model, thread.result,
                     thread.created_at, thread.updated_at,
-                    thread.retry_attempt, thread.next_retry_at, thread.context_window_limit
+                    thread.retry_attempt, thread.next_retry_at
              FROM subthreads thread WHERE {predicate}
              ORDER BY thread.updated_at DESC, thread.id DESC"
         ))?
@@ -7689,7 +7584,7 @@ fn load_thread_index(path: &Path, query: ThreadQuery) -> Result<ThreadIndex> {
                         thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                         thread.blocked_reason, thread.status, thread.model, thread.result,
                         thread.created_at, thread.updated_at,
-                        thread.retry_attempt, thread.next_retry_at, thread.context_window_limit
+                        thread.retry_attempt, thread.next_retry_at
                  FROM subthreads thread WHERE {where_clause}
                  ORDER BY thread.updated_at DESC, thread.id DESC LIMIT ? OFFSET ?"
             ))?
@@ -7718,7 +7613,7 @@ fn load_subthread_detail(path: &Path, id: &str) -> Result<Option<SubthreadDetail
                     thread.completion_criteria, thread.goal_state, thread.goal_evidence,
                     thread.blocked_reason, thread.status, thread.model, thread.result,
                     thread.created_at, thread.updated_at,
-                    thread.retry_attempt, thread.next_retry_at, thread.context_window_limit
+                    thread.retry_attempt, thread.next_retry_at
              FROM subthreads thread WHERE thread.id = ?1",
             [id],
             |row| {
@@ -8043,17 +7938,6 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
             ));
         }
     };
-    let context_window_limit = match args.get("context_window_limit") {
-        None | Some(Value::Null) => None,
-        Some(value) => match value.as_u64().filter(|limit| *limit > 0) {
-            Some(limit) => Some(limit),
-            None => {
-                return tool_execution(
-                    "error: context_window_limit must be a positive integer or null",
-                );
-            }
-        },
-    };
     let goal_prompt = json!({
         "role": "user",
         "content": goal_agent_prompt(task, completion_criteria),
@@ -8079,8 +7963,8 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
         transaction.execute(
             "INSERT INTO subthreads (
            id, title, task, completion_criteria, goal_state, status, model, upstream_thread_id,
-           from_record_id, context_window_limit, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, 'active', 'queued', ?5, ?6, ?7, ?8, ?9, ?9)",
+           from_record_id, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, 'active', 'queued', ?5, ?6, ?7, ?8, ?8)",
             params![
                 id,
                 title,
@@ -8089,7 +7973,6 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
                 model,
                 Uuid::new_v4().to_string(),
                 from_record_id,
-                context_window_limit,
                 now,
             ],
         )
@@ -8099,7 +7982,7 @@ fn execute_fork_subthread(path: &Path, from_record_id: i64, args: Value) -> Tool
             if let Err(cause) = transaction.commit() {
                 return tool_execution(format!("error: cannot prepare subthread run: {cause}"));
             }
-            tool_execution(json!({ "id": id, "status": "queued", "model_id": model, "context_window_limit": context_window_limit }).to_string())
+            tool_execution(json!({ "id": id, "status": "queued", "model_id": model }).to_string())
         }
         Err(cause) => tool_execution(format!("error: {cause}")),
     }
@@ -8783,13 +8666,6 @@ async fn run_agent_items(
             )
             .await?;
         }
-        // A configured limit is a proactive checkpoint policy, distinct from the upstream
-        // overflow recovery below. Reading it after each normal response makes main-thread
-        // setting changes apply to the next loop without changing persisted child limits.
-        let proactive_compaction = context_window_limit_exceeded(
-            response_input_tokens,
-            effective_context_window_limit(db_path, &checkpoint_target)?,
-        );
         let output = response
             .get("output")
             .and_then(Value::as_array)
@@ -8827,27 +8703,6 @@ async fn run_agent_items(
             &output_record_ids,
         )?);
         emit_response_process_events(&output, db_path, &events).await?;
-        if proactive_compaction
-            && !output.iter().any(|item| {
-                matches!(
-                    item.get("type").and_then(Value::as_str),
-                    Some("function_call" | "computer_call")
-                )
-            })
-        {
-            compact_context_after_limit(
-                ResponsesRuntime {
-                    client,
-                    config,
-                    db_path,
-                    upstream_thread_id,
-                },
-                &events,
-                cancellation.clone(),
-                &checkpoint_target,
-            )
-            .await?;
-        }
         if !output.iter().any(|item| {
             matches!(
                 item.get("type").and_then(Value::as_str),
@@ -9048,20 +8903,6 @@ async fn run_agent_items(
                 });
             }
         }
-        if proactive_compaction {
-            compact_context_after_limit(
-                ResponsesRuntime {
-                    client,
-                    config,
-                    db_path,
-                    upstream_thread_id,
-                },
-                &events,
-                cancellation.clone(),
-                &checkpoint_target,
-            )
-            .await?;
-        }
     }
 }
 
@@ -9193,7 +9034,22 @@ fn thread_tool_definitions() -> Vec<Value> {
     let mut tools = Vec::new();
     tools.extend([
             json!({"type":"function","name":"list_subthreads","description":"Inspect Cybion's internal persistent Goal loops. They are implementation details of the single user-visible main thread, not user-managed sessions.","parameters":{"type":"object","additionalProperties":false,"properties":{}}}),
-            json!({"type":"function","name":"fork_subthread","description":"For independently executable, substantial work, subthread parallelism has unlimited default priority: actively fork all independent tasks that can make useful progress in parallel. Do not serialize or cancel independent Goals because they share a repository, may touch the same files, may create merge conflicts, or may eventually share a release or deploy chain. Give each Goal an independent worktree and branch; resolve ordinary integration through Git linear history, rebase, and normal CI. Every fork is one persistent Goal and must state its durable objective and concrete done-when criteria. Infer the user-preferred language from the current conversation context, including the user’s current language and any explicit preference; use it for title, task, and completion_criteria. Do not derive it from the UI locale or source-code language, and do not add a caller-provided language field. Use direct tools for brief, localized checks or edits. model_id is optional: use gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. Omit model_id to use the configured subthread default. The Goal inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Cybion resumes the main thread only after the Goal is achieved or blocked.","parameters":{"type":"object","additionalProperties":false,"required":["title","task","completion_criteria"],"properties":{"title":{"type":"string","description":"A short Goal name in the user-preferred language inferred from the current conversation context."},"task":{"type":"string","description":"The durable Goal objective in the user-preferred language inferred from the current conversation context."},"completion_criteria":{"type":"string","description":"Concrete, verifiable done-when conditions in the user-preferred language inferred from the current conversation context."},"model_id":{"type":"string","enum":["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"],"description":"Optional model override. Prefer sol for scientific/deep research, terra for engineering, and luna for operational or simple low-ambiguity work."},"context_window_limit":{"type":["integer","null"],"minimum":1,"description":"Optional Cybion proactive context-compaction threshold in input tokens, not the model context window. null/omitted keeps only the upstream overflow fallback. Practical guidance: 16k–32k short explicit low-tool tasks; 32k–64k typical engineering/operations/multi-step tool work; 64k–96k complex debugging/cross-file work; 96k–128k deep research that truly needs long source evidence. When actual normal-request input_tokens strictly exceeds this threshold, Cybion compacts before the next normal request. This preserves context deliberately because OpenAI Responses truncation=auto can discard oldest conversation items after a model window is exceeded."}}}}),
+            json!({
+                "type": "function",
+                "name": "fork_subthread",
+                "description": "For independently executable, substantial work, subthread parallelism has unlimited default priority: actively fork all independent tasks that can make useful progress in parallel. Do not serialize or cancel independent Goals because they share a repository, may touch the same files, may create merge conflicts, or may eventually share a release or deploy chain. Give each Goal an independent worktree and branch; resolve ordinary integration through Git linear history, rebase, and normal CI. Every fork is one persistent Goal and must state its durable objective and concrete done-when criteria. Infer the user-preferred language from the current conversation context, including the user’s current language and any explicit preference; use it for title, task, and completion_criteria. Do not derive it from the UI locale or source-code language, and do not add a caller-provided language field. Use direct tools for brief, localized checks or edits. model_id is optional: use gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. Omit model_id to use the configured subthread default. The Goal inherits compiled main-thread context and runs on this controller; each filesystem or Bash call may independently select an enrolled device. Cybion resumes the main thread only after the Goal is achieved or blocked.",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["title", "task", "completion_criteria"],
+                    "properties": {
+                        "title": {"type": "string", "description": "A short Goal name in the user-preferred language inferred from the current conversation context."},
+                        "task": {"type": "string", "description": "The durable Goal objective in the user-preferred language inferred from the current conversation context."},
+                        "completion_criteria": {"type": "string", "description": "Concrete, verifiable done-when conditions in the user-preferred language inferred from the current conversation context."},
+                        "model_id": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"], "description": "Optional model override. Prefer sol for scientific/deep research, terra for engineering work, and luna for operational or simple low-ambiguity work."}
+                    }
+                }
+            }),
             json!({"type":"function","name":"cancel_subthread","description":"Cancel an existing Goal only when a later user instruction makes its objective, premise, or expected correct result irrelevant, wrong, unusable, or directly conflicting. Ordinary Git integration conflicts are not a reason to cancel a Goal.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
             json!({"type":"function","name":"retry_subthread","description":"Immediately resume an active Goal that is waiting after an error. This overrides only its current delay; it does not clear the consecutive-error count. Use this when new main-thread evidence makes waiting unnecessary.","parameters":{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}}}),
         ]);
@@ -12678,7 +12534,6 @@ mod tests {
             voice_script_max_chars: 150,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         }
@@ -13915,28 +13770,20 @@ mod tests {
     }
 
     #[test]
-    fn context_window_limit_is_optional_and_strictly_exceeded() {
-        assert!(!context_window_limit_exceeded(None, Some(1)));
-        assert!(!context_window_limit_exceeded(Some(1), None));
-        assert!(!context_window_limit_exceeded(Some(32_768), Some(32_768)));
-        assert!(context_window_limit_exceeded(Some(32_769), Some(32_768)));
-
-        let values = HashMap::new();
-        assert_eq!(optional_context_window_limit(&values).unwrap(), None);
-        let values = HashMap::from([("context_window_limit".to_owned(), "65536".to_owned())]);
-        assert_eq!(
-            optional_context_window_limit(&values).unwrap(),
-            Some(65_536)
-        );
-        let values = HashMap::from([("context_window_limit".to_owned(), "0".to_owned())]);
-        assert!(optional_context_window_limit(&values).is_err());
-    }
-
-    #[test]
-    fn fork_subthread_persists_an_immutable_context_window_limit() {
+    fn fork_subthread_does_not_expose_or_persist_context_window_limits() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
+        assert!(
+            !has_column(&open_db(&db).unwrap(), "subthreads", "context_window_limit",).unwrap()
+        );
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "ALTER TABLE subthreads ADD COLUMN context_window_limit INTEGER",
+                [],
+            )
+            .unwrap();
         let user = append_conversation(
             &db,
             &ChatMessage {
@@ -13953,47 +13800,42 @@ mod tests {
             &db,
             user.id,
             json!({
-                "title": "Bounded goal",
-                "task": "Do bounded work.",
+                "title": "Goal",
+                "task": "Do the work.",
                 "completion_criteria": "Done.",
                 "context_window_limit": 32768,
             }),
         );
         let created: Value = serde_json::from_str(&execution.output).unwrap();
         let id = created["id"].as_str().unwrap();
-        assert_eq!(created["context_window_limit"], 32_768);
+        assert!(created.get("context_window_limit").is_none());
+        assert_eq!(load_subthreads(&db).unwrap().len(), 1);
         assert_eq!(
-            subthread_context_window_limit(&db, id).unwrap(),
-            Some(32_768)
+            load_subthread_detail(&db, id).unwrap().unwrap().thread.id,
+            id
         );
-        open_db(&db)
+
+        let body = scoped_responses_request_body(
+            DEFAULT_MODEL_ID,
+            &[],
+            &SkillCatalog::default(),
+            AgentScope::Main,
+            &db,
+            None,
+        );
+        let fork = body["tools"]
+            .as_array()
             .unwrap()
-            .execute(
-                "INSERT INTO app_meta (key, value) VALUES ('context_window_limit', '16384')",
-                [],
-            )
+            .iter()
+            .find(|tool| tool["name"] == "fork_subthread")
             .unwrap();
-        assert_eq!(
-            effective_context_window_limit(
-                &db,
-                &ContextCheckpointTarget::Subthread { id: id.to_owned() }
-            )
-            .unwrap(),
-            Some(32_768)
+        assert!(
+            fork["parameters"]["properties"]
+                .as_object()
+                .unwrap()
+                .get("context_window_limit")
+                .is_none()
         );
-        assert_eq!(
-            effective_context_window_limit(
-                &db,
-                &ContextCheckpointTarget::Main {
-                    current_message_id: None,
-                    checkpoint_write_gate: Arc::new(RwLock::new(())),
-                    checkpoint_write_pending: Arc::new(AtomicBool::new(false))
-                }
-            )
-            .unwrap(),
-            Some(16_384)
-        );
-        assert!(execute_fork_subthread(&db, user.id, json!({"title":"bad","task":"bad","completion_criteria":"bad","context_window_limit":0})).output.contains("positive integer"));
     }
 
     #[test]
@@ -14063,33 +13905,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn fork_subthread_tool_schema_explains_context_window_limits() {
-        let body = scoped_responses_request_body(
-            DEFAULT_MODEL_ID,
-            &[],
-            &SkillCatalog::default(),
-            AgentScope::Main,
-            Path::new("/tmp/cybion-tool-schema-test.sqlite3"),
-            None,
-        );
-        let fork = body["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tool| tool["name"] == "fork_subthread")
-            .unwrap();
-        assert_eq!(
-            fork["parameters"]["properties"]["context_window_limit"]["minimum"],
-            1
-        );
-        let description = fork["parameters"]["properties"]["context_window_limit"]["description"]
-            .as_str()
-            .unwrap();
-        assert!(description.contains("16k–32k"));
-        assert!(description.contains("not the model context window"));
     }
 
     #[test]
@@ -16042,7 +15857,6 @@ mod tests {
             voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -16251,7 +16065,6 @@ mod tests {
             voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -16411,7 +16224,6 @@ mod tests {
             voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -16522,7 +16334,6 @@ mod tests {
             voice_script_max_chars: 150,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -16636,7 +16447,6 @@ mod tests {
             voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -16659,7 +16469,6 @@ mod tests {
             voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: "zh-CN-YunxiNeural".to_owned(),
             edge_tts_en_voice: "en-US-GuyNeural".to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -19675,7 +19484,6 @@ mod tests {
             voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -19791,7 +19599,6 @@ mod tests {
             voice_script_max_chars: DEFAULT_VOICE_SCRIPT_MAX_CHARS,
             edge_tts_zh_voice: DEFAULT_EDGE_TTS_ZH_VOICE.to_owned(),
             edge_tts_en_voice: DEFAULT_EDGE_TTS_EN_VOICE.to_owned(),
-            context_window_limit: None,
             machine_id: "machine".to_owned(),
             deployment_role: "controller".to_owned(),
         };
@@ -20851,17 +20658,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actual_normal_input_tokens_trigger_one_proactive_context_compaction() {
+    async fn legacy_context_window_settings_do_not_trigger_compaction() {
         async fn responses(
             State(requests): State<Arc<Mutex<Vec<Value>>>>,
             Json(request): Json<Value>,
         ) -> String {
             let mut requests = requests.lock().await;
-            let compaction = request["tool_choice"] == "none";
             requests.push(request);
-            if compaction {
-                return checkpoint_compaction_response("proactive checkpoint");
-            }
             let response = json!({
                 "output": [{
                     "type": "message",
@@ -20894,6 +20697,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("default.sqlite3");
         bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
         open_db(&db)
             .unwrap()
             .execute(
@@ -20901,6 +20705,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        assert_eq!(load_config(&db).unwrap().default_model, DEFAULT_MODEL_ID);
         let (events, _) = mpsc::channel(16);
         let (_cancel, cancellation) = watch::channel(false);
         let result = run_agent(
@@ -20926,8 +20731,7 @@ mod tests {
         assert_eq!(result.persisted_message.content, "normal result");
         server.abort();
         let requests = requests.lock().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1]["tool_choice"], "none");
+        assert_eq!(requests.len(), 1);
         let audits = load_reasoning_audit_page(&db, &ReasoningAuditQuery::default()).unwrap();
         assert_eq!(
             audits
@@ -20943,17 +20747,8 @@ mod tests {
                 .iter()
                 .filter(|item| item.request_kind == "compaction")
                 .count(),
-            1
+            0
         );
-        let checkpoints: i64 = open_db(&db)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM history_records WHERE kind = 'checkpoint'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(checkpoints, 1);
     }
 
     #[tokio::test]
