@@ -4,14 +4,8 @@ import test from 'node:test'
 
 const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
 
-test('settings expose an optional proactive context compaction threshold', () => {
-  assert.match(source, /context_window_limit: number \| null/)
-  assert.match(source, /id="context-window-limit"/)
-  assert.match(source, /context_window_limit: contextWindowLimit\.trim\(\) \? Number\(contextWindowLimit\) : null/)
-  assert.match(source, /contextWindowLimitHint/)
-})
-
-test('thread detail identifies its persisted context compaction threshold', () => {
-  assert.match(source, /context_window_limit: number \| null/)
-  assert.match(source, /contextWindowLimitLabel\(t, thread\.context_window_limit\)/)
+test('the UI does not expose context-window overrides', () => {
+  assert.doesNotMatch(source, /context_window_limit/)
+  assert.doesNotMatch(source, /context-window-limit/)
+  assert.doesNotMatch(source, /contextWindowLimit/)
 })
