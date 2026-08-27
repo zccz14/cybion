@@ -85,6 +85,7 @@ const COMMAND_RUNS_PAGE_DEFAULT: i64 = 20;
 const COMMAND_RUNS_PAGE_MAX: i64 = 100;
 const RETRY_SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
 const AGENT_RETRY_MAX_ATTEMPTS: i64 = 5;
+const SUBTHREAD_NO_PROGRESS_MAX_ATTEMPTS: i64 = 2;
 const AGENT_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 const MAIN_RETRY_ATTEMPT_KEY: &str = "main_retry_attempt";
 const MAIN_NEXT_RETRY_AT_KEY: &str = "main_next_retry_at";
@@ -853,6 +854,7 @@ struct AgentUsage {
 
 struct AgentResult {
     persisted_message: ConversationMessage,
+    useful_progress: bool,
     #[cfg(test)]
     message: ChatMessage,
 }
@@ -1492,42 +1494,65 @@ async fn run_subthread(state: AppState, job: QueuedSubthread) {
         Err(cause) => Err(cause),
     };
     match result {
-        Ok(_) => match start_terminal_subthread_join(&state, &job.id).await {
-            Ok(true) => {}
-            Ok(false) if subthread_is_active(&state.db_path, &job.id).unwrap_or(false) => {
-                let _ = requeue_subthread_after_progress(&state.db_path, &job.id);
-                let _ = reset_subthread_retry_after_success(&state.db_path, Some(&job.id));
-                let sink = AgentEventSink {
-                    thread_id: Some(&job.id),
-                    sender: &events,
-                };
-                let _ = send_agent_event(
-                    &state.db_path,
-                    &sink,
-                    AgentEvent::Status {
-                        stage: "queued".to_owned(),
-                        message: "Progress recorded; continuing the Goal".to_owned(),
-                    },
-                )
-                .await;
+        Ok(result) => {
+            if !result.useful_progress {
+                match record_subthread_no_progress(&state.db_path, &job.id) {
+                    Ok(attempt) if attempt >= SUBTHREAD_NO_PROGRESS_MAX_ATTEMPTS => {
+                        let _ = block_goal(
+                            &state.db_path,
+                            &job.id,
+                            "The Goal was blocked after repeated acknowledgement-only responses.",
+                            "The model repeatedly acknowledged developer/runtime context without taking a Goal step, calling a tool, or reaching a terminal state. The durable Goal and history were retained; retry after correcting the upstream prompt/model behavior.",
+                        );
+                        let _ = start_terminal_subthread_join(&state, &job.id).await;
+                        state.active_subthreads.lock().await.remove(&job.id);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(cause) => {
+                        tracing::warn!(%cause, subthread = %job.id, "cannot record subthread no-progress response")
+                    }
+                }
+            } else {
+                let _ = reset_subthread_no_progress_after_useful_progress(&state.db_path, &job.id);
             }
-            Ok(false) => {}
-            Err(cause) => {
-                tracing::warn!(%cause, subthread = %job.id, "cannot join terminal subthread");
-                let sink = AgentEventSink {
-                    thread_id: Some(&job.id),
-                    sender: &events,
-                };
-                let _ = send_agent_event(
-                    &state.db_path,
-                    &sink,
-                    AgentEvent::Error {
-                        error: cause.to_string(),
-                    },
-                )
-                .await;
+            match start_terminal_subthread_join(&state, &job.id).await {
+                Ok(true) => {}
+                Ok(false) if subthread_is_active(&state.db_path, &job.id).unwrap_or(false) => {
+                    let _ = requeue_subthread_after_progress(&state.db_path, &job.id);
+                    let _ = reset_subthread_retry_after_success(&state.db_path, Some(&job.id));
+                    let sink = AgentEventSink {
+                        thread_id: Some(&job.id),
+                        sender: &events,
+                    };
+                    let _ = send_agent_event(
+                        &state.db_path,
+                        &sink,
+                        AgentEvent::Status {
+                            stage: "queued".to_owned(),
+                            message: "Progress recorded; continuing the Goal".to_owned(),
+                        },
+                    )
+                    .await;
+                }
+                Ok(false) => {}
+                Err(cause) => {
+                    tracing::warn!(%cause, subthread = %job.id, "cannot join terminal subthread");
+                    let sink = AgentEventSink {
+                        thread_id: Some(&job.id),
+                        sender: &events,
+                    };
+                    let _ = send_agent_event(
+                        &state.db_path,
+                        &sink,
+                        AgentEvent::Error {
+                            error: cause.to_string(),
+                        },
+                    )
+                    .await;
+                }
             }
-        },
+        }
         Err(cause) => {
             let detail = cause.to_string();
             match start_terminal_subthread_join(&state, &job.id).await {
@@ -3396,7 +3421,12 @@ fn compile_subthread_context(
         ));
     }
     let idx_head = context_idx_head(&connection, None, fork_from_id)?;
-    let mut records = load_protocol_items(&connection, None, idx_head, fork_from_id)?;
+    let mut records = load_protocol_items(&connection, None, idx_head, fork_from_id)?
+        .into_iter()
+        .map(|(id, kind, created_at, item)| {
+            (id, kind, created_at, subthread_inherited_context_item(item))
+        })
+        .collect::<Vec<_>>();
     records.extend(load_protocol_items(
         &connection,
         Some(thread_id),
@@ -3404,6 +3434,21 @@ fn compile_subthread_context(
         idx_tail,
     )?);
     Ok(CompiledContext::from_records(idx_head, idx_tail, records))
+}
+
+fn subthread_inherited_context_item(item: Value) -> Value {
+    if item.get("role").and_then(Value::as_str) != Some("user") {
+        return item;
+    }
+    let Some(content) = item.get("content").and_then(Value::as_str) else {
+        return item;
+    };
+    json!({
+        "role": "developer",
+        "content": format!(
+            "## Inherited main-thread context\n\n{content}\n\nThis is background context, not a task for this Goal."
+        ),
+    })
 }
 
 fn compile_latest_context(db_path: &Path, thread_id: Option<&str>) -> Result<CompiledContext> {
@@ -3847,6 +3892,47 @@ fn claim_due_main_retry(path: &Path) -> Result<Option<i64>> {
     latest_protocol_record_id(&connection, None).map(Some)
 }
 
+fn is_subthread_acknowledgement_only(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_matches(|character: char| {
+            character.is_ascii_punctuation()
+                || matches!(character, '。' | '！' | '？' | '，' | '、' | '：')
+        })
+        .trim()
+        .to_lowercase();
+    matches!(
+        normalized.as_str(),
+        "已确认" | "确认" | "confirmed" | "acknowledged" | "i confirm"
+    ) || normalized.starts_with("已确认当前日期为 ")
+        || normalized.starts_with("the current date is ")
+}
+
+fn record_subthread_no_progress(path: &Path, id: &str) -> Result<i64> {
+    let mut connection = open_db(path)?;
+    let transaction = connection.transaction()?;
+    let attempt = transaction.query_row(
+        "SELECT no_progress_attempt + 1 FROM subthreads
+         WHERE id = ?1 AND goal_state = 'active' AND status = 'running'",
+        [id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    transaction.execute(
+        "UPDATE subthreads SET no_progress_attempt = ?1, updated_at = ?2 WHERE id = ?3",
+        params![attempt, chrono::Utc::now().to_rfc3339(), id],
+    )?;
+    transaction.commit()?;
+    Ok(attempt)
+}
+
+fn reset_subthread_no_progress_after_useful_progress(path: &Path, id: &str) -> Result<()> {
+    open_db(path)?.execute(
+        "UPDATE subthreads SET no_progress_attempt = 0 WHERE id = ?1 AND status = 'running'",
+        [id],
+    )?;
+    Ok(())
+}
+
 fn reset_subthread_retry_after_success(path: &Path, thread_id: Option<&str>) -> Result<()> {
     let Some(thread_id) = thread_id else {
         return Ok(());
@@ -4154,6 +4240,11 @@ fn migrate_subthread_scheduler_schema(connection: &Connection) -> Result<()> {
         connection
             .execute_batch("ALTER TABLE subthreads ADD COLUMN context_window_limit INTEGER;")?;
     }
+    if !columns.iter().any(|column| column == "no_progress_attempt") {
+        connection.execute_batch(
+            "ALTER TABLE subthreads ADD COLUMN no_progress_attempt INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     if !columns.iter().any(|column| column == "outcome_record_id") {
         connection.execute_batch("ALTER TABLE subthreads ADD COLUMN outcome_record_id INTEGER;")?;
     }
@@ -4446,6 +4537,7 @@ fn migrate_history_records_without_activity(connection: &Connection) -> Result<(
            updated_at TEXT NOT NULL,
            retry_attempt INTEGER NOT NULL DEFAULT 0,
            next_retry_at INTEGER,
+           no_progress_attempt INTEGER NOT NULL DEFAULT 0,
            context_window_limit INTEGER
          );
          INSERT INTO subthreads (
@@ -4582,7 +4674,8 @@ fn bootstrap_database(db: &Path) -> Result<()> {
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL,
            retry_attempt INTEGER NOT NULL DEFAULT 0,
-           next_retry_at INTEGER
+           next_retry_at INTEGER,
+           no_progress_attempt INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX IF NOT EXISTS subthreads_status ON subthreads(status, created_at);
          CREATE INDEX IF NOT EXISTS subthreads_goal_state_updated ON subthreads(goal_state, updated_at DESC, id DESC);
@@ -8591,6 +8684,7 @@ async fn run_agent_items(
     executor_tunnels: &ExecutorTunnels,
 ) -> Result<AgentResult> {
     let mut images = Vec::new();
+    let mut made_tool_progress = false;
     let history_thread_id = match &checkpoint_target {
         ContextCheckpointTarget::Main { .. } => None,
         ContextCheckpointTarget::Subthread { id } => Some(id.as_str()),
@@ -8720,6 +8814,12 @@ async fn run_agent_items(
             continue;
         }
         let output_record_ids = append_response_output_items(db_path, history_thread_id, &output)?;
+        made_tool_progress |= output.iter().any(|item| {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call" | "computer_call" | "image_generation_call")
+            )
+        });
         reset_subthread_retry_after_success(db_path, history_thread_id)?;
         images.extend(archive_generated_images(
             db_path,
@@ -8778,6 +8878,8 @@ async fn run_agent_items(
             });
             persisted_message.images = images.clone();
             return Ok(AgentResult {
+                useful_progress: made_tool_progress
+                    || !is_subthread_acknowledgement_only(&persisted_message.content),
                 persisted_message,
                 #[cfg(test)]
                 message: ChatMessage {
@@ -8794,6 +8896,7 @@ async fn run_agent_items(
             if call_type != Some("function_call") && call_type != Some("computer_call") {
                 continue;
             }
+            made_tool_progress = true;
             if call_type == Some("computer_call") {
                 let call_id = call
                     .get("call_id")
@@ -8923,6 +9026,7 @@ async fn run_agent_items(
                     .ok_or_else(|| anyhow!("terminal Goal has no subthread ID"))?;
                 let result = terminal_subthread_result(db_path, thread_id)?;
                 return Ok(AgentResult {
+                    useful_progress: true,
                     persisted_message: ConversationMessage {
                         id: output_record_ids[call_index],
                         role: "assistant".to_owned(),
@@ -9105,7 +9209,7 @@ fn thread_developer_section() -> String {
     let subthread_language_policy = "## Subthread language\n\nInfer the user-preferred language from the current conversation context, including the user’s current language and any explicit preference. For every fork, use it for title, task, and completion_criteria. Do not derive it from the UI locale or source-code language, and do not add a caller-provided language field. When a subthread calls achieve_goal or block_goal, write its user-visible result, evidence, or reason in that same inferred language so the terminal handoff remains consistent.";
     let subthread_parallelism_policy = "## Subthread parallelism\n\nFor independently executable work, subthread parallelism has unlimited default priority: actively fork all independent substantial tasks that can make useful progress in parallel. Do not serialize or cancel independent Goals because they share a repository, may touch the same files, may create merge conflicts, or may eventually share a release or deploy chain. Give each Goal an independent worktree and branch. Resolve ordinary integration through Git linear history, rebase, and normal CI. Cancel an existing Goal only when a later user instruction makes its objective, premise, or expected correct result irrelevant, wrong, unusable, or directly conflicting. Ordinary Git integration conflicts are not a reason to cancel a Goal. Parallelism does not bypass user instructions, security constraints, credentials policy, production safeguards, correct isolation, verification, or delivery sequencing.";
     format!(
-        "{subthread_language_policy}\n\n## Thread role\n\nIf the current thread is the main thread, it carries the single user-visible durable conversation. Accept every user input as part of that conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. When selecting an optional fork_subthread model_id, prefer gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. This is guidance, not a substitute for judgment. Inspect existing Goals before replacing work; apply the Subthread parallelism cancellation rule before cancelling any Goal. Cybion returns only an achieved or blocked Goal handoff and resumes automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\nIf the current thread is a subthread, it executes the inherited Goal from a compiled main-thread checkpoint. Keep taking the next useful step until every done-when criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. Call achieve_goal with a concise final result and verifiable evidence when the Goal is achieved, or block_goal with a concise final result and the concrete blocker when it cannot progress. After either terminal tool, take no further action. Do not ask the user to manage this branch.\n\n{subthread_parallelism_policy}\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
+        "{subthread_language_policy}\n\n## Thread role\n\nIf the current thread is the main thread, it carries the single user-visible durable conversation. Accept every user input as part of that conversation and keep driving the user outcome forward one verifiable step at a time. Use direct tools for brief, localized checks or edits. Every fork is one persistent Goal and must provide a durable objective plus concrete done-when criteria. When selecting an optional fork_subthread model_id, prefer gpt-5.6-sol for scientific or deep research work, gpt-5.6-terra for engineering work, and gpt-5.6-luna for operational or simple low-ambiguity work. This is guidance, not a substitute for judgment. Inspect existing Goals before replacing work; apply the Subthread parallelism cancellation rule before cancelling any Goal. Cybion returns only an achieved or blocked Goal handoff and resumes automatically. Never claim the user objective is complete merely because a Goal was dispatched, and never ask the user to manage Goals as sessions.\n\nIf the current thread is a subthread, it executes the inherited Goal from a compiled main-thread checkpoint. The persistent Goal is the only user task; inherited main-thread material and all developer/runtime metadata are background constraints, never a prompt to acknowledge, confirm, or repeat a date. Keep taking the next useful step until every done-when criterion is met or further progress is blocked by a concrete external change. A natural-language response is only progress and will start another loop. Call achieve_goal with a concise final result and verifiable evidence when the Goal is achieved, or block_goal with a concise final result and the concrete blocker when it cannot progress. After either terminal tool, take no further action. Do not ask the user to manage this branch.\n\n{subthread_parallelism_policy}\n\nUse `search_thread_history`, `read_thread_history`, and `get_checkpoint` when you need older information."
     )
 }
 
@@ -12142,6 +12246,21 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::*;
+
+    #[test]
+    fn acknowledgement_only_subthread_text_recognizes_runtime_dates_without_matching_goal_progress()
+    {
+        assert!(is_subthread_acknowledgement_only("已确认。"));
+        assert!(is_subthread_acknowledgement_only(
+            "已确认当前日期为 2026 年 8 月 27 日，星期四。"
+        ));
+        assert!(is_subthread_acknowledgement_only(
+            "The current date is August 27, 2026."
+        ));
+        assert!(!is_subthread_acknowledgement_only(
+            "I ran the first check; the external lock is still held."
+        ));
+    }
 
     #[test]
     fn completed_response_progress_requires_a_tool_image_or_non_whitespace_text() {
@@ -17090,6 +17209,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledgement_only_subthread_responses_block_after_a_bounded_replay() {
+        async fn responses(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> String {
+            requests.lock().await.push(request);
+            let item = json!({
+                "type":"message",
+                "role":"assistant",
+                "content":[{"type":"output_text","text":"已确认当前日期为 2026 年 8 月 27 日，星期四。"}],
+            });
+            format!(
+                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[]}})
+            )
+        }
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/responses", post(responses))
+                    .with_state(server_requests),
+            )
+            .await
+            .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("default.sqlite3");
+        bootstrap_database(&db).unwrap();
+        configure_test_database(&db, &format!("http://{address}"));
+        let connection = open_db(&db).unwrap();
+        let metadata = history_record_payload(
+            &connection,
+            None,
+            "input",
+            &json!({"role":"developer","content":"The current date is Thursday, August 27, 2026."}),
+            "now",
+        )
+        .unwrap();
+        let user = append_conversation(
+            &db,
+            &ChatMessage {
+                role: "user".to_owned(),
+                content: Value::String("Fix the background service.".to_owned()),
+                images: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(metadata < user.id);
+        let fork = execute_fork_subthread(
+            &db,
+            user.id,
+            json!({"title":"Persistent fix","task":"Repair the service without acknowledging metadata.","completion_criteria":"The repair is verified."}),
+        );
+        let id = serde_json::from_str::<Value>(&fork.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let first = claim_queued_subthreads(&db).unwrap().remove(0);
+        run_subthread(test_state(db.clone()), first).await;
+        let first_goal = load_subthread_detail(&db, &id).unwrap().unwrap().thread;
+        assert_eq!(first_goal.goal_state, "active");
+        assert_eq!(first_goal.status, "queued");
+        assert_eq!(
+            open_db(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT no_progress_attempt FROM subthreads WHERE id=?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        bootstrap_database(&db).unwrap();
+        let second = claim_queued_subthreads(&db).unwrap().remove(0);
+        run_subthread(test_state(db.clone()), second).await;
+        server.abort();
+
+        let goal = load_subthread_detail(&db, &id).unwrap().unwrap().thread;
+        assert_eq!(goal.goal_state, "blocked");
+        assert_eq!(goal.status, "completed");
+        assert!(
+            goal.result
+                .as_deref()
+                .is_some_and(|result| result.contains("acknowledgement-only"))
+        );
+        assert_eq!(requests.lock().await.len(), 3);
+        let first_request = requests.lock().await[0].clone();
+        let user_inputs = first_request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["role"] == "user")
+            .collect::<Vec<_>>();
+        assert_eq!(user_inputs.len(), 1);
+        assert!(
+            user_inputs[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Repair the service")
+        );
+        assert!(
+            first_request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["role"] == "developer"
+                        && item["content"].as_str().is_some_and(|content| {
+                            content.contains("The persistent Goal is the only user task")
+                        })
+                })
+        );
+        let own_records: i64 = open_db(&db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM history_records WHERE thread_id=?1 AND kind='tool_output'",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(own_records, 0);
+    }
+
+    #[tokio::test]
     async fn natural_language_goal_progress_requeues_the_same_subthread() {
         async fn responses(Json(_request): Json<Value>) -> String {
             let item = json!({
@@ -17135,6 +17388,13 @@ mod tests {
             .unwrap()
             .to_owned();
         let job = claim_queued_subthreads(&db).unwrap().remove(0);
+        open_db(&db)
+            .unwrap()
+            .execute(
+                "UPDATE subthreads SET no_progress_attempt = 1 WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
         run_subthread(test_state(db.clone()), job).await;
         server.abort();
 
@@ -17169,6 +17429,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "queued");
+        assert_eq!(
+            open_db(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT no_progress_attempt FROM subthreads WHERE id = ?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -20106,20 +20377,26 @@ mod tests {
             inherited[0]["content"],
             "# Current state\nContinue the release."
         );
-        assert_eq!(inherited[1]["content"], "Ship the release.");
+        assert_eq!(inherited[1]["role"], "developer");
         assert!(
-            inherited[2]["content"]
+            inherited[1]["content"]
                 .as_str()
-                .unwrap()
-                .contains("preceding user input")
+                .is_some_and(|content| content.contains("Ship the release."))
         );
-        assert_eq!(inherited[3]["type"], "function_call");
-        assert_eq!(inherited[4]["content"], "Verify the release.");
+        assert_eq!(inherited[2]["type"], "function_call");
+        assert_eq!(inherited[3]["role"], "user");
+        assert_eq!(inherited[3]["content"], "Verify the release.");
         assert!(
-            inherited[5]["content"]
+            inherited[4]["content"]
                 .as_str()
-                .unwrap()
-                .contains("preceding user input")
+                .is_some_and(|content| content.contains("preceding user input"))
+        );
+        assert_eq!(
+            inherited
+                .iter()
+                .filter(|item| item["role"] == "user")
+                .collect::<Vec<_>>(),
+            vec![&json!({"role": "user", "content": "Verify the release."})]
         );
         assert!(
             !inherited
