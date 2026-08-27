@@ -14341,7 +14341,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp() + 60;
+        let due = chrono::Utc::now().timestamp() - 1;
         let first_schedule = schedule_main_retry_at(&db, now, 0).unwrap().unwrap();
         assert_eq!(first_schedule.attempt, 1);
         assert_eq!(claim_due_main_retry(&db).unwrap(), None);
@@ -14349,7 +14350,7 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE app_meta SET value=?1 WHERE key=?2",
-                params![now.to_string(), MAIN_NEXT_RETRY_AT_KEY],
+                params![due.to_string(), MAIN_NEXT_RETRY_AT_KEY],
             )
             .unwrap();
         assert_eq!(claim_due_main_retry(&db).unwrap(), Some(first.id));
@@ -14373,7 +14374,7 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE app_meta SET value=?1 WHERE key=?2",
-                params![now.to_string(), MAIN_NEXT_RETRY_AT_KEY],
+                params![due.to_string(), MAIN_NEXT_RETRY_AT_KEY],
             )
             .unwrap();
         assert_eq!(claim_due_main_retry(&db).unwrap(), Some(second.id));
