@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "cybion"
-version = "0.2.62"
+version = "0.2.63"
 dependencies = [
  "anyhow",
  "auth-mini-axum",
