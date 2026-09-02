@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Cybion">
-  <path d="M200 216 159 175M312 216l41-41M256 342v-58" fill="none" stroke="#818cf8" stroke-linecap="round" stroke-width="28"/>
-  <circle cx="256" cy="256" r="102" fill="#4338ca"/>
-  <circle cx="256" cy="256" r="56" fill="#eef2ff"/>
-  <circle cx="145" cy="145" r="68" fill="#6366f1"/>
-  <circle cx="367" cy="145" r="68" fill="#6366f1"/>
-  <circle cx="256" cy="388" r="68" fill="#6366f1"/>
-</svg>
