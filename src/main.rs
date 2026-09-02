@@ -1637,7 +1637,7 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/auth-config.js", get(auth_config_script))
         .route("/", get(index))
-        .route("/cybion-mark.svg", get(cybion_mark))
+        .route("/cybion-mark.png", get(cybion_mark_png))
         .route("/assets/app.js", get(app_js))
         .route("/assets/app.css", get(app_css))
         .route("/api/setup", post(setup))
@@ -5286,11 +5286,8 @@ async fn index() -> Response {
         "text/html; charset=utf-8",
     )
 }
-async fn cybion_mark() -> Response {
-    asset(
-        include_bytes!("../web/dist/cybion-mark.svg"),
-        "image/svg+xml",
-    )
+async fn cybion_mark_png() -> Response {
+    asset(include_bytes!("../web/dist/cybion-mark.png"), "image/png")
 }
 async fn app_js() -> Response {
     asset(
@@ -13371,10 +13368,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn favicon_is_served_as_svg() {
-        let response = cybion_mark().await;
+    async fn favicon_is_served_as_png() {
+        let response = cybion_mark_png().await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
     }
 
     #[test]
