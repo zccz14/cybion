@@ -19,12 +19,17 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - run: npm --prefix web ci
       - run: npm --prefix web run build
-      - run: cargo build --release --locked
+      - run: cross build --release --locked --target x86_64-unknown-linux-gnu
       - run: |
           mkdir -p dist/cybion-linux-x86_64
-          cp target/release/cybion dist/cybion-linux-x86_64/
+          cp target/x86_64-unknown-linux-gnu/release/cybion dist/cybion-linux-x86_64/
           cp README.md dist/cybion-linux-x86_64/
           tar -C dist -czf cybion-linux-x86_64.tar.gz cybion-linux-x86_64
           shasum -a 256 cybion-linux-x86_64.tar.gz > cybion-linux-x86_64.tar.gz.sha256
