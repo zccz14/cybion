@@ -23,5 +23,5 @@ jobs:
       - run: npm --prefix web run check
       - run: npm --prefix web run build
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
