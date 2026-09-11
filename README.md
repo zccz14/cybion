@@ -21,6 +21,12 @@ Tenant databases use WAL mode, foreign keys, and owner-only file permissions.
   downstream service verifies its own audience without knowing Cybion's context.
 - Every thread has its own direct input stream and independent persistent
   history. Users create, rename, and delete their own threads in the web UI.
+- `history_records` is the durable per-thread protocol log: accepted inputs,
+  every upstream Responses output item, and every Worker output are retained
+  before they can affect a later inference. Each Responses request is rebuilt
+  locally from the latest compacted checkpoint for that same thread plus its
+  later protocol records; it never depends on `previous_response_id` or a
+  checkpoint inherited from another thread.
 - On first use, Cybion creates a user-owned Consumer through the existing
   `openai.ntnl.io/api/consumers` API; request usage and billing remain attributed
   to that Auth Mini subject in OpenAI-LB.
