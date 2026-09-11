@@ -49,3 +49,11 @@ test("the hosted shell keeps the outer navigation and Linkit account surface", (
   assert.match(source, /<LinkitProvider/)
   assert.match(source, /<LinkitMyInfo \/>/)
 })
+
+test("the shadcn tooltip context and layered error boundaries protect the shell", () => {
+  assert.match(source, /import \{ TooltipProvider \} from "@\/components\/ui\/tooltip"/)
+  assert.match(source, /<TooltipProvider delayDuration=\{0\}>/)
+  assert.match(source, /import \{ ErrorBoundary, ErrorBoundaryFallback \} from "@\/components\/error-boundary"/)
+  assert.match(source, /resetKeys=\{\[location\.pathname\]\}/)
+  assert.match(source, /<ErrorBoundary fallback=/)
+})
