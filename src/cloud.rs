@@ -13,7 +13,7 @@ use auth_mini_axum::{AuthMiniLayer, JwksCachePolicy};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Request, State},
+    extract::{Path as AxumPath, Query, Request, State},
     http::{HeaderMap, StatusCode, Uri, header},
     middleware::{Next, from_fn_with_state},
     response::{
@@ -202,6 +202,11 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/threads/{id}/history", get(thread_history))
         .route("/api/threads/{id}/turn", post(thread_turn))
+        .route("/api/reasoning-audits", get(reasoning_audits))
+        .route("/api/system/resources", get(system_resources))
+        .route("/api/status", get(status))
+        .route("/api/integrations", get(integrations))
+        .route("/api/integrations/refresh", post(refresh_integrations))
         .route("/api/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api/api-keys/{id}", delete(delete_api_key))
         .route(
@@ -441,6 +446,23 @@ CREATE TABLE IF NOT EXISTS thread_runs (
   finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS thread_runs_thread_started ON thread_runs(thread_id,started_at DESC);
+CREATE TABLE IF NOT EXISTS reasoning_audits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE REFERENCES thread_runs(id) ON DELETE CASCADE,
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  request_kind TEXT NOT NULL DEFAULT 'thread_turn',
+  model TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('in_flight','completed','failed','cancelled')),
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  cached_tokens INTEGER,
+  openai_lb_request_id TEXT,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS reasoning_audits_status_started ON reasoning_audits(status,started_at DESC);
+CREATE INDEX IF NOT EXISTS reasoning_audits_thread_started ON reasoning_audits(thread_id,started_at DESC);
 CREATE TABLE IF NOT EXISTS api_keys (
   id TEXT PRIMARY KEY,
   label TEXT NOT NULL,
@@ -513,6 +535,64 @@ struct RunView {
     error: Option<String>,
     started_at: i64,
     finished_at: Option<i64>,
+}
+
+#[derive(Clone, Serialize)]
+struct ReasoningAuditView {
+    id: i64,
+    run_id: String,
+    thread_id: String,
+    thread_title: String,
+    request_kind: String,
+    model: String,
+    status: String,
+    started_at: i64,
+    finished_at: Option<i64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cached_tokens: Option<i64>,
+    openai_lb_request_id: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ReasoningAuditQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
+    status: Option<String>,
+    thread_id: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReasoningAuditPage {
+    items: Vec<ReasoningAuditView>,
+    total: usize,
+    page: usize,
+    page_size: usize,
+}
+
+#[derive(Serialize)]
+struct IntegrationStatusView {
+    openai_configured: bool,
+    openai_consumer_id: Option<String>,
+    openai_base_url: String,
+    linkit_configured: bool,
+    linkit_bot_id: Option<String>,
+    linkit_username: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SystemResourcesView {
+    generated_at: i64,
+    version: &'static str,
+    process_id: u32,
+    tenant_id: String,
+    database_bytes: u64,
+    threads: usize,
+    active_runs: usize,
+    workers: usize,
+    online_workers: usize,
 }
 
 #[derive(Deserialize)]
@@ -627,7 +707,9 @@ struct OpenAiConsumerGrant {
 }
 
 #[derive(Deserialize)]
-struct LinkitMe {
+struct LinkitMyInfo {
+    id: String,
+    #[serde(default)]
     profile: Option<LinkitProfile>,
 }
 
@@ -795,6 +877,159 @@ async fn me(
     Ok(Json(
         json!({"tenant_id": identity.tenant.id, "hosted": true}),
     ))
+}
+
+async fn status(
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!({
+        "hosted": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "tenant_id": identity.tenant.id,
+    })))
+}
+
+fn integration_status_view(settings: &IntegrationSettings) -> IntegrationStatusView {
+    IntegrationStatusView {
+        openai_configured: !settings.openai_consumer_secret.is_empty(),
+        openai_consumer_id: (!settings.openai_consumer_id.is_empty())
+            .then(|| settings.openai_consumer_id.clone()),
+        openai_base_url: settings.openai_base_url.clone(),
+        linkit_configured: !settings.linkit_bot_token.is_empty()
+            && !settings.linkit_username.is_empty(),
+        linkit_bot_id: (!settings.linkit_bot_id.is_empty()).then(|| settings.linkit_bot_id.clone()),
+        linkit_username: (!settings.linkit_username.is_empty())
+            .then(|| settings.linkit_username.clone()),
+    }
+}
+
+async fn integrations(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<IntegrationStatusView>, ApiError> {
+    let settings = tenant_db(&state, &identity.tenant, true, |connection| {
+        integration_settings(connection)
+    })
+    .await?;
+    Ok(Json(integration_status_view(&settings)))
+}
+
+async fn refresh_integrations(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<IntegrationStatusView>, ApiError> {
+    let settings = ensure_integrations(&state, &identity.tenant, &identity.bearer).await?;
+    Ok(Json(integration_status_view(&settings)))
+}
+
+async fn system_resources(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<SystemResourcesView>, ApiError> {
+    let database_path = identity.tenant.path.clone();
+    let tenant_id = identity.tenant.id.clone();
+    tenant_db(&state, &identity.tenant, true, move |connection| {
+        let threads: i64 =
+            connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
+        let active_runs: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM thread_runs WHERE status IN ('queued','running')",
+            [],
+            |row| row.get(0),
+        )?;
+        let workers: i64 =
+            connection.query_row("SELECT COUNT(*) FROM workers", [], |row| row.get(0))?;
+        let online_workers: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM workers WHERE status='online' AND last_seen_at>=?",
+            [now() - WORKER_ONLINE_SECONDS],
+            |row| row.get(0),
+        )?;
+        Ok(SystemResourcesView {
+            generated_at: now(),
+            version: env!("CARGO_PKG_VERSION"),
+            process_id: std::process::id(),
+            tenant_id,
+            database_bytes: fs::metadata(database_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            threads: threads.max(0) as usize,
+            active_runs: active_runs.max(0) as usize,
+            workers: workers.max(0) as usize,
+            online_workers: online_workers.max(0) as usize,
+        })
+    })
+    .await
+    .map(Json)
+}
+
+async fn reasoning_audits(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Query(query): Query<ReasoningAuditQuery>,
+) -> Result<Json<ReasoningAuditPage>, ApiError> {
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+    let status = query.status.filter(|value| !value.trim().is_empty());
+    if let Some(value) = status.as_deref()
+        && !matches!(value, "in_flight" | "completed" | "failed" | "cancelled")
+    {
+        return Err(ApiError::bad_request("invalid reasoning audit status"));
+    }
+    let thread_id = query.thread_id.filter(|value| !value.trim().is_empty());
+    let model = query.model.filter(|value| !value.trim().is_empty());
+    tenant_db(&state, &identity.tenant, true, move |connection| {
+        let mut statement = connection.prepare(
+            "SELECT a.id,a.run_id,a.thread_id,COALESCE(t.title,''),a.request_kind,a.model,a.status,a.started_at,a.finished_at,a.input_tokens,a.output_tokens,a.cached_tokens,a.openai_lb_request_id,a.error
+             FROM reasoning_audits a LEFT JOIN threads t ON t.id=a.thread_id ORDER BY a.started_at DESC,a.id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ReasoningAuditView {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                thread_id: row.get(2)?,
+                thread_title: row.get(3)?,
+                request_kind: row.get(4)?,
+                model: row.get(5)?,
+                status: row.get(6)?,
+                started_at: row.get(7)?,
+                finished_at: row.get(8)?,
+                input_tokens: row.get(9)?,
+                output_tokens: row.get(10)?,
+                cached_tokens: row.get(11)?,
+                openai_lb_request_id: row.get(12)?,
+                error: row.get(13)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            let item = row?;
+            let status_matches = status
+                .as_deref()
+                .map(|value| value == item.status)
+                .unwrap_or(true);
+            let thread_matches = thread_id
+                .as_deref()
+                .map(|value| value == item.thread_id)
+                .unwrap_or(true);
+            let model_matches = model
+                .as_deref()
+                .map(|value| value == item.model)
+                .unwrap_or(true);
+            if status_matches && thread_matches && model_matches {
+                items.push(item);
+            }
+        }
+        let total = items.len();
+        let start = (page - 1).saturating_mul(page_size);
+        let items = items.into_iter().skip(start).take(page_size).collect();
+        Ok(ReasoningAuditPage {
+            items,
+            total,
+            page,
+            page_size,
+        })
+    })
+    .await
+    .map(Json)
 }
 
 async fn list_threads(
@@ -1155,8 +1390,9 @@ async fn linkit_username(state: &AppState, bearer: &str) -> Result<String, ApiEr
         .send()
         .await?
         .error_for_status()?
-        .json::<LinkitMe>()
+        .json::<LinkitMyInfo>()
         .await?;
+    let _linkit_user_id = profile.id;
     profile
         .profile
         .map(|profile| profile.username.trim().to_owned())
@@ -1252,7 +1488,7 @@ async fn enqueue_turn(
     let queued_status = pending.status.clone();
     let queued_started_at = pending.started_at;
     tenant_db(&state, &tenant, true, move |connection| {
-        load_thread(connection, &thread_id)?;
+        let thread = load_thread(connection, &thread_id)?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO history_records(thread_id,role,content,created_at) VALUES(?,'user',?,?)",
@@ -1264,6 +1500,17 @@ async fn enqueue_turn(
                 &queued_id,
                 &queued_thread_id,
                 &queued_status,
+                queued_started_at
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO reasoning_audits(run_id,thread_id,request_kind,model,status,started_at) VALUES(?,?,? ,?,?,?)",
+            params![
+                &queued_id,
+                &queued_thread_id,
+                "thread_turn",
+                &thread.model,
+                "in_flight",
                 queued_started_at
             ],
         )?;
@@ -1288,6 +1535,10 @@ async fn execute_turn(state: AppState, tenant: Tenant, run: RunView) {
         move |connection| {
             connection.execute(
                 "UPDATE thread_runs SET status='running' WHERE id=? AND status='queued'",
+                [&run.id],
+            )?;
+            connection.execute(
+                "UPDATE reasoning_audits SET status='in_flight' WHERE run_id=?",
                 [&run.id],
             )?;
             Ok(())
@@ -1320,7 +1571,16 @@ async fn execute_turn(state: AppState, tenant: Tenant, run: RunView) {
     .await;
     let result = match context {
         Ok((thread, integrations, history, worker)) if integrations_ready(&integrations) => {
-            run_agent(&state, &tenant, &thread, &integrations, history, worker).await
+            run_agent(
+                &state,
+                &tenant,
+                &thread,
+                &integrations,
+                history,
+                worker,
+                &run.id,
+            )
+            .await
         }
         Ok((thread, _, _, _)) => Err((
             thread,
@@ -1346,6 +1606,10 @@ async fn execute_turn(state: AppState, tenant: Tenant, run: RunView) {
                 )?;
                 transaction.execute(
                     "UPDATE thread_runs SET status='completed',finished_at=?,error=NULL WHERE id=?",
+                    params![finished_at, &completed_run_id],
+                )?;
+                transaction.execute(
+                    "UPDATE reasoning_audits SET status='completed',finished_at=?,error=NULL WHERE run_id=?",
                     params![finished_at, &completed_run_id],
                 )?;
                 transaction.execute(
@@ -1395,7 +1659,11 @@ async fn fail_run(state: &AppState, tenant: &Tenant, run: &RunView, error: &str)
         )?;
         transaction.execute(
             "UPDATE thread_runs SET status='failed',error=?,finished_at=? WHERE id=?",
-            params![error_for_db, finished_at, &failed_run_id],
+            params![&error_for_db, finished_at, &failed_run_id],
+        )?;
+        transaction.execute(
+            "UPDATE reasoning_audits SET status='failed',error=?,finished_at=? WHERE run_id=?",
+            params![&error_for_db, finished_at, &failed_run_id],
         )?;
         transaction.execute(
             "UPDATE threads SET status='failed',updated_at=? WHERE id=?",
@@ -1485,6 +1753,11 @@ struct FunctionCall {
     arguments: Value,
 }
 
+struct ResponsesResult {
+    value: Value,
+    request_id: Option<String>,
+}
+
 async fn run_agent(
     state: &AppState,
     tenant: &Tenant,
@@ -1492,6 +1765,7 @@ async fn run_agent(
     integrations: &IntegrationSettings,
     history: Vec<HistoryRecord>,
     worker_id: Option<String>,
+    run_id: &str,
 ) -> Result<(ThreadView, IntegrationSettings, String), (ThreadView, Box<ApiError>)> {
     let input = Value::Array(
         history
@@ -1500,7 +1774,7 @@ async fn run_agent(
             .map(|record| json!({"role":record.role,"content":record.content}))
             .collect(),
     );
-    let mut response = responses_request(
+    let first_response = responses_request(
         state,
         integrations,
         &thread.model,
@@ -1510,6 +1784,11 @@ async fn run_agent(
     )
     .await
     .map_err(|error| (thread.clone(), Box::new(error)))?;
+    let ResponsesResult {
+        value: mut response,
+        request_id,
+    } = first_response;
+    update_reasoning_audit_usage(state, tenant, run_id, &response, request_id).await;
     for _ in 0..8 {
         let calls = function_calls(&response);
         if calls.is_empty() {
@@ -1559,7 +1838,7 @@ async fn run_agent(
                     Box::new(ApiError::unavailable("model response has no id")),
                 )
             })?;
-        response = responses_request(
+        let next_response = responses_request(
             state,
             integrations,
             &thread.model,
@@ -1569,6 +1848,9 @@ async fn run_agent(
         )
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
+        let ResponsesResult { value, request_id } = next_response;
+        response = value;
+        update_reasoning_audit_usage(state, tenant, run_id, &response, request_id).await;
     }
     Err((
         thread.clone(),
@@ -1585,29 +1867,194 @@ async fn responses_request(
     input: Value,
     previous_response_id: Option<String>,
     include_tools: bool,
-) -> Result<Value, ApiError> {
-    let mut payload = json!({"model":model,"input":input});
+) -> Result<ResponsesResult, ApiError> {
+    let payload = responses_payload(model, input, previous_response_id, include_tools);
+    let response = state
+        .client
+        .post(format!(
+            "{}/responses",
+            integrations.openai_base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(&integrations.openai_consumer_secret)
+        .header("Accept", "text/event-stream")
+        .json(&payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let response_id = response
+        .headers()
+        .get("x-openai-lb-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(ApiError::unavailable(format!(
+            "upstream Responses request failed with HTTP {status}: {}",
+            upstream_error_detail(&body)
+        )));
+    }
+    if body.trim_start().starts_with('{') {
+        return serde_json::from_str(&body)
+            .map(|value| ResponsesResult {
+                value,
+                request_id: response_id,
+            })
+            .map_err(ApiError::internal);
+    }
+    completed_response_from_sse(&body)
+        .map(|value| ResponsesResult {
+            value,
+            request_id: response_id,
+        })
+        .map_err(|cause| {
+            ApiError::unavailable(format!(
+                "upstream Responses stream could not be read: {cause}"
+            ))
+        })
+}
+
+fn response_usage(response: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
+    (
+        response
+            .pointer("/usage/input_tokens")
+            .and_then(Value::as_i64),
+        response
+            .pointer("/usage/output_tokens")
+            .and_then(Value::as_i64),
+        response
+            .pointer("/usage/input_tokens_details/cached_tokens")
+            .and_then(Value::as_i64),
+    )
+}
+
+async fn update_reasoning_audit_usage(
+    state: &AppState,
+    tenant: &Tenant,
+    run_id: &str,
+    response: &Value,
+    request_id: Option<String>,
+) {
+    let (input_tokens, output_tokens, cached_tokens) = response_usage(response);
+    let run_id = run_id.to_owned();
+    let result = tenant_db(state, tenant, false, move |connection| {
+        connection.execute(
+            "UPDATE reasoning_audits SET input_tokens=?,output_tokens=?,cached_tokens=?,openai_lb_request_id=? WHERE run_id=?",
+            params![input_tokens, output_tokens, cached_tokens, request_id, run_id],
+        )?;
+        Ok(())
+    })
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(error = %error.message, "could not update reasoning audit usage");
+    }
+}
+
+fn responses_payload(
+    model: &str,
+    input: Value,
+    previous_response_id: Option<String>,
+    include_tools: bool,
+) -> Value {
+    let mut payload = json!({"model":model,"input":input,"stream":true});
     if let Some(previous_response_id) = previous_response_id {
         payload["previous_response_id"] = Value::String(previous_response_id);
     }
     if include_tools {
         payload["tools"] = worker_tools();
     }
-    let url = format!(
-        "{}/responses",
-        integrations.openai_base_url.trim_end_matches('/')
-    );
-    state
-        .client
-        .post(url)
-        .bearer_auth(&integrations.openai_consumer_secret)
-        .json(&payload)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
-        .map_err(Into::into)
+    payload
+}
+
+fn upstream_error_detail(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .or_else(|| value.pointer("/detail"))
+                .or_else(|| value.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|detail| !detail.trim().is_empty())
+        .unwrap_or_else(|| body.trim().to_owned())
+}
+
+fn completed_response_from_sse(body: &str) -> Result<Value> {
+    let mut output = Vec::new();
+    let mut saw_done = false;
+    let normalized = body.replace("\r\n", "\n");
+    for block in normalized.split("\n\n") {
+        let Some((event_name, data)) = sse_event_data(block) else {
+            continue;
+        };
+        if data.trim() == "[DONE]" {
+            saw_done = true;
+            continue;
+        }
+        let event: Value = serde_json::from_str(&data)
+            .with_context(|| format!("invalid Responses SSE payload: {data}"))?;
+        let event_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .or(event_name)
+            .unwrap_or_default();
+        match event_type {
+            "response.output_item.done" => {
+                if let Some(item) = event.get("item") {
+                    output.push(item.clone());
+                }
+            }
+            "response.completed" => {
+                let mut response = event
+                    .get("response")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("Responses completion has no response"))?;
+                if output.is_empty()
+                    && let Some(existing) = response.get("output").and_then(Value::as_array)
+                {
+                    output = existing.clone();
+                }
+                response["output"] = Value::Array(output);
+                return Ok(response);
+            }
+            "error" | "response.failed" | "response.incomplete" => {
+                return Err(anyhow::anyhow!(
+                    "upstream {event_type}: {}",
+                    upstream_error_detail(&event.to_string())
+                ));
+            }
+            _ => {}
+        }
+    }
+    if saw_done {
+        Err(anyhow::anyhow!(
+            "upstream stream sent [DONE] without a Responses completion event"
+        ))
+    } else {
+        Err(anyhow::anyhow!(
+            "upstream stream ended without a completed response"
+        ))
+    }
+}
+
+fn sse_event_data(block: &str) -> Option<(Option<&str>, String)> {
+    let mut event_name = None;
+    let mut data = Vec::new();
+    for line in block.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.starts_with(':') {
+            continue;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "event" => event_name = Some(value),
+            "data" => data.push(value),
+            _ => {}
+        }
+    }
+    (!data.is_empty()).then(|| (event_name, data.join("\n")))
 }
 
 fn worker_tools() -> Value {
@@ -2150,5 +2597,33 @@ mod tests {
             (tenant, "one_two".to_owned())
         );
         assert!(parse_api_key("sk-not-a-cybion-key").is_err());
+    }
+
+    #[test]
+    fn responses_payload_always_requests_streaming() {
+        let payload = responses_payload("test-model", json!([]), None, false);
+        assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn responses_sse_is_reassembled_into_a_completed_response() {
+        let body = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = completed_response_from_sse(body).unwrap();
+        assert_eq!(response["id"], "resp_1");
+        assert_eq!(response["output"][0]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn upstream_error_detail_prefers_structured_detail() {
+        assert_eq!(
+            upstream_error_detail(r#"{"detail":"Stream must be set to true"}"#),
+            "Stream must be set to true"
+        );
     }
 }

@@ -38,3 +38,14 @@ test("the management surfaces expose integration keys and SQLite-free Worker pai
     assert.match(source, new RegExp(`${key} =`))
   }
 })
+
+test("the hosted shell keeps the outer navigation and Linkit account surface", () => {
+  for (const group of ["navWork", "navAudit", "navSystem", "navConfiguration"]) {
+    assert.match(source, new RegExp(`${group}:`))
+  }
+  for (const route of ["/reasoning-audit", "/history", "/system", "/configuration"]) {
+    assert.match(source, new RegExp(`to: \"${route}\"`))
+  }
+  assert.match(source, /<LinkitProvider/)
+  assert.match(source, /<LinkitMyInfo \/>/)
+})
