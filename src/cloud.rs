@@ -22,7 +22,7 @@ use axum::{
     },
     routing::{delete, get, post},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,6 +41,12 @@ const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 const WORKER_ONLINE_SECONDS: i64 = 45;
 const WORKER_RESULT_TIMEOUT_SECONDS: usize = 15 * 60;
+const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
+const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
+const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
+const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
+const CHECKPOINT_SUMMARY_MAX_ROUNDS: usize = 8;
+const CHECKPOINT_RETRY_LIMIT: usize = 2;
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -52,6 +58,7 @@ struct AppState {
     client: reqwest::Client,
     auth: Arc<OnceCell<AuthMiniLayer>>,
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    thread_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +82,13 @@ struct ApiIdentity {
 struct ApiError {
     status: StatusCode,
     message: String,
+    kind: ApiErrorKind,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ApiErrorKind {
+    Ordinary,
+    ContextOverflow,
 }
 
 impl ApiError {
@@ -82,6 +96,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            kind: ApiErrorKind::Ordinary,
         }
     }
 
@@ -89,6 +104,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: message.into(),
+            kind: ApiErrorKind::Ordinary,
         }
     }
 
@@ -96,6 +112,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            kind: ApiErrorKind::Ordinary,
         }
     }
 
@@ -103,6 +120,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message: message.into(),
+            kind: ApiErrorKind::Ordinary,
         }
     }
 
@@ -110,6 +128,15 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
+            kind: ApiErrorKind::Ordinary,
+        }
+    }
+
+    fn context_overflow(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+            kind: ApiErrorKind::ContextOverflow,
         }
     }
 
@@ -118,7 +145,12 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "Cybion could not complete the request".to_owned(),
+            kind: ApiErrorKind::Ordinary,
         }
+    }
+
+    fn is_context_overflow(&self) -> bool {
+        self.kind == ApiErrorKind::ContextOverflow
     }
 }
 
@@ -158,6 +190,7 @@ pub async fn serve() -> Result<()> {
         .to_path_buf();
     let data_dir = home.join(".cybion");
     prepare_data_dir(&data_dir)?;
+    recover_interrupted_turns(&data_dir)?;
     let run_dir = data_dir.join("run");
     fs::create_dir_all(&run_dir)?;
     fs::write(
@@ -173,6 +206,7 @@ pub async fn serve() -> Result<()> {
             .build()?,
         auth: Arc::new(OnceCell::new()),
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
+        thread_locks: Arc::new(Mutex::new(HashMap::new())),
     };
     let address: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     tracing::info!(%address, "Cybion Cloud listening");
@@ -188,6 +222,69 @@ fn prepare_data_dir(data_dir: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
         fs::set_permissions(data_dir.join("tenants"), fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn recover_interrupted_turns(data_dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(data_dir.join("tenants"))? {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("sqlite3") {
+            continue;
+        }
+        let mut connection = Connection::open(&path)?;
+        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+        connection.execute_batch(TENANT_SCHEMA)?;
+        migrate_tenant_history(&mut connection).map_err(|error| anyhow::anyhow!(error.message))?;
+        connection.execute_batch(TENANT_HISTORY_INDEXES)?;
+        let interrupted = {
+            let mut statement = connection.prepare(
+                "SELECT id,thread_id,turn_index FROM thread_runs
+                 WHERE status IN ('queued','running') ORDER BY thread_id,turn_index",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if interrupted.is_empty() {
+            continue;
+        }
+        let finished_at = now();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (run_id, thread_id, turn_index) in interrupted {
+            let content = "Run interrupted by a Cybion restart";
+            transaction.execute(
+                "INSERT INTO history_records(thread_id,run_id,turn_index,role,content,kind,payload,visible,created_at)
+                 VALUES(?,?,?,?,?,'activity',?,1,?)",
+                params![
+                    &thread_id,
+                    &run_id,
+                    turn_index,
+                    "system",
+                    content,
+                    serde_json::to_string(&json!({"role":"system","content":content}))?,
+                    finished_at,
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE thread_runs SET status='failed',error=?,finished_at=? WHERE id=?",
+                params![content, finished_at, &run_id],
+            )?;
+            transaction.execute(
+                "UPDATE reasoning_audits SET status='failed',error=?,finished_at=? WHERE run_id=?",
+                params![content, finished_at, &run_id],
+            )?;
+            transaction.execute(
+                "UPDATE threads SET status='failed',updated_at=? WHERE id=?",
+                params![finished_at, &thread_id],
+            )?;
+        }
+        transaction.commit()?;
     }
     Ok(())
 }
@@ -380,7 +477,7 @@ fn open_tenant(path: &Path, create: bool) -> Result<Connection, ApiError> {
         .parent()
         .ok_or_else(|| ApiError::internal("tenant path has no parent"))?;
     fs::create_dir_all(parent).map_err(ApiError::internal)?;
-    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    let mut connection = Connection::open(path).map_err(ApiError::internal)?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(ApiError::internal)?;
@@ -392,6 +489,10 @@ fn open_tenant(path: &Path, create: bool) -> Result<Connection, ApiError> {
         .map_err(ApiError::internal)?;
     connection
         .execute_batch(TENANT_SCHEMA)
+        .map_err(ApiError::internal)?;
+    migrate_tenant_history(&mut connection)?;
+    connection
+        .execute_batch(TENANT_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
     #[cfg(unix)]
     {
@@ -432,14 +533,20 @@ CREATE TABLE IF NOT EXISTS threads (
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  run_id TEXT,
+  turn_index INTEGER NOT NULL DEFAULT 0,
   role TEXT NOT NULL CHECK(role IN ('user','assistant','tool','system')),
   content TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'input' CHECK(kind IN ('input','response_output','tool_output','checkpoint','activity')),
+  payload TEXT NOT NULL DEFAULT '{}',
+  visible INTEGER NOT NULL DEFAULT 1 CHECK(visible IN (0,1)),
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS history_records_thread_created ON history_records(thread_id,id);
 CREATE TABLE IF NOT EXISTS thread_runs (
   id TEXT PRIMARY KEY,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  turn_index INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed')),
   error TEXT,
   started_at INTEGER NOT NULL,
@@ -505,10 +612,147 @@ CREATE TABLE IF NOT EXISTS worker_calls (
 CREATE INDEX IF NOT EXISTS worker_calls_delivery ON worker_calls(worker_id,status,created_at);
 "#;
 
+const TENANT_HISTORY_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS history_records_thread_kind_created
+  ON history_records(thread_id,kind,id);
+CREATE INDEX IF NOT EXISTS history_records_thread_run_created
+  ON history_records(thread_id,run_id,id);
+CREATE INDEX IF NOT EXISTS history_records_thread_turn_created
+  ON history_records(thread_id,turn_index,id);
+CREATE INDEX IF NOT EXISTS thread_runs_thread_turn
+  ON thread_runs(thread_id,turn_index);
+CREATE UNIQUE INDEX IF NOT EXISTS thread_runs_thread_turn_unique
+  ON thread_runs(thread_id,turn_index);
+"#;
+
+fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, ApiError> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(ApiError::internal)?;
+    let rows = statement
+        .query_map([], |row| row.get(1))
+        .map_err(ApiError::internal)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(ApiError::internal)
+}
+
+fn migrate_tenant_history(connection: &mut Connection) -> Result<(), ApiError> {
+    let history_columns = table_columns(connection, "history_records")?;
+    if !history_columns.iter().any(|column| column == "run_id") {
+        connection
+            .execute_batch("ALTER TABLE history_records ADD COLUMN run_id TEXT")
+            .map_err(ApiError::internal)?;
+    }
+    if !history_columns.iter().any(|column| column == "kind") {
+        connection
+            .execute_batch(
+                "ALTER TABLE history_records ADD COLUMN kind TEXT NOT NULL DEFAULT 'input'",
+            )
+            .map_err(ApiError::internal)?;
+    }
+    if !history_columns.iter().any(|column| column == "payload") {
+        connection
+            .execute_batch(
+                "ALTER TABLE history_records ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'",
+            )
+            .map_err(ApiError::internal)?;
+    }
+    if !history_columns.iter().any(|column| column == "visible") {
+        connection
+            .execute_batch(
+                "ALTER TABLE history_records ADD COLUMN visible INTEGER NOT NULL DEFAULT 1",
+            )
+            .map_err(ApiError::internal)?;
+    }
+
+    if !history_columns.iter().any(|column| column == "turn_index") {
+        connection
+            .execute_batch(
+                "ALTER TABLE history_records ADD COLUMN turn_index INTEGER NOT NULL DEFAULT 0",
+            )
+            .map_err(ApiError::internal)?;
+    }
+    let run_columns = table_columns(connection, "thread_runs")?;
+    if !run_columns.iter().any(|column| column == "turn_index") {
+        connection
+            .execute_batch(
+                "ALTER TABLE thread_runs ADD COLUMN turn_index INTEGER NOT NULL DEFAULT 0",
+            )
+            .map_err(ApiError::internal)?;
+    }
+
+    let legacy = {
+        let mut statement = connection
+            .prepare("SELECT id,role,content FROM history_records WHERE payload='{}'")
+            .map_err(ApiError::internal)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(ApiError::internal)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(ApiError::internal)?
+    };
+    let transaction = connection.transaction().map_err(ApiError::internal)?;
+    for (id, role, content) in legacy {
+        let (kind, payload) = match role.as_str() {
+            "user" => ("input", json!({"role":"user","content":content})),
+            "assistant" => (
+                "response_output",
+                json!({
+                    "type":"message",
+                    "role":"assistant",
+                    "content":[{"type":"output_text","text":content}],
+                }),
+            ),
+            "tool" => ("activity", json!({"role":"tool","content":content})),
+            _ => ("activity", json!({"role":"system","content":content})),
+        };
+        transaction
+            .execute(
+                "UPDATE history_records SET kind=?,payload=? WHERE id=?",
+                params![
+                    kind,
+                    serde_json::to_string(&payload).map_err(ApiError::internal)?,
+                    id
+                ],
+            )
+            .map_err(ApiError::internal)?;
+    }
+    let runs = {
+        let mut statement = transaction
+            .prepare("SELECT id,thread_id FROM thread_runs ORDER BY thread_id,started_at,id")
+            .map_err(ApiError::internal)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(ApiError::internal)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(ApiError::internal)?
+    };
+    let mut next_turn_index = HashMap::new();
+    for (run_id, thread_id) in runs {
+        let turn_index = next_turn_index.entry(thread_id).or_insert(0_i64);
+        *turn_index += 1;
+        transaction
+            .execute(
+                "UPDATE thread_runs SET turn_index=? WHERE id=? AND turn_index=0",
+                params![*turn_index, run_id],
+            )
+            .map_err(ApiError::internal)?;
+    }
+    transaction.commit().map_err(ApiError::internal)
+}
+
 // Route implementations live below the persistence model so the tenant boundary
 // remains explicit in every read and write.
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct ThreadView {
     id: String,
     title: String,
@@ -531,6 +775,8 @@ struct HistoryRecord {
 struct RunView {
     id: String,
     thread_id: String,
+    #[serde(skip_serializing)]
+    turn_index: i64,
     status: String,
     error: Option<String>,
     started_at: i64,
@@ -1124,7 +1370,8 @@ async fn history_for(
     tenant_db(state, tenant, true, move |connection| {
         load_thread(connection, &id)?;
         let mut statement = connection.prepare(
-            "SELECT id,thread_id,role,content,created_at FROM history_records WHERE thread_id=? ORDER BY id",
+            "SELECT id,thread_id,role,content,created_at
+             FROM history_records WHERE thread_id=? AND visible=1 ORDER BY id",
         )?;
         let rows = statement.query_map([id], history_from_row)?;
         let mut records = Vec::new();
@@ -1468,40 +1715,227 @@ async fn required_integrations(
         .ok_or_else(|| ApiError::conflict("open this tenant once before using its external API"))
 }
 
+async fn thread_execution_lock(
+    state: &AppState,
+    tenant: &Tenant,
+    thread_id: &str,
+) -> Arc<Mutex<()>> {
+    let key = format!("{}:{thread_id}", tenant.id);
+    let mut locks = state.thread_locks.lock().await;
+    locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+async fn prior_turn_is_active(
+    state: &AppState,
+    tenant: &Tenant,
+    run: &RunView,
+) -> Result<bool, ApiError> {
+    let thread_id = run.thread_id.clone();
+    let turn_index = run.turn_index;
+    tenant_db(state, tenant, false, move |connection| {
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM thread_runs
+                   WHERE thread_id=? AND turn_index<? AND status IN ('queued','running')
+                 )",
+                params![thread_id, turn_index],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    })
+    .await
+}
+
+struct HistoryRecordInsert<'a> {
+    thread_id: &'a str,
+    run_id: Option<&'a str>,
+    turn_index: i64,
+    role: &'a str,
+    content: &'a str,
+    kind: &'a str,
+    payload: &'a Value,
+    visible: bool,
+    created_at: i64,
+}
+
+fn persist_history_record(
+    connection: &Connection,
+    record: HistoryRecordInsert<'_>,
+) -> Result<i64, ApiError> {
+    connection.execute(
+        "INSERT INTO history_records(thread_id,run_id,turn_index,role,content,kind,payload,visible,created_at)
+         VALUES(?,?,?,?,?,?,?,?,?)",
+        params![
+            record.thread_id,
+            record.run_id,
+            record.turn_index,
+            record.role,
+            record.content,
+            record.kind,
+            serde_json::to_string(record.payload).map_err(ApiError::internal)?,
+            if record.visible { 1 } else { 0 },
+            record.created_at,
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+#[derive(Debug)]
+struct CompiledThreadContext {
+    items: Vec<Value>,
+    current_turn_tail_id: i64,
+}
+
+fn compile_thread_context(
+    connection: &Connection,
+    thread_id: &str,
+    turn_index: i64,
+) -> Result<CompiledThreadContext, ApiError> {
+    let current_turn_tail_id = connection
+        .query_row(
+            "SELECT MAX(id) FROM history_records WHERE thread_id=? AND turn_index=?",
+            params![thread_id, turn_index],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .ok_or_else(|| ApiError::conflict("thread run has no durable history"))?;
+    let checkpoint = connection
+        .query_row(
+            "SELECT id,turn_index,payload FROM history_records
+             WHERE thread_id=? AND kind='checkpoint' AND turn_index<=?
+             ORDER BY turn_index DESC,id DESC LIMIT 1",
+            params![thread_id, turn_index],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let mut items = Vec::new();
+    if let Some((checkpoint_id, checkpoint_turn_index, payload)) = checkpoint {
+        let checkpoint = serde_json::from_str::<Value>(&payload).map_err(ApiError::internal)?;
+        items.push(context_protocol_item(&checkpoint));
+        let mut statement = connection.prepare(
+            "SELECT payload FROM history_records
+             WHERE thread_id=?1
+               AND kind IN ('input','response_output','tool_output')
+               AND turn_index<=?2
+               AND (turn_index>?3 OR (turn_index=?3 AND id>?4))
+             ORDER BY turn_index,id",
+        )?;
+        let mut rows = statement.query(params![
+            thread_id,
+            turn_index,
+            checkpoint_turn_index,
+            checkpoint_id,
+        ])?;
+        while let Some(row) = rows.next()? {
+            let payload: String = row.get(0)?;
+            let item = serde_json::from_str::<Value>(&payload).map_err(ApiError::internal)?;
+            items.push(context_protocol_item(&item));
+        }
+    } else {
+        let mut statement = connection.prepare(
+            "SELECT payload FROM history_records
+             WHERE thread_id=? AND kind IN ('input','response_output','tool_output') AND turn_index<=?
+             ORDER BY turn_index,id",
+        )?;
+        let mut rows = statement.query(params![thread_id, turn_index])?;
+        while let Some(row) = rows.next()? {
+            let payload: String = row.get(0)?;
+            let item = serde_json::from_str::<Value>(&payload).map_err(ApiError::internal)?;
+            items.push(context_protocol_item(&item));
+        }
+    }
+    (!items.is_empty())
+        .then_some(CompiledThreadContext {
+            items,
+            current_turn_tail_id,
+        })
+        .ok_or_else(|| ApiError::conflict("thread run has no replayable history"))
+}
+
+fn context_protocol_item(item: &Value) -> Value {
+    let mut item = item.clone();
+    match item.get("type").and_then(Value::as_str) {
+        Some("function_call_output") => {
+            if let Some(output) = item.get("output").and_then(Value::as_str) {
+                item["output"] = Value::String(context_tool_output(output));
+            }
+        }
+        Some("web_search_call") => {
+            // COMPATIBILITY: OpenAI LB rejects `action` on replayed web-search output.
+            // Remove this once stateless replay accepts the raw upstream item.
+            item.as_object_mut()
+                .expect("typed Responses item is an object")
+                .remove("action");
+        }
+        Some("image_generation_call") => {
+            // COMPATIBILITY: OpenAI LB rejects `action` and native `size` on replayed images.
+            // Remove this once stateless replay accepts the raw upstream item.
+            let image = item
+                .as_object_mut()
+                .expect("typed Responses item is an object");
+            image.remove("action");
+            image.remove("size");
+        }
+        _ => {}
+    }
+    item
+}
+
+fn context_tool_output(output: &str) -> String {
+    let Some((end, _)) = output.char_indices().nth(MAX_CONTEXT_TOOL_OUTPUT_CHARS) else {
+        return output.to_owned();
+    };
+    format!("{}{}", &output[..end], TOOL_OUTPUT_TRUNCATED_NOTICE)
+}
+
 async fn enqueue_turn(
     state: AppState,
     tenant: Tenant,
     thread_id: String,
     input: String,
 ) -> Result<RunView, ApiError> {
-    let run = RunView {
-        id: Uuid::new_v4().to_string(),
-        thread_id: thread_id.clone(),
-        status: "queued".to_owned(),
-        error: None,
-        started_at: now(),
-        finished_at: None,
-    };
-    let pending = run.clone();
-    let queued_id = pending.id.clone();
-    let queued_thread_id = pending.thread_id.clone();
-    let queued_status = pending.status.clone();
-    let queued_started_at = pending.started_at;
-    tenant_db(&state, &tenant, true, move |connection| {
-        let thread = load_thread(connection, &thread_id)?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO history_records(thread_id,role,content,created_at) VALUES(?,'user',?,?)",
-            params![&queued_thread_id, input, queued_started_at],
+    let run_id = Uuid::new_v4().to_string();
+    let started_at = now();
+    let queued_id = run_id.clone();
+    let queued_thread_id = thread_id.clone();
+    let input_payload = json!({"role":"user","content":input});
+    let turn_index = tenant_db(&state, &tenant, true, move |connection| {
+        let thread = load_thread(connection, &queued_thread_id)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let turn_index = transaction.query_row(
+            "SELECT COALESCE(MAX(turn_index),0)+1 FROM thread_runs WHERE thread_id=?",
+            [&queued_thread_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id: &queued_thread_id,
+                run_id: Some(&queued_id),
+                turn_index,
+                role: "user",
+                content: input_payload
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .expect("validated input is a string"),
+                kind: "input",
+                payload: &input_payload,
+                visible: true,
+                created_at: started_at,
+            },
         )?;
         transaction.execute(
-            "INSERT INTO thread_runs(id,thread_id,status,started_at) VALUES(?,?,?,?)",
-            params![
-                &queued_id,
-                &queued_thread_id,
-                &queued_status,
-                queued_started_at
-            ],
+            "INSERT INTO thread_runs(id,thread_id,turn_index,status,started_at) VALUES(?,?,?,'queued',?)",
+            params![&queued_id, &queued_thread_id, turn_index, started_at],
         )?;
         transaction.execute(
             "INSERT INTO reasoning_audits(run_id,thread_id,request_kind,model,status,started_at) VALUES(?,?,? ,?,?,?)",
@@ -1511,17 +1945,27 @@ async fn enqueue_turn(
                 "thread_turn",
                 &thread.model,
                 "in_flight",
-                queued_started_at
+                started_at
             ],
         )?;
         transaction.execute(
             "UPDATE threads SET status='running',updated_at=? WHERE id=?",
-            params![queued_started_at, &queued_thread_id],
+            params![started_at, &queued_thread_id],
         )?;
         transaction.commit()?;
-        Ok(())
+        Ok(turn_index)
     })
     .await?;
+    let run = RunView {
+        id: run_id,
+        thread_id,
+        turn_index,
+        status: "queued".to_owned(),
+        error: None,
+        started_at,
+        finished_at: None,
+    };
+    let pending = run.clone();
     let background_state = state.clone();
     tokio::spawn(async move {
         execute_turn(background_state, tenant, run).await;
@@ -1530,6 +1974,23 @@ async fn enqueue_turn(
 }
 
 async fn execute_turn(state: AppState, tenant: Tenant, run: RunView) {
+    let execution_lock = thread_execution_lock(&state, &tenant, &run.thread_id).await;
+    let execution_guard = loop {
+        let guard = execution_lock.lock().await;
+        match prior_turn_is_active(&state, &tenant, &run).await {
+            Ok(false) => break guard,
+            Ok(true) => {
+                drop(guard);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => {
+                drop(guard);
+                tracing::warn!(run_id = %run.id, error = %error.message, "could not order a thread run");
+                fail_run(&state, &tenant, &run, &error.message).await;
+                return;
+            }
+        }
+    };
     let _ = tenant_db(&state, &tenant, false, {
         let run = run.clone();
         move |connection| {
@@ -1550,14 +2011,6 @@ async fn execute_turn(state: AppState, tenant: Tenant, run: RunView) {
         move |connection| {
             let thread = load_thread(connection, &thread_id)?;
             let integrations = integration_settings(connection)?;
-            let mut statement = connection.prepare(
-                "SELECT id,thread_id,role,content,created_at FROM history_records WHERE thread_id=? ORDER BY id",
-            )?;
-            let rows = statement.query_map([&thread_id], history_from_row)?;
-            let mut history = Vec::new();
-            for row in rows {
-                history.push(row?);
-            }
             let worker: Option<String> = connection
                 .query_row(
                     "SELECT id FROM workers WHERE status='online' AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 1",
@@ -1565,45 +2018,32 @@ async fn execute_turn(state: AppState, tenant: Tenant, run: RunView) {
                     |row| row.get(0),
                 )
                 .optional()?;
-            Ok((thread, integrations, history, worker))
+            Ok((thread, integrations, worker))
         }
     })
     .await;
     let result = match context {
-        Ok((thread, integrations, history, worker)) if integrations_ready(&integrations) => {
-            run_agent(
-                &state,
-                &tenant,
-                &thread,
-                &integrations,
-                history,
-                worker,
-                &run.id,
-            )
-            .await
+        Ok((thread, integrations, worker)) if integrations_ready(&integrations) => {
+            run_agent(&state, &tenant, &thread, &integrations, worker, &run).await
         }
-        Ok((thread, _, _, _)) => Err((
+        Ok((thread, _, _)) => Err((
             thread,
             Box::new(ApiError::conflict("tenant integrations are not ready")),
         )),
         Err(error) => {
             tracing::warn!(run_id = %run.id, error = %error.message, "could not load a thread run");
             fail_run(&state, &tenant, &run, &error.message).await;
+            drop(execution_guard);
             return;
         }
     };
     match result {
         Ok((thread, integrations, output)) => {
-            let output_for_db = output.clone();
             let finished_at = now();
             let completed_run_id = run.id.clone();
             let completed_thread_id = run.thread_id.clone();
             if let Err(error) = tenant_db(&state, &tenant, false, move |connection| {
                 let transaction = connection.transaction()?;
-                transaction.execute(
-                    "INSERT INTO history_records(thread_id,role,content,created_at) VALUES(?,'assistant',?,?)",
-                    params![&completed_thread_id, output_for_db, finished_at],
-                )?;
                 transaction.execute(
                     "UPDATE thread_runs SET status='completed',finished_at=?,error=NULL WHERE id=?",
                     params![finished_at, &completed_run_id],
@@ -1623,11 +2063,14 @@ async fn execute_turn(state: AppState, tenant: Tenant, run: RunView) {
                 tracing::warn!(run_id = %run.id, error = %error.message, "could not finalize a completed thread run");
                 return;
             }
+            drop(execution_guard);
             notify_thread(&state, &integrations, &thread, true, &output).await;
         }
         Err((thread, error)) => {
             let error_text = error.message.clone();
-            if !fail_run(&state, &tenant, &run, &error_text).await {
+            let finalized = fail_run(&state, &tenant, &run, &error_text).await;
+            drop(execution_guard);
+            if !finalized {
                 return;
             }
             notify_thread(
@@ -1646,16 +2089,24 @@ async fn fail_run(state: &AppState, tenant: &Tenant, run: &RunView, error: &str)
     let error_for_db = error.to_owned();
     let failed_run_id = run.id.clone();
     let failed_thread_id = run.thread_id.clone();
+    let failed_turn_index = run.turn_index;
     match tenant_db(state, tenant, false, move |connection| {
         let finished_at = now();
         let transaction = connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO history_records(thread_id,role,content,created_at) VALUES(?,'system',?,?)",
-            params![
-                &failed_thread_id,
-                format!("Run failed: {error_for_db}"),
-                finished_at
-            ],
+        let content = format!("Run failed: {error_for_db}");
+        persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id: &failed_thread_id,
+                run_id: Some(&failed_run_id),
+                turn_index: failed_turn_index,
+                role: "system",
+                content: &content,
+                kind: "activity",
+                payload: &json!({"role":"system","content":&content}),
+                visible: true,
+                created_at: finished_at,
+            },
         )?;
         transaction.execute(
             "UPDATE thread_runs SET status='failed',error=?,finished_at=? WHERE id=?",
@@ -1763,33 +2214,67 @@ async fn run_agent(
     tenant: &Tenant,
     thread: &ThreadView,
     integrations: &IntegrationSettings,
-    history: Vec<HistoryRecord>,
     worker_id: Option<String>,
-    run_id: &str,
+    run: &RunView,
 ) -> Result<(ThreadView, IntegrationSettings, String), (ThreadView, Box<ApiError>)> {
-    let input = Value::Array(
-        history
-            .into_iter()
-            .filter(|record| matches!(record.role.as_str(), "user" | "assistant"))
-            .map(|record| json!({"role":record.role,"content":record.content}))
-            .collect(),
-    );
-    let first_response = responses_request(
-        state,
-        integrations,
-        &thread.model,
-        input,
-        None,
-        worker_id.is_some(),
-    )
-    .await
-    .map_err(|error| (thread.clone(), Box::new(error)))?;
-    let ResponsesResult {
-        value: mut response,
-        request_id,
-    } = first_response;
-    update_reasoning_audit_usage(state, tenant, run_id, &response, request_id).await;
-    for _ in 0..8 {
+    let mut tool_rounds = 0;
+    let mut checkpoint_retries = 0;
+    loop {
+        if tool_rounds == 8 {
+            return Err((
+                thread.clone(),
+                Box::new(ApiError::unavailable(
+                    "agent exceeded the Worker tool-call limit",
+                )),
+            ));
+        }
+        let context = tenant_db(state, tenant, false, {
+            let thread_id = thread.id.clone();
+            let turn_index = run.turn_index;
+            move |connection| compile_thread_context(connection, &thread_id, turn_index)
+        })
+        .await
+        .map_err(|error| (thread.clone(), Box::new(error)))?;
+        let response = match responses_request(
+            state,
+            integrations,
+            &thread.model,
+            Value::Array(context.items.clone()),
+            worker_id.is_some(),
+            None,
+        )
+        .await
+        {
+            Err(error)
+                if error.is_context_overflow() && checkpoint_retries < CHECKPOINT_RETRY_LIMIT =>
+            {
+                checkpoint_retries += 1;
+                compact_thread_context(state, tenant, thread, run, &context, integrations)
+                    .await
+                    .map_err(|error| (thread.clone(), Box::new(error)))?;
+                continue;
+            }
+            Err(error) => return Err((thread.clone(), Box::new(error))),
+            Ok(response) => response,
+        };
+        let ResponsesResult {
+            value: response,
+            request_id,
+        } = response;
+        update_reasoning_audit_usage(state, tenant, &run.id, &response, request_id).await;
+        let output = response
+            .get("output")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    thread.clone(),
+                    Box::new(ApiError::unavailable("model response has no output")),
+                )
+            })?;
+        append_response_output_items(state, tenant, thread, run, &output)
+            .await
+            .map_err(|error| (thread.clone(), Box::new(error)))?;
         let calls = function_calls(&response);
         if calls.is_empty() {
             return response_text(&response)
@@ -1807,7 +2292,6 @@ async fn run_agent(
                 Box::new(ApiError::conflict("no Worker is online")),
             ));
         };
-        let mut outputs = Vec::with_capacity(calls.len());
         for call in calls {
             let call_id = enqueue_worker_call(
                 state,
@@ -1822,42 +2306,340 @@ async fn run_agent(
             let result = wait_worker_result(state, tenant, &call_id)
                 .await
                 .map_err(|error| (thread.clone(), Box::new(error)))?;
-            outputs.push(json!({
+            let output = json!({
                 "type":"function_call_output",
                 "call_id":call.call_id,
                 "output":result.to_string(),
-            }));
+            });
+            append_tool_output_item(state, tenant, thread, run, &output)
+                .await
+                .map_err(|error| (thread.clone(), Box::new(error)))?;
         }
-        let previous_response_id = response
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                (
-                    thread.clone(),
-                    Box::new(ApiError::unavailable("model response has no id")),
-                )
-            })?;
-        let next_response = responses_request(
-            state,
-            integrations,
-            &thread.model,
-            Value::Array(outputs),
-            Some(previous_response_id),
-            true,
-        )
-        .await
-        .map_err(|error| (thread.clone(), Box::new(error)))?;
-        let ResponsesResult { value, request_id } = next_response;
-        response = value;
-        update_reasoning_audit_usage(state, tenant, run_id, &response, request_id).await;
+        tool_rounds += 1;
     }
-    Err((
-        thread.clone(),
-        Box::new(ApiError::unavailable(
-            "agent exceeded the Worker tool-call limit",
-        )),
+}
+
+fn output_text(items: &[Value]) -> String {
+    items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|content| content.get("type").and_then(Value::as_str) == Some("output_text"))
+        .filter_map(|content| content.get("text").and_then(Value::as_str))
+        .collect()
+}
+
+fn response_item_display(item: &Value) -> (String, String, bool) {
+    if item.get("type").and_then(Value::as_str) == Some("message") {
+        let content = output_text(std::slice::from_ref(item));
+        return (
+            "assistant".to_owned(),
+            content.clone(),
+            !content.trim().is_empty(),
+        );
+    }
+    (
+        "tool".to_owned(),
+        "Responses protocol item recorded".to_owned(),
+        false,
+    )
+}
+
+async fn append_response_output_items(
+    state: &AppState,
+    tenant: &Tenant,
+    thread: &ThreadView,
+    run: &RunView,
+    output: &[Value],
+) -> Result<(), ApiError> {
+    let records = output
+        .iter()
+        .map(|item| {
+            let (role, content, visible) = response_item_display(item);
+            Ok((
+                role,
+                content,
+                serde_json::to_string(item).map_err(ApiError::internal)?,
+                visible,
+            ))
+        })
+        .collect::<std::result::Result<Vec<_>, ApiError>>()?;
+    let thread_id = thread.id.clone();
+    let run_id = run.id.clone();
+    let turn_index = run.turn_index;
+    let created_at = now();
+    tenant_db(state, tenant, false, move |connection| {
+        let transaction = connection.transaction()?;
+        for (role, content, payload, visible) in records {
+            transaction.execute(
+                "INSERT INTO history_records(thread_id,run_id,turn_index,role,content,kind,payload,visible,created_at)
+                 VALUES(?,?,?,?,?,'response_output',?,?,?)",
+                params![
+                    &thread_id,
+                    &run_id,
+                    turn_index,
+                    role,
+                    content,
+                    payload,
+                    if visible { 1 } else { 0 },
+                    created_at,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+async fn append_tool_output_item(
+    state: &AppState,
+    tenant: &Tenant,
+    thread: &ThreadView,
+    run: &RunView,
+    item: &Value,
+) -> Result<(), ApiError> {
+    let content = item
+        .get("output")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| item.to_string());
+    let payload = serde_json::to_string(item).map_err(ApiError::internal)?;
+    let thread_id = thread.id.clone();
+    let run_id = run.id.clone();
+    let turn_index = run.turn_index;
+    let created_at = now();
+    tenant_db(state, tenant, false, move |connection| {
+        connection.execute(
+            "INSERT INTO history_records(thread_id,run_id,turn_index,role,content,kind,payload,visible,created_at)
+             VALUES(?,?,?,?,?,'tool_output',?,0,?)",
+            params![
+                thread_id,
+                run_id,
+                turn_index,
+                "tool",
+                content,
+                payload,
+                created_at,
+            ],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+async fn compact_thread_context(
+    state: &AppState,
+    tenant: &Tenant,
+    thread: &ThreadView,
+    run: &RunView,
+    context: &CompiledThreadContext,
+    integrations: &IntegrationSettings,
+) -> Result<(), ApiError> {
+    let summary =
+        summarize_context(state, integrations, &thread.model, context.items.clone()).await?;
+    persist_thread_checkpoint(
+        state,
+        tenant,
+        thread,
+        run,
+        context.current_turn_tail_id,
+        summary,
+    )
+    .await
+}
+
+async fn persist_thread_checkpoint(
+    state: &AppState,
+    tenant: &Tenant,
+    thread: &ThreadView,
+    run: &RunView,
+    current_turn_tail_id: i64,
+    summary: String,
+) -> Result<(), ApiError> {
+    let payload = serde_json::to_string(&json!({"role":"developer","content":summary}))
+        .map_err(ApiError::internal)?;
+    let thread_id = thread.id.clone();
+    let run_id = run.id.clone();
+    let turn_index = run.turn_index;
+    tenant_db(state, tenant, false, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let latest: Option<i64> = transaction.query_row(
+            "SELECT MAX(id) FROM history_records WHERE thread_id=? AND turn_index=?",
+            params![&thread_id, turn_index],
+            |row| row.get(0),
+        )?;
+        if latest != Some(current_turn_tail_id) {
+            return Err(ApiError::conflict(
+                "thread context changed while its checkpoint was being compacted",
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO history_records(thread_id,run_id,turn_index,role,content,kind,payload,visible,created_at)
+             VALUES(?,?,?,?,?,'checkpoint',?,0,?)",
+            params![
+                thread_id,
+                run_id,
+                turn_index,
+                "system",
+                "Context checkpoint",
+                payload,
+                now(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+async fn summarize_context(
+    state: &AppState,
+    integrations: &IntegrationSettings,
+    model: &str,
+    items: Vec<Value>,
+) -> Result<String, ApiError> {
+    let mut batches = context_summary_batches(items);
+    for _ in 0..CHECKPOINT_SUMMARY_MAX_ROUNDS {
+        if batches.len() == 1 {
+            return summarize_context_once(
+                state,
+                integrations,
+                model,
+                batches.pop().expect("one checkpoint summary batch exists"),
+            )
+            .await;
+        }
+        let input_bytes = context_summary_bytes(&batches);
+        let mut summaries = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let summary = summarize_context_once(state, integrations, model, batch).await?;
+            summaries.push(json!({"role":"developer","content":summary}));
+        }
+        if context_summary_bytes(std::slice::from_ref(&summaries)) >= input_bytes {
+            return Err(ApiError::unavailable(
+                "context checkpoint did not reduce its input",
+            ));
+        }
+        batches = context_summary_batches(summaries);
+    }
+    Err(ApiError::unavailable(
+        "context checkpoint exceeded its reduction limit",
     ))
+}
+
+async fn summarize_context_once(
+    state: &AppState,
+    integrations: &IntegrationSettings,
+    model: &str,
+    items: Vec<Value>,
+) -> Result<String, ApiError> {
+    let mut input = Vec::with_capacity(items.len() + 1);
+    input.push(json!({"role":"developer","content":checkpoint_developer_prompt()}));
+    input.extend(items);
+    let response = responses_request(
+        state,
+        integrations,
+        model,
+        Value::Array(input),
+        false,
+        Some(CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS),
+    )
+    .await?;
+    response_text(&response.value)
+        .filter(|summary| !summary.trim().is_empty())
+        .ok_or_else(|| ApiError::unavailable("checkpoint response has no text"))
+}
+
+fn checkpoint_developer_prompt() -> &'static str {
+    r#"# Thread context checkpoint
+
+Write a compact Markdown state checkpoint for the same thread. It will replace the earlier
+replayed protocol history in the next inference request, so preserve only what is needed to
+continue correctly: the current objective, verified facts, active constraints, unfinished work,
+and the next useful step. Do not answer the user, call tools, invent facts, or retell the full
+conversation. Raw history remains durable outside this checkpoint."#
+}
+
+fn context_summary_batches(items: Vec<Value>) -> Vec<Vec<Value>> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut bytes = 0;
+    for item in items.into_iter().flat_map(context_summary_segments) {
+        let item_bytes = serde_json::to_vec(&item)
+            .expect("context summary item is serializable")
+            .len();
+        if !batch.is_empty() && bytes + item_bytes > CHECKPOINT_SUMMARY_INPUT_BYTES {
+            batches.push(std::mem::take(&mut batch));
+            bytes = 0;
+        }
+        bytes += item_bytes;
+        batch.push(item);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
+
+fn context_summary_segments(item: Value) -> Vec<Value> {
+    let serialized = serde_json::to_string(&item).expect("context item is serializable");
+    if serialized.len() <= CHECKPOINT_SUMMARY_INPUT_BYTES {
+        return vec![item];
+    }
+    let segments = split_utf8_by_bytes(&serialized, CHECKPOINT_SUMMARY_INPUT_BYTES);
+    let count = segments.len();
+    segments
+        .into_iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            json!({
+                "role":"developer",
+                "content":format!(
+                    "[Cybion durable context segment {}/{}; preserve it as evidence and combine every segment before summarizing.]\n{}",
+                    index + 1,
+                    count,
+                    segment,
+                ),
+            })
+        })
+        .collect()
+}
+
+fn split_utf8_by_bytes(value: &str, limit: usize) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, character) in value.char_indices() {
+        let width = character.len_utf8();
+        if bytes + width > limit && start < index {
+            segments.push(&value[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes += width;
+    }
+    if start < value.len() {
+        segments.push(&value[start..]);
+    }
+    segments
+}
+
+fn context_summary_bytes(batches: &[Vec<Value>]) -> usize {
+    batches
+        .iter()
+        .flatten()
+        .map(|item| {
+            serde_json::to_vec(item)
+                .expect("context summary item is serializable")
+                .len()
+        })
+        .sum()
 }
 
 async fn responses_request(
@@ -1865,10 +2647,10 @@ async fn responses_request(
     integrations: &IntegrationSettings,
     model: &str,
     input: Value,
-    previous_response_id: Option<String>,
     include_tools: bool,
+    max_output_tokens: Option<usize>,
 ) -> Result<ResponsesResult, ApiError> {
-    let payload = responses_payload(model, input, previous_response_id, include_tools);
+    let payload = responses_payload(model, input, include_tools, max_output_tokens);
     let response = state
         .client
         .post(format!(
@@ -1888,10 +2670,14 @@ async fn responses_request(
         .map(str::to_owned);
     let body = response.text().await?;
     if !status.is_success() {
-        return Err(ApiError::unavailable(format!(
+        let message = format!(
             "upstream Responses request failed with HTTP {status}: {}",
             upstream_error_detail(&body)
-        )));
+        );
+        if context_overflow_response(&body) {
+            return Err(ApiError::context_overflow(message));
+        }
+        return Err(ApiError::unavailable(message));
     }
     if body.trim_start().starts_with('{') {
         return serde_json::from_str(&body)
@@ -1907,6 +2693,11 @@ async fn responses_request(
             request_id: response_id,
         })
         .map_err(|cause| {
+            if context_overflow_response(&body) {
+                return ApiError::context_overflow(format!(
+                    "upstream Responses stream exceeded the context window: {cause}"
+                ));
+            }
             ApiError::unavailable(format!(
                 "upstream Responses stream could not be read: {cause}"
             ))
@@ -1952,15 +2743,15 @@ async fn update_reasoning_audit_usage(
 fn responses_payload(
     model: &str,
     input: Value,
-    previous_response_id: Option<String>,
     include_tools: bool,
+    max_output_tokens: Option<usize>,
 ) -> Value {
-    let mut payload = json!({"model":model,"input":input,"stream":true});
-    if let Some(previous_response_id) = previous_response_id {
-        payload["previous_response_id"] = Value::String(previous_response_id);
-    }
+    let mut payload = json!({"model":model,"input":input,"store":false,"stream":true});
     if include_tools {
         payload["tools"] = worker_tools();
+    }
+    if let Some(max_output_tokens) = max_output_tokens {
+        payload["max_output_tokens"] = json!(max_output_tokens);
     }
     payload
 }
@@ -1978,6 +2769,30 @@ fn upstream_error_detail(body: &str) -> String {
         })
         .filter(|detail| !detail.trim().is_empty())
         .unwrap_or_else(|| body.trim().to_owned())
+}
+
+fn context_overflow_response(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .is_some_and(|value| context_overflow_value(&value))
+        || body
+            .replace("\r\n", "\n")
+            .split("\n\n")
+            .filter_map(sse_event_data)
+            .filter_map(|(_, data)| serde_json::from_str::<Value>(&data).ok())
+            .any(|value| context_overflow_value(&value))
+}
+
+fn context_overflow_value(value: &Value) -> bool {
+    matches!(
+        value
+            .pointer("/error/code")
+            .or_else(|| value.pointer("/response/error/code"))
+            .or_else(|| value.pointer("/response/incomplete_details/reason"))
+            .or_else(|| value.get("code"))
+            .and_then(Value::as_str),
+        Some("context_length_exceeded" | "context_window_exceeded")
+    )
 }
 
 fn completed_response_from_sse(body: &str) -> Result<Value> {
@@ -2118,18 +2933,8 @@ fn response_text(response: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| {
-            response.get("output")?.as_array()?.iter().find_map(|item| {
-                item.get("content")?.as_array()?.iter().find_map(|content| {
-                    (content.get("type").and_then(Value::as_str) == Some("output_text"))
-                        .then(|| {
-                            content
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        })
-                        .flatten()
-                })
-            })
+            let text = output_text(response.get("output")?.as_array()?);
+            (!text.is_empty()).then_some(text)
         })
 }
 
@@ -2454,8 +3259,39 @@ mod tests {
                 client: reqwest::Client::new(),
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
+                thread_locks: Arc::new(Mutex::new(HashMap::new())),
             },
         )
+    }
+
+    async fn read_json_request(stream: &mut tokio::net::TcpStream) -> Value {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0, "upstream client closed before sending a request");
+            bytes.extend_from_slice(&buffer[..read]);
+            let Some(headers_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&bytes[..headers_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let body_start = headers_end + 4;
+            if bytes.len() >= body_start + content_length {
+                return serde_json::from_slice(&bytes[body_start..body_start + content_length])
+                    .unwrap();
+            }
+        }
     }
 
     #[test]
@@ -2507,6 +3343,7 @@ mod tests {
         let run = RunView {
             id: Uuid::new_v4().to_string(),
             thread_id: thread.id.clone(),
+            turn_index: 1,
             status: "queued".to_owned(),
             error: None,
             started_at: now(),
@@ -2516,8 +3353,8 @@ mod tests {
             let run = run.clone();
             move |connection| {
                 connection.execute(
-                    "INSERT INTO thread_runs(id,thread_id,status,started_at) VALUES(?,?,?,?)",
-                    params![run.id, run.thread_id, run.status, run.started_at],
+                    "INSERT INTO thread_runs(id,thread_id,turn_index,status,started_at) VALUES(?,?,?,?,?)",
+                    params![run.id, run.thread_id, run.turn_index, run.status, run.started_at],
                 )?;
                 connection.execute(
                     "UPDATE threads SET status='running' WHERE id=?",
@@ -2556,6 +3393,119 @@ mod tests {
         assert_eq!(stored.0, "failed");
         assert_eq!(stored.1, "failed");
         assert!(stored.2.contains("upstream unavailable"));
+    }
+
+    #[tokio::test]
+    async fn later_turns_wait_for_an_active_predecessor() {
+        let (_root, state) = test_state();
+        let tenant = tenant_for_subject(&state, "ordered-user");
+        let thread = create_thread_for(
+            &state,
+            &tenant,
+            CreateThreadInput {
+                title: Some("Ordered turns".to_owned()),
+                model: None,
+            },
+        )
+        .await
+        .unwrap();
+        tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                connection.execute(
+                    "INSERT INTO thread_runs(id,thread_id,turn_index,status,started_at)
+                     VALUES('first',?,1,'running',?),('second',?,2,'queued',?)",
+                    params![&thread_id, now(), &thread_id, now()],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let second = RunView {
+            id: "second".to_owned(),
+            thread_id: thread.id.clone(),
+            turn_index: 2,
+            status: "queued".to_owned(),
+            error: None,
+            started_at: now(),
+            finished_at: None,
+        };
+        assert!(
+            prior_turn_is_active(&state, &tenant, &second)
+                .await
+                .unwrap()
+        );
+        tenant_db(&state, &tenant, false, |connection| {
+            connection.execute(
+                "UPDATE thread_runs SET status='completed' WHERE id='first'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            !prior_turn_is_active(&state, &tenant, &second)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_terminalizes_interrupted_turns() {
+        let (root, state) = test_state();
+        let tenant = tenant_for_subject(&state, "restart-user");
+        let thread = create_thread_for(
+            &state,
+            &tenant,
+            CreateThreadInput {
+                title: Some("Restart recovery".to_owned()),
+                model: None,
+            },
+        )
+        .await
+        .unwrap();
+        tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                connection.execute(
+                    "INSERT INTO thread_runs(id,thread_id,turn_index,status,started_at)
+                     VALUES('interrupted',?,1,'running',?)",
+                    params![thread_id, now()],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        recover_interrupted_turns(root.path()).unwrap();
+        let recovered = tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                let run_status: String = connection.query_row(
+                    "SELECT status FROM thread_runs WHERE id='interrupted'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let thread_status: String = connection.query_row(
+                    "SELECT status FROM threads WHERE id=?",
+                    [thread_id],
+                    |row| row.get(0),
+                )?;
+                let activity: String = connection.query_row(
+                    "SELECT content FROM history_records WHERE run_id='interrupted' AND kind='activity'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((run_status, thread_status, activity))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(recovered.0, "failed");
+        assert_eq!(recovered.1, "failed");
+        assert_eq!(recovered.2, "Run interrupted by a Cybion restart");
     }
 
     #[tokio::test]
@@ -2601,8 +3551,584 @@ mod tests {
 
     #[test]
     fn responses_payload_always_requests_streaming() {
-        let payload = responses_payload("test-model", json!([]), None, false);
+        let payload = responses_payload("test-model", json!([]), false, None);
         assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(payload.get("store").and_then(Value::as_bool), Some(false));
+        assert!(payload.get("previous_response_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn thread_context_starts_at_its_checkpoint_and_excludes_future_turns() {
+        let (_root, state) = test_state();
+        let tenant = tenant_for_subject(&state, "context-user");
+        let thread = create_thread_for(
+            &state,
+            &tenant,
+            CreateThreadInput {
+                title: Some("Context test".to_owned()),
+                model: None,
+            },
+        )
+        .await
+        .unwrap();
+        let sibling = create_thread_for(
+            &state,
+            &tenant,
+            CreateThreadInput {
+                title: Some("Sibling".to_owned()),
+                model: None,
+            },
+        )
+        .await
+        .unwrap();
+        let compiled = tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            let sibling_id = sibling.id.clone();
+            move |connection| {
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-1"),
+                        turn_index: 1,
+                        role: "user",
+                        content: "first request",
+                        kind: "input",
+                        payload: &json!({"role":"user","content":"first request"}),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-1"),
+                        turn_index: 1,
+                        role: "assistant",
+                        content: "first answer",
+                        kind: "response_output",
+                        payload: &json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "content":[{"type":"output_text","text":"first answer"}],
+                        }),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-2"),
+                        turn_index: 2,
+                        role: "user",
+                        content: "second request",
+                        kind: "input",
+                        payload: &json!({"role":"user","content":"second request"}),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-1"),
+                        turn_index: 1,
+                        role: "system",
+                        content: "Context checkpoint",
+                        kind: "checkpoint",
+                        payload: &json!({"role":"developer","content":"# Current state\nFirst turn is complete."}),
+                        visible: false,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-2"),
+                        turn_index: 2,
+                        role: "tool",
+                        content: "",
+                        kind: "response_output",
+                        payload: &json!({"type":"function_call","call_id":"call-2","name":"bash","arguments":"{}"}),
+                        visible: false,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-3"),
+                        turn_index: 3,
+                        role: "user",
+                        content: "future request",
+                        kind: "input",
+                        payload: &json!({"role":"user","content":"future request"}),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                let tool_id = persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-2"),
+                        turn_index: 2,
+                        role: "tool",
+                        content: "done",
+                        kind: "tool_output",
+                        payload: &json!({"type":"function_call_output","call_id":"call-2","output":"done"}),
+                        visible: false,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &sibling_id,
+                        run_id: Some("sibling-run"),
+                        turn_index: 1,
+                        role: "user",
+                        content: "private sibling request",
+                        kind: "input",
+                        payload: &json!({"role":"user","content":"private sibling request"}),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                let context = compile_thread_context(connection, &thread_id, 2)?;
+                Ok((context, tool_id))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(compiled.0.current_turn_tail_id, compiled.1);
+        assert_eq!(
+            compiled.0.items,
+            vec![
+                json!({"role":"developer","content":"# Current state\nFirst turn is complete."}),
+                json!({"role":"user","content":"second request"}),
+                json!({"type":"function_call","call_id":"call-2","name":"bash","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":"call-2","output":"done"}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_responses_request_replays_durable_checkpoint_context() {
+        use tokio::io::AsyncWriteExt;
+
+        let (_root, state) = test_state();
+        let tenant = tenant_for_subject(&state, "request-replay-user");
+        let thread = create_thread_for(
+            &state,
+            &tenant,
+            CreateThreadInput {
+                title: Some("Replay request".to_owned()),
+                model: None,
+            },
+        )
+        .await
+        .unwrap();
+        let run = RunView {
+            id: "run-2".to_owned(),
+            thread_id: thread.id.clone(),
+            turn_index: 2,
+            status: "running".to_owned(),
+            error: None,
+            started_at: now(),
+            finished_at: None,
+        };
+        tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-1"),
+                        turn_index: 1,
+                        role: "user",
+                        content: "old request",
+                        kind: "input",
+                        payload: &json!({"role":"user","content":"old request"}),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-1"),
+                        turn_index: 1,
+                        role: "system",
+                        content: "Context checkpoint",
+                        kind: "checkpoint",
+                        payload: &json!({"role":"developer","content":"# Current state\nOld work is done."}),
+                        visible: false,
+                        created_at: now(),
+                    },
+                )?;
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("run-2"),
+                        turn_index: 2,
+                        role: "user",
+                        content: "new request",
+                        kind: "input",
+                        payload: &json!({"role":"user","content":"new request"}),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut socket).await;
+            sent.send(request).unwrap();
+            let body = json!({
+                "id":"resp_1",
+                "output":[{
+                    "type":"message",
+                    "role":"assistant",
+                    "content":[{"type":"output_text","text":"replayed"}],
+                }],
+            })
+            .to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let integrations = IntegrationSettings {
+            openai_consumer_id: "consumer".to_owned(),
+            openai_consumer_secret: "secret".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            linkit_bot_id: String::new(),
+            linkit_bot_token: String::new(),
+            linkit_username: String::new(),
+        };
+        let result = run_agent(&state, &tenant, &thread, &integrations, None, &run)
+            .await
+            .unwrap();
+        assert_eq!(result.2, "replayed");
+        let request = received.await.unwrap();
+        server.await.unwrap();
+        assert_eq!(request["store"], false);
+        assert!(request.get("previous_response_id").is_none());
+        assert_eq!(
+            request["input"],
+            json!([
+                {"role":"developer","content":"# Current state\nOld work is done."},
+                {"role":"user","content":"new request"},
+            ])
+        );
+        let stored = tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                connection
+                    .query_row(
+                        "SELECT payload FROM history_records
+                     WHERE thread_id=? AND kind='response_output' ORDER BY id DESC LIMIT 1",
+                        [thread_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(Into::into)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored).unwrap(),
+            json!({
+                "type":"message",
+                "role":"assistant",
+                "content":[{"type":"output_text","text":"replayed"}],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn context_overflow_compacts_then_replays_the_persisted_checkpoint() {
+        use tokio::io::AsyncWriteExt;
+
+        let (_root, state) = test_state();
+        let tenant = tenant_for_subject(&state, "checkpoint-user");
+        let thread = create_thread_for(
+            &state,
+            &tenant,
+            CreateThreadInput {
+                title: Some("Checkpoint request".to_owned()),
+                model: None,
+            },
+        )
+        .await
+        .unwrap();
+        let run = RunView {
+            id: "checkpoint-run".to_owned(),
+            thread_id: thread.id.clone(),
+            turn_index: 1,
+            status: "running".to_owned(),
+            error: None,
+            started_at: now(),
+            finished_at: None,
+        };
+        tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                persist_history_record(
+                    connection,
+                    HistoryRecordInsert {
+                        thread_id: &thread_id,
+                        run_id: Some("checkpoint-run"),
+                        turn_index: 1,
+                        role: "user",
+                        content: "continue the work",
+                        kind: "input",
+                        payload: &json!({"role":"user","content":"continue the work"}),
+                        visible: true,
+                        created_at: now(),
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let responses = vec![
+                (
+                    "400 Bad Request",
+                    json!({"error":{"code":"context_length_exceeded","message":"too long"}}),
+                ),
+                (
+                    "200 OK",
+                    json!({
+                        "id":"checkpoint-response",
+                        "output":[{
+                            "type":"message",
+                            "role":"assistant",
+                            "content":[{"type":"output_text","text":"# Current state\nContinue safely."}],
+                        }],
+                    }),
+                ),
+                (
+                    "200 OK",
+                    json!({
+                        "id":"final-response",
+                        "output":[{
+                            "type":"message",
+                            "role":"assistant",
+                            "content":[{"type":"output_text","text":"finished"}],
+                        }],
+                    }),
+                ),
+            ];
+            let mut requests = Vec::new();
+            for (status, response) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_json_request(&mut socket).await);
+                let body = response.to_string();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body,
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            sent.send(requests).unwrap();
+        });
+        let integrations = IntegrationSettings {
+            openai_consumer_id: "consumer".to_owned(),
+            openai_consumer_secret: "secret".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            linkit_bot_id: String::new(),
+            linkit_bot_token: String::new(),
+            linkit_username: String::new(),
+        };
+        let result = run_agent(&state, &tenant, &thread, &integrations, None, &run)
+            .await
+            .unwrap();
+        assert_eq!(result.2, "finished");
+        let requests = received.await.unwrap();
+        server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[0]["input"],
+            json!([{"role":"user","content":"continue the work"}])
+        );
+        assert!(
+            requests[1]["input"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("# Thread context checkpoint")
+        );
+        assert_eq!(
+            requests[1]["input"][1],
+            json!({"role":"user","content":"continue the work"})
+        );
+        assert_eq!(
+            requests[2]["input"],
+            json!([{"role":"developer","content":"# Current state\nContinue safely."}])
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["store"] == Value::Bool(false))
+        );
+        let kinds = tenant_db(&state, &tenant, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                let mut statement = connection
+                    .prepare("SELECT kind FROM history_records WHERE thread_id=? ORDER BY id")?;
+                let rows = statement.query_map([thread_id], |row| row.get::<_, String>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(Into::into)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(kinds, vec!["input", "checkpoint", "response_output"]);
+    }
+
+    #[test]
+    fn legacy_history_rows_are_upgraded_to_replayable_protocol_items() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("legacy.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO threads VALUES ('thread-1','Legacy','test','idle',1,1);
+                 CREATE TABLE history_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                 );
+                 INSERT INTO history_records(thread_id,role,content,created_at)
+                    VALUES ('thread-1','user','remember this',1),
+                           ('thread-1','assistant','remembered',2);
+                 CREATE TABLE thread_runs (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    started_at INTEGER NOT NULL,
+                    finished_at INTEGER
+                 );
+                 INSERT INTO thread_runs VALUES ('run-1','thread-1','completed',NULL,1,2);",
+            )
+            .unwrap();
+        drop(connection);
+        let upgraded = open_tenant(&path, true).unwrap();
+        let records = upgraded
+            .prepare("SELECT kind,payload,turn_index FROM history_records ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(records[0].0, "input");
+        assert_eq!(
+            serde_json::from_str::<Value>(&records[0].1).unwrap(),
+            json!({"role":"user","content":"remember this"})
+        );
+        assert_eq!(records[1].0, "response_output");
+        assert_eq!(
+            serde_json::from_str::<Value>(&records[1].1).unwrap(),
+            json!({
+                "type":"message",
+                "role":"assistant",
+                "content":[{"type":"output_text","text":"remembered"}],
+            })
+        );
+        assert_eq!(records[0].2, 0);
+        assert_eq!(records[1].2, 0);
+        let turn_index: i64 = upgraded
+            .query_row(
+                "SELECT turn_index FROM thread_runs WHERE id='run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(turn_index, 1);
+    }
+
+    #[test]
+    fn raw_tool_output_is_retained_while_replay_is_bounded() {
+        let output = format!("{}终", "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS));
+        let item = json!({"type":"function_call_output","call_id":"call-1","output":output});
+        let replayed = context_protocol_item(&item);
+        assert_eq!(
+            item["output"].as_str().unwrap().chars().count(),
+            MAX_CONTEXT_TOOL_OUTPUT_CHARS + 1
+        );
+        assert_eq!(
+            replayed["output"].as_str().unwrap(),
+            format!(
+                "{}{}",
+                "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS),
+                TOOL_OUTPUT_TRUNCATED_NOTICE
+            )
+        );
+    }
+
+    #[test]
+    fn context_overflow_detection_requires_an_upstream_error_code() {
+        assert!(context_overflow_response(
+            r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#
+        ));
+        assert!(context_overflow_response(
+            "event: response.failed\ndata: {\"error\":{\"code\":\"context_window_exceeded\"}}\n\n"
+        ));
+        assert!(!context_overflow_response(
+            r#"{"error":{"code":"invalid_request_error","message":"too long"}}"#
+        ));
     }
 
     #[test]
