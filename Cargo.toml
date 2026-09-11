@@ -1,9 +1,9 @@
 [package]
 name = "cybion"
-version = "0.2.65"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
-description = "An unrestricted, multi-machine AI harness."
+description = "Hosted multi-tenant AI execution service with paired Workers."
 
 [[bin]]
 name = "cybion"
@@ -11,29 +11,21 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.98"
-auth-mini-axum = "0.1.1"
+auth-mini-axum = "=0.1.2"
+async-stream = "0.3"
 axum = { version = "0.8.4", features = ["macros", "multipart"] }
-base64 = "0.22.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 directories = "6.0.0"
-flate2 = "1.1.2"
 futures-util = { version = "0.3.31", features = ["sink"] }
-hostname = "0.4.1"
-image = { version = "0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
-libc = "0.2"
-notify = "8.0.0"
+hex = "0.4"
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+rust-embed = "8"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
 sha2 = "0.10.9"
-similar = "2.7.0"
-sysinfo = { version = "0.38.4", default-features = false, features = ["disk", "network", "system"] }
-tar = "0.4.44"
 tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-tokio-stream = "0.1.17"
-tokio-tungstenite = { version = "0.27.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tower-http = { version = "0.6.6", features = ["cors", "trace"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
