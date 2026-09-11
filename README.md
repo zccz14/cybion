@@ -91,3 +91,8 @@ The Cloud release builds only a Linux x86_64 binary because it runs on the
 Tokyo EC2 host. The binary embeds `web/dist`, so rebuild the frontend before a
 release build. Production state remains under `/root/.cybion`; the current
 service never reads or migrates the legacy single-tenant `default.sqlite3`.
+
+Pushing a `v*` tag runs the release CD job after publishing the asset. The job
+assumes the repository's AWS OIDC deployment role and uses Systems Manager to
+update the Tokyo instance behind `cybion.ntnl.io`; its repository variables are
+`AWS_DEPLOY_ROLE_ARN`, `AWS_REGION`, and `EC2_INSTANCE_ID`.
