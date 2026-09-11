@@ -22,6 +22,7 @@ jobs:
       - run: npm --prefix web ci
       - run: npm --prefix web run check
       - run: npm --prefix web run build
+      - run: bash -n .github/scripts/send-deploy.sh deploy/deploy-release.sh
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
