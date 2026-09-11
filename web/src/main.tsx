@@ -47,6 +47,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import {
   Dialog,
   DialogContent,
@@ -100,6 +101,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
+import { TooltipProvider } from "@/components/ui/tooltip"
 
 type Language = "en" | "zh"
 type ThreadStatus = "idle" | "running" | "failed"
@@ -296,6 +298,13 @@ const copy = {
     noHistory: "No messages in this thread yet.",
     connection: "Connected",
     hosted: "Hosted workspace",
+    pageErrorTitle: "This page hit an unexpected error",
+    pageErrorDescription: "The rest of the workspace is still available. Try again or reload the app.",
+    appErrorTitle: "Cybion could not load",
+    appErrorDescription: "Reload the app to restore your workspace.",
+    errorDetails: "Error details",
+    tryAgain: "Try again",
+    reload: "Reload",
   },
   zh: {
     threads: "线程",
@@ -402,6 +411,13 @@ const copy = {
     noHistory: "这个线程还没有消息。",
     connection: "已连接",
     hosted: "托管工作区",
+    pageErrorTitle: "这个页面遇到了意外错误",
+    pageErrorDescription: "工作区的其他功能仍然可用。可以重试或重新加载应用。",
+    appErrorTitle: "Cybion 无法加载",
+    appErrorDescription: "重新加载应用即可恢复工作区。",
+    errorDetails: "错误详情",
+    tryAgain: "重试",
+    reload: "重新加载",
   },
 } as const
 
@@ -483,14 +499,16 @@ async function api<T>(sdk: AuthMiniApi, path: string, init?: RequestInit): Promi
 }
 
 function App() {
-  return <AuthMiniProvider
-    authMiniBaseUrl="https://auth.ntnl.io"
-    audiences={AUTH_AUDIENCES}
-    callbackUrl={callbackUrl()}
-    autoRedirectToLogin
-  >
-    <AuthenticatedApp />
-  </AuthMiniProvider>
+  return <TooltipProvider delayDuration={0}>
+    <AuthMiniProvider
+      authMiniBaseUrl="https://auth.ntnl.io"
+      audiences={AUTH_AUDIENCES}
+      callbackUrl={callbackUrl()}
+      autoRedirectToLogin
+    >
+      <AuthenticatedApp />
+    </AuthMiniProvider>
+  </TooltipProvider>
 }
 
 function AuthenticatedApp() {
@@ -536,7 +554,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("cybion.language") === "zh" ? "zh" : "en")
   const [dark, setDark] = useState(() => localStorage.getItem("cybion.theme") === "dark" || (!localStorage.getItem("cybion.theme") && matchMedia("(prefers-color-scheme: dark)").matches))
   const [createOpen, setCreateOpen] = useState(false)
-  const t = copy[language]
+  const labels = copy[language]
   const client = useQueryClient()
   const threads = useQuery({
     queryKey: ["threads"],
@@ -571,21 +589,41 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   }), [dark, language])
   return <LinkitProvider linkitBaseUrl="https://linkit.ntnl.io" lang={language === "zh" ? "zh-CN" : "en-US"}>
     <UiContext.Provider value={ui}>
-      <WorkspaceShell
-        sdk={sdk}
-        threads={threads.data ?? []}
-        threadsLoading={threads.isLoading}
-        threadsError={threads.error}
-        onCreate={() => setCreateOpen(true)}
-      />
-      <CreateThreadDialog
-        language={language}
-        open={createOpen}
-        pending={createThread.isPending}
-        error={createThread.error}
-        onClose={() => setCreateOpen(false)}
-        onCreate={(title) => createThread.mutate(title)}
-      />
+      <ErrorBoundary fallback={({ error, reset }) => <ErrorBoundaryFallback
+        error={error}
+        reset={reset}
+        title={labels.appErrorTitle}
+        description={labels.appErrorDescription}
+        detailsLabel={labels.errorDetails}
+        retryLabel={labels.tryAgain}
+        reloadLabel={labels.reload}
+      />}>
+        <WorkspaceShell
+          sdk={sdk}
+          threads={threads.data ?? []}
+          threadsLoading={threads.isLoading}
+          threadsError={threads.error}
+          onCreate={() => setCreateOpen(true)}
+        />
+      </ErrorBoundary>
+      <ErrorBoundary fallback={({ error, reset }) => <ErrorBoundaryFallback
+        error={error}
+        reset={reset}
+        title={labels.pageErrorTitle}
+        description={labels.pageErrorDescription}
+        detailsLabel={labels.errorDetails}
+        retryLabel={labels.tryAgain}
+        reloadLabel={labels.reload}
+      />}>
+        <CreateThreadDialog
+          language={language}
+          open={createOpen}
+          pending={createThread.isPending}
+          error={createThread.error}
+          onClose={() => setCreateOpen(false)}
+          onCreate={(title) => createThread.mutate(title)}
+        />
+      </ErrorBoundary>
     </UiContext.Provider>
   </LinkitProvider>
 }
@@ -663,20 +701,33 @@ function WorkspaceShell({
       </header>
       {Boolean(threadsError) && location.pathname.startsWith("/threads") && <div className="p-4"><RequestError error={threadsError} /></div>}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <Routes>
-          <Route path="/threads" element={<ThreadsPage threads={threads} loading={threadsLoading} error={threadsError} onCreate={onCreate} />} />
-          <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={onCreate} />} />
-          <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
-          <Route path="/history" element={<HistoryPage threads={threads} />} />
-          <Route path="/system" element={<SystemPage sdk={sdk} />} />
-          <Route path="/resources" element={<SystemPage sdk={sdk} />} />
-          <Route path="/workers" element={<WorkersPage sdk={sdk} />} />
-          <Route path="/configuration" element={<ConfigurationPage sdk={sdk} />} />
-          <Route path="/settings" element={<ConfigurationPage sdk={sdk} />} />
-          <Route path="/api" element={<ApiKeysPage sdk={sdk} />} />
-          <Route path="/tools" element={<ToolsPage />} />
-          <Route path="*" element={<Navigate to="/threads" replace />} />
-        </Routes>
+        <ErrorBoundary
+          resetKeys={[location.pathname]}
+          fallback={({ error, reset }) => <ErrorBoundaryFallback
+            error={error}
+            reset={reset}
+            title={t("pageErrorTitle")}
+            description={t("pageErrorDescription")}
+            detailsLabel={t("errorDetails")}
+            retryLabel={t("tryAgain")}
+            reloadLabel={t("reload")}
+          />}
+        >
+          <Routes>
+            <Route path="/threads" element={<ThreadsPage threads={threads} loading={threadsLoading} error={threadsError} onCreate={onCreate} />} />
+            <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={onCreate} />} />
+            <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
+            <Route path="/history" element={<HistoryPage threads={threads} />} />
+            <Route path="/system" element={<SystemPage sdk={sdk} />} />
+            <Route path="/resources" element={<SystemPage sdk={sdk} />} />
+            <Route path="/workers" element={<WorkersPage sdk={sdk} />} />
+            <Route path="/configuration" element={<ConfigurationPage sdk={sdk} />} />
+            <Route path="/settings" element={<ConfigurationPage sdk={sdk} />} />
+            <Route path="/api" element={<ApiKeysPage sdk={sdk} />} />
+            <Route path="/tools" element={<ToolsPage />} />
+            <Route path="*" element={<Navigate to="/threads" replace />} />
+          </Routes>
+        </ErrorBoundary>
       </div>
     </SidebarInset>
   </SidebarProvider>
@@ -983,4 +1034,22 @@ function Page({ title, description, children }: { title: string; description: st
   return <main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><div><h1 className="font-heading text-2xl font-semibold text-balance">{title}</h1>{description && <p className="mt-1 max-w-3xl text-sm text-muted-foreground text-pretty">{description}</p>}</div>{children}</main>
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><QueryClientProvider client={queryClient}><HashRouter><App /></HashRouter></QueryClientProvider></StrictMode>)
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <ErrorBoundary fallback={({ error, reset }) => <ErrorBoundaryFallback
+      error={error}
+      reset={reset}
+      title="Cybion could not load"
+      description="Reload the app to restore your workspace."
+      detailsLabel="Error details"
+      retryLabel="Try again"
+      reloadLabel="Reload"
+    />}>
+      <QueryClientProvider client={queryClient}>
+        <HashRouter>
+          <App />
+        </HashRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
+  </StrictMode>
+)
