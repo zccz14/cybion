@@ -942,6 +942,8 @@ struct WorkerResultInput {
     error: Option<String>,
 }
 
+type WorkerCallResultRow = (String, Option<i64>, String, Option<i64>, String);
+
 #[derive(Clone)]
 struct IntegrationSettings {
     openai_consumer_id: String,
@@ -4014,6 +4016,7 @@ fn response_text(response: &Value) -> Option<String> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn enqueue_worker_call(
     state: &AppState,
     user: &User,
@@ -4398,7 +4401,7 @@ async fn worker_result(
         .or_else(|| input.failed.then(|| input.result.to_string()));
     user_db(&state, &user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let call: Option<(String, Option<i64>, String, Option<i64>, String)> = transaction
+        let call: Option<WorkerCallResultRow> = transaction
             .query_row(
                 "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id FROM worker_calls
                  WHERE id=? AND worker_id=?",
@@ -5014,7 +5017,7 @@ mod tests {
             r#"{"status":"completed","error":null,"output":[{"type":"message"}]}"#,
         )
         .unwrap();
-        assert!(!response.get("error").is_some_and(|error| !error.is_null()));
+        assert!(response.get("error").is_none_or(|error| error.is_null()));
     }
 
     #[tokio::test]
