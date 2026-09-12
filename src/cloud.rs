@@ -2522,6 +2522,7 @@ struct ResponsesResult {
     value: Value,
 }
 
+#[allow(clippy::result_large_err)]
 async fn request_agent(
     state: &AppState,
     user: &User,
