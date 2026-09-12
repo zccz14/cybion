@@ -3576,7 +3576,7 @@ async fn send_responses_request(
         }
         return Err(error);
     }
-    if value.get("error").is_some() {
+    if value.get("error").is_some_and(|error| !error.is_null()) {
         let error = ApiError::unavailable(format!(
             "upstream Responses request returned an error: {}",
             upstream_error_detail(&value.to_string())
@@ -4996,6 +4996,15 @@ mod tests {
         );
         let response = completed_response_from_sse(body).unwrap();
         assert_eq!(response["output"][0]["content"][0]["text"], "usable");
+    }
+
+    #[test]
+    fn completed_response_with_null_error_is_not_rejected() {
+        let response: Value = serde_json::from_str(
+            r#"{"status":"completed","error":null,"output":[{"type":"message"}]}"#,
+        )
+        .unwrap();
+        assert!(!response.get("error").is_some_and(|error| !error.is_null()));
     }
 
     #[tokio::test]
