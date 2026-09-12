@@ -2546,20 +2546,11 @@ async fn request_agent(
     source_record_idx: i64,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(ThreadView, IntegrationSettings, String), (ThreadView, Box<ApiError>)> {
-    let mut tool_rounds = 0;
     let mut checkpoint_retries = 0;
     let mut idx_tail = source_record_idx;
     loop {
         if *cancellation.borrow() {
             return Err((thread.clone(), Box::new(ApiError::cancelled())));
-        }
-        if tool_rounds >= 8 {
-            return Err((
-                thread.clone(),
-                Box::new(ApiError::unavailable(
-                    "agent exceeded the Worker tool-call limit",
-                )),
-            ));
         }
         let context = user_db(state, user, false, {
             let thread_id = thread.id.clone();
@@ -2694,7 +2685,6 @@ async fn request_agent(
                     .map_err(|error| (thread.clone(), Box::new(error)))?
             };
         }
-        tool_rounds += 1;
     }
 }
 
