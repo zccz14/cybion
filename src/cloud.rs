@@ -47,7 +47,7 @@ const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
 const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
-const USER_SCHEMA_VERSION: i64 = 5;
+const USER_SCHEMA_VERSION: i64 = 6;
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -541,6 +541,7 @@ CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh')),
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -682,6 +683,7 @@ struct ThreadView {
     id: String,
     title: String,
     model: String,
+    reasoning_effort: String,
     status: String,
     created_at: i64,
     updated_at: i64,
@@ -821,6 +823,8 @@ struct UpdateThreadInput {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -961,9 +965,10 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         id: row.get(0)?,
         title: row.get(1)?,
         model: row.get(2)?,
-        status: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        reasoning_effort: row.get(3)?,
+        status: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -1041,7 +1046,7 @@ fn input_text(value: String) -> Result<String, ApiError> {
 fn load_thread(connection: &Connection, id: &str) -> Result<ThreadView, ApiError> {
     connection
         .query_row(
-            "SELECT id,title,model,status,created_at,updated_at FROM threads WHERE id=?",
+            "SELECT id,title,model,reasoning_effort,status,created_at,updated_at FROM threads WHERE id=?",
             [id],
             thread_from_row,
         )
@@ -1058,17 +1063,19 @@ async fn create_thread_for(
         id: Uuid::new_v4().to_string(),
         title: optional_title(input.title)?,
         model: model_id(input.model)?,
+        reasoning_effort: "medium".to_owned(),
         status: "idle".to_owned(),
         created_at: now(),
         updated_at: now(),
     };
     user_db(state, user, true, move |connection| {
         connection.execute(
-            "INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,reasoning_effort,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
                 thread.model,
+                thread.reasoning_effort,
                 thread.status,
                 thread.created_at,
                 thread.updated_at
@@ -1082,7 +1089,7 @@ async fn create_thread_for(
 async fn list_threads_for(state: &AppState, user: &User) -> Result<Vec<ThreadView>, ApiError> {
     user_db(state, user, true, |connection| {
         let mut statement = connection.prepare(
-            "SELECT id,title,model,status,created_at,updated_at FROM threads ORDER BY updated_at DESC,id DESC",
+            "SELECT id,title,model,reasoning_effort,status,created_at,updated_at FROM threads ORDER BY updated_at DESC,id DESC",
         )?;
         let rows = statement.query_map([], thread_from_row)?;
         let mut threads = Vec::new();
@@ -1386,14 +1393,24 @@ async fn update_thread(
         .map(|value| label(&value, "title", 160))
         .transpose()?;
     let model = input.model.map(|value| model_id(Some(value))).transpose()?;
-    if title.is_none() && model.is_none() {
+    let reasoning_effort = input
+        .reasoning_effort
+        .map(|value| {
+            if matches!(value.as_str(), "none" | "low" | "medium" | "high" | "xhigh") {
+                Ok(value)
+            } else {
+                Err(ApiError::bad_request("invalid reasoning effort"))
+            }
+        })
+        .transpose()?;
+    if title.is_none() && model.is_none() && reasoning_effort.is_none() {
         return Err(ApiError::bad_request("thread update is empty"));
     }
     let updated_at = now();
     let thread = user_db(&state, &identity.user, true, move |connection| {
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),updated_at=? WHERE id=?",
-            params![title, model, updated_at, id],
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),reasoning_effort=COALESCE(?,reasoning_effort),updated_at=? WHERE id=?",
+            params![title, model, reasoning_effort, updated_at, id],
         )?;
         if changed == 0 {
             return Err(ApiError::not_found("thread not found"));
@@ -1994,6 +2011,7 @@ async fn process_request(
                 id: thread_id.clone(),
                 title: "Untitled thread".to_owned(),
                 model: DEFAULT_MODEL.to_owned(),
+                reasoning_effort: "medium".to_owned(),
                 status: "failed".to_owned(),
                 created_at: now(),
                 updated_at: now(),
@@ -2504,6 +2522,7 @@ struct ResponsesResult {
     value: Value,
 }
 
+#[allow(clippy::result_large_err)]
 async fn request_agent(
     state: &AppState,
     user: &User,
@@ -2549,6 +2568,7 @@ async fn request_agent(
             context.idx_tail,
             integrations,
             &thread.model,
+            Some(&thread.reasoning_effort),
             Value::Array(context.items.clone()),
             !workers.is_empty(),
             None,
@@ -3042,6 +3062,7 @@ async fn summarize_context_once(
         idx_tail,
         integrations,
         model,
+        None,
         Value::Array(items),
         false,
         Some(CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS),
@@ -3310,6 +3331,7 @@ async fn responses_request(
         state,
         integrations,
         model,
+        None,
         input,
         include_tools,
         max_output_tokens,
@@ -3330,6 +3352,7 @@ async fn responses_request_with_options(
     idx_tail: i64,
     integrations: &IntegrationSettings,
     model: &str,
+    reasoning_effort: Option<&str>,
     input: Value,
     include_tools: bool,
     max_output_tokens: Option<usize>,
@@ -3349,6 +3372,7 @@ async fn responses_request_with_options(
         state,
         integrations,
         model,
+        reasoning_effort,
         input,
         include_tools,
         max_output_tokens,
@@ -3363,6 +3387,7 @@ async fn send_responses_request(
     state: &AppState,
     integrations: &IntegrationSettings,
     model: &str,
+    reasoning_effort: Option<&str>,
     input: Value,
     include_tools: bool,
     max_output_tokens: Option<usize>,
@@ -3376,6 +3401,7 @@ async fn send_responses_request(
     };
     let payload = responses_payload_with_prefix(
         model,
+        reasoning_effort,
         input,
         include_tools,
         max_output_tokens,
@@ -3683,11 +3709,12 @@ fn responses_payload(
     include_tools: bool,
     max_output_tokens: Option<usize>,
 ) -> Value {
-    responses_payload_with_prefix(model, input, include_tools, max_output_tokens, None)
+    responses_payload_with_prefix(model, None, input, include_tools, max_output_tokens, None)
 }
 
 fn responses_payload_with_prefix(
     model: &str,
+    reasoning_effort: Option<&str>,
     input: Value,
     include_tools: bool,
     max_output_tokens: Option<usize>,
@@ -3702,6 +3729,9 @@ fn responses_payload_with_prefix(
         (None, input) => input,
     };
     let mut payload = json!({"model":model,"input":input,"store":false,"stream":true});
+    if let Some(reasoning_effort) = reasoning_effort {
+        payload["reasoning"] = json!({"effort": reasoning_effort});
+    }
     if include_tools {
         payload["tools"] = worker_tools();
         payload["tool_choice"] = json!("auto");
@@ -4959,6 +4989,7 @@ mod tests {
             input_idx,
             &integrations,
             &thread.model,
+            Some(&thread.reasoning_effort),
             json!([{"role":"user","content":"hello"}]),
             false,
             None,
