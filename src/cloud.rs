@@ -3882,7 +3882,26 @@ fn completed_response_from_sse(body: &str) -> Result<Value> {
                 response["output"] = Value::Array(output);
                 return Ok(response);
             }
-            "error" | "response.failed" | "response.incomplete" => {
+            "response.incomplete" => {
+                let mut response = event
+                    .get("response")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("incomplete response has no response"))?;
+                if output.is_empty()
+                    && let Some(existing) = response.get("output").and_then(Value::as_array)
+                {
+                    output = existing.clone();
+                }
+                if !output.is_empty() {
+                    response["output"] = Value::Array(output);
+                    return Ok(response);
+                }
+                return Err(anyhow::anyhow!(
+                    "upstream {event_type}: {}",
+                    upstream_error_detail(&event.to_string())
+                ));
+            }
+            "error" | "response.failed" => {
                 return Err(anyhow::anyhow!(
                     "upstream {event_type}: {}",
                     upstream_error_detail(&event.to_string())
@@ -4965,6 +4984,18 @@ mod tests {
         );
         let response = completed_response_from_sse(body).unwrap();
         assert_eq!(response["output"][0]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn incomplete_response_with_generated_output_is_usable() {
+        let body = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"usable\"}]}}\n\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_2\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"
+        );
+        let response = completed_response_from_sse(body).unwrap();
+        assert_eq!(response["output"][0]["content"][0]["text"], "usable");
     }
 
     #[tokio::test]
