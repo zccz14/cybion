@@ -27,16 +27,20 @@ test("every thread renders through the shared chat primitives", () => {
   assert.match(source, /<MessageScrollerViewport>/)
   assert.match(source, /<MessageScrollerContent/)
   assert.match(source, /<MessageScrollerButton behavior="auto"/)
-  assert.match(source, /<Message align=\{own \? "end" : "start"\}>/)
+  assert.match(source, /<Message align="end">/)
+  assert.match(source, /record\.kind === "input" && record\.role === "user"/)
+  assert.doesNotMatch(source, /<MessageAvatar/)
+  assert.doesNotMatch(source, /<MessageHeader/)
 })
 
 test("the management surfaces expose integration keys and SQLite-free Worker pairing", () => {
   assert.match(source, /\/api\/api-keys/)
   assert.match(source, /\/api\/workers/)
   assert.match(source, /function workerToml/)
-  for (const key of ["controller_url", "tenant_id", "machine_id", "access_token"]) {
+  for (const key of ["controller_url", "user_id", "machine_id", "access_token"]) {
     assert.match(source, new RegExp(`${key} =`))
   }
+  assert.doesNotMatch(source, /tenant_id|\/turn|run_id|turn_index/)
 })
 
 test("the hosted shell keeps the outer navigation and Linkit account surface", () => {

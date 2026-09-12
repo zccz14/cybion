@@ -1,22 +1,24 @@
-# Flat thread model
+# Thread model
 
-Every Cybion conversation is a peer thread. A thread has a UUID, title, model,
-status, timestamps, an ordered history, and independently persisted runs.
-
-There is no privileged main thread, subthread, fork boundary, Goal, or implicit
-handoff. A user or API client can append an input to any owned thread. The input
-is written before the run starts, so it is never lost if a process exits after
-accepting the request.
+Every conversation is an independent thread owned by one Auth Mini user. A
+thread contains a UUID, title, model, status, timestamps, and an append-only
+history. Users and API clients can append input to any thread they own.
 
 ```text
-thread
-  ├── history_records: user, assistant, system, tool
-  └── thread_runs: queued, running, completed, failed
+user database
+  └── thread
+        ├── metadata
+        └── history_records (ordered by id)
 ```
 
-The UI shows a thread as `idle`, `running`, or `failed`. A failed run writes a
-system record and leaves both the run and its thread in a terminal failed state;
-the user can append another direct input when ready.
+An input record is written before inference begins. Responses output items and
+Worker results are appended as they arrive, so a later request can reconstruct
+the thread from durable records after a process restart. A context checkpoint
+is another history record; it summarizes an earlier prefix without removing
+the source records.
 
-Thread deletion removes that thread's history, runs, and Worker-call rows inside
-the same tenant database. It does not affect any other thread or tenant.
+The UI exposes `idle`, `running`, and `failed` thread states. Failures append a
+visible activity record and leave the thread ready for a later input.
+
+Deleting a thread removes its history, checkpoints, audit rows, and Worker-call
+rows within the owning user database. Other users and threads are independent.
