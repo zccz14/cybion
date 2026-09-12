@@ -611,6 +611,7 @@ CREATE TABLE IF NOT EXISTS workers (
 );
 CREATE TABLE IF NOT EXISTS worker_calls (
   id TEXT PRIMARY KEY,
+  responses_call_id TEXT NOT NULL DEFAULT '',
   worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   input_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
@@ -667,6 +668,21 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
+    let has_responses_call_id: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('worker_calls') WHERE name='responses_call_id')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ApiError::internal)?;
+    if !has_responses_call_id {
+        transaction
+            .execute(
+                "ALTER TABLE worker_calls ADD COLUMN responses_call_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(ApiError::internal)?;
+    }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
@@ -2657,12 +2673,14 @@ async fn request_agent(
                     )
                 })?;
             let call_arguments = call.arguments.clone();
+            let responses_call_id = call.call_id.clone();
             let call_id = enqueue_worker_call(
                 state,
                 user,
                 worker_id,
                 &thread.id,
                 source_record_idx,
+                responses_call_id.clone(),
                 call.name,
                 call_arguments,
             )
@@ -2677,7 +2695,7 @@ async fn request_agent(
             } else {
                 let output = json!({
                     "type":"function_call_output",
-                    "call_id":call.call_id,
+                    "call_id":responses_call_id,
                     "output":result.to_string(),
                 });
                 append_tool_output_item(state, user, thread, source_record_idx, &output)
@@ -4002,6 +4020,7 @@ async fn enqueue_worker_call(
     worker_id: &str,
     thread_id: &str,
     input_record_id: i64,
+    responses_call_id: String,
     name: String,
     arguments: Value,
 ) -> Result<String, ApiError> {
@@ -4038,11 +4057,12 @@ async fn enqueue_worker_call(
         }
         connection.execute(
             "INSERT INTO worker_calls(
-                id,worker_id,thread_id,input_record_id,name,arguments_json,status,
+                id,responses_call_id,worker_id,thread_id,input_record_id,name,arguments_json,status,
                 created_at,worker_label,worker_hostname,worker_version,worker_resource_json
-             ) VALUES(?,?,?,?,?,?, 'queued', ?,?,?,?,?)",
+             ) VALUES(?,?,?,?,?,?,?, 'queued', ?,?,?,?,?)",
             params![
                 &call_id_for_db,
+                responses_call_id,
                 &worker_id,
                 &thread_id,
                 input_record_id,
@@ -4371,13 +4391,6 @@ async fn worker_result(
     let worker_id = record_id(&worker_id)?;
     let call_id = record_id(&call_id)?;
     let result_json = serde_json::to_string(&input.result).map_err(ApiError::internal)?;
-    let output = json!({
-        "type": "function_call_output",
-        "call_id": call_id,
-        "output": input.result.to_string(),
-    });
-    let output_content = output["output"].as_str().unwrap_or_default().to_owned();
-    let output_payload = serde_json::to_string(&output).map_err(ApiError::internal)?;
     let status = if input.failed { "failed" } else { "completed" };
     let error_text = input
         .error
@@ -4385,21 +4398,28 @@ async fn worker_result(
         .or_else(|| input.failed.then(|| input.result.to_string()));
     user_db(&state, &user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let call: Option<(String, Option<i64>, String, Option<i64>)> = transaction
+        let call: Option<(String, Option<i64>, String, Option<i64>, String)> = transaction
             .query_row(
-                "SELECT thread_id,input_record_id,status,output_record_id FROM worker_calls
+                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id FROM worker_calls
                  WHERE id=? AND worker_id=?",
                 params![&call_id, &worker_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
-        let Some((thread_id, input_record_id, call_status, existing_output_id)) = call else {
+        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id)) = call else {
             return Err(ApiError::not_found("Worker call not found"));
         };
         if existing_output_id.is_some() {
             transaction.commit()?;
             return Ok(());
         }
+        let output = json!({
+            "type": "function_call_output",
+            "call_id": if responses_call_id.is_empty() { call_id.clone() } else { responses_call_id.clone() },
+            "output": input.result.to_string(),
+        });
+        let output_content = output["output"].as_str().unwrap_or_default().to_owned();
+        let output_payload = serde_json::to_string(&output).map_err(ApiError::internal)?;
         let accepted = matches!(call_status.as_str(), "queued" | "delivered");
         if accepted {
             transaction.execute(
