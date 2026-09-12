@@ -3764,7 +3764,7 @@ fn responses_payload_with_prefix(
         payload["reasoning"] = json!({"effort": reasoning_effort});
     }
     if service_tier_fast {
-        payload["service_tier"] = json!("priority");
+        payload["service_tier"] = json!("fast");
     }
     if include_tools {
         payload["tools"] = worker_tools();
