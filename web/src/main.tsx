@@ -109,6 +109,7 @@ type Thread = {
   title: string
   model: string
   reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh"
+  service_tier_fast: boolean
   status: ThreadStatus
   created_at: number
   updated_at: number
@@ -895,7 +896,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"] }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -926,7 +927,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
           <Button size="sm" disabled={rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
         </form> : <div className="min-w-0 flex-1"><h1 className="truncate text-base font-semibold">{current.title}</h1><p className="truncate text-xs text-muted-foreground">{current.model}</p></div>}
         <Badge variant={current.status === "failed" ? "destructive" : current.status === "running" ? "secondary" : "outline"}>{statusLabel(current.status, t)}</Badge>
-        {!editing && <div className="flex items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label="Model"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="gpt-5.6-terra">gpt-5.6-terra</SelectItem><SelectItem value="gpt-5.6-sol">gpt-5.6-sol</SelectItem><SelectItem value="gpt-5.6-luna">gpt-5.6-luna</SelectItem></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label="Reasoning effort"><SelectValue /></SelectTrigger><SelectContent>{["none", "low", "medium", "high", "xhigh"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
+        {!editing && <div className="flex items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label="Model"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="gpt-5.6-terra">gpt-5.6-terra</SelectItem><SelectItem value="gpt-5.6-sol">gpt-5.6-sol</SelectItem><SelectItem value="gpt-5.6-luna">gpt-5.6-luna</SelectItem><SelectItem value="gpt-6-astra">gpt-6-astra</SelectItem></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label="Reasoning effort"><SelectValue /></SelectTrigger><SelectContent>{["none", "low", "medium", "high", "xhigh", "max"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
       {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input.trim())} /></div>}
