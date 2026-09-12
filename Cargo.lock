@@ -40,7 +40,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "async-stream"
-version = "0.3.7"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
 dependencies = [
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "cybion"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-stream",
