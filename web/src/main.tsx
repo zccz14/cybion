@@ -1,4 +1,4 @@
-import { StrictMode, createContext, useContext, useEffect, useMemo, useState } from "react"
+import { memo, StrictMode, createContext, useContext, useEffect, useMemo, useState } from "react"
 import { createRoot } from "react-dom/client"
 import {
   HashRouter,
@@ -956,7 +956,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
   </main>
 }
 
-function HistoryMessage({ language, record }: { language: Language; record: HistoryRecord }) {
+const HistoryMessage = memo(function HistoryMessage({ language, record }: { language: Language; record: HistoryRecord }) {
   const isUserInput = record.kind === "input" && record.role === "user"
   if (isUserInput) {
     return <Message align="end">
@@ -978,7 +978,7 @@ function HistoryMessage({ language, record }: { language: Language; record: Hist
     </div>
     <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-6">{historyRecordText(record)}</pre>
   </div>
-}
+}, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.role === next.record.role && previous.record.content === next.record.content && previous.record.visible === next.record.visible && previous.record.request_input_id === next.record.request_input_id && previous.record.created_at === next.record.created_at)
 
 function historyRecordText(record: HistoryRecord) {
   const payload = record.payload
