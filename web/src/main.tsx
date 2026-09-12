@@ -31,6 +31,7 @@ import {
   LanguagesIcon,
   MoonIcon,
   NetworkIcon,
+  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
   SendIcon,
@@ -60,11 +61,9 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import {
   Message,
-  MessageAvatar,
   MessageContent,
   MessageFooter,
   MessageGroup,
-  MessageHeader,
 } from "@/components/ui/message"
 import {
   MessageScroller,
@@ -116,17 +115,18 @@ type Thread = {
 type HistoryRecord = {
   id: number
   thread_id: string
+  request_input_id: number | null
   role: "user" | "assistant" | "tool" | "system"
   content: string
+  kind: "input" | "response_output" | "tool_output" | "checkpoint" | "activity"
+  payload: unknown
+  visible: boolean
   created_at: number
 }
-type Run = {
-  id: string
+type RequestAck = {
   thread_id: string
-  status: "queued" | "running" | "completed" | "failed"
-  error?: string | null
-  started_at: number
-  finished_at?: number | null
+  record_idx: number
+  status: "accepted"
 }
 type ApiKey = {
   id: string
@@ -146,13 +146,13 @@ type Worker = {
 }
 type WorkerPairing = {
   controller_url: string
-  tenant_id: string
+  user_id: string
   machine_id: string
   access_token: string
 }
 type ReasoningAudit = {
   id: number
-  run_id: string
+  input_record_id: number | null
   thread_id: string
   thread_title: string
   request_kind: string
@@ -164,6 +164,8 @@ type ReasoningAudit = {
   output_tokens: number | null
   cached_tokens: number | null
   openai_lb_request_id: string | null
+  idx_head: number | null
+  idx_tail: number | null
   error: string | null
 }
 type ReasoningAuditPage = {
@@ -184,12 +186,37 @@ type SystemResources = {
   generated_at: number
   version: string
   process_id: number
-  tenant_id: string
+  user_id: string
   database_bytes: number
   threads: number
-  active_runs: number
+  active_requests: number
   workers: number
   online_workers: number
+}
+type WorkerCallAudit = {
+  id: string
+  worker_id: string
+  worker_label: string | null
+  worker_hostname: string | null
+  worker_version: string | null
+  worker_resource: Record<string, unknown> | null
+  thread_id: string
+  thread_title: string
+  input_record_id: number | null
+  name: string
+  arguments: Record<string, unknown>
+  status: "queued" | "delivered" | "completed" | "failed"
+  result: unknown
+  error: string | null
+  created_at: number
+  started_at: number | null
+  completed_at: number | null
+}
+type WorkerCallAuditPage = {
+  items: WorkerCallAudit[]
+  total: number
+  page: number
+  page_size: number
 }
 
 const copy = {
@@ -200,7 +227,7 @@ const copy = {
     create: "Create",
     cancel: "Cancel",
     emptyTitle: "No threads yet",
-    emptyDescription: "Start a focused thread. Every thread has its own history and run state.",
+    emptyDescription: "Start a focused thread. Every thread has its own history and request state.",
     chat: "Thread",
     send: "Send",
     input: "Give this thread its next instruction…",
@@ -211,10 +238,10 @@ const copy = {
     rename: "Rename",
     delete: "Delete",
     deleteTitle: "Delete this thread?",
-    deleteDescription: "Its history, runs, Worker calls, and files for this thread will be removed.",
+    deleteDescription: "Its history and Worker calls will be removed.",
     api: "API keys",
     apiTitle: "Integration API",
-    apiDescription: "Create a tenant-scoped key for another application to create threads and append inputs.",
+    apiDescription: "Create a user-scoped key for another application to create threads and append inputs.",
     apiKeyLabel: "Key label",
     createKey: "Create API key",
     copyNow: "Copy this key now",
@@ -265,17 +292,30 @@ const copy = {
     auditUsage: "Usage",
     auditLink: "OpenAI LB request",
     auditEmpty: "No reasoning requests yet.",
+    workerAudit: "Worker call audit",
+    workerAuditDescription: "Every Worker call, including queued and in-flight calls.",
+    workerAuditEmpty: "No Worker calls yet.",
+    workerCall: "Call",
+    workerArguments: "Arguments",
+    workerResult: "Result",
+    workerQueued: "Queued",
+    workerDelivered: "Delivered",
+    workerCompleted: "Completed",
+    workerFailed: "Failed",
+    editWorker: "Edit name",
+    saveWorker: "Save name",
+    workerAuditRange: "{from}–{to} of {total} calls",
     auditRange: "{from}–{to} of {total} requests",
     previous: "Previous",
     next: "Next",
     pageSize: "Per page",
     systemTitle: "System",
-    systemDescription: "Live runtime and tenant capacity for this Cybion workspace.",
+    systemDescription: "Live runtime and capacity for this Cybion workspace.",
     process: "Process",
-    database: "Tenant database",
-    activeRuns: "Active runs",
+    database: "User database",
+    activeRequests: "Active requests",
     workerCount: "Workers",
-    tenant: "Tenant",
+    userId: "User ID",
     sampled: "Sampled",
     configuration: "Configuration",
     configurationDescription: "External integrations and workspace-owned access surfaces.",
@@ -313,7 +353,7 @@ const copy = {
     create: "创建",
     cancel: "取消",
     emptyTitle: "还没有线程",
-    emptyDescription: "创建一个聚焦的线程。每个线程都拥有独立的历史和运行状态。",
+    emptyDescription: "创建一个聚焦的线程。每个线程都拥有独立的历史和请求状态。",
     chat: "线程",
     send: "发送",
     input: "为这个线程追加下一条指令…",
@@ -324,10 +364,10 @@ const copy = {
     rename: "重命名",
     delete: "删除",
     deleteTitle: "删除这个线程？",
-    deleteDescription: "该线程的历史、运行、Worker 调用及文件都会被删除。",
+    deleteDescription: "该线程的历史和 Worker 调用都会被删除。",
     api: "API 密钥",
     apiTitle: "集成 API",
-    apiDescription: "创建仅属于当前租户的密钥，让其他应用创建线程或追加输入。",
+    apiDescription: "创建仅属于当前用户的密钥，让其他应用创建线程或追加输入。",
     apiKeyLabel: "Key 名称",
     createKey: "创建 API Key",
     copyNow: "立即复制此 Key",
@@ -378,17 +418,30 @@ const copy = {
     auditUsage: "用量",
     auditLink: "OpenAI LB 请求",
     auditEmpty: "尚无推理请求。",
+    workerAudit: "Worker 调用审计",
+    workerAuditDescription: "展示所有 Worker 调用，包括排队和在途调用。",
+    workerAuditEmpty: "尚无 Worker 调用。",
+    workerCall: "调用",
+    workerArguments: "参数",
+    workerResult: "结果",
+    workerQueued: "排队",
+    workerDelivered: "已投递",
+    workerCompleted: "已完成",
+    workerFailed: "失败",
+    editWorker: "编辑名称",
+    saveWorker: "保存名称",
+    workerAuditRange: "第 {from}–{to} 条，共 {total} 次调用",
     auditRange: "第 {from}–{to} 条，共 {total} 个请求",
     previous: "上一页",
     next: "下一页",
     pageSize: "每页",
     systemTitle: "系统",
-    systemDescription: "当前 Cybion 工作区的实时运行状态与租户容量。",
+    systemDescription: "当前 Cybion 工作区的实时运行状态与容量。",
     process: "进程",
-    database: "租户数据库",
-    activeRuns: "活动运行",
+    database: "用户数据库",
+    activeRequests: "活动请求",
     workerCount: "Worker 数量",
-    tenant: "租户",
+    userId: "用户 ID",
     sampled: "采样时间",
     configuration: "配置",
     configurationDescription: "外部集成和当前工作区拥有的访问入口。",
@@ -649,6 +702,7 @@ function WorkspaceShell({
   ]
   const auditNav = [
     { to: "/reasoning-audit", label: t("audit"), icon: ActivityIcon },
+    { to: "/worker-audit", label: t("workerAudit"), icon: WrenchIcon },
     { to: "/history", label: t("history"), icon: DatabaseIcon },
   ]
   const systemNav = [
@@ -717,6 +771,7 @@ function WorkspaceShell({
             <Route path="/threads" element={<ThreadsPage threads={threads} loading={threadsLoading} error={threadsError} onCreate={onCreate} />} />
             <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={onCreate} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
+            <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
             <Route path="/history" element={<HistoryPage threads={threads} />} />
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
@@ -735,6 +790,7 @@ function WorkspaceShell({
 
 function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
+  if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/history")) return t("history")
   if (pathname.startsWith("/system") || pathname.startsWith("/resources")) return t("systemTitle")
   if (pathname.startsWith("/workers")) return t("workers")
@@ -813,8 +869,8 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
     setTitle(thread.data?.title ?? "")
     setEditing(false)
   }, [threadId, thread.data?.title])
-  const turn = useMutation({
-    mutationFn: (value: string) => api<Run>(sdk, `/api/threads/${encodeURIComponent(threadId)}/turn`, {
+  const submit = useMutation({
+    mutationFn: (value: string) => api<RequestAck>(sdk, `/api/threads/${encodeURIComponent(threadId)}/inputs`, {
       method: "POST",
       body: JSON.stringify({ input: value }),
     }),
@@ -868,7 +924,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
         {!editing && <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
-      {turn.error && <div className="shrink-0 p-3"><RequestError error={turn.error} onRetry={() => input.trim() && turn.mutate(input.trim())} /></div>}
+      {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input.trim())} /></div>}
       <MessageScrollerProvider autoScroll defaultScrollPosition="end">
         <MessageScroller className="min-h-0 flex-1">
           <MessageScrollerViewport>
@@ -884,9 +940,9 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
           <MessageScrollerButton behavior="auto" />
         </MessageScroller>
       </MessageScrollerProvider>
-      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !turn.isPending) turn.mutate(value) }}>
-        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); const value = input.trim(); if (value && !turn.isPending) turn.mutate(value) } }} disabled={turn.isPending} /></Field>
-          <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter</span><Button disabled={!input.trim() || turn.isPending}>{turn.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
+      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !submit.isPending) submit.mutate(value) }}>
+        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); const value = input.trim(); if (value && !submit.isPending) submit.mutate(value) } }} disabled={submit.isPending} /></Field>
+          <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter</span><Button disabled={!input.trim() || submit.isPending}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
         </FieldGroup>
       </form>
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>{remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
@@ -895,10 +951,48 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
 }
 
 function HistoryMessage({ language, record }: { language: Language; record: HistoryRecord }) {
-  const { t } = useUi()
-  const own = record.role === "user"
-  const role = own ? t("user") : record.role === "assistant" ? t("assistant") : record.role === "tool" ? t("worker") : t("system")
-  return <Message align={own ? "end" : "start"}><MessageAvatar aria-hidden="true">{role.slice(0, 1)}</MessageAvatar><MessageContent><MessageHeader>{role}</MessageHeader><MessageGroup><div className={own ? "max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground" : record.role === "system" ? "max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-muted px-3 py-2 text-sm leading-6 text-muted-foreground" : "max-w-[75ch] whitespace-pre-wrap break-words rounded-lg border bg-card px-3 py-2 text-sm leading-6"}>{record.content}</div></MessageGroup><MessageFooter>{formattedTime(language, record.created_at)}</MessageFooter></MessageContent></Message>
+  const isUserInput = record.kind === "input" && record.role === "user"
+  if (isUserInput) {
+    return <Message align="end">
+      <MessageContent>
+        <MessageGroup>
+          <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground">{record.content}</div>
+        </MessageGroup>
+        <MessageFooter>#{record.id} · {formattedTime(language, record.created_at)}</MessageFooter>
+      </MessageContent>
+    </Message>
+  }
+  return <div className={`rounded-lg border px-3 py-3 ${record.visible ? "bg-card" : "bg-muted/40 text-muted-foreground"}`}>
+    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <code>{record.kind}</code>
+      <span>#{record.id}</span>
+      {record.request_input_id !== null && <span>input #{record.request_input_id}</span>}
+      <span>{formattedTime(language, record.created_at)}</span>
+      {!record.visible && <span>hidden</span>}
+    </div>
+    <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-6">{historyRecordText(record)}</pre>
+  </div>
+}
+
+function historyRecordText(record: HistoryRecord) {
+  const payload = record.payload
+  const object = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : null
+  if (record.kind === "response_output" && object?.type === "message") {
+    const content = object.content
+    if (Array.isArray(content)) {
+      const text = content
+        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+        .filter((item) => item.type === "output_text" && typeof item.text === "string")
+        .map((item) => item.text as string)
+        .join("")
+      if (text) return text
+    }
+  }
+  if (record.kind === "tool_output" && typeof object?.output === "string") return object.output
+  if (record.content.trim()) return record.content
+  return JSON.stringify(payload, null, 2)
 }
 
 function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
@@ -925,7 +1019,7 @@ function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
       {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
       {!query.data && !query.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("audit")}</div>}
       {query.data && query.data.items.length === 0 && <p className="py-8 text-sm text-muted-foreground">{t("auditEmpty")}</p>}
-      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[50rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{item.request_kind}</p></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <code className="break-all text-xs">{item.openai_lb_request_id}</code> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
+      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[50rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <code className="break-all text-xs">{item.openai_lb_request_id}</code> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
       {query.data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-sm text-muted-foreground">{range}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</Button><Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>{t("next")}</Button></div></div>}
     </CardContent></Card>
   </Page>
@@ -940,6 +1034,62 @@ function usageLabel(item: ReasoningAudit) {
   return `${item.input_tokens ?? 0} in · ${item.output_tokens ?? 0} out${item.cached_tokens === null ? "" : ` · ${item.cached_tokens} cached`}`
 }
 
+function WorkerAuditPage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t, language } = useUi()
+  const [status, setStatus] = useState<WorkerCallAudit["status"] | "all">("all")
+  const [workerId, setWorkerId] = useState("all")
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
+  const workers = useQuery({ queryKey: ["workers"], queryFn: () => api<Worker[]>(sdk, "/api/workers"), refetchInterval: 5000 })
+  const query = useQuery({
+    queryKey: ["worker-calls", status, workerId, page, pageSize],
+    queryFn: () => {
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+      if (status !== "all") params.set("status", status)
+      if (workerId !== "all") params.set("worker_id", workerId)
+      return api<WorkerCallAuditPage>(sdk, `/api/worker-calls?${params}`)
+    },
+    refetchInterval: 2000,
+  })
+  const totalPages = Math.max(1, Math.ceil((query.data?.total ?? 0) / pageSize))
+  useEffect(() => { if (page > totalPages) setPage(totalPages) }, [page, totalPages])
+  const rangeStart = query.data?.total ? (page - 1) * pageSize + 1 : 0
+  const rangeEnd = query.data ? rangeStart + query.data.items.length - 1 : 0
+  const range = t("workerAuditRange").replace("{from}", String(rangeStart)).replace("{to}", String(rangeEnd)).replace("{total}", String(query.data?.total ?? 0))
+  return <Page title={t("workerAudit")} description={t("workerAuditDescription")}>
+    <Card>
+      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div><CardTitle>{t("workerAudit")}</CardTitle><CardDescription>{t("workerAuditDescription")}</CardDescription></div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Select value={status} onValueChange={(value) => { setStatus(value as WorkerCallAudit["status"] | "all"); setPage(1) }}>
+            <SelectTrigger aria-label={t("auditStatus")} size="sm"><SelectValue /></SelectTrigger>
+            <SelectContent><SelectItem value="all">{t("auditAll")}</SelectItem><SelectItem value="queued">{t("workerQueued")}</SelectItem><SelectItem value="delivered">{t("workerDelivered")}</SelectItem><SelectItem value="completed">{t("workerCompleted")}</SelectItem><SelectItem value="failed">{t("workerFailed")}</SelectItem></SelectContent>
+          </Select>
+          <Select value={workerId} onValueChange={(value) => { setWorkerId(value); setPage(1) }}>
+            <SelectTrigger aria-label={t("workers")} size="sm"><SelectValue placeholder={t("workers")} /></SelectTrigger>
+            <SelectContent><SelectItem value="all">{t("workers")}</SelectItem>{workers.data?.map((worker) => <SelectItem key={worker.id} value={worker.id}>{worker.label}</SelectItem>)}</SelectContent>
+          </Select>
+          <Select value={String(pageSize)} onValueChange={(value) => { setPageSize(Number(value)); setPage(1) }}>
+            <SelectTrigger aria-label={t("pageSize")} size="sm"><SelectValue /></SelectTrigger>
+            <SelectContent><SelectItem value="20">20</SelectItem><SelectItem value="50">50</SelectItem><SelectItem value="100">100</SelectItem></SelectContent>
+          </Select>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
+        {!query.data && !query.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("workerAudit")}</div>}
+        {query.data && query.data.items.length === 0 && <p className="py-8 text-sm text-muted-foreground">{t("workerAuditEmpty")}</p>}
+        {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[58rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("workerCall")}</th><th className="px-3 py-2 font-medium">{t("workers")}</th><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("workerResult")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="px-3 py-3"><code>{item.name}</code><p className="mt-1 text-xs text-muted-foreground">{item.id}</p><details className="mt-2 max-w-64"><summary className="cursor-pointer text-xs text-muted-foreground">{t("workerArguments")}</summary><pre className="mt-1 whitespace-pre-wrap break-words text-xs">{JSON.stringify(item.arguments, null, 2)}</pre></details></td><td className="px-3 py-3"><p>{item.worker_label ?? item.worker_id}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{item.worker_id}</p></td><td className="px-3 py-3"><Link className="hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 font-mono text-xs text-muted-foreground">input #{item.input_record_id ?? "—"}</p></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "completed" ? "outline" : "secondary"}>{workerCallStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.created_at)}{item.completed_at && <><br />{formattedTime(language, item.completed_at)}</>}</td><td className="max-w-72 px-3 py-3"><pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-xs">{item.result === null ? "—" : JSON.stringify(item.result, null, 2)}</pre></td></tr>)}</tbody></table></div>}
+        {query.data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-sm text-muted-foreground">{range}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</Button><Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>{t("next")}</Button></div></div>}
+      </CardContent>
+    </Card>
+  </Page>
+}
+
+function workerCallStatusLabel(status: WorkerCallAudit["status"], t: (key: CopyKey) => string) {
+  return status === "queued" ? t("workerQueued") : status === "delivered" ? t("workerDelivered") : status === "completed" ? t("workerCompleted") : t("workerFailed")
+}
+
 function HistoryPage({ threads }: { threads: Thread[] }) {
   const { t, language } = useUi()
   return <Page title={t("history")} description={t("historyDescription")}><Card><CardHeader><CardTitle>{t("threads")}</CardTitle><CardDescription>{t("historyDescription")}</CardDescription></CardHeader><CardContent className="divide-y p-0">{threads.length === 0 ? <p className="p-4 text-sm text-muted-foreground">{t("emptyTitle")}</p> : threads.map((thread) => <Link key={thread.id} to={`/threads/${thread.id}`} className="flex items-center gap-3 px-4 py-3 hover:bg-accent"><StatusDot status={thread.status} /><span className="min-w-0 flex-1 truncate text-sm font-medium">{thread.title}</span><span className="text-xs text-muted-foreground">{formattedTime(language, thread.updated_at)}</span></Link>)}</CardContent></Card></Page>
@@ -951,7 +1101,7 @@ function SystemPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("systemTitle")} description={t("systemDescription")}>
     {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
     {!query.data && !query.error && <Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t("systemTitle")}</CardContent></Card>}
-    {query.data && <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label={t("process")} value={`PID ${query.data.process_id}`} detail={`v${query.data.version}`} /><MetricCard label={t("database")} value={formatBytes(query.data.database_bytes)} detail={query.data.tenant_id} /><MetricCard label={t("activeRuns")} value={String(query.data.active_runs)} detail={t("running")} progress={query.data.active_runs ? 100 : 0} /><MetricCard label={t("workerCount")} value={`${query.data.online_workers} / ${query.data.workers}`} detail={t("online")} progress={query.data.workers ? query.data.online_workers / query.data.workers * 100 : 0} /><Card className="sm:col-span-2 xl:col-span-4"><CardHeader><CardTitle>{t("connection")}</CardTitle><CardDescription>{t("sampled")}: {formattedTime(language, query.data.generated_at)}</CardDescription></CardHeader><CardContent><dl className="grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">{t("tenant")}</dt><dd className="mt-1 break-all font-mono text-xs">{query.data.tenant_id}</dd></div><div><dt className="text-muted-foreground">{t("process")}</dt><dd className="mt-1">Cybion Cloud · {t("hosted")}</dd></div></dl></CardContent></Card></div>}
+    {query.data && <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label={t("process")} value={`PID ${query.data.process_id}`} detail={`v${query.data.version}`} /><MetricCard label={t("database")} value={formatBytes(query.data.database_bytes)} detail={query.data.user_id} /><MetricCard label={t("activeRequests")} value={String(query.data.active_requests)} detail={t("running")} progress={query.data.active_requests ? 100 : 0} /><MetricCard label={t("workerCount")} value={`${query.data.online_workers} / ${query.data.workers}`} detail={t("online")} progress={query.data.workers ? query.data.online_workers / query.data.workers * 100 : 0} /><Card className="sm:col-span-2 xl:col-span-4"><CardHeader><CardTitle>{t("connection")}</CardTitle><CardDescription>{t("sampled")}: {formattedTime(language, query.data.generated_at)}</CardDescription></CardHeader><CardContent><dl className="grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">{t("userId")}</dt><dd className="mt-1 break-all font-mono text-xs">{query.data.user_id}</dd></div><div><dt className="text-muted-foreground">{t("process")}</dt><dd className="mt-1">Cybion Cloud · {t("hosted")}</dd></div></dl></CardContent></Card></div>}
   </Page>
 }
 
@@ -997,10 +1147,41 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
   const client = useQueryClient()
   const [label, setLabel] = useState("")
   const [pairing, setPairing] = useState<WorkerPairing | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingLabel, setEditingLabel] = useState("")
   const workers = useQuery({ queryKey: ["workers"], queryFn: () => api<Worker[]>(sdk, "/api/workers"), refetchInterval: 5000 })
   const pair = useMutation({ mutationFn: (value: string) => api<WorkerPairing>(sdk, "/api/workers", { method: "POST", body: JSON.stringify({ label: value }) }), onSuccess: (value) => { setPairing(value); setLabel(""); void client.invalidateQueries({ queryKey: ["workers"] }) } })
+  const rename = useMutation({ mutationFn: ({ id, value }: { id: string; value: string }) => api<Worker>(sdk, `/api/workers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ label: value }) }), onSuccess: () => { setEditingId(null); setEditingLabel(""); void client.invalidateQueries({ queryKey: ["workers"] }) } })
   const remove = useMutation({ mutationFn: (id: string) => api<unknown>(sdk, `/api/workers/${encodeURIComponent(id)}`, { method: "DELETE" }), onSuccess: () => void client.invalidateQueries({ queryKey: ["workers"] }) })
-  return <Page title={t("workers")} description={t("workersDescription")}><Card><CardHeader><CardTitle>{t("pair")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-3 sm:flex-row" onSubmit={(event) => { event.preventDefault(); if (label.trim()) pair.mutate(label.trim()) }}><Input aria-label={t("workerName")} value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t("workerName")} /><Button disabled={!label.trim() || pair.isPending}>{pair.isPending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t("pair")}</Button></form>{pairing && <Alert className="mt-4"><NetworkIcon /><AlertTitle>{t("copyConfig")}</AlertTitle><AlertDescription><SecretValue value={workerToml(pairing)} /></AlertDescription></Alert>}{pair.error && <p className="mt-3 text-sm text-destructive">{errorMessage(pair.error)}</p>}</CardContent></Card><Card><CardHeader><CardTitle>{t("workers")}</CardTitle></CardHeader><CardContent>{workers.error && <RequestError error={workers.error} onRetry={() => void workers.refetch()} />}{workers.isLoading && <Skeleton className="h-8" />}{workers.data && workers.data.length === 0 && <p className="text-sm text-muted-foreground">{t("noWorkers")}</p>}{workers.data?.map((worker) => <div className="flex items-center gap-3 border-b py-3 last:border-0" key={worker.id}><StatusDot status={worker.status === "online" ? "running" : "idle"} /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{worker.label}</p><p className="text-xs text-muted-foreground">{formattedTime(language, worker.last_seen_at ?? worker.created_at)}</p></div><Badge variant={worker.status === "online" ? "secondary" : "outline"}>{worker.status === "online" ? t("online") : t("offline")}</Badge><Button size="icon-sm" variant="ghost" aria-label={t("remove")} disabled={remove.isPending} onClick={() => remove.mutate(worker.id)}><Trash2Icon /></Button></div>)}</CardContent></Card></Page>
+  return <Page title={t("workers")} description={t("workersDescription")}>
+    <Card>
+      <CardHeader><CardTitle>{t("pair")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader>
+      <CardContent>
+        <form className="flex flex-col gap-3 sm:flex-row" onSubmit={(event) => { event.preventDefault(); if (label.trim()) pair.mutate(label.trim()) }}>
+          <Input aria-label={t("workerName")} value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t("workerName")} />
+          <Button disabled={!label.trim() || pair.isPending}>{pair.isPending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t("pair")}</Button>
+        </form>
+        {pairing && <Alert className="mt-4"><NetworkIcon /><AlertTitle>{t("copyConfig")}</AlertTitle><AlertDescription><SecretValue value={workerToml(pairing)} /></AlertDescription></Alert>}
+        {pair.error && <p className="mt-3 text-sm text-destructive">{errorMessage(pair.error)}</p>}
+      </CardContent>
+    </Card>
+    <Card>
+      <CardHeader><CardTitle>{t("workers")}</CardTitle></CardHeader>
+      <CardContent>
+        {workers.error && <RequestError error={workers.error} onRetry={() => void workers.refetch()} />}
+        {workers.isLoading && <Skeleton className="h-8" />}
+        {workers.data && workers.data.length === 0 && <p className="text-sm text-muted-foreground">{t("noWorkers")}</p>}
+        {workers.data?.map((worker) => <div className="flex flex-wrap items-center gap-3 border-b py-3 last:border-0" key={worker.id}>
+          <StatusDot status={worker.status === "online" ? "running" : "idle"} />
+          {editingId === worker.id ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); const value = editingLabel.trim(); if (value) rename.mutate({ id: worker.id, value }) }}>
+            <Input aria-label={t("workerName")} value={editingLabel} onChange={(event) => setEditingLabel(event.target.value)} autoFocus />
+            <Button size="sm" disabled={!editingLabel.trim() || rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("saveWorker")}</Button>
+          </form> : <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{worker.label}</p><p className="text-xs text-muted-foreground">{formattedTime(language, worker.last_seen_at ?? worker.created_at)}</p></div>}
+          {editingId !== worker.id && <><Badge variant={worker.status === "online" ? "secondary" : "outline"}>{worker.status === "online" ? t("online") : t("offline")}</Badge><Button size="sm" variant="ghost" aria-label={t("editWorker")} onClick={() => { setEditingId(worker.id); setEditingLabel(worker.label) }}><PencilIcon data-icon="inline-start" />{t("editWorker")}</Button><Button size="icon-sm" variant="ghost" aria-label={t("remove")} disabled={remove.isPending} onClick={() => remove.mutate(worker.id)}><Trash2Icon /></Button></>}
+        </div>)}
+      </CardContent>
+    </Card>
+  </Page>
 }
 
 function ToolsPage() {
@@ -1010,7 +1191,7 @@ function ToolsPage() {
 }
 
 function workerToml(pairing: WorkerPairing) {
-  return `controller_url = "${pairing.controller_url}"\ntenant_id = "${pairing.tenant_id}"\nmachine_id = "${pairing.machine_id}"\naccess_token = "${pairing.access_token}"\n`
+  return `controller_url = "${pairing.controller_url}"\nuser_id = "${pairing.user_id}"\nmachine_id = "${pairing.machine_id}"\naccess_token = "${pairing.access_token}"\n`
 }
 
 function SecretValue({ value }: { value: string }) {
