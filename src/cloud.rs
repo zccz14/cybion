@@ -2474,21 +2474,14 @@ fn available_workers(connection: &Connection) -> Result<Vec<WorkerSnapshot>, Api
 fn worker_developer_prefix(workers: &[WorkerSnapshot]) -> Value {
     let list = workers
         .iter()
-        .map(|worker| {
-            json!({
-                "worker_id": worker.id,
-                "name": worker.label,
-                "status": worker.status,
-                "last_seen_at": worker.last_seen_at,
-                "resource": worker.resource,
-            })
-        })
-        .collect::<Vec<_>>();
+        .map(|worker| format!("- worker_id: {} ({})", worker.id, worker.label))
+        .collect::<Vec<_>>()
+        .join("\n");
     json!({
         "role": "developer",
         "content": format!(
-            "Cybion Worker availability (evidence only): {}. Every Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.",
-            serde_json::to_string(&list).expect("worker list is serializable")
+            "Cybion Workers:\n{}\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.",
+            list
         ),
     })
 }
@@ -4982,6 +4975,21 @@ mod tests {
                     .any(|value| value == "worker_id")
             );
         }
+    }
+
+    #[test]
+    fn worker_developer_prefix_uses_markdown_ids_and_names_only() {
+        let prefix = worker_developer_prefix(&[WorkerSnapshot {
+            id: "4b9aa3ae-f5a3-483b-975a-3fdcd148d680".to_owned(),
+            label: "MBA".to_owned(),
+            status: "online".to_owned(),
+            last_seen_at: Some(1_789_259_826),
+            resource: Some(json!({"logical_cpus": 8})),
+        }]);
+        assert_eq!(
+            prefix["content"].as_str().unwrap(),
+            "Cybion Workers:\n- worker_id: 4b9aa3ae-f5a3-483b-975a-3fdcd148d680 (MBA)\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly."
+        );
     }
 
     #[test]
