@@ -704,7 +704,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         |row| row.get(0),
     )?;
     if !thread_schema.contains("'max'") {
-        // COMPATIBILITY: hosted databases before 0.3.24 reject the existing max
+        // COMPATIBILITY: hosted databases before 0.3.25 reject the existing max
         // option. Retire this rebuild after all user databases accept max and a
         // schema audit confirms it; keep the preservation regression test.
         transaction.execute_batch(&THREAD_SCHEMA.replace("threads", "threads_with_max"))?;
