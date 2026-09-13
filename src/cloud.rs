@@ -321,6 +321,7 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/history", get(thread_history))
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
+        .route("/api/insights", get(insights))
         .route("/api/reasoning-audits", get(reasoning_audits))
         .route("/api/worker-calls", get(worker_call_audits))
         .route("/api/system/resources", get(system_resources))
@@ -828,6 +829,101 @@ struct ReasoningAuditPage {
     total: usize,
     page: usize,
     page_size: usize,
+}
+
+#[derive(Deserialize, Default)]
+struct InsightsQuery {
+    range: Option<String>,
+    thread_id: Option<String>,
+    model: Option<String>,
+    request_kind: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Insights {
+    range: String,
+    generated_at: i64,
+    tokens: InsightTokens,
+    requests: InsightRequests,
+    by_model: Vec<InsightModel>,
+    worker: InsightWorker,
+    history: InsightHistory,
+    dimensions: InsightDimensions,
+}
+
+#[derive(Serialize)]
+struct InsightTokens {
+    completed_requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
+    cached_tokens: i64,
+    cache_hit_rate: Option<f64>,
+    input_output_ratio: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct InsightRequests {
+    total: i64,
+    completed: i64,
+    in_flight: i64,
+    failed: i64,
+    cancelled: i64,
+}
+
+#[derive(Serialize)]
+struct InsightModel {
+    model: String,
+    calls: i64,
+    completed: i64,
+    in_flight: i64,
+    failed: i64,
+    cancelled: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
+    cached_tokens: i64,
+    cache_hit_rate: Option<f64>,
+    input_output_ratio: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct InsightWorker {
+    calls: i64,
+    read_bytes: i64,
+    write_bytes: i64,
+    by_worker: Vec<InsightWorkerItem>,
+}
+
+#[derive(Serialize)]
+struct InsightWorkerItem {
+    worker_id: String,
+    worker_label: String,
+    calls: i64,
+    read_bytes: i64,
+    write_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct InsightCount {
+    key: String,
+    count: i64,
+}
+
+#[derive(Serialize)]
+struct InsightHistory {
+    total_records: i64,
+    payload_bytes: i64,
+    checkpoint_count: i64,
+    latest_record_at: Option<i64>,
+    kinds: Vec<InsightCount>,
+}
+
+#[derive(Serialize)]
+struct InsightDimensions {
+    thread_ids: Vec<String>,
+    models: Vec<String>,
+    request_kinds: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1371,6 +1467,247 @@ async fn system_resources(
     })
     .await
     .map(Json)
+}
+
+async fn insights(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Query(query): Query<InsightsQuery>,
+) -> Result<Json<Insights>, ApiError> {
+    let (range, started_after) = insight_range(query.range.as_deref())?;
+    let thread_id = query.thread_id.filter(|value| !value.trim().is_empty());
+    let model = query.model.filter(|value| !value.trim().is_empty());
+    let request_kind = query.request_kind.filter(|value| !value.trim().is_empty());
+    user_db(&state, &identity.user, true, move |connection| {
+        load_insights(
+            connection,
+            range,
+            started_after,
+            thread_id,
+            model,
+            request_kind,
+        )
+    })
+    .await
+    .map(Json)
+}
+
+fn insight_range(value: Option<&str>) -> Result<(String, Option<i64>), ApiError> {
+    let range = value.unwrap_or("7d").trim();
+    let seconds = match range {
+        "24h" => Some(24 * 60 * 60),
+        "7d" => Some(7 * 24 * 60 * 60),
+        "30d" => Some(30 * 24 * 60 * 60),
+        "all" => None,
+        _ => return Err(ApiError::bad_request("insight range is invalid")),
+    };
+    Ok((range.to_owned(), seconds.map(|seconds| now() - seconds)))
+}
+
+fn load_insights(
+    connection: &Connection,
+    range: String,
+    started_after: Option<i64>,
+    thread_id: Option<String>,
+    model: Option<String>,
+    request_kind: Option<String>,
+) -> Result<Insights, ApiError> {
+    let audit_where = "(?1 IS NULL OR started_at >= ?1)
+        AND (?2 IS NULL OR thread_id = ?2)
+        AND (?3 IS NULL OR model = ?3)
+        AND (?4 IS NULL OR request_kind = ?4)";
+    let history_where = "(?1 IS NULL OR created_at >= ?1)
+        AND (?2 IS NULL OR thread_id = ?2)";
+    let audit_params = params![started_after, thread_id, model, request_kind];
+    let (completed_requests, input_tokens, output_tokens, cached_tokens): (i64, i64, i64, i64) =
+        connection.query_row(
+            &format!(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(COALESCE(input_tokens, 0)), 0),
+                        COALESCE(SUM(COALESCE(output_tokens, 0)), 0),
+                        COALESCE(SUM(COALESCE(cached_tokens, 0)), 0)
+                 FROM reasoning_audits
+                 WHERE status = 'completed' AND {audit_where}"
+            ),
+            audit_params,
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    let (total, completed, in_flight, failed, cancelled): (i64, i64, i64, i64, i64) = connection
+        .query_row(
+            &format!(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status='in_flight' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END), 0)
+                 FROM reasoning_audits WHERE {audit_where}"
+            ),
+            audit_params,
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+    let mut models = Vec::new();
+    let mut statement = connection.prepare(&format!(
+        "SELECT model, COUNT(*),
+                COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status='in_flight' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(input_tokens, 0) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(output_tokens, 0) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(cached_tokens, 0) ELSE 0 END), 0)
+         FROM reasoning_audits WHERE {audit_where}
+         GROUP BY model
+         ORDER BY (SUM(CASE WHEN status='completed' THEN COALESCE(input_tokens, 0) ELSE 0 END)
+                 + SUM(CASE WHEN status='completed' THEN COALESCE(output_tokens, 0) ELSE 0 END)) DESC,
+                  model"
+    ))?;
+    let rows = statement.query_map(audit_params, |row| {
+        let input_tokens: i64 = row.get(6)?;
+        let output_tokens: i64 = row.get(7)?;
+        let cached_tokens: i64 = row.get(8)?;
+        Ok(InsightModel {
+            model: row.get(0)?,
+            calls: row.get(1)?,
+            completed: row.get(2)?,
+            in_flight: row.get(3)?,
+            failed: row.get(4)?,
+            cancelled: row.get(5)?,
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            cached_tokens,
+            cache_hit_rate: (input_tokens > 0)
+                .then(|| cached_tokens as f64 / input_tokens as f64 * 100.0),
+            input_output_ratio: (output_tokens > 0)
+                .then(|| input_tokens as f64 / output_tokens as f64),
+        })
+    })?;
+    for row in rows {
+        models.push(row?);
+    }
+    let worker_params = params![started_after];
+    let (worker_calls, worker_read_bytes, worker_write_bytes): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
+                    COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0)
+             FROM worker_calls WHERE (?1 IS NULL OR created_at >= ?1)",
+            worker_params,
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    let mut workers = Vec::new();
+    let mut worker_statement = connection.prepare(
+        "SELECT c.worker_id, COALESCE(MAX(c.worker_label), MAX(w.label), c.worker_id), COUNT(*),
+                COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
+                COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0)
+         FROM worker_calls c LEFT JOIN workers w ON w.id = c.worker_id
+         WHERE (?1 IS NULL OR c.created_at >= ?1)
+         GROUP BY c.worker_id
+         ORDER BY (SUM(length(CAST(arguments_json AS BLOB)))
+                 + SUM(length(CAST(COALESCE(result_json, '') AS BLOB)))) DESC,
+                  c.worker_id",
+    )?;
+    let worker_rows = worker_statement.query_map(worker_params, |row| {
+        Ok(InsightWorkerItem {
+            worker_id: row.get(0)?,
+            worker_label: row.get(1)?,
+            calls: row.get(2)?,
+            read_bytes: row.get(3)?,
+            write_bytes: row.get(4)?,
+        })
+    })?;
+    for row in worker_rows {
+        workers.push(row?);
+    }
+    let (total_records, payload_bytes, checkpoint_count, latest_record_at): (
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+    ) = connection.query_row(
+        &format!(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(length(CAST(payload AS BLOB))), 0),
+                    COALESCE(SUM(CASE WHEN kind='checkpoint' THEN 1 ELSE 0 END), 0),
+                    MAX(created_at)
+             FROM history_records WHERE {history_where}"
+        ),
+        params![started_after, thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let mut kinds = Vec::new();
+    let mut kind_statement = connection.prepare(&format!(
+        "SELECT kind, COUNT(*) FROM history_records WHERE {history_where}
+         GROUP BY kind ORDER BY kind"
+    ))?;
+    let kind_rows = kind_statement.query_map(params![started_after, thread_id], |row| {
+        Ok(InsightCount {
+            key: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })?;
+    for row in kind_rows {
+        kinds.push(row?);
+    }
+    let dimensions = InsightDimensions {
+        thread_ids: connection
+            .prepare("SELECT DISTINCT thread_id FROM reasoning_audits ORDER BY thread_id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?,
+        models: connection
+            .prepare("SELECT DISTINCT model FROM reasoning_audits ORDER BY model")?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?,
+        request_kinds: connection
+            .prepare("SELECT DISTINCT request_kind FROM reasoning_audits ORDER BY request_kind")?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?,
+    };
+    Ok(Insights {
+        range,
+        generated_at: now(),
+        tokens: InsightTokens {
+            completed_requests,
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            cached_tokens,
+            cache_hit_rate: (input_tokens > 0)
+                .then(|| cached_tokens as f64 / input_tokens as f64 * 100.0),
+            input_output_ratio: (output_tokens > 0)
+                .then(|| input_tokens as f64 / output_tokens as f64),
+        },
+        requests: InsightRequests {
+            total,
+            completed,
+            in_flight,
+            failed,
+            cancelled,
+        },
+        by_model: models,
+        worker: InsightWorker {
+            calls: worker_calls,
+            read_bytes: worker_read_bytes,
+            write_bytes: worker_write_bytes,
+            by_worker: workers,
+        },
+        history: InsightHistory {
+            total_records,
+            payload_bytes,
+            checkpoint_count,
+            latest_record_at,
+            kinds,
+        },
+        dimensions,
+    })
 }
 
 async fn reasoning_audits(
@@ -4959,6 +5296,83 @@ mod tests {
         assert_eq!(user.id, "auth-user-123");
         assert!(user.path.ends_with("users/auth-user-123.sqlite3"));
         assert!(user_from_id(&state, "../escape".to_owned()).is_err());
+    }
+
+    #[tokio::test]
+    async fn insights_aggregate_tokens_by_model_and_worker_payload_bytes() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "insights-user").unwrap();
+        let first = create_test_thread(&state, &user).await;
+        let second = create_thread_for(
+            &state,
+            &user,
+            CreateThreadInput {
+                title: Some("Second".to_owned()),
+                model: Some("second-model".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+        let stats = user_db(&state, &user, false, move |connection| {
+            let timestamp = now();
+            connection.execute(
+                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens)
+                 VALUES(?,?,?,'completed',?,?,?,?,?)",
+                params![
+                    &first.id,
+                    "inference",
+                    &first.model,
+                    timestamp,
+                    timestamp,
+                    100_i64,
+                    25_i64,
+                    40_i64
+                ],
+            )?;
+            connection.execute(
+                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at)
+                 VALUES(?,?,?,'in_flight',?)",
+                params![&second.id, "inference", &second.model, timestamp],
+            )?;
+            connection.execute(
+                "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at)
+                 VALUES('worker-1','Laptop','hash',?,'online',?)",
+                params![timestamp, timestamp],
+            )?;
+            connection.execute(
+                "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,result_json)
+                 VALUES('call-1','worker-1',?,'bash',?,'completed',?,?)",
+                params![
+                    &first.id,
+                    r#"{"command":"ls"}"#,
+                    timestamp,
+                    r#"{"stdout":"ok"}"#
+                ],
+            )?;
+            load_insights(
+                connection,
+                "all".to_owned(),
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(stats.requests.total, 2);
+        assert_eq!(stats.requests.in_flight, 1);
+        assert_eq!(stats.tokens.completed_requests, 1);
+        assert_eq!(stats.tokens.input_tokens, 100);
+        assert_eq!(stats.tokens.output_tokens, 25);
+        assert_eq!(stats.tokens.cached_tokens, 40);
+        assert_eq!(stats.tokens.cache_hit_rate, Some(40.0));
+        assert_eq!(stats.tokens.input_output_ratio, Some(4.0));
+        assert_eq!(stats.by_model.len(), 2);
+        assert_eq!(stats.worker.calls, 1);
+        assert_eq!(stats.worker.read_bytes, r#"{"command":"ls"}"#.len() as i64);
+        assert_eq!(stats.worker.write_bytes, r#"{"stdout":"ok"}"#.len() as i64);
+        assert_eq!(stats.worker.by_worker[0].worker_label, "Laptop");
     }
 
     #[tokio::test]
