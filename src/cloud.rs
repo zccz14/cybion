@@ -1593,28 +1593,43 @@ fn load_insights(
     for row in rows {
         models.push(row?);
     }
-    let worker_params = params![started_after];
+    let worker_where = "(?1 IS NULL OR c.created_at >= ?1)
+        AND (?2 IS NULL OR EXISTS (
+            SELECT 1 FROM reasoning_audits a
+            WHERE a.thread_id = c.thread_id
+              AND a.input_record_id = c.input_record_id
+              AND a.model = ?2
+        ))
+        AND (?3 IS NULL OR EXISTS (
+            SELECT 1 FROM reasoning_audits a
+            WHERE a.thread_id = c.thread_id
+              AND a.input_record_id = c.input_record_id
+              AND a.request_kind = ?3
+        ))";
+    let worker_params = params![started_after, model, request_kind];
     let (worker_calls, worker_read_bytes, worker_write_bytes): (i64, i64, i64) = connection
         .query_row(
-            "SELECT COUNT(*),
+            &format!(
+                "SELECT COUNT(*),
                     COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
                     COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0)
-             FROM worker_calls WHERE (?1 IS NULL OR created_at >= ?1)",
+             FROM worker_calls c WHERE {worker_where}"
+            ),
             worker_params,
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
     let mut workers = Vec::new();
-    let mut worker_statement = connection.prepare(
+    let mut worker_statement = connection.prepare(&format!(
         "SELECT c.worker_id, COALESCE(MAX(c.worker_label), MAX(w.label), c.worker_id), COUNT(*),
                 COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
                 COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0)
          FROM worker_calls c LEFT JOIN workers w ON w.id = c.worker_id
-         WHERE (?1 IS NULL OR c.created_at >= ?1)
+         WHERE {worker_where}
          GROUP BY c.worker_id
          ORDER BY (SUM(length(CAST(arguments_json AS BLOB)))
                  + SUM(length(CAST(COALESCE(result_json, '') AS BLOB)))) DESC,
-                  c.worker_id",
-    )?;
+                  c.worker_id"
+    ))?;
     let worker_rows = worker_statement.query_map(worker_params, |row| {
         Ok(InsightWorkerItem {
             worker_id: row.get(0)?,
