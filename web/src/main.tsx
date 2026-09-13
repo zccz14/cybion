@@ -46,6 +46,8 @@ import {
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
+import { pendingResponseRecords, type ThreadResponseView } from "@/lib/thread-response"
+
 import "./styles.css"
 import "linkit-react-components/styles.css"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -887,6 +889,12 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
     refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
     enabled: Boolean(threadId),
   })
+  const liveResponse = useQuery({
+    queryKey: ["thread-response", threadId, thread.data?.status],
+    queryFn: () => api<ThreadResponseView | null>(sdk, `/api/threads/${encodeURIComponent(threadId)}/response`),
+    refetchInterval: thread.data?.status === "running" ? 750 : false,
+    enabled: Boolean(threadId),
+  })
   const [input, setInput] = useState("")
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
@@ -963,6 +971,8 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
               {history.data?.map((record) => <MessageScrollerItem key={record.id}><HistoryMessage language={language} record={record} /></MessageScrollerItem>)}
               {!history.isLoading && !history.error && history.data?.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
+              {pendingResponseRecords(liveResponse.data, history.data ?? [], threadId).map((record) => <MessageScrollerItem key={`live-${liveResponse.data?.audit_id}-${record.id}`}><HistoryMessage language={language} record={record} /></MessageScrollerItem>)}
+              {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
               {current.status === "running" && <MessageScrollerItem><div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("running")}</div></MessageScrollerItem>}
               <MessageScrollerItem scrollAnchor />
             </MessageScrollerContent>
@@ -978,6 +988,18 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>{remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
     </section>
   </main>
+}
+
+function ResponseMetadata({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
+  const response = view.response
+  const buffering = running && !response.completed && response.safety_buffering?.show_buffering_ui
+  return <div className="flex flex-col gap-2 py-2">
+    {buffering && <Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{response.safety_buffering?.reasons.join(" · ")}</AlertDescription></Alert>}
+    <details className="text-xs text-muted-foreground">
+      <summary className="cursor-pointer">{response.server_model ?? (language === "zh" ? "响应信息" : "Response details")}{response.usage ? ` · ${response.usage.input_tokens} → ${response.usage.output_tokens} tokens` : ""}</summary>
+      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify({ ...response, output: undefined }, null, 2)}</pre>
+    </details>
+  </div>
 }
 
 const HistoryMessage = memo(function HistoryMessage({ language, record }: { language: Language; record: HistoryRecord }) {

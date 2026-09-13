@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     convert::Infallible,
     fs,
     net::SocketAddr,
@@ -22,6 +22,7 @@ use axum::{
     },
     routing::{delete, get, post},
 };
+use futures_util::StreamExt;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::responses::{
-    ResponseItem, ResponsesStreamError, StreamedResponse, parse_json_response, read_response_stream,
+    ResponseItem, ResponseState, ResponseStream, ResponsesStreamError, json_response_events,
+    response_stream,
 };
 
 const AUTH_ISSUER: &str = "https://auth.ntnl.io";
@@ -313,6 +315,7 @@ fn app(state: AppState) -> Router {
             get(read_thread).patch(update_thread).delete(delete_thread),
         )
         .route("/api/threads/{id}/history", get(thread_history))
+        .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
         .route("/api/reasoning-audits", get(reasoning_audits))
         .route("/api/worker-calls", get(worker_call_audits))
@@ -336,6 +339,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/threads", post(external_create_thread))
         .route("/v1/threads/{id}", get(external_read_thread))
         .route("/v1/threads/{id}/history", get(external_thread_history))
+        .route("/v1/threads/{id}/response", get(external_thread_response))
         .route("/v1/threads/{id}/inputs", post(external_thread_input))
         .route_layer(from_fn_with_state(state.clone(), api_key_auth));
 
@@ -582,6 +586,10 @@ CREATE TABLE IF NOT EXISTS reasoning_audits (
   idx_tail INTEGER,
   error TEXT
 );
+CREATE TABLE IF NOT EXISTS response_states (
+  audit_id INTEGER PRIMARY KEY REFERENCES reasoning_audits(id) ON DELETE CASCADE,
+  snapshot TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS reasoning_audits_status_started ON reasoning_audits(status,started_at DESC);
 CREATE INDEX IF NOT EXISTS reasoning_audits_thread_started ON reasoning_audits(thread_id,started_at DESC);
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -617,6 +625,7 @@ CREATE TABLE IF NOT EXISTS workers (
 CREATE TABLE IF NOT EXISTS worker_calls (
   id TEXT PRIMARY KEY,
   responses_call_id TEXT NOT NULL DEFAULT '',
+  responses_output_type TEXT NOT NULL DEFAULT 'function_call_output',
   worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   input_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
@@ -660,7 +669,8 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // There is no supported migration from the discarded pre-release user databases.
         transaction
             .execute_batch(
-                "DROP TABLE IF EXISTS worker_calls;
+                "DROP TABLE IF EXISTS response_states;
+                 DROP TABLE IF EXISTS worker_calls;
                  DROP TABLE IF EXISTS workers;
                  DROP TABLE IF EXISTS api_keys;
                  DROP TABLE IF EXISTS reasoning_audits;
@@ -687,6 +697,12 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                 [],
             )
             .map_err(ApiError::internal)?;
+    }
+    let has_output_type: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('worker_calls') WHERE name='responses_output_type')", [], |row| row.get(0)
+    )?;
+    if !has_output_type {
+        transaction.execute("ALTER TABLE worker_calls ADD COLUMN responses_output_type TEXT NOT NULL DEFAULT 'function_call_output'", [])?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -947,7 +963,7 @@ struct WorkerResultInput {
     error: Option<String>,
 }
 
-type WorkerCallResultRow = (String, Option<i64>, String, Option<i64>, String);
+type WorkerCallResultRow = (String, Option<i64>, String, Option<i64>, String, String);
 
 #[derive(Clone)]
 struct IntegrationSettings {
@@ -1483,6 +1499,56 @@ async fn thread_history(
     let id = thread_id(&id)?;
     let records = history_for(&state, &identity.user, id).await?;
     Ok(Json(records))
+}
+
+#[derive(Serialize)]
+struct ThreadResponseView {
+    audit_id: i64,
+    input_record_id: Option<i64>,
+    started_at: i64,
+    status: String,
+    response: ResponseState,
+}
+
+async fn response_for(
+    state: &AppState,
+    user: &User,
+    id: String,
+) -> Result<Option<ThreadResponseView>, ApiError> {
+    user_db(state, user, true, move |connection| {
+        load_thread(connection, &id)?;
+        connection.query_row(
+            "SELECT a.id,a.input_record_id,a.started_at,a.status,s.snapshot
+             FROM reasoning_audits a JOIN response_states s ON s.audit_id=a.id
+             WHERE a.thread_id=? AND a.request_kind='inference'
+               AND a.input_record_id=(SELECT MAX(id) FROM history_records WHERE thread_id=a.thread_id AND kind='input')
+             ORDER BY a.id DESC LIMIT 1", [id], |row| {
+                let snapshot: String = row.get(4)?;
+                let response = serde_json::from_str(&snapshot).map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
+                Ok(ThreadResponseView { audit_id: row.get(0)?, input_record_id: row.get(1)?, started_at: row.get(2)?, status: row.get(3)?, response })
+            }
+        ).optional().map_err(ApiError::from)
+    }).await
+}
+
+async fn thread_response(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Option<ThreadResponseView>>, ApiError> {
+    Ok(Json(
+        response_for(&state, &identity.user, thread_id(&id)?).await?,
+    ))
+}
+
+async fn external_thread_response(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Option<ThreadResponseView>>, ApiError> {
+    Ok(Json(
+        response_for(&state, &identity.user, thread_id(&id)?).await?,
+    ))
 }
 
 async fn history_for(
@@ -2393,7 +2459,8 @@ fn compile_thread_context(
 
 fn context_tool_output_item(item: &Value) -> Value {
     let mut item = item.clone();
-    if let Some("function_call_output") = item.get("type").and_then(Value::as_str)
+    if let Some("function_call_output" | "custom_tool_call_output") =
+        item.get("type").and_then(Value::as_str)
         && let Some(output) = item.get("output").and_then(Value::as_str)
     {
         item["output"] = Value::String(context_tool_output(output));
@@ -2412,47 +2479,41 @@ fn context_tool_output(output: &str) -> String {
     format!("{}{}", &output[..end], TOOL_OUTPUT_TRUNCATED_NOTICE)
 }
 
-fn replayable_context_items(items: &[Value]) -> Vec<Value> {
-    let paired_call_ids = paired_function_call_ids(items);
-    items
-        .iter()
-        .filter(|item| match item.get("type").and_then(Value::as_str) {
-            Some("function_call" | "function_call_output") => item
-                .get("call_id")
-                .and_then(Value::as_str)
-                .is_some_and(|call_id| paired_call_ids.contains(call_id)),
-            _ => true,
-        })
-        .cloned()
-        .collect()
+fn tool_pair(item: &Value) -> Option<(&'static str, bool)> {
+    match item.get("type").and_then(Value::as_str)? {
+        "function_call" => Some(("function", false)),
+        "function_call_output" => Some(("function", true)),
+        "custom_tool_call" => Some(("custom", false)),
+        "custom_tool_call_output" => Some(("custom", true)),
+        "tool_search_call" if item.get("execution").and_then(Value::as_str) == Some("client") => {
+            Some(("search", false))
+        }
+        "tool_search_output" if item.get("execution").and_then(Value::as_str) == Some("client") => {
+            Some(("search", true))
+        }
+        _ => None,
+    }
 }
 
-fn paired_function_call_ids(items: &[Value]) -> HashSet<String> {
-    let mut calls = HashMap::<String, (usize, usize)>::new();
-    let mut outputs = HashMap::<String, (usize, usize)>::new();
+fn replayable_context_items(items: &[Value]) -> Vec<Value> {
+    let mut calls = HashMap::<(&str, &str), Vec<usize>>::new();
+    let mut outputs = HashMap::<(&str, &str), Vec<usize>>::new();
     for (index, item) in items.iter().enumerate() {
-        let Some(call_id) = item
-            .get("call_id")
-            .and_then(Value::as_str)
-            .filter(|call_id| !call_id.is_empty())
-        else {
-            continue;
-        };
-        let counts = match item.get("type").and_then(Value::as_str) {
-            Some("function_call") => &mut calls,
-            Some("function_call_output") => &mut outputs,
-            _ => continue,
-        };
-        let entry = counts.entry(call_id.to_owned()).or_insert((0, index));
-        entry.0 += 1;
+        if let Some((kind, output)) = tool_pair(item)
+            && let Some(id) = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+        {
+            let counts = if output { &mut outputs } else { &mut calls };
+            counts.entry((kind, id)).or_default().push(index);
+        }
     }
-    calls
-        .into_iter()
-        .filter_map(|(call_id, (call_count, call_index))| {
-            let (output_count, output_index) = outputs.get(&call_id)?;
-            (call_count == 1 && *output_count == 1 && call_index < *output_index).then_some(call_id)
-        })
-        .collect()
+    items.iter().filter(|item| {
+        let Some((kind, _)) = tool_pair(item) else { return true };
+        let Some(id) = item.get("call_id").and_then(Value::as_str) else { return false };
+        matches!((calls.get(&(kind, id)).map(Vec::as_slice), outputs.get(&(kind, id)).map(Vec::as_slice)), (Some([call]), Some([output])) if call < output)
+    }).cloned().collect()
 }
 
 fn available_workers(connection: &Connection) -> Result<Vec<WorkerSnapshot>, ApiError> {
@@ -2545,6 +2606,8 @@ fn truncate(value: &str, limit: usize) -> String {
 struct ResponsesResult {
     value: Value,
     output_items: Vec<ResponseItem>,
+    output_record_ids: Vec<i64>,
+    tool_calls: Vec<PendingToolCall>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -2617,6 +2680,8 @@ async fn request_agent(
         let ResponsesResult {
             value: response,
             output_items,
+            output_record_ids: output_ids,
+            tool_calls: calls,
         } = response;
         if response.get("output").and_then(Value::as_array).is_none() {
             return Err((
@@ -2624,10 +2689,6 @@ async fn request_agent(
                 Box::new(ApiError::unavailable("model response has no output")),
             ));
         }
-        let output_ids =
-            append_response_output_items(state, user, thread, source_record_idx, &output_items)
-                .await
-                .map_err(|error| (thread.clone(), Box::new(error)))?;
         // The complete upstream response is durable before a superseding input can
         // discard this request's continuation. This keeps the append-only history
         // faithful even when cancellation races the response boundary.
@@ -2637,64 +2698,40 @@ async fn request_agent(
         if let Some(last_id) = output_ids.last().copied() {
             idx_tail = last_id;
         }
-        let calls = function_calls(&output_items);
+        if calls.is_empty() && response.get("end_turn").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
         if calls.is_empty() {
-            return response_text(&response)
-                .map(|text| (thread.clone(), integrations.clone(), text))
-                .ok_or_else(|| {
-                    (
-                        thread.clone(),
-                        Box::new(ApiError::unavailable("model returned no text output")),
-                    )
-                });
+            let text = output_items
+                .iter()
+                .filter(|item| matches!(item, ResponseItem::Message(_)))
+                .map(ResponseItem::text)
+                .collect::<String>();
+            return Ok((thread.clone(), integrations.clone(), text));
         }
         for call in calls {
             if *cancellation.borrow() {
                 return Err((thread.clone(), Box::new(ApiError::cancelled())));
             }
-            let worker_id = call
-                .arguments
-                .get("worker_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    (
-                        thread.clone(),
-                        Box::new(ApiError::conflict(
-                            "Worker tool arguments must include worker_id",
-                        )),
-                    )
-                })?;
-            let call_arguments = call.arguments.clone();
-            let responses_call_id = call.call_id.clone();
-            let call_id = enqueue_worker_call(
-                state,
-                user,
-                worker_id,
-                &thread.id,
-                source_record_idx,
-                responses_call_id.clone(),
-                call.name,
-                call_arguments,
-            )
-            .await
-            .map_err(|error| (thread.clone(), Box::new(error)))?;
-            let (result, output_record_id) =
-                wait_worker_result(state, user, &call_id, cancellation)
-                    .await
-                    .map_err(|error| (thread.clone(), Box::new(error)))?;
-            idx_tail = if let Some(record_id) = output_record_id {
-                record_id
-            } else {
-                let output = json!({
-                    "type":"function_call_output",
-                    "call_id":responses_call_id,
-                    "output":result.to_string(),
-                });
-                append_tool_output_item(state, user, thread, source_record_idx, &output)
-                    .await
-                    .map_err(|error| (thread.clone(), Box::new(error)))?
+            let record_id = match call {
+                PendingToolCall::Answered(id) => id,
+                PendingToolCall::Worker {
+                    id,
+                    call_id,
+                    output_type,
+                } => {
+                    let (result, output_id) = wait_worker_result(state, user, &id, cancellation)
+                        .await
+                        .map_err(|error| (thread.clone(), Box::new(error)))?;
+                    if let Some(id) = output_id {
+                        id
+                    } else {
+                        append_tool_output_item(state, user, thread, source_record_idx, &json!({"type": output_type, "call_id": call_id, "output": result.to_string()})).await
+                            .map_err(|error| (thread.clone(), Box::new(error)))?
+                    }
+                }
             };
+            idx_tail = idx_tail.max(record_id);
         }
     }
 }
@@ -2715,22 +2752,11 @@ fn output_text(items: &[Value]) -> String {
 }
 
 fn response_item_display(item: &ResponseItem) -> (String, String, bool) {
-    match item.kind() {
-        crate::responses::ResponseItemKind::Message => {
-            let content = output_text(std::slice::from_ref(item.value()));
-            (
-                "assistant".to_owned(),
-                content.clone(),
-                !content.trim().is_empty(),
-            )
-        }
-        crate::responses::ResponseItemKind::Reasoning => {
-            let content = reasoning_summary(item.value());
-            (
-                "assistant".to_owned(),
-                content.clone(),
-                !content.trim().is_empty(),
-            )
+    match item {
+        ResponseItem::Message(_) | ResponseItem::Reasoning(_) => {
+            let content = item.text();
+            let visible = !content.trim().is_empty();
+            ("assistant".to_owned(), content, visible)
         }
         _ => (
             "tool".to_owned(),
@@ -2738,20 +2764,6 @@ fn response_item_display(item: &ResponseItem) -> (String, String, bool) {
             false,
         ),
     }
-}
-
-fn reasoning_summary(item: &Value) -> String {
-    item.get("summary")
-        .and_then(Value::as_array)
-        .map(|summary| {
-            summary
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .filter(|text| !text.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
-        .unwrap_or_default()
 }
 
 async fn append_response_output_items(
@@ -2768,7 +2780,7 @@ async fn append_response_output_items(
             Ok((
                 role,
                 content,
-                serde_json::to_string(item.value()).map_err(ApiError::internal)?,
+                serde_json::to_string(item).map_err(ApiError::internal)?,
                 visible,
             ))
         })
@@ -3555,9 +3567,19 @@ async fn send_responses_request(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let parsed = if content_type.starts_with("application/json") {
-        let body = match read_response_body(response, &mut cancellation).await {
-            Ok(body) => body,
+    let events = if content_type.starts_with("application/json") {
+        match read_response_body(response, &mut cancellation).await {
+            Ok(body) => {
+                let parsed = serde_json::from_str::<Value>(&body)
+                    .map_err(|cause| ResponsesStreamError::InvalidPayload(cause.to_string()))
+                    .and_then(json_response_events);
+                match parsed {
+                    Ok(events) => Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)))
+                        as ResponseStream,
+                    Err(error) => Box::pin(futures_util::stream::once(async move { Err(error) }))
+                        as ResponseStream,
+                }
+            }
             Err(error) => {
                 if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
                     finish_reasoning_audit(
@@ -3573,55 +3595,53 @@ async fn send_responses_request(
                         None,
                         None,
                         response_id.as_deref(),
-                        Some(error.message.as_str()),
+                        Some(&error.message),
                     )
                     .await;
                 }
                 return Err(error);
             }
-        };
-        serde_json::from_str::<Value>(&body)
-            .map(parse_json_response)
-            .map_err(|cause| ApiError::unavailable(format!("invalid Responses JSON: {cause}")))
+        }
     } else {
-        read_response_stream(
+        response_stream(
             response,
-            &mut cancellation,
+            cancellation,
             Duration::from_secs(RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS),
         )
-        .await
-        .map_err(|cause| match cause {
-            ResponsesStreamError::Cancelled => ApiError::cancelled(),
-            ResponsesStreamError::ContextOverflow(message) => ApiError::context_overflow(message),
-            error => ApiError::unavailable(format!(
-                "upstream Responses stream could not be read: {error}"
-            )),
-        })
     };
-    let StreamedResponse {
-        value,
-        output_items,
-    } = match parsed {
-        Ok(value) => value,
+    let parsed = consume_response_events(
+        state,
+        audit.as_ref().map(|(spec, _)| spec),
+        audit_id,
+        events,
+    )
+    .await;
+    let result = match parsed {
+        Ok(result) => result,
         Err(error) => {
             if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
                 finish_reasoning_audit(
                     state,
                     spec,
                     id,
-                    "failed",
+                    if error.is_cancelled() {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    },
                     None,
                     None,
                     None,
                     response_id.as_deref(),
-                    Some(error.message.as_str()),
+                    Some(&error.message),
                 )
                 .await;
             }
             return Err(error);
         }
     };
-    if context_overflow_value(&value) {
+    let value = &result.value;
+    if context_overflow_value(value) {
         let error = ApiError::context_overflow(format!(
             "upstream Responses request exceeded the context window: {}",
             upstream_error_detail(&value.to_string())
@@ -3664,7 +3684,7 @@ async fn send_responses_request(
         return Err(error);
     }
     if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
-        let (input_tokens, output_tokens, cached_tokens) = response_usage(&value);
+        let (input_tokens, output_tokens, cached_tokens) = response_usage(value);
         finish_reasoning_audit(
             state,
             spec,
@@ -3678,10 +3698,164 @@ async fn send_responses_request(
         )
         .await;
     }
-    Ok(ResponsesResult {
-        value,
-        output_items,
-    })
+    Ok(result)
+}
+
+fn stream_api_error(error: ResponsesStreamError) -> ApiError {
+    match error {
+        ResponsesStreamError::Cancelled => ApiError::cancelled(),
+        ResponsesStreamError::ContextOverflow(message) => ApiError::context_overflow(message),
+        error => ApiError::unavailable(format!("upstream Responses stream: {error}")),
+    }
+}
+
+async fn save_response_state(
+    state: &AppState,
+    spec: &AuditSpec,
+    audit_id: i64,
+    response: &ResponseState,
+) -> Result<(), ApiError> {
+    let snapshot = serde_json::to_string(response).map_err(ApiError::internal)?;
+    user_db(state, &spec.user, false, move |connection| {
+        connection.execute("INSERT INTO response_states(audit_id,snapshot) VALUES(?,?) ON CONFLICT(audit_id) DO UPDATE SET snapshot=excluded.snapshot", params![audit_id, snapshot])?;
+        Ok(())
+    }).await
+}
+
+async fn consume_response_events(
+    state: &AppState,
+    audit: Option<&AuditSpec>,
+    audit_id: Option<i64>,
+    mut events: ResponseStream,
+) -> Result<ResponsesResult, ApiError> {
+    let thread = match audit.filter(|spec| spec.request_kind == "inference") {
+        Some(spec) => Some(read_thread_for(state, &spec.user, spec.thread_id.clone()).await?),
+        None => None,
+    };
+    let mut response = ResponseState::default();
+    let mut tool_calls = Vec::new();
+    let mut flush = tokio::time::interval(Duration::from_millis(250));
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut dirty = false;
+    let mut result = async {
+    loop {
+        let event = tokio::select! {
+            event = events.next() => event,
+            _ = flush.tick(), if dirty && audit.is_some() => {
+                if let (Some(spec), Some(id)) = (audit, audit_id) { save_response_state(state, spec, id, &response).await?; }
+                dirty = false;
+                continue;
+            }
+        };
+        let result = match event {
+            Some(Ok(event)) => response.apply(&event),
+            Some(Err(error)) => Err(error),
+            None => Err(ResponsesStreamError::Closed),
+        };
+        let completed = match result {
+            Ok(indices) => indices,
+            Err(error) => {
+                response.error = Some(error.clone());
+                if let (Some(spec), Some(id)) = (audit, audit_id) {
+                    save_response_state(state, spec, id, &response).await?;
+                }
+                return Err(stream_api_error(error));
+            }
+        };
+        if let (Some(thread), Some(spec)) = (&thread, audit) {
+            let input_id = spec
+                .input_record_id
+                .ok_or_else(|| ApiError::internal("inference has no input record"))?;
+            let items = completed
+                .iter()
+                .map(|index| response.output[*index].item.clone())
+                .collect::<Vec<_>>();
+            if !items.is_empty() {
+                let ids = append_response_output_items(state, &spec.user, thread, input_id, &items)
+                    .await?;
+                for (index, id) in completed.iter().zip(ids) {
+                    response.output[*index].record_id = Some(id);
+                    if let Some(call) = start_response_tool(
+                        state,
+                        &spec.user,
+                        thread,
+                        input_id,
+                        &response.output[*index].item,
+                    )
+                    .await?
+                    {
+                        tool_calls.push(call);
+                    }
+                }
+            }
+        }
+        dirty = true;
+        if !completed.is_empty() || response.completed {
+            if let (Some(spec), Some(id)) = (audit, audit_id) {
+                save_response_state(state, spec, id, &response).await?;
+            }
+            dirty = false;
+        }
+        if response.completed {
+            return Ok(ResponsesResult {
+                value: response.value(),
+                output_items: response
+                    .output
+                    .iter()
+                    .map(|item| item.item.clone())
+                    .collect(),
+                tool_calls: std::mem::take(&mut tool_calls),
+                output_record_ids: response
+                    .output
+                    .iter()
+                    .filter_map(|item| item.record_id)
+                    .collect(),
+            });
+        }
+    }
+    }.await;
+    if let Err(error) = &mut result {
+        let dispatched = tool_calls
+            .iter()
+            .any(|call| matches!(call, PendingToolCall::Worker { .. }));
+        if dispatched && error.is_context_overflow() {
+            // A tool may already have run. Do not automatically repeat a request
+            // with side effects after the provider changes its terminal status.
+            error.kind = ApiErrorKind::Ordinary;
+        }
+        if let Some(spec) = audit {
+            abort_response_tools(state, &spec.user, &tool_calls, &error.message).await;
+        }
+    }
+    result
+}
+
+async fn abort_response_tools(
+    state: &AppState,
+    user: &User,
+    calls: &[PendingToolCall],
+    reason: &str,
+) {
+    let ids = calls
+        .iter()
+        .filter_map(|call| match call {
+            PendingToolCall::Worker { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return;
+    }
+    let reason = reason.to_owned();
+    let result = user_db(state, user, false, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for id in ids { transaction.execute("UPDATE worker_calls SET status='failed',error=?,completed_at=? WHERE id=? AND status IN ('queued','delivered')", params![reason, now(), id])?; }
+        transaction.commit()?;
+        Ok(())
+    }).await;
+    if let Err(error) = result {
+        tracing::warn!(error = %error.message, "could not stop Worker calls after response failure");
+    }
 }
 
 async fn send_with_cancellation(
@@ -3833,7 +4007,10 @@ fn responses_payload_with_prefix(
     };
     let mut payload = json!({"model":model,"input":input,"store":false,"stream":true});
     if let Some(reasoning_effort) = reasoning_effort {
-        payload["reasoning"] = json!({"effort": reasoning_effort});
+        // Codex requests summaries explicitly so the summary event stream is
+        // available for both rendering and the next Thread context.
+        payload["reasoning"] = json!({"effort": reasoning_effort, "summary": "auto"});
+        payload["include"] = json!(["reasoning.encrypted_content"]);
     }
     if service_tier_fast {
         payload["service_tier"] = json!("priority");
@@ -3976,11 +4153,108 @@ fn responses_tools(include_worker_tools: bool, include_native_tools: bool) -> Va
     Value::Array(tools)
 }
 
-fn function_calls(output: &[ResponseItem]) -> Vec<crate::responses::FunctionCall> {
-    output
-        .iter()
-        .filter_map(ResponseItem::function_call)
-        .collect()
+enum PendingToolCall {
+    Worker {
+        id: String,
+        call_id: String,
+        output_type: String,
+    },
+    Answered(i64),
+}
+
+#[derive(Deserialize)]
+struct WorkerArguments {
+    worker_id: String,
+}
+
+async fn start_response_tool(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input_id: i64,
+    item: &ResponseItem,
+) -> Result<Option<PendingToolCall>, ApiError> {
+    if let ResponseItem::ToolSearchCall(call) = item
+        && call.execution == "client"
+        && let Some(call_id) = &call.call_id
+    {
+        let output = json!({"type":"tool_search_output", "call_id":call_id, "status":"completed", "execution":"client", "tools":worker_tools()});
+        return Ok(Some(PendingToolCall::Answered(
+            append_tool_output_item(state, user, thread, input_id, &output).await?,
+        )));
+    }
+    let (call_id, name, namespace, input, output_type) = match item {
+        ResponseItem::FunctionCall(call) => (
+            &call.call_id,
+            &call.name,
+            &call.namespace,
+            &call.arguments,
+            "function_call_output",
+        ),
+        ResponseItem::CustomToolCall(call) => (
+            &call.call_id,
+            &call.name,
+            &call.namespace,
+            &call.input,
+            "custom_tool_call_output",
+        ),
+        _ => return Ok(None),
+    };
+    let prepared = prepare_worker_arguments(name, namespace.as_deref(), input);
+    let result = match prepared {
+        Ok((worker_id, arguments)) => {
+            enqueue_worker_call(
+                state,
+                user,
+                &worker_id,
+                &thread.id,
+                input_id,
+                call_id.clone(),
+                output_type.to_owned(),
+                name.clone(),
+                arguments,
+            )
+            .await
+        }
+        Err(message) => Err(ApiError::bad_request(message)),
+    };
+    match result {
+        Ok(id) => Ok(Some(PendingToolCall::Worker {
+            id,
+            call_id: call_id.clone(),
+            output_type: output_type.to_owned(),
+        })),
+        // Tool validation and unavailable Workers are answered to the model so
+        // it can correct the call. Storage failures must still abort the turn.
+        Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+            let output = json!({"type":output_type, "call_id":call_id, "output":json!({"error":error.message}).to_string()});
+            Ok(Some(PendingToolCall::Answered(
+                append_tool_output_item(state, user, thread, input_id, &output).await?,
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn prepare_worker_arguments(
+    name: &str,
+    namespace: Option<&str>,
+    input: &str,
+) -> Result<(String, Value), String> {
+    if namespace.is_some_and(|value| !matches!(value, "functions" | ""))
+        || !matches!(name, "bash" | "browser_control" | "computer_use")
+    {
+        return Err(format!("unsupported Worker tool: {name}"));
+    }
+    let worker: WorkerArguments = serde_json::from_str(input).map_err(|error| {
+        format!("Worker tool arguments must contain an explicit worker_id: {error}")
+    })?;
+    if worker.worker_id.trim().is_empty() {
+        return Err("Worker tool arguments must include worker_id".to_owned());
+    }
+    let arguments = serde_json::from_str(input)
+        .map_err(|error| format!("invalid Worker arguments: {error}"))?;
+    Ok((worker.worker_id, arguments))
 }
 
 fn response_text(response: &Value) -> Option<String> {
@@ -4002,6 +4276,7 @@ async fn enqueue_worker_call(
     thread_id: &str,
     input_record_id: i64,
     responses_call_id: String,
+    responses_output_type: String,
     name: String,
     arguments: Value,
 ) -> Result<String, ApiError> {
@@ -4011,7 +4286,10 @@ async fn enqueue_worker_call(
     let thread_id = thread_id.to_owned();
     let call_id_for_db = call_id.clone();
     user_db(state, user, false, move |connection| {
-        let snapshot = connection
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let superseded: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM history_records WHERE thread_id=? AND kind='input' AND id>?)", params![&thread_id, input_record_id], |row| row.get(0))?;
+        if superseded { return Err(ApiError::cancelled()); }
+        let snapshot = transaction
             .query_row(
                 "SELECT label,hostname,version,resource_json,status,last_seen_at
                  FROM workers WHERE id=?",
@@ -4036,14 +4314,15 @@ async fn enqueue_worker_call(
         {
             return Err(ApiError::conflict("selected Worker is offline"));
         }
-        connection.execute(
+        transaction.execute(
             "INSERT INTO worker_calls(
-                id,responses_call_id,worker_id,thread_id,input_record_id,name,arguments_json,status,
+                id,responses_call_id,responses_output_type,worker_id,thread_id,input_record_id,name,arguments_json,status,
                 created_at,worker_label,worker_hostname,worker_version,worker_resource_json
-             ) VALUES(?,?,?,?,?,?,?, 'queued', ?,?,?,?,?)",
+             ) VALUES(?,?,?,?,?,?,?,?, 'queued', ?,?,?,?,?)",
             params![
                 &call_id_for_db,
                 responses_call_id,
+                responses_output_type,
                 &worker_id,
                 &thread_id,
                 input_record_id,
@@ -4056,6 +4335,7 @@ async fn enqueue_worker_call(
                 snapshot.3,
             ],
         )?;
+        transaction.commit()?;
         Ok(())
     })
     .await?;
@@ -4381,13 +4661,13 @@ async fn worker_result(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let call: Option<WorkerCallResultRow> = transaction
             .query_row(
-                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id FROM worker_calls
+                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type FROM worker_calls
                  WHERE id=? AND worker_id=?",
                 params![&call_id, &worker_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .optional()?;
-        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id)) = call else {
+        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id, responses_output_type)) = call else {
             return Err(ApiError::not_found("Worker call not found"));
         };
         if existing_output_id.is_some() {
@@ -4395,7 +4675,7 @@ async fn worker_result(
             return Ok(());
         }
         let output = json!({
-            "type": "function_call_output",
+            "type": responses_output_type,
             "call_id": if responses_call_id.is_empty() { call_id.clone() } else { responses_call_id.clone() },
             "output": input.result.to_string(),
         });
@@ -4457,11 +4737,15 @@ async fn worker_result(
 }
 
 #[cfg(test)]
+#[path = "cloud_response_tests.rs"]
+mod response_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn test_state() -> (tempfile::TempDir, AppState) {
+    pub(super) fn test_state() -> (tempfile::TempDir, AppState) {
         let root = tempfile::tempdir().unwrap();
         prepare_data_dir(root.path()).unwrap();
         let data_dir = root.path().to_path_buf();
@@ -4477,7 +4761,7 @@ mod tests {
         )
     }
 
-    async fn read_json_request(stream: &mut tokio::net::TcpStream) -> Value {
+    pub(super) async fn read_json_request(stream: &mut tokio::net::TcpStream) -> Value {
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 4096];
         loop {
@@ -4505,7 +4789,7 @@ mod tests {
         }
     }
 
-    async fn create_test_thread(state: &AppState, user: &User) -> ThreadView {
+    pub(super) async fn create_test_thread(state: &AppState, user: &User) -> ThreadView {
         create_thread_for(
             state,
             user,
@@ -4518,7 +4802,7 @@ mod tests {
         .unwrap()
     }
 
-    fn insert_record(
+    pub(super) fn insert_record(
         connection: &Connection,
         thread_id: &str,
         role: &str,
@@ -4863,7 +5147,8 @@ mod tests {
                 "type":"message",
                 "role":"assistant",
                 "content":[{"type":"output_text","text":"late"}]
-            }))],
+            }))
+            .unwrap()],
         )
         .await
         .unwrap();
@@ -4963,6 +5248,19 @@ mod tests {
     }
 
     #[test]
+    fn worker_tool_names_match_the_declared_tools() {
+        for name in ["bash", "browser_control", "computer_use"] {
+            let input = json!({"worker_id": "worker", "action": "inspect"}).to_string();
+            assert!(
+                prepare_worker_arguments(name, None, &input).is_ok(),
+                "{name}"
+            );
+        }
+        let input = json!({"worker_id": "worker", "action": "inspect"}).to_string();
+        assert!(prepare_worker_arguments("browser", None, &input).is_err());
+    }
+
+    #[test]
     fn responses_tools_include_native_tools_without_workers() {
         let tools = responses_tools(false, true);
         assert_eq!(
@@ -4988,7 +5286,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            response_item_display(&ResponseItem::from_value(item)),
+            response_item_display(&ResponseItem::from_value(item).unwrap()),
             (
                 "assistant".to_owned(),
                 "First thought.\n\nSecond thought.".to_owned(),
@@ -5190,9 +5488,12 @@ mod tests {
         .unwrap();
         server.await.unwrap();
         assert_eq!(result.value["id"], "resp_1");
-        let call = result.output_items[0].function_call().unwrap();
+        let ResponseItem::FunctionCall(call) = &result.output_items[0] else {
+            panic!("expected typed function call")
+        };
+        let arguments: Value = serde_json::from_str(&call.arguments).unwrap();
         assert_eq!(call.call_id, "call_1");
-        assert_eq!(call.arguments["worker_id"], "worker-1");
+        assert_eq!(arguments["worker_id"], "worker-1");
         assert_eq!(response_text(&result.value).as_deref(), Some("hello"));
     }
 
