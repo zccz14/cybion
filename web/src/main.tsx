@@ -280,6 +280,7 @@ const copy = {
     worker: "Worker",
     close: "Close",
     recordToolOutput: "Worker result",
+    recordReasoning: "Reasoning",
     recordActivity: "Activity",
     recordCheckpoint: "Checkpoint",
     recordProtocol: "Protocol event",
@@ -341,10 +342,13 @@ const copy = {
     baseUrl: "Base URL",
     username: "Username",
     tools: "Tools",
-    toolsDescription: "Capabilities available to a paired Worker.",
+    toolsDescription: "Capabilities available to Cybion threads.",
     toolBash: "Run shell commands",
     toolBrowser: "Control a browser",
     toolComputer: "Control the desktop",
+    toolWebSearch: "Web search",
+    toolImageGeneration: "Image generation",
+    toolOpenAi: "OpenAI",
     history: "History",
     historyDescription: "Choose a thread to inspect its durable conversation history.",
     noHistory: "No messages in this thread yet.",
@@ -412,6 +416,7 @@ const copy = {
     worker: "Worker",
     close: "关闭",
     recordToolOutput: "Worker 结果",
+    recordReasoning: "推理 (Reasoning)",
     recordActivity: "活动记录",
     recordCheckpoint: "上下文检查点",
     recordProtocol: "协议事件",
@@ -473,10 +478,13 @@ const copy = {
     baseUrl: "基础地址",
     username: "用户名",
     tools: "工具",
-    toolsDescription: "已配对 Worker 可使用的能力。",
+    toolsDescription: "Cybion 线程可使用的能力。",
     toolBash: "运行 Shell 命令",
     toolBrowser: "控制浏览器",
     toolComputer: "控制桌面",
+    toolWebSearch: "网页搜索",
+    toolImageGeneration: "图像生成",
+    toolOpenAi: "OpenAI",
     history: "历史",
     historyDescription: "选择一个线程查看它的持久对话历史。",
     noHistory: "这个线程还没有消息。",
@@ -988,6 +996,29 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
     </Message>
   }
 
+  if (isReasoningRecord(record)) {
+    const summary = reasoningSummary(record)
+    return <div className="relative flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-3 py-3">
+      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
+        <SparklesIcon className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-medium text-primary">{t("recordReasoning")}</span>
+          <time className="text-xs text-muted-foreground">{time}</time>
+        </div>
+        {summary ? <div className="prose prose-sm mt-2 max-w-none break-words dark:prose-invert prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0"><ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
+        <details className="group mt-2">
+          <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <span>{t("recordPayload")}</span>
+            <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+          </summary>
+          <HistoryRecordPayload language={language} record={record} />
+        </details>
+      </div>
+    </div>
+  }
+
   if (record.role === "assistant" && record.kind === "response_output") {
     return <Message className="items-start">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
@@ -1078,10 +1109,32 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
 }, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.role === next.record.role && previous.record.content === next.record.content && previous.record.visible === next.record.visible && previous.record.request_input_id === next.record.request_input_id && previous.record.created_at === next.record.created_at)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
+  if (isReasoningRecord(record)) return t("recordReasoning")
   if (record.kind === "tool_output") return t("recordToolOutput")
   if (record.kind === "activity") return t("recordActivity")
   if (record.kind === "checkpoint") return t("recordCheckpoint")
   return t("recordProtocol")
+}
+
+function historyRecordPayloadObject(payload: unknown): Record<string, unknown> | null {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : null
+}
+
+function isReasoningRecord(record: HistoryRecord) {
+  return historyRecordPayloadObject(record.payload)?.type === "reasoning"
+}
+
+function reasoningSummary(record: HistoryRecord) {
+  const summary = historyRecordPayloadObject(record.payload)?.summary
+  if (!Array.isArray(summary)) return ""
+  return summary
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .filter((item) => typeof item.text === "string")
+    .map((item) => item.text as string)
+    .filter((text) => text.trim())
+    .join("\n\n")
 }
 
 function historyRecordSummary(text: string) {
@@ -1107,9 +1160,11 @@ function historyRecordPayloadText(record: HistoryRecord) {
 
 function historyRecordText(record: HistoryRecord) {
   const payload = record.payload
-  const object = payload && typeof payload === "object" && !Array.isArray(payload)
-    ? payload as Record<string, unknown>
-    : null
+  const object = historyRecordPayloadObject(payload)
+  if (isReasoningRecord(record)) {
+    const summary = reasoningSummary(record)
+    if (summary) return summary
+  }
   if (record.kind === "response_output" && object?.type === "message") {
     const content = object.content
     if (Array.isArray(content)) {
@@ -1317,8 +1372,14 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
 
 function ToolsPage() {
   const { t } = useUi()
-  const tools = [{ label: t("toolBash"), detail: "bash" }, { label: t("toolBrowser"), detail: "browser_control" }, { label: t("toolComputer"), detail: "computer_use" }]
-  return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.detail}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.label}</p><code className="text-xs text-muted-foreground">{tool.detail}</code></div><Badge variant="outline">Worker</Badge></div>)}</CardContent></Card></Page>
+  const tools = [
+    { label: t("toolBash"), detail: "bash", provider: "Worker" },
+    { label: t("toolBrowser"), detail: "browser_control", provider: "Worker" },
+    { label: t("toolComputer"), detail: "computer_use", provider: "Worker" },
+    { label: t("toolWebSearch"), detail: "web_search", provider: t("toolOpenAi") },
+    { label: t("toolImageGeneration"), detail: "image_generation", provider: t("toolOpenAi") },
+  ]
+  return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.detail}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.label}</p><code className="text-xs text-muted-foreground">{tool.detail}</code></div><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
 }
 
 function workerToml(pairing: WorkerPairing) {
