@@ -31,6 +31,10 @@ use tokio::sync::{Mutex, OnceCell, watch};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+use crate::responses::{
+    ResponseItem, ResponsesStreamError, StreamedResponse, parse_json_response, read_response_stream,
+};
+
 const AUTH_ISSUER: &str = "https://auth.ntnl.io";
 const AUTH_AUDIENCE: &str = "cybion.ntnl.io";
 const AUTH_AUDIENCES: [&str; 3] = ["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io"];
@@ -47,6 +51,7 @@ const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
 const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
+const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 const USER_SCHEMA_VERSION: i64 = 7;
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
@@ -2537,15 +2542,9 @@ fn truncate(value: &str, limit: usize) -> String {
     value[..end].to_owned()
 }
 
-#[derive(Clone)]
-struct FunctionCall {
-    call_id: String,
-    name: String,
-    arguments: Value,
-}
-
 struct ResponsesResult {
     value: Value,
+    output_items: Vec<ResponseItem>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -2615,19 +2614,18 @@ async fn request_agent(
             Err(error) => return Err((thread.clone(), Box::new(error))),
             Ok(response) => response,
         };
-        let response = response.value;
-        let output = response
-            .get("output")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    thread.clone(),
-                    Box::new(ApiError::unavailable("model response has no output")),
-                )
-            })?;
+        let ResponsesResult {
+            value: response,
+            output_items,
+        } = response;
+        if response.get("output").and_then(Value::as_array).is_none() {
+            return Err((
+                thread.clone(),
+                Box::new(ApiError::unavailable("model response has no output")),
+            ));
+        }
         let output_ids =
-            append_response_output_items(state, user, thread, source_record_idx, &output)
+            append_response_output_items(state, user, thread, source_record_idx, &output_items)
                 .await
                 .map_err(|error| (thread.clone(), Box::new(error)))?;
         // The complete upstream response is durable before a superseding input can
@@ -2639,7 +2637,7 @@ async fn request_agent(
         if let Some(last_id) = output_ids.last().copied() {
             idx_tail = last_id;
         }
-        let calls = function_calls(&response);
+        let calls = function_calls(&output_items);
         if calls.is_empty() {
             return response_text(&response)
                 .map(|text| (thread.clone(), integrations.clone(), text))
@@ -2716,28 +2714,30 @@ fn output_text(items: &[Value]) -> String {
         .collect()
 }
 
-fn response_item_display(item: &Value) -> (String, String, bool) {
-    if item.get("type").and_then(Value::as_str) == Some("message") {
-        let content = output_text(std::slice::from_ref(item));
-        return (
-            "assistant".to_owned(),
-            content.clone(),
-            !content.trim().is_empty(),
-        );
+fn response_item_display(item: &ResponseItem) -> (String, String, bool) {
+    match item.kind() {
+        crate::responses::ResponseItemKind::Message => {
+            let content = output_text(std::slice::from_ref(item.value()));
+            (
+                "assistant".to_owned(),
+                content.clone(),
+                !content.trim().is_empty(),
+            )
+        }
+        crate::responses::ResponseItemKind::Reasoning => {
+            let content = reasoning_summary(item.value());
+            (
+                "assistant".to_owned(),
+                content.clone(),
+                !content.trim().is_empty(),
+            )
+        }
+        _ => (
+            "tool".to_owned(),
+            "Responses protocol item recorded".to_owned(),
+            false,
+        ),
     }
-    if item.get("type").and_then(Value::as_str) == Some("reasoning") {
-        let content = reasoning_summary(item);
-        return (
-            "assistant".to_owned(),
-            content.clone(),
-            !content.trim().is_empty(),
-        );
-    }
-    (
-        "tool".to_owned(),
-        "Responses protocol item recorded".to_owned(),
-        false,
-    )
 }
 
 fn reasoning_summary(item: &Value) -> String {
@@ -2759,7 +2759,7 @@ async fn append_response_output_items(
     user: &User,
     thread: &ThreadView,
     request_input_id: i64,
-    output: &[Value],
+    output: &[ResponseItem],
 ) -> Result<Vec<i64>, ApiError> {
     let records = output
         .iter()
@@ -2768,7 +2768,7 @@ async fn append_response_output_items(
             Ok((
                 role,
                 content,
-                serde_json::to_string(item).map_err(ApiError::internal)?,
+                serde_json::to_string(item.value()).map_err(ApiError::internal)?,
                 visible,
             ))
         })
@@ -3498,31 +3498,31 @@ async fn send_responses_request(
         .get("x-openai-lb-request-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = match read_response_body(response, &mut cancellation).await {
-        Ok(body) => body,
-        Err(error) => {
-            if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
-                finish_reasoning_audit(
-                    state,
-                    spec,
-                    id,
-                    if error.is_cancelled() {
-                        "cancelled"
-                    } else {
-                        "failed"
-                    },
-                    None,
-                    None,
-                    None,
-                    response_id.as_deref(),
-                    Some(error.message.as_str()),
-                )
-                .await;
-            }
-            return Err(error);
-        }
-    };
     if !status.is_success() {
+        let body = match read_response_body(response, &mut cancellation).await {
+            Ok(body) => body,
+            Err(error) => {
+                if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
+                    finish_reasoning_audit(
+                        state,
+                        spec,
+                        id,
+                        if error.is_cancelled() {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
+                        None,
+                        None,
+                        None,
+                        response_id.as_deref(),
+                        Some(error.message.as_str()),
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         let message = format!(
             "upstream Responses request failed with HTTP {status}: {}",
             upstream_error_detail(&body)
@@ -3548,23 +3548,60 @@ async fn send_responses_request(
         }
         return Err(error);
     }
-    let parsed = if body.trim_start().starts_with('{') {
+
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let parsed = if content_type.starts_with("application/json") {
+        let body = match read_response_body(response, &mut cancellation).await {
+            Ok(body) => body,
+            Err(error) => {
+                if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
+                    finish_reasoning_audit(
+                        state,
+                        spec,
+                        id,
+                        if error.is_cancelled() {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
+                        None,
+                        None,
+                        None,
+                        response_id.as_deref(),
+                        Some(error.message.as_str()),
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         serde_json::from_str::<Value>(&body)
+            .map(parse_json_response)
             .map_err(|cause| ApiError::unavailable(format!("invalid Responses JSON: {cause}")))
     } else {
-        completed_response_from_sse(&body).map_err(|cause| {
-            if context_overflow_response(&body) {
-                ApiError::context_overflow(format!(
-                    "upstream Responses stream exceeded the context window: {cause}"
-                ))
-            } else {
-                ApiError::unavailable(format!(
-                    "upstream Responses stream could not be read: {cause}"
-                ))
-            }
+        read_response_stream(
+            response,
+            &mut cancellation,
+            Duration::from_secs(RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS),
+        )
+        .await
+        .map_err(|cause| match cause {
+            ResponsesStreamError::Cancelled => ApiError::cancelled(),
+            ResponsesStreamError::ContextOverflow(message) => ApiError::context_overflow(message),
+            error => ApiError::unavailable(format!(
+                "upstream Responses stream could not be read: {error}"
+            )),
         })
     };
-    let value = match parsed {
+    let StreamedResponse {
+        value,
+        output_items,
+    } = match parsed {
         Ok(value) => value,
         Err(error) => {
             if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
@@ -3641,7 +3678,10 @@ async fn send_responses_request(
         )
         .await;
     }
-    Ok(ResponsesResult { value })
+    Ok(ResponsesResult {
+        value,
+        output_items,
+    })
 }
 
 async fn send_with_cancellation(
@@ -3876,234 +3916,6 @@ fn context_overflow_value(value: &Value) -> bool {
     )
 }
 
-fn remember_response_output_item(
-    output: &mut Vec<Value>,
-    output_indices: &mut HashMap<String, usize>,
-    item: Value,
-) -> usize {
-    let item_id = item.get("id").and_then(Value::as_str).map(str::to_owned);
-    let Some(item_id) = item_id else {
-        output.push(item);
-        return output.len() - 1;
-    };
-    if let Some(index) = output_indices.get(&item_id).copied() {
-        output[index] = item;
-        return index;
-    }
-    let index = output.len();
-    output.push(item);
-    output_indices.insert(item_id, index);
-    index
-}
-
-fn completed_response_from_sse(body: &str) -> Result<Value> {
-    let mut output = Vec::new();
-    let mut output_indices = HashMap::new();
-    let mut completed_output_indices = HashSet::new();
-    let mut saw_done = false;
-    let normalized = body.replace("\r\n", "\n");
-    for block in normalized.split("\n\n") {
-        let Some((event_name, data)) = sse_event_data(block) else {
-            continue;
-        };
-        if data.trim() == "[DONE]" {
-            saw_done = true;
-            continue;
-        }
-        let event: Value = serde_json::from_str(&data)
-            .with_context(|| format!("invalid Responses SSE payload: {data}"))?;
-        let event_type = event
-            .get("type")
-            .and_then(Value::as_str)
-            .or(event_name)
-            .unwrap_or_default();
-        match event_type {
-            "response.output_item.added" => {
-                if let Some(item) = event.get("item") {
-                    remember_response_output_item(&mut output, &mut output_indices, item.clone());
-                }
-            }
-            "response.function_call_arguments.delta" => {
-                if let (Some(item_id), Some(delta)) = (
-                    event.get("item_id").and_then(Value::as_str),
-                    event.get("delta").and_then(Value::as_str),
-                ) && let Some(index) = output_indices.get(item_id).copied()
-                    && let Some(item) = output.get_mut(index)
-                {
-                    let arguments = item
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    item["arguments"] = Value::String(format!("{arguments}{delta}"));
-                }
-            }
-            "response.function_call_arguments.done" => {
-                if let (Some(item_id), Some(arguments)) = (
-                    event.get("item_id").and_then(Value::as_str),
-                    event.get("arguments").and_then(Value::as_str),
-                ) && let Some(index) = output_indices.get(item_id).copied()
-                    && let Some(item) = output.get_mut(index)
-                {
-                    item["arguments"] = Value::String(arguments.to_owned());
-                }
-            }
-            "response.reasoning_summary_part.added" => {
-                if let (Some(item_id), Some(summary_index), Some(part)) = (
-                    event.get("item_id").and_then(Value::as_str),
-                    event.get("summary_index").and_then(Value::as_u64),
-                    event.get("part"),
-                ) && let Some(index) = output_indices.get(item_id).copied()
-                    && let Some(item) = output.get_mut(index)
-                {
-                    set_reasoning_summary_part(item, summary_index as usize, part.clone());
-                }
-            }
-            "response.reasoning_summary_text.delta" => {
-                if let (Some(item_id), Some(summary_index), Some(delta)) = (
-                    event.get("item_id").and_then(Value::as_str),
-                    event.get("summary_index").and_then(Value::as_u64),
-                    event.get("delta").and_then(Value::as_str),
-                ) && let Some(index) = output_indices.get(item_id).copied()
-                    && let Some(item) = output.get_mut(index)
-                {
-                    append_reasoning_summary_text(item, summary_index as usize, delta);
-                }
-            }
-            "response.reasoning_summary_text.done" => {
-                if let (Some(item_id), Some(summary_index), Some(text)) = (
-                    event.get("item_id").and_then(Value::as_str),
-                    event.get("summary_index").and_then(Value::as_u64),
-                    event.get("text").and_then(Value::as_str),
-                ) && let Some(index) = output_indices.get(item_id).copied()
-                    && let Some(item) = output.get_mut(index)
-                {
-                    set_reasoning_summary_text(item, summary_index as usize, text);
-                }
-            }
-            "response.output_item.done" => {
-                if let Some(item) = event.get("item") {
-                    let mut item = item.clone();
-                    if item.get("type").and_then(Value::as_str) == Some("reasoning")
-                        && item
-                            .get("summary")
-                            .and_then(Value::as_array)
-                            .is_some_and(Vec::is_empty)
-                        && let Some(item_id) = item.get("id").and_then(Value::as_str)
-                        && let Some(index) = output_indices.get(item_id).copied()
-                        && let Some(summary) = output[index].get("summary").filter(|summary| {
-                            summary.as_array().is_some_and(|value| !value.is_empty())
-                        })
-                    {
-                        item["summary"] = summary.clone();
-                    }
-                    let index =
-                        remember_response_output_item(&mut output, &mut output_indices, item);
-                    completed_output_indices.insert(index);
-                }
-            }
-            "response.completed" => {
-                let mut response = event
-                    .get("response")
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("Responses completion has no response"))?;
-                if !completed_output_indices.is_empty() {
-                    output = output
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(index, item)| {
-                            completed_output_indices.contains(&index).then_some(item)
-                        })
-                        .collect();
-                } else if output.is_empty()
-                    && let Some(existing) = response.get("output").and_then(Value::as_array)
-                {
-                    output = existing.clone();
-                }
-                response["output"] = Value::Array(output);
-                return Ok(response);
-            }
-            "response.incomplete" => {
-                let mut response = event
-                    .get("response")
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("incomplete response has no response"))?;
-                if !completed_output_indices.is_empty() {
-                    output = output
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(index, item)| {
-                            completed_output_indices.contains(&index).then_some(item)
-                        })
-                        .collect();
-                } else if output.is_empty()
-                    && let Some(existing) = response.get("output").and_then(Value::as_array)
-                {
-                    output = existing.clone();
-                }
-                if !output.is_empty() {
-                    response["output"] = Value::Array(output);
-                    return Ok(response);
-                }
-                return Err(anyhow::anyhow!(
-                    "upstream {event_type}: {}",
-                    upstream_error_detail(&event.to_string())
-                ));
-            }
-            "error" | "response.failed" => {
-                return Err(anyhow::anyhow!(
-                    "upstream {event_type}: {}",
-                    upstream_error_detail(&event.to_string())
-                ));
-            }
-            _ => {}
-        }
-    }
-    if saw_done {
-        Err(anyhow::anyhow!(
-            "upstream stream sent [DONE] without a Responses completion event"
-        ))
-    } else {
-        Err(anyhow::anyhow!(
-            "upstream stream ended without a completed response"
-        ))
-    }
-}
-
-fn set_reasoning_summary_part(item: &mut Value, summary_index: usize, part: Value) {
-    let Some(summary) = item.get_mut("summary").and_then(Value::as_array_mut) else {
-        item["summary"] = Value::Array(Vec::new());
-        return set_reasoning_summary_part(item, summary_index, part);
-    };
-    while summary.len() <= summary_index {
-        summary.push(json!({"type":"summary_text","text":""}));
-    }
-    summary[summary_index] = part;
-}
-
-fn append_reasoning_summary_text(item: &mut Value, summary_index: usize, delta: &str) {
-    let current = item
-        .get("summary")
-        .and_then(Value::as_array)
-        .and_then(|summary| summary.get(summary_index))
-        .and_then(|part| part.get("text"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    set_reasoning_summary_text(item, summary_index, &format!("{current}{delta}"));
-}
-
-fn set_reasoning_summary_text(item: &mut Value, summary_index: usize, text: &str) {
-    let Some(summary) = item.get_mut("summary").and_then(Value::as_array_mut) else {
-        item["summary"] = Value::Array(Vec::new());
-        return set_reasoning_summary_text(item, summary_index, text);
-    };
-    while summary.len() <= summary_index {
-        summary.push(json!({"type":"summary_text","text":""}));
-    }
-    summary[summary_index]["type"] = json!("summary_text");
-    summary[summary_index]["text"] = json!(text);
-}
-
 fn sse_event_data(block: &str) -> Option<(Option<&str>, String)> {
     let mut event_name = None;
     let mut data = Vec::new();
@@ -4164,35 +3976,10 @@ fn responses_tools(include_worker_tools: bool, include_native_tools: bool) -> Va
     Value::Array(tools)
 }
 
-fn function_calls(response: &Value) -> Vec<FunctionCall> {
-    response
-        .get("output")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            (item.get("type").and_then(Value::as_str) == Some("function_call"))
-                .then(|| {
-                    let call_id = item
-                        .get("call_id")
-                        .or_else(|| item.get("id"))
-                        .and_then(Value::as_str)?
-                        .to_owned();
-                    let name = item.get("name").and_then(Value::as_str)?.to_owned();
-                    let arguments = item
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .and_then(|value| serde_json::from_str(value).ok())
-                        .or_else(|| item.get("arguments").cloned())
-                        .unwrap_or_else(|| json!({}));
-                    Some(FunctionCall {
-                        call_id,
-                        name,
-                        arguments,
-                    })
-                })
-                .flatten()
-        })
+fn function_calls(output: &[ResponseItem]) -> Vec<crate::responses::FunctionCall> {
+    output
+        .iter()
+        .filter_map(ResponseItem::function_call)
         .collect()
 }
 
@@ -5072,11 +4859,11 @@ mod tests {
             &user,
             &thread,
             first_input,
-            &[json!({
+            &[ResponseItem::from_value(json!({
                 "type":"message",
                 "role":"assistant",
                 "content":[{"type":"output_text","text":"late"}]
-            })],
+            }))],
         )
         .await
         .unwrap();
@@ -5201,7 +4988,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            response_item_display(&item),
+            response_item_display(&ResponseItem::from_value(item)),
             (
                 "assistant".to_owned(),
                 "First thought.\n\nSecond thought.".to_owned(),
@@ -5223,33 +5010,6 @@ mod tests {
             prefix["content"].as_str().unwrap(),
             "Cybion Workers:\n- worker_id: 4b9aa3ae-f5a3-483b-975a-3fdcd148d680 (MBA)\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly."
         );
-    }
-
-    #[test]
-    fn utf8_fragmentation_and_sse_reassembly_are_stable() {
-        let fragments = split_utf8_by_bytes("甲乙丙丁", 4);
-        assert_eq!(fragments, vec!["甲", "乙", "丙", "丁"]);
-        let body = concat!(
-            "event: response.output_item.done\n",
-            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n\n",
-            "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let response = completed_response_from_sse(body).unwrap();
-        assert_eq!(response["output"][0]["content"][0]["text"], "hello");
-    }
-
-    #[test]
-    fn incomplete_response_with_generated_output_is_usable() {
-        let body = concat!(
-            "event: response.output_item.done\n",
-            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"usable\"}]}}\n\n",
-            "event: response.incomplete\n",
-            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_2\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"
-        );
-        let response = completed_response_from_sse(body).unwrap();
-        assert_eq!(response["output"][0]["content"][0]["text"], "usable");
     }
 
     #[test]
@@ -5373,6 +5133,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn responses_request_consumes_sse_incrementally_with_typed_items() {
+        let (_root, state) = test_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_json_request(&mut socket).await;
+            let body = concat!(
+                "data: {}\n\n",
+                "event: response.created\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+                "event: response.output_item.added\n",
+                "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"arguments\":\"\",\"call_id\":\"call_1\",\"name\":\"bash\"}}\n\n",
+                "event: response.function_call_arguments.delta\n",
+                "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"worker_id\\\":\\\"worker-1\\\"}\"}\n\n",
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"arguments\":\"\",\"call_id\":\"call_1\",\"name\":\"bash\"}}\n\n",
+                "event: response.output_item.added\n",
+                "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"content_index\":0,\"delta\":\"hello\"}\n\n",
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let headers =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            for chunk in body.as_bytes().chunks(7) {
+                socket.write_all(chunk).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+        let integrations = IntegrationSettings {
+            openai_consumer_id: "consumer".to_owned(),
+            openai_consumer_secret: "secret".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            linkit_bot_id: String::new(),
+            linkit_bot_token: String::new(),
+            linkit_username: String::new(),
+        };
+        let result = responses_request(
+            &state,
+            &integrations,
+            "test-model",
+            json!([{"role":"user","content":"hello"}]),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(result.value["id"], "resp_1");
+        let call = result.output_items[0].function_call().unwrap();
+        assert_eq!(call.call_id, "call_1");
+        assert_eq!(call.arguments["worker_id"], "worker-1");
+        assert_eq!(response_text(&result.value).as_deref(), Some("hello"));
+    }
+
     #[test]
     fn oversized_tool_output_is_bounded_only_in_replay() {
         let output = format!("{}终", "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS));
@@ -5389,56 +5212,6 @@ mod tests {
                 "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS),
                 TOOL_OUTPUT_TRUNCATED_NOTICE
             )
-        );
-    }
-
-    #[test]
-    fn sse_function_call_arguments_are_reassembled_without_output_item_done() {
-        let body = r#"event: response.output_item.added
-data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","arguments":"","call_id":"call_1","name":"bash"}}
-
-event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"worker_id\":\"worker-1\""}
-
-event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"}"}
-
-event: response.function_call_arguments.done
-data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"worker_id\":\"worker-1\"}"}
-
-event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}
-
-"#;
-        let response = completed_response_from_sse(body).unwrap();
-        let calls = function_calls(&response);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "bash");
-        assert_eq!(calls[0].arguments["worker_id"], "worker-1");
-    }
-
-    #[test]
-    fn sse_reasoning_summary_deltas_are_reassembled() {
-        let body = concat!(
-            "event: response.output_item.added\n",
-            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
-            "event: response.reasoning_summary_part.added\n",
-            "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
-            "event: response.reasoning_summary_text.delta\n",
-            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"First\"}\n\n",
-            "event: response.reasoning_summary_text.delta\n",
-            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\" thought.\"}\n\n",
-            "event: response.reasoning_summary_text.done\n",
-            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"summary_index\":0,\"text\":\"First thought.\"}\n\n",
-            "event: response.output_item.done\n",
-            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
-            "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"
-        );
-        let response = completed_response_from_sse(body).unwrap();
-        assert_eq!(
-            response["output"][0]["summary"][0]["text"],
-            "First thought."
         );
     }
 }
