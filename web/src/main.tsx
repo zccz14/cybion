@@ -1008,7 +1008,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
     </Message>
   }
 
-  if (record.kind === "tool_output" || record.role === "tool") {
+  if (record.kind === "tool_output") {
     return <div className="relative flex items-start gap-3 px-1">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground ring-1 ring-border">
         <TerminalSquareIcon className="size-4" />
@@ -1078,7 +1078,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
 }, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.role === next.record.role && previous.record.content === next.record.content && previous.record.visible === next.record.visible && previous.record.request_input_id === next.record.request_input_id && previous.record.created_at === next.record.created_at)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
-  if (record.kind === "tool_output" || record.role === "tool") return t("recordToolOutput")
+  if (record.kind === "tool_output") return t("recordToolOutput")
   if (record.kind === "activity") return t("recordActivity")
   if (record.kind === "checkpoint") return t("recordCheckpoint")
   return t("recordProtocol")
