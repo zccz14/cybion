@@ -19,6 +19,10 @@ The databases use WAL mode, foreign keys, and owner-only file permissions.
   its own audience.
 - Threads are independent. A user can create, rename, inspect, and delete
   them from the web UI.
+- Configuration lets each user save the default model, reasoning effort, and
+  Fast mode for new threads. These defaults are stored in the user's database
+  and apply to both web and API creation. An explicit API `model` overrides the
+  default model; existing threads keep their own settings.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record
