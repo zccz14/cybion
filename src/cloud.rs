@@ -309,6 +309,10 @@ fn recover_interrupted_requests(data_dir: &Path) -> Result<()> {
 fn app(state: AppState) -> Router {
     let browser_api = Router::new()
         .route("/api/me", get(me))
+        .route(
+            "/api/thread-defaults",
+            get(read_thread_defaults).put(update_thread_defaults),
+        )
         .route("/api/threads", get(list_threads).post(create_thread))
         .route(
             "/api/threads/{id}",
@@ -545,16 +549,25 @@ where
     .map_err(ApiError::internal)?
 }
 
-const USER_SCHEMA: &str = r#"
+const THREAD_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   model TEXT NOT NULL,
-  reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh')),
+  reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+"#;
+
+const USER_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_defaults (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
+  service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1))
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -655,6 +668,9 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_input_record
 "#;
 
 fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
+    // SQLite requires foreign keys to be disabled outside the transaction when
+    // rebuilding a referenced table; that migration checks relationships before commit.
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
     // Serialize first-open/reset work with SQLite's write lock. A user can be opened by
     // several request tasks at once, and both must not observe the old version and reset it
     // concurrently.
@@ -676,9 +692,36 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                  DROP TABLE IF EXISTS reasoning_audits;
                  DROP TABLE IF EXISTS history_records;
                  DROP TABLE IF EXISTS threads;
+                 DROP TABLE IF EXISTS thread_defaults;
                  DROP TABLE IF EXISTS integration_settings;",
             )
             .map_err(ApiError::internal)?;
+    }
+    transaction.execute_batch(THREAD_SCHEMA)?;
+    let thread_schema: String = transaction.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='threads'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !thread_schema.contains("'max'") {
+        // COMPATIBILITY: hosted databases before 0.3.25 reject the existing max
+        // option. Retire this rebuild after all user databases accept max and a
+        // schema audit confirms it; keep the preservation regression test.
+        transaction.execute_batch(&THREAD_SCHEMA.replace("threads", "threads_with_max"))?;
+        transaction.execute_batch(
+            "INSERT INTO threads_with_max(id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at)
+             SELECT id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at FROM threads;
+             DROP TABLE threads;
+             ALTER TABLE threads_with_max RENAME TO threads;",
+        )?;
+        let foreign_key_violation: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+            [],
+            |row| row.get(0),
+        )?;
+        if foreign_key_violation {
+            return Err(ApiError::internal("user database foreign key check failed"));
+        }
     }
     transaction
         .execute_batch(USER_SCHEMA)
@@ -710,7 +753,9 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(&format!("PRAGMA user_version = {USER_SCHEMA_VERSION};"))
         .map_err(ApiError::internal)?;
-    transaction.commit().map_err(ApiError::internal)
+    transaction.commit()?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
 }
 
 // Route implementations live below the persistence model so the user boundary
@@ -853,6 +898,24 @@ struct CreateThreadInput {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ThreadDefaults {
+    model: String,
+    reasoning_effort: String,
+    service_tier_fast: bool,
+}
+
+impl Default for ThreadDefaults {
+    fn default() -> Self {
+        Self {
+            model: DEFAULT_MODEL.to_owned(),
+            reasoning_effort: "medium".to_owned(),
+            service_tier_fast: false,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1061,8 +1124,7 @@ fn optional_title(value: Option<String>) -> Result<String, ApiError> {
     }
 }
 
-fn model_id(value: Option<String>) -> Result<String, ApiError> {
-    let value = value.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+fn model_id(value: String) -> Result<String, ApiError> {
     let value = value.trim();
     if value.is_empty()
         || value.len() > 128
@@ -1075,6 +1137,66 @@ fn model_id(value: Option<String>) -> Result<String, ApiError> {
         ));
     }
     Ok(value.to_owned())
+}
+
+fn reasoning_effort(value: String) -> Result<String, ApiError> {
+    if !matches!(
+        value.as_str(),
+        "none" | "low" | "medium" | "high" | "xhigh" | "max"
+    ) {
+        return Err(ApiError::bad_request("invalid reasoning effort"));
+    }
+    Ok(value)
+}
+
+fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
+    Ok(connection
+        .query_row(
+            "SELECT model,reasoning_effort,service_tier_fast FROM thread_defaults WHERE id=1",
+            [],
+            |row| {
+                Ok(ThreadDefaults {
+                    model: row.get(0)?,
+                    reasoning_effort: row.get(1)?,
+                    service_tier_fast: row.get::<_, i64>(2)? != 0,
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_default())
+}
+
+async fn read_thread_defaults(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<ThreadDefaults>, ApiError> {
+    user_db(&state, &identity.user, true, |connection| {
+        load_thread_defaults(connection)
+    })
+    .await
+    .map(Json)
+}
+
+async fn update_thread_defaults(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<ThreadDefaults>,
+) -> Result<Json<ThreadDefaults>, ApiError> {
+    let defaults = ThreadDefaults {
+        model: model_id(input.model)?,
+        reasoning_effort: reasoning_effort(input.reasoning_effort)?,
+        service_tier_fast: input.service_tier_fast,
+    };
+    user_db(&state, &identity.user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast) VALUES(1,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast",
+            params![defaults.model, defaults.reasoning_effort, defaults.service_tier_fast],
+        )?;
+        Ok(defaults)
+    })
+    .await
+    .map(Json)
 }
 
 fn input_text(value: String) -> Result<String, ApiError> {
@@ -1103,18 +1225,22 @@ async fn create_thread_for(
     user: &User,
     input: CreateThreadInput,
 ) -> Result<ThreadView, ApiError> {
-    let thread = ThreadView {
-        id: Uuid::new_v4().to_string(),
-        title: optional_title(input.title)?,
-        model: model_id(input.model)?,
-        reasoning_effort: "medium".to_owned(),
-        service_tier_fast: false,
-        status: "idle".to_owned(),
-        created_at: now(),
-        updated_at: now(),
-    };
+    let title = optional_title(input.title)?;
+    let model = input.model.map(model_id).transpose()?;
     user_db(state, user, true, move |connection| {
-        connection.execute(
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let defaults = load_thread_defaults(&transaction)?;
+        let thread = ThreadView {
+            id: Uuid::new_v4().to_string(),
+            title,
+            model: model.unwrap_or(defaults.model),
+            reasoning_effort: defaults.reasoning_effort,
+            service_tier_fast: defaults.service_tier_fast,
+            status: "idle".to_owned(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        transaction.execute(
             "INSERT INTO threads(id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
@@ -1127,6 +1253,7 @@ async fn create_thread_for(
                 thread.updated_at
             ],
         )?;
+        transaction.commit()?;
         Ok(thread)
     })
     .await
@@ -1438,20 +1565,8 @@ async fn update_thread(
         .title
         .map(|value| label(&value, "title", 160))
         .transpose()?;
-    let model = input.model.map(|value| model_id(Some(value))).transpose()?;
-    let reasoning_effort = input
-        .reasoning_effort
-        .map(|value| {
-            if matches!(
-                value.as_str(),
-                "none" | "low" | "medium" | "high" | "xhigh" | "max"
-            ) {
-                Ok(value)
-            } else {
-                Err(ApiError::bad_request("invalid reasoning effort"))
-            }
-        })
-        .transpose()?;
+    let model = input.model.map(model_id).transpose()?;
+    let reasoning_effort = input.reasoning_effort.map(reasoning_effort).transpose()?;
     if title.is_none()
         && model.is_none()
         && reasoning_effort.is_none()
@@ -4739,6 +4854,10 @@ async fn worker_result(
 #[cfg(test)]
 #[path = "cloud_response_tests.rs"]
 mod response_tests;
+
+#[cfg(test)]
+#[path = "cloud_settings_tests.rs"]
+mod settings_tests;
 
 #[cfg(test)]
 mod tests {

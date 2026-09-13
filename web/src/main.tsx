@@ -63,7 +63,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import {
   Message,
@@ -83,6 +83,7 @@ import { Progress } from "@/components/ui/progress"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -105,17 +106,22 @@ import {
 } from "@/components/ui/sidebar"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
+import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
 type Language = "en" | "zh"
+const THREAD_MODELS = ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra"] as const
+const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const
+type ThreadDefaults = {
+  model: string
+  reasoning_effort: typeof REASONING_EFFORTS[number]
+  service_tier_fast: boolean
+}
 type ThreadStatus = "idle" | "running" | "failed"
-type Thread = {
+type Thread = ThreadDefaults & {
   id: string
   title: string
-  model: string
-  reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh"
-  service_tier_fast: boolean
   status: ThreadStatus
   created_at: number
   updated_at: number
@@ -334,7 +340,17 @@ const copy = {
     userId: "User ID",
     sampled: "Sampled",
     configuration: "Configuration",
-    configurationDescription: "External integrations and workspace-owned access surfaces.",
+    configurationDescription: "Thread defaults, integrations, and workspace access.",
+    threadDefaults: "New thread defaults",
+    threadDefaultsDescription: "Applied when you create a thread. You can adjust these settings within each thread.",
+    reasoningEffort: "Reasoning effort",
+    fastMode: "Fast mode",
+    fastModeDescription: "Use priority processing for new threads.",
+    saveDefaults: "Save defaults",
+    savingDefaults: "Saving…",
+    defaultsSaved: "Defaults saved",
+    saveDefaultsError: "Could not save thread defaults",
+    integrationDescription: "External integrations connected to your workspace.",
     integration: "Integrations",
     refreshIntegrations: "Provision or refresh integrations",
     refreshing: "Refreshing…",
@@ -471,7 +487,17 @@ const copy = {
     userId: "用户 ID",
     sampled: "采样时间",
     configuration: "配置",
-    configurationDescription: "外部集成和当前工作区拥有的访问入口。",
+    configurationDescription: "线程默认设置、外部集成和工作区访问入口。",
+    threadDefaults: "新线程默认设置",
+    threadDefaultsDescription: "创建新线程时自动应用，也可以在每个线程中单独调整。",
+    reasoningEffort: "推理强度",
+    fastMode: "Fast 模式",
+    fastModeDescription: "新线程默认使用优先处理。",
+    saveDefaults: "保存默认设置",
+    savingDefaults: "保存中…",
+    defaultsSaved: "默认设置已保存",
+    saveDefaultsError: "无法保存线程默认设置",
+    integrationDescription: "连接到当前工作区的外部服务。",
     integration: "集成",
     refreshIntegrations: "开通或刷新集成",
     refreshing: "刷新中…",
@@ -961,7 +987,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
           <Button size="sm" disabled={rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
         </form> : <div className="min-w-0 flex-1"><h1 className="truncate text-base font-semibold">{current.title}</h1><p className="truncate text-xs text-muted-foreground">{current.model}</p></div>}
         <Badge variant={current.status === "failed" ? "destructive" : current.status === "running" ? "secondary" : "outline"}>{statusLabel(current.status, t)}</Badge>
-        {!editing && <div className="flex items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label="Model"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="gpt-5.6-terra">gpt-5.6-terra</SelectItem><SelectItem value="gpt-5.6-sol">gpt-5.6-sol</SelectItem><SelectItem value="gpt-5.6-luna">gpt-5.6-luna</SelectItem><SelectItem value="gpt-6-astra">gpt-6-astra</SelectItem></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label="Reasoning effort"><SelectValue /></SelectTrigger><SelectContent>{["none", "low", "medium", "high", "xhigh", "max"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
+        {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
       {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input.trim())} /></div>}
@@ -1328,13 +1354,81 @@ function MetricCard({ label, value, detail, progress }: { label: string; value: 
   return <Card><CardHeader><CardDescription>{label}</CardDescription><CardTitle className="text-2xl tabular-nums">{value}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{detail}{progress !== undefined && <Progress className="mt-3" value={Math.max(0, Math.min(100, progress))} />}</CardContent></Card>
 }
 
+function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
+  const { t } = useUi()
+  const client = useQueryClient()
+  const queryKey = ["thread-defaults", sdk.session.getState().sessionId]
+  const [draft, setDraft] = useState<ThreadDefaults | null>(null)
+  const defaults = useQuery({ queryKey, queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
+  const save = useMutation({
+    mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
+    onMutate: () => client.cancelQueries({ queryKey }),
+    onSuccess: (value) => {
+      client.setQueryData(queryKey, value)
+      setDraft(null)
+    },
+  })
+  const value = draft ?? defaults.data
+  const changed = value && defaults.data && (
+    value.model !== defaults.data.model ||
+    value.reasoning_effort !== defaults.data.reasoning_effort ||
+    value.service_tier_fast !== defaults.data.service_tier_fast
+  )
+  function edit(next: ThreadDefaults) {
+    setDraft(next)
+    save.reset()
+  }
+  return <Card>
+    <CardHeader><CardTitle>{t("threadDefaults")}</CardTitle><CardDescription>{t("threadDefaultsDescription")}</CardDescription></CardHeader>
+    <CardContent>
+      {defaults.error && <RequestError error={defaults.error} onRetry={() => void defaults.refetch()} />}
+      {defaults.isLoading && <div className="flex flex-col gap-4"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-9 w-36" /></div>}
+      {value && <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (changed && !save.isPending) save.mutate(value) }}>
+        <FieldGroup>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="default-thread-model">{t("model")}</FieldLabel>
+            <Select value={value.model} disabled={save.isPending} onValueChange={(model) => edit({ ...value, model })}>
+              <SelectTrigger id="default-thread-model"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectGroup>
+                {!THREAD_MODELS.some((model) => model === value.model) && <SelectItem value={value.model}>{value.model}</SelectItem>}
+                {THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
+              </SelectGroup></SelectContent>
+            </Select>
+          </Field>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="default-thread-reasoning">{t("reasoningEffort")}</FieldLabel>
+            <Select value={value.reasoning_effort} disabled={save.isPending} onValueChange={(effort) => edit({ ...value, reasoning_effort: effort as ThreadDefaults["reasoning_effort"] })}>
+              <SelectTrigger id="default-thread-reasoning"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectGroup>{REASONING_EFFORTS.map((effort) => <SelectItem key={effort} value={effort}>{effort}</SelectItem>)}</SelectGroup></SelectContent>
+            </Select>
+          </Field>
+          <Field orientation="horizontal" data-disabled={save.isPending}>
+            <FieldContent>
+              <FieldLabel htmlFor="default-thread-fast">{t("fastMode")}</FieldLabel>
+              <FieldDescription id="default-thread-fast-description">{t("fastModeDescription")}</FieldDescription>
+            </FieldContent>
+            <Switch id="default-thread-fast" aria-describedby="default-thread-fast-description" checked={value.service_tier_fast} disabled={save.isPending} onCheckedChange={(fast) => edit({ ...value, service_tier_fast: fast })} />
+          </Field>
+        </FieldGroup>
+        {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button disabled={!changed || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingDefaults") : t("saveDefaults")}</Button>
+          <p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("defaultsSaved")}</p>
+        </div>
+      </form>}
+    </CardContent>
+  </Card>
+}
+
 function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
+  const { session } = useAuthMini()
   const client = useQueryClient()
   const integrations = useQuery({ queryKey: ["integrations"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations") })
   const refresh = useMutation({ mutationFn: () => api<IntegrationStatus>(sdk, "/api/integrations/refresh", { method: "POST" }), onSuccess: (value) => client.setQueryData(["integrations"], value) })
   return <Page title={t("configuration")} description={t("configurationDescription")}>
-    <Card><CardHeader><CardTitle>{t("integration")}</CardTitle><CardDescription>{t("configurationDescription")}</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2">
+    <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
+    <Card><CardHeader><CardTitle>{t("integration")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2">
       {integrations.error && <div className="sm:col-span-2"><RequestError error={integrations.error} onRetry={() => void integrations.refetch()} /></div>}
       {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><IntegrationRow label={t("linkit")} configured={integrations.data.linkit_configured} detail={integrations.data.linkit_username ? `@${integrations.data.linkit_username}` : t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
       {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
