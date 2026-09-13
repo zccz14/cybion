@@ -33,6 +33,14 @@ test("every thread renders through the shared chat primitives", () => {
   assert.doesNotMatch(source, /<MessageHeader/)
 })
 
+test("history renders reasoning summaries and exposes OpenAI native tools", () => {
+  assert.match(source, /recordReasoning: "推理 \(Reasoning\)"/)
+  assert.match(source, /function isReasoningRecord\(record: HistoryRecord\)/)
+  assert.match(source, /function reasoningSummary\(record: HistoryRecord\)/)
+  assert.match(source, /detail: "web_search"/)
+  assert.match(source, /detail: "image_generation"/)
+})
+
 test("the management surfaces expose integration keys and SQLite-free Worker pairing", () => {
   assert.match(source, /\/api\/api-keys/)
   assert.match(source, /\/api\/workers/)

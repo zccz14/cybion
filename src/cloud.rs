@@ -2725,11 +2725,33 @@ fn response_item_display(item: &Value) -> (String, String, bool) {
             !content.trim().is_empty(),
         );
     }
+    if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+        let content = reasoning_summary(item);
+        return (
+            "assistant".to_owned(),
+            content.clone(),
+            !content.trim().is_empty(),
+        );
+    }
     (
         "tool".to_owned(),
         "Responses protocol item recorded".to_owned(),
         false,
     )
+}
+
+fn reasoning_summary(item: &Value) -> String {
+    item.get("summary")
+        .and_then(Value::as_array)
+        .map(|summary| {
+            summary
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
 }
 
 async fn append_response_output_items(
@@ -3355,6 +3377,7 @@ async fn responses_request(
         false,
         input,
         include_tools,
+        include_tools,
         max_output_tokens,
         None,
         None,
@@ -3398,6 +3421,7 @@ async fn responses_request_with_options(
         service_tier_fast,
         input,
         include_tools,
+        request_kind == "inference",
         max_output_tokens,
         developer_prefix,
         Some((audit, cancellation)),
@@ -3413,7 +3437,8 @@ async fn send_responses_request(
     reasoning_effort: Option<&str>,
     service_tier_fast: bool,
     input: Value,
-    include_tools: bool,
+    include_worker_tools: bool,
+    include_native_tools: bool,
     max_output_tokens: Option<usize>,
     developer_prefix: Option<Value>,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
@@ -3428,7 +3453,8 @@ async fn send_responses_request(
         reasoning_effort,
         service_tier_fast,
         input,
-        include_tools,
+        include_worker_tools,
+        include_native_tools,
         max_output_tokens,
         developer_prefix,
     );
@@ -3740,17 +3766,20 @@ fn responses_payload(
         false,
         input,
         include_tools,
+        include_tools,
         max_output_tokens,
         None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn responses_payload_with_prefix(
     model: &str,
     reasoning_effort: Option<&str>,
     service_tier_fast: bool,
     input: Value,
-    include_tools: bool,
+    include_worker_tools: bool,
+    include_native_tools: bool,
     max_output_tokens: Option<usize>,
     developer_prefix: Option<Value>,
 ) -> Value {
@@ -3769,8 +3798,8 @@ fn responses_payload_with_prefix(
     if service_tier_fast {
         payload["service_tier"] = json!("priority");
     }
-    if include_tools {
-        payload["tools"] = worker_tools();
+    if include_worker_tools || include_native_tools {
+        payload["tools"] = responses_tools(include_worker_tools, include_native_tools);
         payload["tool_choice"] = json!("auto");
     } else {
         // Compaction and requests without a Worker must never turn replayed history into a tool call.
@@ -3918,13 +3947,57 @@ fn completed_response_from_sse(body: &str) -> Result<Value> {
                     item["arguments"] = Value::String(arguments.to_owned());
                 }
             }
+            "response.reasoning_summary_part.added" => {
+                if let (Some(item_id), Some(summary_index), Some(part)) = (
+                    event.get("item_id").and_then(Value::as_str),
+                    event.get("summary_index").and_then(Value::as_u64),
+                    event.get("part"),
+                ) && let Some(index) = output_indices.get(item_id).copied()
+                    && let Some(item) = output.get_mut(index)
+                {
+                    set_reasoning_summary_part(item, summary_index as usize, part.clone());
+                }
+            }
+            "response.reasoning_summary_text.delta" => {
+                if let (Some(item_id), Some(summary_index), Some(delta)) = (
+                    event.get("item_id").and_then(Value::as_str),
+                    event.get("summary_index").and_then(Value::as_u64),
+                    event.get("delta").and_then(Value::as_str),
+                ) && let Some(index) = output_indices.get(item_id).copied()
+                    && let Some(item) = output.get_mut(index)
+                {
+                    append_reasoning_summary_text(item, summary_index as usize, delta);
+                }
+            }
+            "response.reasoning_summary_text.done" => {
+                if let (Some(item_id), Some(summary_index), Some(text)) = (
+                    event.get("item_id").and_then(Value::as_str),
+                    event.get("summary_index").and_then(Value::as_u64),
+                    event.get("text").and_then(Value::as_str),
+                ) && let Some(index) = output_indices.get(item_id).copied()
+                    && let Some(item) = output.get_mut(index)
+                {
+                    set_reasoning_summary_text(item, summary_index as usize, text);
+                }
+            }
             "response.output_item.done" => {
                 if let Some(item) = event.get("item") {
-                    let index = remember_response_output_item(
-                        &mut output,
-                        &mut output_indices,
-                        item.clone(),
-                    );
+                    let mut item = item.clone();
+                    if item.get("type").and_then(Value::as_str) == Some("reasoning")
+                        && item
+                            .get("summary")
+                            .and_then(Value::as_array)
+                            .is_some_and(Vec::is_empty)
+                        && let Some(item_id) = item.get("id").and_then(Value::as_str)
+                        && let Some(index) = output_indices.get(item_id).copied()
+                        && let Some(summary) = output[index].get("summary").filter(|summary| {
+                            summary.as_array().is_some_and(|value| !value.is_empty())
+                        })
+                    {
+                        item["summary"] = summary.clone();
+                    }
+                    let index =
+                        remember_response_output_item(&mut output, &mut output_indices, item);
                     completed_output_indices.insert(index);
                 }
             }
@@ -3996,6 +4069,41 @@ fn completed_response_from_sse(body: &str) -> Result<Value> {
     }
 }
 
+fn set_reasoning_summary_part(item: &mut Value, summary_index: usize, part: Value) {
+    let Some(summary) = item.get_mut("summary").and_then(Value::as_array_mut) else {
+        item["summary"] = Value::Array(Vec::new());
+        return set_reasoning_summary_part(item, summary_index, part);
+    };
+    while summary.len() <= summary_index {
+        summary.push(json!({"type":"summary_text","text":""}));
+    }
+    summary[summary_index] = part;
+}
+
+fn append_reasoning_summary_text(item: &mut Value, summary_index: usize, delta: &str) {
+    let current = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .and_then(|summary| summary.get(summary_index))
+        .and_then(|part| part.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    set_reasoning_summary_text(item, summary_index, &format!("{current}{delta}"));
+}
+
+fn set_reasoning_summary_text(item: &mut Value, summary_index: usize, text: &str) {
+    let Some(summary) = item.get_mut("summary").and_then(Value::as_array_mut) else {
+        item["summary"] = Value::Array(Vec::new());
+        return set_reasoning_summary_text(item, summary_index, text);
+    };
+    while summary.len() <= summary_index {
+        summary.push(json!({"type":"summary_text","text":""}));
+    }
+    summary[summary_index]["type"] = json!("summary_text");
+    summary[summary_index]["text"] = json!(text);
+}
+
 fn sse_event_data(block: &str) -> Option<(Option<&str>, String)> {
     let mut event_name = None;
     let mut data = Vec::new();
@@ -4036,6 +4144,24 @@ fn worker_tools() -> Value {
             "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact available Worker ID."},"action":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"text":{"type":"string"}},"required":["worker_id","action"],"additionalProperties":false}
         }
     ])
+}
+
+fn native_tools() -> Value {
+    json!([
+        {"type":"web_search"},
+        {"type":"image_generation"}
+    ])
+}
+
+fn responses_tools(include_worker_tools: bool, include_native_tools: bool) -> Value {
+    let mut tools = Vec::new();
+    if include_worker_tools {
+        tools.extend(worker_tools().as_array().cloned().unwrap_or_default());
+    }
+    if include_native_tools {
+        tools.extend(native_tools().as_array().cloned().unwrap_or_default());
+    }
+    Value::Array(tools)
 }
 
 fn function_calls(response: &Value) -> Vec<FunctionCall> {
@@ -5050,6 +5176,41 @@ mod tests {
     }
 
     #[test]
+    fn responses_tools_include_native_tools_without_workers() {
+        let tools = responses_tools(false, true);
+        assert_eq!(
+            tools,
+            json!([
+                {"type":"web_search"},
+                {"type":"image_generation"}
+            ])
+        );
+        let worker_and_native = responses_tools(true, true);
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 5);
+        assert_eq!(worker_and_native[3]["type"], "web_search");
+        assert_eq!(worker_and_native[4]["type"], "image_generation");
+    }
+
+    #[test]
+    fn reasoning_output_uses_summary_as_visible_assistant_content() {
+        let item = json!({
+            "type":"reasoning",
+            "summary":[
+                {"type":"summary_text","text":"First thought."},
+                {"type":"summary_text","text":"Second thought."}
+            ]
+        });
+        assert_eq!(
+            response_item_display(&item),
+            (
+                "assistant".to_owned(),
+                "First thought.\n\nSecond thought.".to_owned(),
+                true
+            )
+        );
+    }
+
+    #[test]
     fn worker_developer_prefix_uses_markdown_ids_and_names_only() {
         let prefix = worker_developer_prefix(&[WorkerSnapshot {
             id: "4b9aa3ae-f5a3-483b-975a-3fdcd148d680".to_owned(),
@@ -5177,6 +5338,14 @@ mod tests {
                 .unwrap()
                 .contains("worker_id")
         );
+        assert_eq!(
+            request["tools"],
+            json!([
+                {"type":"web_search"},
+                {"type":"image_generation"}
+            ])
+        );
+        assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(
                 "SELECT input_record_id,idx_head,idx_tail,status,input_tokens,output_tokens FROM reasoning_audits",
@@ -5246,5 +5415,30 @@ data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "bash");
         assert_eq!(calls[0].arguments["worker_id"], "worker-1");
+    }
+
+    #[test]
+    fn sse_reasoning_summary_deltas_are_reassembled() {
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+            "event: response.reasoning_summary_part.added\n",
+            "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+            "event: response.reasoning_summary_text.delta\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"First\"}\n\n",
+            "event: response.reasoning_summary_text.delta\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\" thought.\"}\n\n",
+            "event: response.reasoning_summary_text.done\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"summary_index\":0,\"text\":\"First thought.\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"
+        );
+        let response = completed_response_from_sse(body).unwrap();
+        assert_eq!(
+            response["output"][0]["summary"][0]["text"],
+            "First thought."
+        );
     }
 }
