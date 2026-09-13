@@ -3847,8 +3847,30 @@ fn context_overflow_value(value: &Value) -> bool {
     )
 }
 
+fn remember_response_output_item(
+    output: &mut Vec<Value>,
+    output_indices: &mut HashMap<String, usize>,
+    item: Value,
+) -> usize {
+    let item_id = item.get("id").and_then(Value::as_str).map(str::to_owned);
+    let Some(item_id) = item_id else {
+        output.push(item);
+        return output.len() - 1;
+    };
+    if let Some(index) = output_indices.get(&item_id).copied() {
+        output[index] = item;
+        return index;
+    }
+    let index = output.len();
+    output.push(item);
+    output_indices.insert(item_id, index);
+    index
+}
+
 fn completed_response_from_sse(body: &str) -> Result<Value> {
     let mut output = Vec::new();
+    let mut output_indices = HashMap::new();
+    let mut completed_output_indices = HashSet::new();
     let mut saw_done = false;
     let normalized = body.replace("\r\n", "\n");
     for block in normalized.split("\n\n") {
@@ -3867,9 +3889,43 @@ fn completed_response_from_sse(body: &str) -> Result<Value> {
             .or(event_name)
             .unwrap_or_default();
         match event_type {
+            "response.output_item.added" => {
+                if let Some(item) = event.get("item") {
+                    remember_response_output_item(&mut output, &mut output_indices, item.clone());
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let (Some(item_id), Some(delta)) = (
+                    event.get("item_id").and_then(Value::as_str),
+                    event.get("delta").and_then(Value::as_str),
+                ) && let Some(index) = output_indices.get(item_id).copied()
+                    && let Some(item) = output.get_mut(index)
+                {
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    item["arguments"] = Value::String(format!("{arguments}{delta}"));
+                }
+            }
+            "response.function_call_arguments.done" => {
+                if let (Some(item_id), Some(arguments)) = (
+                    event.get("item_id").and_then(Value::as_str),
+                    event.get("arguments").and_then(Value::as_str),
+                ) && let Some(index) = output_indices.get(item_id).copied()
+                    && let Some(item) = output.get_mut(index)
+                {
+                    item["arguments"] = Value::String(arguments.to_owned());
+                }
+            }
             "response.output_item.done" => {
                 if let Some(item) = event.get("item") {
-                    output.push(item.clone());
+                    let index = remember_response_output_item(
+                        &mut output,
+                        &mut output_indices,
+                        item.clone(),
+                    );
+                    completed_output_indices.insert(index);
                 }
             }
             "response.completed" => {
@@ -3877,7 +3933,15 @@ fn completed_response_from_sse(body: &str) -> Result<Value> {
                     .get("response")
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Responses completion has no response"))?;
-                if output.is_empty()
+                if !completed_output_indices.is_empty() {
+                    output = output
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, item)| {
+                            completed_output_indices.contains(&index).then_some(item)
+                        })
+                        .collect();
+                } else if output.is_empty()
                     && let Some(existing) = response.get("output").and_then(Value::as_array)
                 {
                     output = existing.clone();
@@ -3890,7 +3954,15 @@ fn completed_response_from_sse(body: &str) -> Result<Value> {
                     .get("response")
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("incomplete response has no response"))?;
-                if output.is_empty()
+                if !completed_output_indices.is_empty() {
+                    output = output
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, item)| {
+                            completed_output_indices.contains(&index).then_some(item)
+                        })
+                        .collect();
+                } else if output.is_empty()
                     && let Some(existing) = response.get("output").and_then(Value::as_array)
                 {
                     output = existing.clone();
@@ -5149,5 +5221,30 @@ mod tests {
                 TOOL_OUTPUT_TRUNCATED_NOTICE
             )
         );
+    }
+
+    #[test]
+    fn sse_function_call_arguments_are_reassembled_without_output_item_done() {
+        let body = r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","arguments":"","call_id":"call_1","name":"bash"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"worker_id\":\"worker-1\""}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"worker_id\":\"worker-1\"}"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}
+
+"#;
+        let response = completed_response_from_sse(body).unwrap();
+        let calls = function_calls(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].arguments["worker_id"], "worker-1");
     }
 }
