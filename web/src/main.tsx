@@ -188,6 +188,45 @@ type ReasoningAuditPage = {
   page: number
   page_size: number
 }
+type InsightModel = {
+  model: string
+  calls: number
+  completed: number
+  in_flight: number
+  failed: number
+  cancelled: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  cached_tokens: number
+  cache_hit_rate: number | null
+  input_output_ratio: number | null
+}
+type InsightWorkerItem = {
+  worker_id: string
+  worker_label: string
+  calls: number
+  read_bytes: number
+  write_bytes: number
+}
+type Insights = {
+  range: "24h" | "7d" | "30d" | "all"
+  generated_at: number
+  tokens: {
+    completed_requests: number
+    input_tokens: number
+    output_tokens: number
+    total_tokens: number
+    cached_tokens: number
+    cache_hit_rate: number | null
+    input_output_ratio: number | null
+  }
+  requests: { total: number; completed: number; in_flight: number; failed: number; cancelled: number }
+  by_model: InsightModel[]
+  worker: { calls: number; read_bytes: number; write_bytes: number; by_worker: InsightWorkerItem[] }
+  history: { total_records: number; payload_bytes: number; checkpoint_count: number; latest_record_at: number | null; kinds: { key: string; count: number }[] }
+  dimensions: { thread_ids: string[]; models: string[]; request_kinds: string[] }
+}
 type IntegrationStatus = {
   openai_configured: boolean
   openai_consumer_id: string | null
@@ -297,6 +336,7 @@ const copy = {
     recordPayload: "View raw payload",
     navWork: "Work",
     navAudit: "Audit",
+    inferenceStats: "Inference statistics",
     navSystem: "System",
     navConfiguration: "Configuration",
     audit: "Reasoning audit",
@@ -328,6 +368,46 @@ const copy = {
     saveWorker: "Save name",
     workerAuditRange: "{from}–{to} of {total} calls",
     auditRange: "{from}–{to} of {total} requests",
+    inferenceStatsDescription: "Token usage, cache efficiency, input/output ratio, calls by model, and Worker byte consumption.",
+    statsRange: "Time range",
+    stats24h: "Last 24 hours",
+    stats7d: "Last 7 days",
+    stats30d: "Last 30 days",
+    statsAll: "All time",
+    statsModel: "Model",
+    statsAllModels: "All models",
+    statsRequestKind: "Request type",
+    statsAllRequestKinds: "All request types",
+    statsClearFilters: "Clear filters",
+    statsGenerated: "Aggregated {time}",
+    statsTokenUsage: "Token usage",
+    statsCompletedRequests: "Completed requests",
+    statsInputTokens: "Input tokens",
+    statsOutputTokens: "Output tokens",
+    statsTotalTokens: "Total tokens",
+    statsCachedTokens: "Cached input",
+    statsCacheRate: "Cache rate",
+    statsInputOutputRatio: "Input / output",
+    statsRequests: "Request outcomes",
+    statsCalls: "Calls",
+    statsCompleted: "Completed",
+    statsInFlight: "In flight",
+    statsFailed: "Failed",
+    statsCancelled: "Cancelled",
+    statsByModel: "By model",
+    statsWorkerBytes: "Worker bytes",
+    statsWorkerBytesDescription: "Bytes in Worker call payloads: arguments read by the Worker and results written back.",
+    statsWorkerCalls: "Worker calls",
+    statsReadBytes: "Read Bytes",
+    statsWriteBytes: "Write Bytes",
+    statsWorker: "Worker",
+    statsNoWorkers: "No Worker calls in this range.",
+    statsHistory: "Protocol history",
+    statsHistoryRecords: "Records",
+    statsPayloadBytes: "Payload bytes",
+    statsCheckpoints: "Checkpoints",
+    statsLatestRecord: "Latest record",
+    statsNoData: "No statistics for this range.",
     previous: "Previous",
     next: "Next",
     pageSize: "Per page",
@@ -444,6 +524,7 @@ const copy = {
     recordPayload: "查看原始负载",
     navWork: "工作",
     navAudit: "审计",
+    inferenceStats: "推理统计",
     navSystem: "系统",
     navConfiguration: "配置",
     audit: "推理审计",
@@ -475,6 +556,46 @@ const copy = {
     saveWorker: "保存名称",
     workerAuditRange: "第 {from}–{to} 条，共 {total} 次调用",
     auditRange: "第 {from}–{to} 条，共 {total} 个请求",
+    inferenceStatsDescription: "按模型查看 Token 用量、缓存效率、输入输出比、调用次数，以及 Worker 字节消耗。",
+    statsRange: "时间范围",
+    stats24h: "近 24 小时",
+    stats7d: "近 7 天",
+    stats30d: "近 30 天",
+    statsAll: "全部时间",
+    statsModel: "模型",
+    statsAllModels: "全部模型",
+    statsRequestKind: "请求类型",
+    statsAllRequestKinds: "全部请求类型",
+    statsClearFilters: "清除筛选",
+    statsGenerated: "聚合时间 {time}",
+    statsTokenUsage: "Token 用量",
+    statsCompletedRequests: "已完成请求",
+    statsInputTokens: "输入 Token",
+    statsOutputTokens: "输出 Token",
+    statsTotalTokens: "总 Token",
+    statsCachedTokens: "缓存输入",
+    statsCacheRate: "缓存率",
+    statsInputOutputRatio: "输入 / 输出",
+    statsRequests: "请求结果",
+    statsCalls: "调用次数",
+    statsCompleted: "已完成",
+    statsInFlight: "在途",
+    statsFailed: "失败",
+    statsCancelled: "已取消",
+    statsByModel: "按模型",
+    statsWorkerBytes: "Worker 字节",
+    statsWorkerBytesDescription: "Worker 调用负载的字节数：Worker 读取的参数与写回的结果。",
+    statsWorkerCalls: "Worker 调用",
+    statsReadBytes: "读取 Bytes",
+    statsWriteBytes: "写入 Bytes",
+    statsWorker: "Worker",
+    statsNoWorkers: "当前范围没有 Worker 调用。",
+    statsHistory: "协议历史",
+    statsHistoryRecords: "记录数",
+    statsPayloadBytes: "负载字节",
+    statsCheckpoints: "检查点",
+    statsLatestRecord: "最近记录",
+    statsNoData: "当前范围没有统计数据。",
     previous: "上一页",
     next: "下一页",
     pageSize: "每页",
@@ -757,6 +878,7 @@ function WorkspaceShell({
     { to: "/threads", label: t("threads"), icon: TerminalSquareIcon },
   ]
   const auditNav = [
+    { to: "/insights", label: t("inferenceStats"), icon: ActivityIcon },
     { to: "/reasoning-audit", label: t("audit"), icon: ActivityIcon },
     { to: "/worker-audit", label: t("workerAudit"), icon: WrenchIcon },
     { to: "/history", label: t("history"), icon: DatabaseIcon },
@@ -826,6 +948,7 @@ function WorkspaceShell({
           <Routes>
             <Route path="/threads" element={<ThreadsPage threads={threads} loading={threadsLoading} error={threadsError} onCreate={onCreate} />} />
             <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={onCreate} />} />
+            <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
             <Route path="/history" element={<HistoryPage threads={threads} />} />
@@ -845,6 +968,7 @@ function WorkspaceShell({
 }
 
 function pageTitle(pathname: string, t: (key: CopyKey) => string) {
+  if (pathname.startsWith("/insights")) return t("inferenceStats")
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/history")) return t("history")
@@ -1238,6 +1362,87 @@ function historyRecordText(record: HistoryRecord) {
   if (record.kind === "tool_output" && typeof object?.output === "string") return object.output
   if (record.content.trim()) return record.content
   return JSON.stringify(payload, null, 2)
+}
+
+function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t, language } = useUi()
+  const [range, setRange] = useState<Insights["range"]>("7d")
+  const [model, setModel] = useState("all")
+  const [requestKind, setRequestKind] = useState("all")
+  const query = useQuery({
+    queryKey: ["insights", range, model, requestKind],
+    queryFn: () => {
+      const params = new URLSearchParams({ range })
+      if (model !== "all") params.set("model", model)
+      if (requestKind !== "all") params.set("request_kind", requestKind)
+      return api<Insights>(sdk, `/api/insights?${params}`)
+    },
+    refetchInterval: 5000,
+  })
+  const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
+  const rate = (value: number | null) => value === null
+    ? "—"
+    : `${value.toLocaleString(language === "zh" ? "zh-CN" : "en", { maximumFractionDigits: 1 })}%`
+  const ratio = (value: number | null) => value === null
+    ? "—"
+    : `${value.toLocaleString(language === "zh" ? "zh-CN" : "en", { maximumFractionDigits: 2 })}:1`
+  const clear = () => { setRange("7d"); setModel("all"); setRequestKind("all") }
+  if (query.error) return <Page title={t("inferenceStats")} description={t("inferenceStatsDescription")}><RequestError error={query.error} onRetry={() => void query.refetch()} /></Page>
+  if (!query.data) return <Page title={t("inferenceStats")} description={t("inferenceStatsDescription")}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t("inferenceStats")}</CardContent></Card></Page>
+  const data = query.data
+  const tokenMetrics = [
+    [t("statsCompletedRequests"), number(data.tokens.completed_requests)],
+    [t("statsInputTokens"), number(data.tokens.input_tokens)],
+    [t("statsOutputTokens"), number(data.tokens.output_tokens)],
+    [t("statsTotalTokens"), number(data.tokens.total_tokens)],
+    [t("statsCachedTokens"), number(data.tokens.cached_tokens)],
+    [t("statsCacheRate"), rate(data.tokens.cache_hit_rate)],
+    [t("statsInputOutputRatio"), ratio(data.tokens.input_output_ratio)],
+  ]
+  const outcomes: { label: string; count: number; variant: "outline" | "secondary" | "destructive" }[] = [
+    { label: t("statsCalls"), count: data.requests.total, variant: "outline" },
+    { label: t("statsCompleted"), count: data.requests.completed, variant: "secondary" },
+    { label: t("statsInFlight"), count: data.requests.in_flight, variant: "secondary" },
+    { label: t("statsFailed"), count: data.requests.failed, variant: "destructive" },
+    { label: t("statsCancelled"), count: data.requests.cancelled, variant: "outline" },
+  ]
+  return <Page title={t("inferenceStats")} description={t("inferenceStatsDescription")}>
+    <Card>
+      <CardContent className="flex flex-wrap items-center gap-2 pt-6">
+        <Select value={range} onValueChange={(value) => setRange(value as Insights["range"])}>
+          <SelectTrigger aria-label={t("statsRange")} size="sm"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="24h">{t("stats24h")}</SelectItem><SelectItem value="7d">{t("stats7d")}</SelectItem><SelectItem value="30d">{t("stats30d")}</SelectItem><SelectItem value="all">{t("statsAll")}</SelectItem></SelectContent>
+        </Select>
+        <Select value={model} onValueChange={setModel}>
+          <SelectTrigger aria-label={t("statsModel")} size="sm"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="all">{t("statsAllModels")}</SelectItem>{data.dimensions.models.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent>
+        </Select>
+        <Select value={requestKind} onValueChange={setRequestKind}>
+          <SelectTrigger aria-label={t("statsRequestKind")} size="sm"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="all">{t("statsAllRequestKinds")}</SelectItem>{data.dimensions.request_kinds.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent>
+        </Select>
+        <Button type="button" variant="outline" size="sm" onClick={clear}><RefreshCwIcon data-icon="inline-start" />{t("statsClearFilters")}</Button>
+      </CardContent>
+    </Card>
+    <p className="text-xs text-muted-foreground">{t("statsGenerated").replace("{time}", formattedTime(language, data.generated_at))}</p>
+    <Card>
+      <CardHeader><CardTitle>{t("statsTokenUsage")}</CardTitle><CardDescription>{t("statsByModel")}</CardDescription></CardHeader>
+      <CardContent>
+        <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">{tokenMetrics.map(([label, value]) => <div key={String(label)}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{value}</dd></div>)}</dl>
+      </CardContent>
+    </Card>
+    <Card>
+      <CardHeader><CardTitle>{t("statsByModel")}</CardTitle><CardDescription>{number(data.requests.total)} {t("statsCalls")}</CardDescription></CardHeader>
+      <CardContent>
+        {data.by_model.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoData")}</p> : <div className="overflow-x-auto"><table className="w-full min-w-[66rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("statsModel")}</th><th className="px-3 py-2 font-medium">{t("statsCalls")}</th><th className="px-3 py-2 font-medium">{t("statsInputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsOutputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsTotalTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCachedTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("statsInputOutputRatio")}</th></tr></thead><tbody className="divide-y">{data.by_model.map((item) => <tr key={item.model} className="align-top"><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{number(item.completed)} {t("statsCompleted")}</p></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.calls)}<p className="mt-1 text-xs text-muted-foreground">{number(item.in_flight)} {t("statsInFlight")}</p></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.input_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.output_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.total_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.cached_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{rate(item.cache_hit_rate)}</td><td className="px-3 py-3 font-mono tabular-nums">{ratio(item.input_output_ratio)}</td></tr>)}</tbody></table></div>}
+      </CardContent>
+    </Card>
+    <section className="grid gap-4 xl:grid-cols-2">
+      <Card><CardHeader><CardTitle>{t("statsRequests")}</CardTitle></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2">{outcomes.map(({ label, count, variant }) => <div className="flex items-center justify-between rounded-lg border px-3 py-2" key={label}><Badge variant={variant}>{label}</Badge><span className="font-mono text-sm tabular-nums">{number(count)}</span></div>)}</CardContent></Card>
+      <Card><CardHeader><CardTitle>{t("statsWorkerBytes")}</CardTitle><CardDescription>{t("statsWorkerBytesDescription")}</CardDescription></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-3"><div><dt className="text-xs text-muted-foreground">{t("statsWorkerCalls")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.worker.calls)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsReadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.read_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsWriteBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.write_bytes)}</dd></div></dl>{data.worker.by_worker.length === 0 ? <p className="mt-6 text-sm text-muted-foreground">{t("statsNoWorkers")}</p> : <div className="mt-6 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-2 py-2 font-medium">{t("statsWorker")}</th><th className="px-2 py-2 font-medium">{t("statsCalls")}</th><th className="px-2 py-2 font-medium">{t("statsReadBytes")}</th><th className="px-2 py-2 font-medium">{t("statsWriteBytes")}</th></tr></thead><tbody className="divide-y">{data.worker.by_worker.map((item) => <tr key={item.worker_id}><td className="px-2 py-2"><p>{item.worker_label}</p><code className="text-xs text-muted-foreground">{item.worker_id}</code></td><td className="px-2 py-2 font-mono tabular-nums">{number(item.calls)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.read_bytes)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.write_bytes)}</td></tr>)}</tbody></table></div>}</CardContent></Card>
+    </section>
+    <Card><CardHeader><CardTitle>{t("statsHistory")}</CardTitle></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><div><dt className="text-xs text-muted-foreground">{t("statsHistoryRecords")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.total_records)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsPayloadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.history.payload_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsCheckpoints")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.checkpoint_count)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsLatestRecord")}</dt><dd className="mt-1 text-sm font-medium">{formattedTime(language, data.history.latest_record_at)}</dd></div></dl></CardContent></Card>
+  </Page>
 }
 
 function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
