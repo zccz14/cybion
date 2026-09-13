@@ -24,6 +24,7 @@ import { LinkitMyInfo, LinkitProvider } from "linkit-react-components"
 import {
   ActivityIcon,
   CheckIcon,
+  ChevronDownIcon,
   CircleAlertIcon,
   CopyIcon,
   DatabaseIcon,
@@ -37,10 +38,13 @@ import {
   SendIcon,
   Settings2Icon,
   SunIcon,
+  SparklesIcon,
   TerminalSquareIcon,
   Trash2Icon,
   WrenchIcon,
 } from "lucide-react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -275,6 +279,12 @@ const copy = {
     user: "You",
     worker: "Worker",
     close: "Close",
+    recordToolOutput: "Worker result",
+    recordActivity: "Activity",
+    recordCheckpoint: "Checkpoint",
+    recordProtocol: "Protocol event",
+    recordHidden: "Internal",
+    recordPayload: "View raw payload",
     navWork: "Work",
     navAudit: "Audit",
     navSystem: "System",
@@ -401,6 +411,12 @@ const copy = {
     user: "你",
     worker: "Worker",
     close: "关闭",
+    recordToolOutput: "Worker 结果",
+    recordActivity: "活动记录",
+    recordCheckpoint: "上下文检查点",
+    recordProtocol: "协议事件",
+    recordHidden: "内部记录",
+    recordPayload: "查看原始负载",
     navWork: "工作",
     navAudit: "审计",
     navSystem: "系统",
@@ -957,6 +973,9 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
 }
 
 const HistoryMessage = memo(function HistoryMessage({ language, record }: { language: Language; record: HistoryRecord }) {
+  const { t } = useUi()
+  const text = historyRecordText(record)
+  const time = formattedTime(language, record.created_at)
   const isUserInput = record.kind === "input" && record.role === "user"
   if (isUserInput) {
     return <Message align="end">
@@ -964,21 +983,127 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
         <MessageGroup>
           <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground">{record.content}</div>
         </MessageGroup>
-        <MessageFooter>#{record.id} · {formattedTime(language, record.created_at)}</MessageFooter>
+        <MessageFooter>#{record.id} · {time}</MessageFooter>
       </MessageContent>
     </Message>
   }
-  return <div className={`rounded-lg border px-3 py-3 ${record.visible ? "bg-card" : "bg-muted/40 text-muted-foreground"}`}>
-    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-      <code>{record.kind}</code>
-      <span>#{record.id}</span>
-      {record.request_input_id !== null && <span>input #{record.request_input_id}</span>}
-      <span>{formattedTime(language, record.created_at)}</span>
-      {!record.visible && <span>hidden</span>}
+
+  if (record.role === "assistant" && record.kind === "response_output") {
+    return <Message className="items-start">
+      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
+        <SparklesIcon className="size-4" />
+      </div>
+      <MessageContent className="gap-1.5">
+        <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+          <span className="text-sm font-medium text-foreground">{t("assistant")}</span>
+          <span aria-hidden="true">·</span>
+          <time>{time}</time>
+        </div>
+        <div className="max-w-[75ch] rounded-2xl rounded-tl-md bg-card px-4 py-3 shadow-sm ring-1 ring-foreground/10">
+          <div className="prose prose-sm max-w-none break-words dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+          </div>
+        </div>
+      </MessageContent>
+    </Message>
+  }
+
+  if (record.kind === "tool_output" || record.role === "tool") {
+    return <div className="relative flex items-start gap-3 px-1">
+      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground ring-1 ring-border">
+        <TerminalSquareIcon className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-medium">{t("recordToolOutput")}</span>
+          <Badge variant="secondary" className="h-5 gap-1 px-1.5 text-[0.68rem]">
+            <span aria-hidden="true" className="size-1.5 rounded-full bg-primary" />
+            {t("worker")}
+          </Badge>
+          <time className="text-xs text-muted-foreground">{time}</time>
+        </div>
+        <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>
+        <details className="group mt-2">
+          <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <span>{t("recordPayload")}</span>
+            <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+          </summary>
+          <HistoryRecordPayload language={language} record={record} />
+        </details>
+      </div>
     </div>
-    <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-6">{historyRecordText(record)}</pre>
+  }
+
+  if (!record.visible) {
+    const Icon = record.kind === "checkpoint" ? DatabaseIcon : ActivityIcon
+    return <div className="relative flex items-start gap-3 px-1">
+      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border/80">
+        <Icon className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-medium text-muted-foreground">{historyRecordLabel(record, t)}</span>
+          <Badge variant="outline" className="h-5 px-1.5 text-[0.68rem] text-muted-foreground">{t("recordHidden")}</Badge>
+          <time className="text-xs text-muted-foreground">{time}</time>
+        </div>
+        <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>
+        <details className="group mt-2">
+          <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <span>{t("recordPayload")}</span>
+            <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+          </summary>
+          <HistoryRecordPayload language={language} record={record} />
+        </details>
+      </div>
+    </div>
+  }
+
+  const isFailure = record.role === "system" && text.startsWith("Request failed:")
+  return <div className={`flex items-start gap-3 rounded-xl border px-3 py-3 ${isFailure ? "border-destructive/35 bg-destructive/5" : "border-border/70 bg-card/70"}`}>
+    <div aria-hidden="true" className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg ring-1 ${isFailure ? "bg-destructive/10 text-destructive ring-destructive/20" : "bg-muted text-muted-foreground ring-border/80"}`}>
+      {isFailure ? <CircleAlertIcon className="size-4" /> : <ActivityIcon className="size-4" />}
+    </div>
+    <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className={`text-sm font-medium ${isFailure ? "text-destructive" : ""}`}>{historyRecordLabel(record, t)}</span>
+        <time className="text-xs text-muted-foreground">{time}</time>
+      </div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-sm leading-6">{text}</div>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.68rem] text-muted-foreground">
+        <span className="font-mono">#{record.id}</span>
+        {record.request_input_id !== null && <span>input #{record.request_input_id}</span>}
+      </div>
+    </div>
   </div>
 }, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.role === next.record.role && previous.record.content === next.record.content && previous.record.visible === next.record.visible && previous.record.request_input_id === next.record.request_input_id && previous.record.created_at === next.record.created_at)
+
+function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
+  if (record.kind === "tool_output" || record.role === "tool") return t("recordToolOutput")
+  if (record.kind === "activity") return t("recordActivity")
+  if (record.kind === "checkpoint") return t("recordCheckpoint")
+  return t("recordProtocol")
+}
+
+function historyRecordSummary(text: string) {
+  const summary = text.replace(/\s+/g, " ").trim()
+  if (!summary) return "—"
+  return summary.length > 160 ? `${summary.slice(0, 157)}…` : summary
+}
+
+function HistoryRecordPayload({ language, record }: { language: Language; record: HistoryRecord }) {
+  return <div className="mt-2 overflow-hidden rounded-lg border border-border/70 bg-background/70">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b bg-muted/50 px-3 py-2 text-[0.68rem] text-muted-foreground">
+      <code className="font-mono">#{record.id}</code>
+      {record.request_input_id !== null && <span>input #{record.request_input_id}</span>}
+      <time>{formattedTime(language, record.created_at)}</time>
+    </div>
+    <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-3 font-mono text-xs leading-5 text-foreground">{historyRecordPayloadText(record)}</pre>
+  </div>
+}
+
+function historyRecordPayloadText(record: HistoryRecord) {
+  return JSON.stringify(record.payload, null, 2) ?? String(record.payload)
+}
 
 function historyRecordText(record: HistoryRecord) {
   const payload = record.payload
