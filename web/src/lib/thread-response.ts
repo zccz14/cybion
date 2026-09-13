@@ -16,6 +16,15 @@ export type ThreadResponseView = {
   }
 }
 
+export function generatedImageSource(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object"
+    || !("type" in payload) || payload.type !== "image_generation_call"
+    || !("result" in payload) || typeof payload.result !== "string" || !payload.result) return null
+  const format = "output_format" in payload ? payload.output_format : "png"
+  if (format !== "png" && format !== "jpeg" && format !== "webp") return null
+  return `data:image/${format};base64,${payload.result}`
+}
+
 export function pendingResponseRecords(view: ThreadResponseView | null | undefined, history: { id: number }[], threadId: string) {
   if (!view) return []
   const durableIds = new Set(history.map((record) => record.id))
