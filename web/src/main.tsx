@@ -910,7 +910,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
   if (thread.isLoading) return <Page title={t("chat")} description=""><div className="flex flex-col gap-3"><Skeleton className="h-8 w-56" /><Skeleton className="h-20" /><Skeleton className="h-20" /></div></Page>
   if (thread.isError || !thread.data) return <Page title={t("chat")} description=""><RequestError error={thread.error} /></Page>
   const current = thread.data
-  return <main className="flex min-h-full flex-col lg:flex-row">
+  return <main className="flex h-full flex-col lg:flex-row">
     <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <p className="text-xs font-medium text-muted-foreground">{t("threads")}</p>
