@@ -46,7 +46,7 @@ import {
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
-import { pendingResponseRecords, type ThreadResponseView } from "@/lib/thread-response"
+import { generatedImageSource, pendingResponseRecords, type ThreadResponseView } from "@/lib/thread-response"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -286,6 +286,7 @@ const copy = {
     recordActivity: "Activity",
     recordCheckpoint: "Checkpoint",
     recordProtocol: "Protocol event",
+    generatedImage: "Generated image",
     recordHidden: "Internal",
     recordPayload: "View raw payload",
     navWork: "Work",
@@ -422,6 +423,7 @@ const copy = {
     recordActivity: "活动记录",
     recordCheckpoint: "上下文检查点",
     recordProtocol: "协议事件",
+    generatedImage: "生成的图片",
     recordHidden: "内部记录",
     recordPayload: "查看原始负载",
     navWork: "工作",
@@ -1004,8 +1006,17 @@ function ResponseMetadata({ language, view, running }: { language: Language; vie
 
 const HistoryMessage = memo(function HistoryMessage({ language, record }: { language: Language; record: HistoryRecord }) {
   const { t } = useUi()
-  const text = historyRecordText(record)
   const time = formattedTime(language, record.created_at)
+  const imageSource = generatedImageSource(record.payload)
+  if (imageSource) {
+    return <Message>
+      <MessageContent className="max-w-[75ch]">
+        <img src={imageSource} alt={t("generatedImage")} loading="lazy" decoding="async" className="block h-auto max-w-full rounded-lg" />
+        <MessageFooter>{t("generatedImage")} · #{record.id} · {time}</MessageFooter>
+      </MessageContent>
+    </Message>
+  }
+  const text = historyRecordText(record)
   const isUserInput = record.kind === "input" && record.role === "user"
   if (isUserInput) {
     return <Message align="end">
@@ -1128,7 +1139,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
       </div>
     </div>
   </div>
-}, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.role === next.record.role && previous.record.content === next.record.content && previous.record.visible === next.record.visible && previous.record.request_input_id === next.record.request_input_id && previous.record.created_at === next.record.created_at)
+}, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.role === next.record.role && previous.record.content === next.record.content && previous.record.payload === next.record.payload && previous.record.visible === next.record.visible && previous.record.request_input_id === next.record.request_input_id && previous.record.created_at === next.record.created_at)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")
