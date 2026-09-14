@@ -370,7 +370,7 @@ fn app(state: AppState) -> Router {
         .route("/api/contexts", get(list_contexts).post(create_context))
         .route(
             "/api/contexts/{id}",
-            get(read_context)
+            get(read_context_api)
                 .patch(update_context)
                 .delete(delete_context),
         )
@@ -2479,13 +2479,22 @@ async fn create_context(
     Ok(Json(context))
 }
 
-async fn read_context(
+async fn read_context_api(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ContextView>, ApiError> {
+    let context = read_context_for(&state, &identity.user, id).await?;
+    Ok(Json(context))
+}
+
+async fn read_context_for(
+    state: &AppState,
+    user: &User,
+    id: String,
+) -> Result<ContextView, ApiError> {
     let id = context_id(&id)?;
-    let context = user_db(&state, &identity.user, true, move |connection| {
+    user_db(state, user, true, move |connection| {
         connection
             .query_row(
                 "SELECT id,name,description,content,parent_id FROM contexts WHERE id=?",
@@ -2496,8 +2505,7 @@ async fn read_context(
             .map_err(Into::into)
     })
     .await?
-    .ok_or_else(|| ApiError::not_found("context not found"))?;
-    Ok(Json(context))
+    .ok_or_else(|| ApiError::not_found("context not found"))
 }
 
 async fn update_context(
@@ -5118,8 +5126,32 @@ fn native_tools() -> Value {
     ])
 }
 
+fn context_tools() -> Value {
+    json!([
+        {
+            "type":"function",
+            "name":"read_context",
+            "description":"Read the full content of a Cybion context directly from the controller.",
+            "parameters":{
+                "type":"object",
+                "properties":{
+                    "context_id":{
+                        "type":"string",
+                        "description":"Exact context ID from the top-level context list."
+                    }
+                },
+                "required":["context_id"],
+                "additionalProperties":false
+            }
+        }
+    ])
+}
+
 fn responses_tools(include_worker_tools: bool, include_native_tools: bool) -> Value {
     let mut tools = Vec::new();
+    if include_native_tools {
+        tools.extend(context_tools().as_array().cloned().unwrap_or_default());
+    }
     if include_worker_tools {
         tools.extend(worker_tools().as_array().cloned().unwrap_or_default());
     }
@@ -5141,6 +5173,12 @@ enum PendingToolCall {
 #[derive(Deserialize)]
 struct WorkerArguments {
     worker_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadContextArguments {
+    context_id: String,
 }
 
 async fn start_response_tool(
@@ -5176,6 +5214,28 @@ async fn start_response_tool(
         ),
         _ => return Ok(None),
     };
+    if name == "read_context" {
+        let output = match serde_json::from_str::<ReadContextArguments>(input) {
+            Ok(arguments) => match read_context_for(state, user, arguments.context_id).await {
+                Ok(context) => serde_json::to_value(context).map_err(ApiError::internal)?,
+                Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                    json!({"error":error.message})
+                }
+                Err(error) => return Err(error),
+            },
+            Err(error) => {
+                json!({"error":format!("read_context arguments must contain an explicit context_id: {error}")})
+            }
+        };
+        let output = json!({
+            "type": output_type,
+            "call_id": call_id,
+            "output": serde_json::to_string(&output).map_err(ApiError::internal)?,
+        });
+        return Ok(Some(PendingToolCall::Answered(
+            append_tool_output_item(state, user, thread, input_id, &output).await?,
+        )));
+    }
     let prepared = prepare_worker_arguments(name, namespace.as_deref(), input);
     let result = match prepared {
         Ok((worker_id, arguments)) => {
@@ -6420,17 +6480,16 @@ mod tests {
     #[test]
     fn responses_tools_include_native_tools_without_workers() {
         let tools = responses_tools(false, true);
-        assert_eq!(
-            tools,
-            json!([
-                {"type":"web_search"},
-                {"type":"image_generation"}
-            ])
-        );
+        assert_eq!(tools.as_array().unwrap().len(), 3);
+        assert_eq!(tools[0]["name"], "read_context");
+        assert_eq!(tools[0]["parameters"]["required"], json!(["context_id"]));
+        assert_eq!(tools[1], json!({"type":"web_search"}));
+        assert_eq!(tools[2], json!({"type":"image_generation"}));
         let worker_and_native = responses_tools(true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 5);
-        assert_eq!(worker_and_native[3]["type"], "web_search");
-        assert_eq!(worker_and_native[4]["type"], "image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 6);
+        assert_eq!(worker_and_native[0]["name"], "read_context");
+        assert_eq!(worker_and_native[4]["type"], "web_search");
+        assert_eq!(worker_and_native[5]["type"], "image_generation");
     }
 
     #[test]
@@ -6534,6 +6593,22 @@ mod tests {
         assert_eq!(
             request["tools"],
             json!([
+                {
+                    "type":"function",
+                    "name":"read_context",
+                    "description":"Read the full content of a Cybion context directly from the controller.",
+                    "parameters":{
+                        "type":"object",
+                        "properties":{
+                            "context_id":{
+                                "type":"string",
+                                "description":"Exact context ID from the top-level context list."
+                            }
+                        },
+                        "required":["context_id"],
+                        "additionalProperties":false
+                    }
+                },
                 {"type":"web_search"},
                 {"type":"image_generation"}
             ])

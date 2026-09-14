@@ -290,6 +290,64 @@ async fn invalid_custom_tools_are_answered_with_the_matching_output_type() {
 }
 
 #[tokio::test]
+async fn read_context_is_answered_by_the_controller_without_a_worker_call() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "read-context-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let context_id = "00000000-0000-4000-8000-000000000099";
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+            params![
+                context_id,
+                "Worker skill",
+                "How to invoke the worker skill",
+                r#"worker_id = "worker-1"; path = "/skill""#,
+                Option::<String>::None,
+            ],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-read-context",
+        "call_id":"read-context-call",
+        "name":"read_context",
+        "arguments":json!({"context_id":context_id}).to_string()
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let output = history.last().unwrap();
+    assert_eq!(output.kind, "tool_output");
+    assert_eq!(output.payload["type"], "function_call_output");
+    assert_eq!(output.payload["call_id"], "read-context-call");
+    let content: Value = serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap();
+    assert_eq!(content["id"], context_id);
+    assert_eq!(
+        content["content"],
+        r#"worker_id = "worker-1"; path = "/skill""#
+    );
+    let worker_calls: i64 = user_db(&state, &user, false, |connection| {
+        connection
+            .query_row("SELECT COUNT(*) FROM worker_calls", [], |row| row.get(0))
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap();
+    assert_eq!(worker_calls, 0);
+}
+
+#[tokio::test]
 async fn additive_schema_upgrade_preserves_existing_history() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "migration-user").unwrap();
