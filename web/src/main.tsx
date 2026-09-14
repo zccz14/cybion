@@ -28,6 +28,8 @@ import {
   CircleAlertIcon,
   CopyIcon,
   DatabaseIcon,
+  DownloadIcon,
+  ExternalLinkIcon,
   FileKey2Icon,
   LanguagesIcon,
   MoonIcon,
@@ -310,6 +312,22 @@ type WorkerCallAuditPage = {
   page_size: number
 }
 
+const CYBION_WORKER_RELEASE = {
+  version: "v0.1.2",
+  url: "https://github.com/zccz14/cybion-worker/releases/tag/v0.1.2",
+  downloads: [
+    { label: "macOS · Apple Silicon", asset: "cybion-worker-macos-aarch64.tar.gz" },
+    { label: "macOS · Intel", asset: "cybion-worker-macos-x86_64.tar.gz" },
+    { label: "Linux · x86_64", asset: "cybion-worker-linux-x86_64.tar.gz" },
+    { label: "Linux · ARM64", asset: "cybion-worker-linux-aarch64.tar.gz" },
+    { label: "Windows · x86_64", asset: "cybion-worker-windows-x86_64.tar.gz" },
+  ],
+} as const
+
+function cybionWorkerDownloadUrl(asset: string) {
+  return `https://github.com/zccz14/cybion-worker/releases/download/${CYBION_WORKER_RELEASE.version}/${asset}`
+}
+
 const copy = {
   en: {
     threads: "Threads",
@@ -346,6 +364,9 @@ const copy = {
     workers: "Workers",
     workersTitle: "Cybion Worker",
     workersDescription: "Pair a personal device so a thread can run approved local tools.",
+    workerDownloads: "Download Cybion Worker",
+    workerDownloadsDescription: "Install the latest Worker release for your platform, then create a pairing below.",
+    workerReleaseNotes: "View release notes",
     workerName: "Worker name",
     pair: "Create pairing",
     copyConfig: "Copy worker.toml",
@@ -584,6 +605,9 @@ const copy = {
     workers: "Worker",
     workersTitle: "Cybion Worker",
     workersDescription: "配对个人设备，让线程可以调用经过授权的本地工具。",
+    workerDownloads: "下载 Cybion Worker",
+    workerDownloadsDescription: "先下载适合你平台的最新 Worker 版本，再在下方创建配对。",
+    workerReleaseNotes: "查看发布说明",
     workerName: "Worker 名称",
     pair: "创建配对",
     copyConfig: "复制 worker.toml",
@@ -2030,6 +2054,22 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
         </form>
         {pairing && <Alert className="mt-4"><NetworkIcon /><AlertTitle>{t("copyConfig")}</AlertTitle><AlertDescription><SecretValue value={workerToml(pairing)} /></AlertDescription></Alert>}
         {pair.error && <p className="mt-3 text-sm text-destructive">{errorMessage(pair.error)}</p>}
+      </CardContent>
+    </Card>
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div><CardTitle>{t("workerDownloads")}</CardTitle><CardDescription>{t("workerDownloadsDescription")}</CardDescription></div>
+          <Badge variant="outline">{CYBION_WORKER_RELEASE.version}</Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {CYBION_WORKER_RELEASE.downloads.map((download) => <Button asChild className="justify-between" variant="outline" key={download.asset}>
+            <a href={cybionWorkerDownloadUrl(download.asset)} target="_blank" rel="noreferrer"><span className="flex items-center gap-2"><DownloadIcon />{download.label}</span><ExternalLinkIcon /></a>
+          </Button>)}
+        </div>
+        <a className="mt-4 inline-flex items-center gap-1 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" href={CYBION_WORKER_RELEASE.url} target="_blank" rel="noreferrer">{t("workerReleaseNotes")}<ExternalLinkIcon className="size-3.5" /></a>
       </CardContent>
     </Card>
     <Card>
