@@ -8,10 +8,9 @@ record index. It is the only ordering key used to reconstruct a context.
 
 The stored `payload` is immutable evidence. Request assembly operates on a
 copy, so replay compatibility cleanup never changes the durable record.
-Response and Worker records also retain the triggering input's `record idx` in
-`request_input_id`. This lets the compiler recognize output that arrived after
-a newer input superseded its request without introducing a second request
-identity.
+Each thread has one current request. A newer input cancels the previous request.
+Output persistence checks the latest input in the same transaction as the
+append; output from a superseded request is stored as `activity`.
 
 The protocol kinds are:
 
@@ -38,9 +37,8 @@ same range. A missing, foreign, or non-protocol `idx_tail` is an error.
 
 Each Responses request prepends its current developer policy and Worker
 availability to this compiled array. The policy is request metadata; the
-durable conversation remains the record range above. A response or Worker
-record with an intervening newer input is retained as `activity` (or excluded
-by the same causal check) and is never replayed as protocol context.
+durable conversation remains the record range above. The compiler uses `kind`
+to select protocol records; `activity` stays outside the model context.
 
 ## Replay cleanup
 

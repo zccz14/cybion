@@ -12,46 +12,42 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
-const columns = ["id", "thread_id", "request_input_id", "role", "content", "kind", "payload", "visible", "created_at"] as const
+const columns = ["id", "thread_id", "kind", "payload", "created_at"] as const
 type Column = typeof columns[number]
 type RawRecord = {
   id: number
   thread_id: string
-  request_input_id: number | null
-  role: string
-  content: string
   kind: string
   payload: string
-  visible: number
   created_at: number
 }
-type Preview = RawRecord & { thread_title: string; content_truncated: boolean; payload_truncated: boolean }
+type Preview = RawRecord & { thread_title: string; payload_truncated: boolean }
 type RecordPage = { items: Preview[]; total: number; page: number; page_size: number; sort: Column; direction: "asc" | "desc" }
 type Request = <T>(path: string, signal?: AbortSignal) => Promise<T>
 type Language = "en" | "zh"
 
 const copy = {
   en: {
-    readOnly: "Read only", search: "Search content / payload", searchHint: "Exact text · case sensitive",
+    readOnly: "Read only", search: "Search payload", searchHint: "Exact text · case sensitive",
     apply: "Apply filters", reset: "Clear filters", all: "All", more: "ID, thread & time filters",
     from: "created_at from (local time)", to: "created_at to (local time)",
     refresh: "Refresh", previous: "Previous", next: "Next", first: "First", last: "Last", perPage: "Per page", page: "Page",
     loading: "Loading records…", error: "Could not load records", retry: "Retry",
     empty: "No matching records", emptyHint: "Clear the filters or wait for new history to be recorded.",
-    note: "Includes visible = 0. Text cells are previews; expand a row for complete stored values. Times use your local time zone.",
+    note: "Payload cells are previews; expand a row for complete stored values. Times use your local time zone.",
     openThread: "Open thread",
     expand: "Expand record", collapse: "Collapse record", details: "Stored values", preview: "Preview", raw: "Full stored text",
     rows: (start: number, end: number, total: number) => `${start}–${end} of ${total} rows`,
     sort: (column: string, direction: string) => `Sort ${column} ${direction === "asc" ? "ascending" : "descending"}`,
   },
   zh: {
-    readOnly: "只读", search: "搜索 content / payload", searchHint: "原文匹配 · 区分大小写",
+    readOnly: "只读", search: "搜索 payload", searchHint: "原文匹配 · 区分大小写",
     apply: "应用筛选", reset: "清空筛选", all: "全部", more: "ID、线程与时间筛选",
     from: "created_at 起始（本地时间）", to: "created_at 截止（本地时间）",
     refresh: "刷新", previous: "上一页", next: "下一页", first: "首页", last: "末页", perPage: "每页", page: "页码",
     loading: "正在读取记录…", error: "无法读取记录", retry: "重试",
     empty: "没有匹配的记录", emptyHint: "清空筛选条件，或等待新的历史记录写入。",
-    note: "包含 visible = 0 的记录。文本单元格为预览，展开行可查看完整存储值。时间使用本地时区。",
+    note: "payload 单元格显示预览，展开行可查看完整存储值。时间使用本地时区。",
     openThread: "打开线程",
     expand: "展开记录", collapse: "收起记录", details: "存储字段", preview: "预览", raw: "完整存储原文",
     rows: (start: number, end: number, total: number) => `第 ${start}–${end} 条，共 ${total} 条`,
@@ -59,7 +55,15 @@ const copy = {
   },
 }
 type Copy = typeof copy[Language]
-const filterKeys = ["q", "id", "thread_id", "request_input_id", "kind", "role", "visible", "created_from", "created_to"] as const
+const filterKeys = ["q", "id", "thread_id", "kind", "created_from", "created_to"] as const
+const queryKeys = [...filterKeys, "page", "page_size", "sort", "direction"] as const
+
+function historyParams(params: URLSearchParams) {
+  const next = new URLSearchParams([...params].filter(([key]) => (queryKeys as readonly string[]).includes(key)))
+  const sort = next.get("sort")
+  if (sort && !(columns as readonly string[]).includes(sort)) next.delete("sort")
+  return next
+}
 
 function localDateTime(value: string | null) {
   if (!value) return ""
@@ -86,29 +90,30 @@ export function HistoryTable({ language, request }: { language: Language; reques
   const t = copy[language]
   const [params, setParams] = useSearchParams()
   const [filterReset, setFilterReset] = useState(0)
-  const queryString = params.toString()
+  const requestParams = historyParams(params)
+  const queryString = requestParams.toString()
   const query = useQuery({
     queryKey: ["history-table", queryString],
     queryFn: ({ signal }) => request<RecordPage>(`/api/history?${queryString}`, signal),
   })
   const data = query.data
   const page = data?.page ?? 1
-  const pageSize = data?.page_size ?? Number(params.get("page_size") || 20)
+  const pageSize = data?.page_size ?? Number(requestParams.get("page_size") || 20)
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))
-  const sort = data?.sort ?? params.get("sort") ?? "id"
-  const direction = data?.direction ?? params.get("direction") ?? "desc"
-  const filters = new URLSearchParams([...params].filter(([key]) => (filterKeys as readonly string[]).includes(key))).toString()
+  const sort = data?.sort ?? requestParams.get("sort") ?? "id"
+  const direction = data?.direction ?? requestParams.get("direction") ?? "desc"
+  const filters = new URLSearchParams([...requestParams].filter(([key]) => (filterKeys as readonly string[]).includes(key))).toString()
   const hasFilters = Boolean(filters)
-  const advanced = ["id", "thread_id", "request_input_id", "created_from", "created_to"].some((key) => params.has(key))
+  const advanced = ["id", "thread_id", "created_from", "created_to"].some((key) => params.has(key))
 
   function update(values: Record<string, string>) {
-    const next = new URLSearchParams(params)
+    const next = new URLSearchParams(requestParams)
     Object.entries(values).forEach(([key, value]) => next.set(key, value))
     setParams(next)
   }
 
   function clearFilters() {
-    const next = new URLSearchParams(params)
+    const next = new URLSearchParams(requestParams)
     filterKeys.forEach((key) => next.delete(key))
     next.set("page", "1")
     setFilterReset((value) => value + 1)
@@ -123,25 +128,23 @@ export function HistoryTable({ language, request }: { language: Language; reques
     <form key={`${filters}:${filterReset}`} className="flex flex-col gap-3" onSubmit={(event) => {
       event.preventDefault()
       const form = new FormData(event.currentTarget)
-      const next = new URLSearchParams(params)
+      const next = new URLSearchParams(requestParams)
       filterKeys.forEach((key) => {
         const value = String(form.get(key) ?? "")
         next.delete(key)
-        if (value && !(value === "all" && ["kind", "role", "visible"].includes(key))) next.set(key, key.startsWith("created_") ? String(Math.floor(new Date(value).getTime() / 1000)) : value)
+        if (value && !(value === "all" && key === "kind")) next.set(key, key.startsWith("created_") ? String(Math.floor(new Date(value).getTime() / 1000)) : value)
       })
       next.set("page", "1")
       setParams(next)
     }}>
-      <FieldGroup className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(16rem,2fr)_1fr_1fr_1fr]">
+      <FieldGroup className="grid gap-3 sm:grid-cols-[minmax(16rem,2fr)_1fr]">
         <Field className="gap-2"><FieldLabel htmlFor="history-q">{t.search}</FieldLabel><Input id="history-q" name="q" defaultValue={params.get("q") ?? ""} placeholder={t.searchHint} /></Field>
         <FilterSelect name="kind" values={["input", "response_output", "tool_output", "checkpoint", "activity"]} value={params.get("kind")} all={t.all} />
-        <FilterSelect name="role" values={["user", "assistant", "tool", "system"]} value={params.get("role")} all={t.all} />
-        <FilterSelect name="visible" values={["0", "1"]} value={params.get("visible")} all={t.all} />
       </FieldGroup>
       <details open={advanced || undefined} className="text-sm">
         <summary className="w-fit cursor-pointer rounded-sm py-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring">{t.more}</summary>
-        <FieldGroup className="grid gap-3 pt-3 sm:grid-cols-2 xl:grid-cols-3">
-          {["id", "request_input_id", "thread_id"].map((name) => <Field key={name} className="gap-2"><FieldLabel htmlFor={`history-${name}`}>{name}</FieldLabel><Input id={`history-${name}`} name={name} type={name === "thread_id" ? "text" : "number"} min="1" step="1" defaultValue={params.get(name) ?? ""} /></Field>)}
+        <FieldGroup className="grid gap-3 pt-3 sm:grid-cols-2 xl:grid-cols-4">
+          {["id", "thread_id"].map((name) => <Field key={name} className="gap-2"><FieldLabel htmlFor={`history-${name}`}>{name}</FieldLabel><Input id={`history-${name}`} name={name} type={name === "thread_id" ? "text" : "number"} min="1" step="1" defaultValue={params.get(name) ?? ""} /></Field>)}
           <Field className="gap-2"><FieldLabel htmlFor="history-created-from">{t.from}</FieldLabel><Input id="history-created-from" name="created_from" type="datetime-local" step="1" defaultValue={localDateTime(params.get("created_from"))} /></Field>
           <Field className="gap-2"><FieldLabel htmlFor="history-created-to">{t.to}</FieldLabel><Input id="history-created-to" name="created_to" type="datetime-local" step="1" defaultValue={localDateTime(params.get("created_to"))} /></Field>
         </FieldGroup>
@@ -163,9 +166,9 @@ export function HistoryTable({ language, request }: { language: Language; reques
           })}
         </TableRow></TableHeader>
         <TableBody>
-          {query.isPending && Array.from({ length: 5 }, (_, i) => <TableRow key={i}><TableCell colSpan={10}><Skeleton className="h-9 w-full" /><span className="sr-only">{t.loading}</span></TableCell></TableRow>)}
+          {query.isPending && Array.from({ length: 5 }, (_, i) => <TableRow key={i}><TableCell colSpan={6}><Skeleton className="h-9 w-full" /><span className="sr-only">{t.loading}</span></TableCell></TableRow>)}
           {data?.items.map((record) => <RecordRows key={`${queryString}:${record.id}`} record={record} language={language} request={request} />)}
-          {data?.items.length === 0 && <TableRow><TableCell colSpan={10} className="h-36 whitespace-normal text-center"><p className="font-medium">{t.empty}</p><p className="mt-1 text-sm text-muted-foreground">{t.emptyHint}</p>{hasFilters && <Button variant="link" onClick={clearFilters}>{t.reset}</Button>}</TableCell></TableRow>}
+          {data?.items.length === 0 && <TableRow><TableCell colSpan={6} className="h-36 whitespace-normal text-center"><p className="font-medium">{t.empty}</p><p className="mt-1 text-sm text-muted-foreground">{t.emptyHint}</p>{hasFilters && <Button variant="link" onClick={clearFilters}>{t.reset}</Button>}</TableCell></TableRow>}
         </TableBody>
       </Table>
     </div>
@@ -191,13 +194,13 @@ function RecordRows({ record, language, request }: { record: Preview; language: 
     <TableRow>
       <TableCell><Button size="icon-sm" variant="ghost" aria-label={`${expanded ? t.collapse : t.expand} #${record.id}`} aria-expanded={expanded} aria-controls={`history-detail-${record.id}`} onClick={() => setExpanded(!expanded)}>{expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</Button></TableCell>
       {columns.map((column) => <TableCell key={column}>
-        {column === "content" || column === "payload" ? <div className="w-64"><pre className="line-clamp-2 whitespace-pre-wrap break-all font-mono text-xs leading-5">{record[column] === "" ? '""' : record[column]}</pre>{record[`${column}_truncated`] && <span className="text-xs text-muted-foreground">… {t.preview}</span>}</div>
+        {column === "payload" ? <div className="w-64"><pre className="line-clamp-2 whitespace-pre-wrap break-all font-mono text-xs leading-5">{record.payload === "" ? '""' : record.payload}</pre>{record.payload_truncated && <span className="text-xs text-muted-foreground">… {t.preview}</span>}</div>
           : column === "thread_id" ? <div className="flex max-w-80 flex-col gap-1"><span className="truncate font-medium" title={record.thread_title}>{record.thread_title}</span><div className="flex items-center gap-1"><code className="text-xs text-muted-foreground">{record.thread_id}</code><Button asChild size="icon-xs" variant="ghost"><Link to={`/threads/${encodeURIComponent(record.thread_id)}`} aria-label={`${t.openThread}: ${record.thread_title}`} title={t.openThread}><LinkIcon /></Link></Button></div></div>
           : column === "created_at" ? <time dateTime={new Date(record.created_at * 1000).toISOString()} className="text-xs tabular-nums">{historyTime(record.created_at, language)}</time>
-          : <code className="text-xs tabular-nums">{record[column] === null ? "NULL" : record[column]}</code>}
+          : <code className="text-xs tabular-nums">{record[column]}</code>}
       </TableCell>)}
     </TableRow>
-    {expanded && <TableRow><TableCell colSpan={10} className="whitespace-normal p-4 align-top"><RecordDetail id={record.id} request={request} language={language} /></TableCell></TableRow>}
+    {expanded && <TableRow><TableCell colSpan={6} className="whitespace-normal p-4 align-top"><RecordDetail id={record.id} request={request} language={language} /></TableCell></TableRow>}
   </Fragment>
 }
 
@@ -209,8 +212,8 @@ function RecordDetail({ id, request, language }: { id: number; request: Request;
         {detail.isPending && <Skeleton className="h-28 w-full" />}
         {detail.error && <LoadError error={detail.error} retry={() => void detail.refetch()} t={t} />}
         {detail.data && <>
-          <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2">{columns.filter((column) => column !== "content" && column !== "payload").map((column) => <div key={column} className="flex flex-wrap gap-x-3"><dt className="font-mono text-xs text-muted-foreground">{column}</dt><dd className="break-all font-mono text-xs">{column === "created_at" ? historyTime(detail.data!.created_at, language) : detail.data![column] === null ? "NULL" : detail.data![column]}</dd></div>)}</dl>
-          {(["content", "payload"] as const).map((column) => <div key={column}><h4 className="mb-2 text-xs font-medium"><code>{column}</code> · {t.raw}</h4><pre tabIndex={0} className="max-h-96 overflow-auto rounded-md border bg-background p-3 font-mono text-xs leading-5 whitespace-pre-wrap break-all">{detail.data![column] === "" ? '""' : detail.data![column]}</pre></div>)}
+          <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2">{columns.filter((column) => column !== "payload").map((column) => <div key={column} className="flex flex-wrap gap-x-3"><dt className="font-mono text-xs text-muted-foreground">{column}</dt><dd className="break-all font-mono text-xs">{column === "created_at" ? historyTime(detail.data!.created_at, language) : detail.data![column]}</dd></div>)}</dl>
+          <div><h4 className="mb-2 text-xs font-medium"><code>payload</code> · {t.raw}</h4><pre tabIndex={0} className="max-h-96 overflow-auto rounded-md border bg-background p-3 font-mono text-xs leading-5 whitespace-pre-wrap break-all">{detail.data.payload === "" ? '""' : detail.data.payload}</pre></div>
         </>}
       </div>
 }

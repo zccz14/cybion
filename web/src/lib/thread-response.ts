@@ -30,18 +30,9 @@ export function pendingResponseRecords(view: ThreadResponseView | null | undefin
   const durableIds = new Set(history.map((record) => record.id))
   return view.response.output.flatMap((output, index) => {
     if (output.record_id !== null && durableIds.has(output.record_id)) return []
-    const item = output.item
-    const parts = item.type === "reasoning" ? item.summary : item.content
-    const content = Array.isArray(parts) ? parts.flatMap((part: unknown) => {
-      if (typeof part !== "object" || part === null) return []
-      if ("text" in part && typeof part.text === "string") return [part.text]
-      if ("refusal" in part && typeof part.refusal === "string") return [part.refusal]
-      return []
-    }).join(item.type === "reasoning" ? "\n\n" : "") : ""
     return [{
-      id: output.record_id ?? -(index + 1), thread_id: threadId, request_input_id: view.input_record_id,
-      role: item.type === "message" || item.type === "reasoning" ? "assistant" as const : "tool" as const,
-      content, kind: "response_output" as const, payload: item, visible: true, created_at: view.started_at,
+      id: output.record_id ?? -(index + 1), thread_id: threadId,
+      kind: "response_output" as const, payload: output.item, created_at: view.started_at,
     }]
   })
 }

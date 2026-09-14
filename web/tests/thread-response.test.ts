@@ -13,12 +13,12 @@ test("streamed reasoning and messages become history rows without duplicating co
       ],
     },
   }
-  assert.equal(pendingResponseRecords(view, [], "thread")[0].content, "checking")
+  assert.deepEqual(pendingResponseRecords(view, [], "thread")[0].payload, view.response.output[0].item)
   const live = pendingResponseRecords(view, [{ id: 11 }], "thread")
   assert.equal(live.length, 1)
-  assert.equal(live[0].content, "hello")
-  assert.equal(live[0].role, "assistant")
-  assert.equal(live[0].request_input_id, 10)
+  assert.deepEqual(live[0], {
+    id: -2, thread_id: "thread", kind: "response_output", payload: view.response.output[1].item, created_at: 100,
+  })
   view.response.output[1].done = true
   view.response.output[1].record_id = 12
   assert.deepEqual(pendingResponseRecords(view, [{ id: 11 }, { id: 12 }], "thread"), [])

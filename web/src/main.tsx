@@ -47,6 +47,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
 import { generatedImageSource, pendingResponseRecords, type ThreadResponseView } from "@/lib/thread-response"
+import { historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -130,12 +131,8 @@ type Thread = ThreadDefaults & {
 type HistoryRecord = {
   id: number
   thread_id: string
-  request_input_id: number | null
-  role: "user" | "assistant" | "tool" | "system"
-  content: string
   kind: "input" | "response_output" | "tool_output" | "checkpoint" | "activity"
   payload: unknown
-  visible: boolean
   created_at: number
 }
 type RequestAck = {
@@ -1349,12 +1346,12 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
     </Message>
   }
   const text = historyRecordText(record)
-  const isUserInput = record.kind === "input" && record.role === "user"
+  const isUserInput = record.kind === "input"
   if (isUserInput) {
     return <Message align="end">
       <MessageContent>
         <MessageGroup>
-          <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground">{record.content}</div>
+          <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground">{text}</div>
         </MessageGroup>
         <MessageFooter>#{record.id} · {time}</MessageFooter>
       </MessageContent>
@@ -1384,7 +1381,8 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
     </div>
   }
 
-  if (record.role === "assistant" && record.kind === "response_output") {
+  const payload = historyPayloadObject(record.payload)
+  if (record.kind === "response_output" && payload?.type === "message") {
     return <Message className="items-start">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
         <SparklesIcon className="size-4" />
@@ -1430,7 +1428,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
     </div>
   }
 
-  if (!record.visible) {
+  if (record.kind === "checkpoint" || (typeof payload?.type === "string" && (payload.type !== "message" || !text.trim()))) {
     const Icon = record.kind === "checkpoint" ? DatabaseIcon : ActivityIcon
     return <div className="relative flex items-start gap-3 px-1">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border/80">
@@ -1454,7 +1452,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
     </div>
   }
 
-  const isFailure = record.role === "system" && text.startsWith("Request failed:")
+  const isFailure = record.kind === "activity" && payload?.role === "system" && text.startsWith("Request failed:")
   return <div className={`flex items-start gap-3 rounded-xl border px-3 py-3 ${isFailure ? "border-destructive/35 bg-destructive/5" : "border-border/70 bg-card/70"}`}>
     <div aria-hidden="true" className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg ring-1 ${isFailure ? "bg-destructive/10 text-destructive ring-destructive/20" : "bg-muted text-muted-foreground ring-border/80"}`}>
       {isFailure ? <CircleAlertIcon className="size-4" /> : <ActivityIcon className="size-4" />}
@@ -1467,11 +1465,10 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
       <div className="mt-1 whitespace-pre-wrap break-words text-sm leading-6">{text}</div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.68rem] text-muted-foreground">
         <span className="font-mono">#{record.id}</span>
-        {record.request_input_id !== null && <span>input #{record.request_input_id}</span>}
       </div>
     </div>
   </div>
-}, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.role === next.record.role && previous.record.content === next.record.content && previous.record.payload === next.record.payload && previous.record.visible === next.record.visible && previous.record.request_input_id === next.record.request_input_id && previous.record.created_at === next.record.created_at)
+}, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")
@@ -1481,18 +1478,12 @@ function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) 
   return t("recordProtocol")
 }
 
-function historyRecordPayloadObject(payload: unknown): Record<string, unknown> | null {
-  return payload && typeof payload === "object" && !Array.isArray(payload)
-    ? payload as Record<string, unknown>
-    : null
-}
-
 function isReasoningRecord(record: HistoryRecord) {
-  return historyRecordPayloadObject(record.payload)?.type === "reasoning"
+  return historyPayloadObject(record.payload)?.type === "reasoning"
 }
 
 function reasoningSummary(record: HistoryRecord) {
-  const summary = historyRecordPayloadObject(record.payload)?.summary
+  const summary = historyPayloadObject(record.payload)?.summary
   if (!Array.isArray(summary)) return ""
   return summary
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
@@ -1512,7 +1503,6 @@ function HistoryRecordPayload({ language, record }: { language: Language; record
   return <div className="mt-2 overflow-hidden rounded-lg border border-border/70 bg-background/70">
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b bg-muted/50 px-3 py-2 text-[0.68rem] text-muted-foreground">
       <code className="font-mono">#{record.id}</code>
-      {record.request_input_id !== null && <span>input #{record.request_input_id}</span>}
       <time>{formattedTime(language, record.created_at)}</time>
     </div>
     <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-3 font-mono text-xs leading-5 text-foreground">{historyRecordPayloadText(record)}</pre>
@@ -1524,26 +1514,7 @@ function historyRecordPayloadText(record: HistoryRecord) {
 }
 
 function historyRecordText(record: HistoryRecord) {
-  const payload = record.payload
-  const object = historyRecordPayloadObject(payload)
-  if (isReasoningRecord(record)) {
-    const summary = reasoningSummary(record)
-    if (summary) return summary
-  }
-  if (record.kind === "response_output" && object?.type === "message") {
-    const content = object.content
-    if (Array.isArray(content)) {
-      const text = content
-        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-        .filter((item) => item.type === "output_text" && typeof item.text === "string")
-        .map((item) => item.text as string)
-        .join("")
-      if (text) return text
-    }
-  }
-  if (record.kind === "tool_output" && typeof object?.output === "string") return object.output
-  if (record.content.trim()) return record.content
-  return JSON.stringify(payload, null, 2)
+  return historyPayloadText(record.payload)
 }
 
 type ContextDraft = {

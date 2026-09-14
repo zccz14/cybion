@@ -905,12 +905,8 @@ struct ThreadView {
 struct HistoryRecord {
     id: i64,
     thread_id: String,
-    request_input_id: Option<i64>,
-    role: String,
-    content: String,
     kind: String,
     payload: Value,
-    visible: bool,
     created_at: i64,
 }
 
@@ -1354,18 +1350,14 @@ fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextView> {
 }
 
 fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
-    let payload = serde_json::from_str::<Value>(&row.get::<_, String>(6)?)
+    let payload = serde_json::from_str::<Value>(&row.get::<_, String>(3)?)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(HistoryRecord {
         id: row.get(0)?,
         thread_id: row.get(1)?,
-        request_input_id: row.get(2)?,
-        role: row.get(3)?,
-        content: row.get(4)?,
-        kind: row.get(5)?,
+        kind: row.get(2)?,
         payload,
-        visible: row.get::<_, i64>(7)? != 0,
-        created_at: row.get(8)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -2247,7 +2239,7 @@ async fn history_for(
     user_db(state, user, true, move |connection| {
         load_thread(connection, &id)?;
         let mut statement = connection.prepare(
-            "SELECT id,thread_id,request_input_id,role,content,kind,payload,visible,created_at
+            "SELECT id,thread_id,kind,payload,created_at
              FROM history_records WHERE thread_id=? ORDER BY id",
         )?;
         let rows = statement.query_map([id], history_from_row)?;
@@ -3053,7 +3045,7 @@ async fn maybe_name_thread(
         move |connection| {
             connection
                 .query_row(
-                    "SELECT content FROM history_records WHERE id=? AND thread_id=? AND kind='input'",
+                    "SELECT payload FROM history_records WHERE id=? AND thread_id=? AND kind='input'",
                     params![input_record_id, thread_id],
                     |row| row.get::<_, String>(0),
                 )
@@ -3062,7 +3054,13 @@ async fn maybe_name_thread(
         }
     })
     .await;
-    let Ok(Some(input)) = source else {
+    let Ok(Some(payload)) = source else {
+        return thread.clone();
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(&payload) else {
+        return thread.clone();
+    };
+    let Some(input) = payload.get("content").and_then(Value::as_str) else {
         return thread.clone();
     };
     let prompt = json!([
@@ -3390,17 +3388,6 @@ fn load_protocol_items(
         "SELECT h.id,h.created_at,h.kind,h.payload FROM history_records h
          WHERE h.thread_id=? AND h.id>=? AND h.id<=?
            AND h.kind IN ('input','response_output','tool_output','checkpoint')
-           AND NOT (
-             h.kind IN ('response_output','tool_output')
-             AND h.request_input_id IS NOT NULL
-             AND EXISTS(
-               SELECT 1 FROM history_records newer
-               WHERE newer.thread_id=h.thread_id
-                 AND newer.kind='input'
-                 AND newer.id>h.request_input_id
-                 AND newer.id<h.id
-             )
-           )
          ORDER BY h.id",
     )?;
     let rows = statement.query_map(params![thread_id, idx_head, idx_tail], |row| {
@@ -6047,7 +6034,7 @@ mod tests {
                 .unwrap()
                 .starts_with('#')
         );
-        assert!(!records[2].visible);
+        assert_eq!(records[2].kind, "checkpoint");
         assert!(read_thread_for(&state, &second, thread.id).await.is_err());
     }
 
@@ -6435,16 +6422,16 @@ mod tests {
             move |connection| {
                 connection
                     .query_row(
-                        "SELECT kind,request_input_id FROM history_records WHERE id=?",
+                        "SELECT kind FROM history_records WHERE id=?",
                         [output_id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                        |row| row.get::<_, String>(0),
                     )
                     .map_err(Into::into)
             }
         })
         .await
         .unwrap();
-        assert_eq!(stored_kind, ("activity".to_owned(), first_input));
+        assert_eq!(stored_kind, "activity");
         let context = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
             move |connection| compile_thread_context(connection, &thread_id, third_input)
