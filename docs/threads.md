@@ -17,8 +17,8 @@ the thread from durable records after a process restart. A context checkpoint
 is another history record; it summarizes an earlier prefix without removing
 the source records.
 
-The UI exposes `idle`, `running`, and `failed` thread states. Failures append a
-visible activity record and leave the thread ready for a later input.
+The UI exposes `idle`, `running`, and `failed` thread states. Failures append
+an activity record and leave the thread ready for a later input.
 
 Deleting a thread removes its history, checkpoints, audit rows, and Worker-call
 rows within the owning user database. Other users and threads are independent.

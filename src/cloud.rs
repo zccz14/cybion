@@ -57,7 +57,7 @@ const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 8;
+const USER_SCHEMA_VERSION: i64 = 9;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
@@ -687,16 +687,11 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-  request_input_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
-  role TEXT NOT NULL CHECK(role IN ('user','assistant','tool','system')),
-  content TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'input' CHECK(kind IN ('input','response_output','tool_output','checkpoint','activity')),
   payload TEXT NOT NULL DEFAULT '{}',
-  visible INTEGER NOT NULL DEFAULT 1 CHECK(visible IN (0,1)),
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS history_records_thread_created ON history_records(thread_id,id);
-CREATE INDEX IF NOT EXISTS history_records_request_input ON history_records(request_input_id,id);
 CREATE TABLE IF NOT EXISTS reasoning_audits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   input_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
@@ -839,14 +834,20 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
              DROP TABLE threads;
              ALTER TABLE threads_with_max RENAME TO threads;",
         )?;
-        let foreign_key_violation: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-            [],
-            |row| row.get(0),
+        check_user_foreign_keys(&transaction)?;
+    }
+    if (RESETTABLE_USER_SCHEMA_VERSION..9).contains(&version) {
+        // COMPATIBILITY: the schema upgrader supports persisted versions 7/8.
+        // Retire this migration when the supported minimum is 9 and all user
+        // databases have been audited at that version; retain preservation tests.
+        transaction.execute_batch(
+            "DROP INDEX IF EXISTS history_records_request_input;
+             ALTER TABLE history_records DROP COLUMN request_input_id;
+             ALTER TABLE history_records DROP COLUMN role;
+             ALTER TABLE history_records DROP COLUMN content;
+             ALTER TABLE history_records DROP COLUMN visible;",
         )?;
-        if foreign_key_violation {
-            return Err(ApiError::internal("user database foreign key check failed"));
-        }
+        check_user_foreign_keys(&transaction)?;
     }
     transaction
         .execute_batch(USER_SCHEMA)
@@ -882,6 +883,18 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     }
     transaction.commit()?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
+}
+
+fn check_user_foreign_keys(connection: &Connection) -> Result<(), ApiError> {
+    let violation: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+        [],
+        |row| row.get(0),
+    )?;
+    if violation {
+        return Err(ApiError::internal("user database foreign key check failed"));
+    }
     Ok(())
 }
 
@@ -3232,12 +3245,9 @@ fn persist_history_record(
     connection: &Connection,
     record: HistoryRecordInsert<'_>,
 ) -> Result<i64, ApiError> {
-    // COMPATIBILITY: schema 8 requires role/content without defaults. The history
-    // schema migration removes these fixed placeholders together with the columns;
-    // no caller supplies or reads them.
     connection.execute(
-        "INSERT INTO history_records(thread_id,kind,payload,created_at,role,content)
-         VALUES(?,?,?,?,'system','')",
+        "INSERT INTO history_records(thread_id,kind,payload,created_at)
+         VALUES(?,?,?,?)",
         params![
             record.thread_id,
             record.kind,
@@ -5704,6 +5714,10 @@ mod response_tests;
 mod settings_tests;
 
 #[cfg(test)]
+#[path = "cloud_schema_tests.rs"]
+mod schema_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6007,6 +6021,9 @@ mod tests {
         let path = root.path().join("v7.sqlite3");
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(THREAD_SCHEMA).unwrap();
+        connection
+            .execute_batch(schema_tests::LEGACY_HISTORY_SCHEMA)
+            .unwrap();
         connection.execute_batch(USER_SCHEMA).unwrap();
         connection
             .execute_batch(
