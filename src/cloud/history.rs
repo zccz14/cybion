@@ -210,78 +210,27 @@ mod tests {
              ('a','Alpha','model','idle',0,0),('b','Beta','model','idle',0,0);",
             )
             .unwrap();
-        for (id, thread, request, role, kind, visible, created, content, payload) in [
-            (
-                1,
-                "a",
-                None,
-                "user",
-                "input",
-                1,
-                300,
-                "Hello",
-                " {\n  \"a\":1, \"a\":2 } ".to_owned(),
-            ),
-            (
-                2,
-                "b",
-                None,
-                "assistant",
-                "response_output",
-                0,
-                100,
-                "100%_literal",
-                "not JSON".to_owned(),
-            ),
+        for (id, thread, kind, created, payload) in [
+            (1, "a", "input", 300, " {\n  \"a\":1, \"a\":2 } ".to_owned()),
+            (2, "b", "response_output", 100, "not JSON".to_owned()),
             (
                 3,
                 "a",
-                Some(1),
-                "tool",
                 "tool_output",
-                0,
                 100,
-                "工具",
                 format!("{}needle", "数据🧪".repeat(400)),
             ),
-            (
-                4,
-                "b",
-                Some(2),
-                "system",
-                "checkpoint",
-                0,
-                200,
-                "",
-                "{}".to_owned(),
-            ),
-            (
-                5,
-                "a",
-                Some(1),
-                "system",
-                "activity",
-                1,
-                200,
-                "state",
-                "{}".to_owned(),
-            ),
-            (
-                6,
-                "b",
-                Some(2),
-                "assistant",
-                "response_output",
-                1,
-                300,
-                "needle",
-                "{}".to_owned(),
-            ),
+            (4, "b", "checkpoint", 200, "{}".to_owned()),
+            (5, "a", "activity", 200, "{}".to_owned()),
+            (6, "b", "response_output", 300, "{}".to_owned()),
         ] {
-            connection.execute(
-                "INSERT INTO history_records(id,thread_id,request_input_id,role,content,kind,payload,visible,created_at)
-                 VALUES(?,?,?,?,?,?,?,?,?)", params![id,thread,request,role,content,kind,payload,visible,created],
-            ).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO history_records(id,thread_id,kind,payload,created_at)
+                 VALUES(?,?,?,?,?)",
+                    params![id, thread, kind, payload, created],
+                )
+                .unwrap();
         }
         connection
     }
@@ -511,7 +460,7 @@ mod tests {
         let stranger = cloud::user_for_subject(&state, "history-stranger").unwrap();
         let thread = create_test_thread(&state, &owner).await;
         user_db(&state, &owner, false, move |connection| {
-            connection.execute("INSERT INTO history_records(thread_id,role,content,kind,payload,visible,created_at) VALUES(?,'system','private','activity','raw',0,123)", [thread.id])?;
+            connection.execute("INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES(?,'activity','raw',123)", [thread.id])?;
             Ok(())
         }).await.unwrap();
         let identity = |user| {

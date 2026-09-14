@@ -307,6 +307,9 @@ fn max_reasoning_upgrade_preserves_existing_history_and_foreign_keys() {
          );
          PRAGMA user_version=7;",
     ).unwrap();
+    connection
+        .execute_batch(schema_tests::LEGACY_HISTORY_SCHEMA)
+        .unwrap();
     connection.execute_batch(USER_SCHEMA).unwrap();
     connection.execute_batch(
         "DROP TABLE thread_defaults;
@@ -377,7 +380,7 @@ fn max_reasoning_upgrade_preserves_existing_history_and_foreign_keys() {
             effort
         );
     }
-    assert!(connection.execute("INSERT INTO history_records(thread_id,role,content,created_at) VALUES('missing-thread','user','bad',1)", []).is_err());
+    assert!(connection.execute("INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES('missing-thread','input','{}',1)", []).is_err());
     connection
         .execute("DELETE FROM threads WHERE id='existing-thread'", [])
         .unwrap();

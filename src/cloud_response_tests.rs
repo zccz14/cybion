@@ -303,3 +303,80 @@ async fn additive_schema_upgrade_preserves_existing_history() {
         Ok(())
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "late-worker-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let first = input_record(&state, &user, &thread).await;
+    let worker_id = "00000000-0000-4000-8000-000000000002";
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES(?,'fixture',?,?,?,'online')",
+            params![worker_id, hash_secret("fixture-token"), now(), now()],
+        )?;
+        Ok(())
+    }).await.unwrap();
+    let call_id = enqueue_worker_call(
+        &state,
+        &user,
+        worker_id,
+        &thread.id,
+        first,
+        "old-call".to_owned(),
+        "function_call_output".to_owned(),
+        "bash".to_owned(),
+        json!({"worker_id":worker_id,"command":"pwd"}),
+    )
+    .await
+    .unwrap();
+    let second = input_record(&state, &user, &thread).await;
+    cancel_worker_call(&state, &user, &call_id).await;
+    for _ in 0..2 {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer fixture-token".parse().unwrap());
+        let _ = worker_result(
+            State(state.clone()),
+            AxumPath((user.id.clone(), worker_id.to_owned(), call_id.clone())),
+            headers,
+            Json(WorkerResultInput {
+                result: json!({"stdout":"late result"}),
+                failed: false,
+                error: None,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[2].kind, "activity");
+    assert_eq!(history[2].payload["call_id"], "old-call");
+    assert!(
+        history[2].payload["output"]
+            .as_str()
+            .unwrap()
+            .contains("late result")
+    );
+    user_db(&state, &user, false, move |connection| {
+        let (status, output_id): (String, i64) = connection.query_row(
+            "SELECT status,output_record_id FROM worker_calls WHERE id=?",
+            [call_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(status, "failed");
+        assert_eq!(output_id, history[2].id);
+        let context = compile_thread_context(connection, &thread.id, second)?;
+        assert_eq!(context.record_ids, [first, second]);
+        assert!(
+            context
+                .items
+                .iter()
+                .all(|item| item.get("call_id").is_none())
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
