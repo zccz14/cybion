@@ -66,6 +66,9 @@ curl -X POST https://cybion.ntnl.io/v1/threads \
 `POST /v1/threads/{id}/inputs` accepts `{"input":"..."}` and returns the
 new `record_idx`. Poll the thread and history endpoints for the result.
 
+The [History table](docs/history.md) at `#/history` exposes stored history rows
+with server-side filters, sorting, pagination, and full raw-field inspection.
+
 ## Cybion Worker
 
 The standalone Worker is published from
