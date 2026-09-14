@@ -53,6 +53,7 @@ pub(super) struct RawHistoryRecord {
 struct HistoryPreview {
     #[serde(flatten)]
     record: RawHistoryRecord,
+    thread_title: String,
     content_truncated: bool,
     payload_truncated: bool,
 }
@@ -195,13 +196,15 @@ fn load_page(connection: &mut Connection, query: HistoryQuery) -> Result<History
     // Only allowlisted column/direction identifiers enter SQL; all filter values are bound.
     let mut statement = transaction.prepare(&format!(
         "SELECT id,thread_id,request_input_id,role,substr(content,1,240),kind,substr(payload,1,240),visible,created_at,
-                length(CAST(content AS BLOB)),length(CAST(payload AS BLOB))
+                length(CAST(content AS BLOB)),length(CAST(payload AS BLOB)),
+                (SELECT t.title FROM threads t WHERE t.id=history_records.thread_id)
          FROM history_records WHERE {predicate} ORDER BY {sort} {direction},id {direction} LIMIT ? OFFSET ?"
     ))?;
     let items = statement
         .query_map(params_from_iter(&values), |row| {
             let record = raw_record(row)?;
             Ok(HistoryPreview {
+                thread_title: row.get(11)?,
                 content_truncated: row.get::<_, usize>(9)? > record.content.len(),
                 payload_truncated: row.get::<_, usize>(10)? > record.payload.len(),
                 record,
@@ -335,6 +338,8 @@ mod tests {
         assert_eq!(ids(&first), [6, 5, 4, 3, 2, 1]);
         assert_eq!(first.items[2].record.visible, 0);
         assert_eq!(first.items[4].record.payload, "not JSON");
+        assert_eq!(first.items[0].thread_title, "Beta");
+        assert_eq!(first.items[1].thread_title, "Alpha");
         let mut ordered = Vec::new();
         for page in 1..=3 {
             let result = load_page(

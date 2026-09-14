@@ -3,6 +3,10 @@
 `#/history` browses the authenticated user's `history_records` table across all
 threads. Each database row is one table row, including `visible = 0` records.
 It is read only. Filters, sort order, page, and page size are retained in the URL.
+The thread column shows the current `threads.title` above the original ID, with
+a link icon beside the ID that opens the thread. The title comes from the same
+database read snapshot as the page and is returned as `thread_title` metadata;
+it is not a history column or a snapshot of the thread's former name.
 
 The browser-authenticated `GET /api/history` endpoint accepts:
 
@@ -27,7 +31,25 @@ explicit `content_truncated` / `payload_truncated` flags. Expanding a row fetche
 stays a text string, preserving its original formatting even when it is not
 valid JSON. `visible` stays an integer, `request_input_id` preserves SQL NULL,
 and `created_at` stays Unix seconds. The UI marks empty text as `""`, SQL NULL as
-`NULL`, and shows a local-time annotation alongside the stored timestamp.
+`NULL`, and displays `created_at` as a local date/time string in both the table
+and expanded row. Filtering and sorting still use the stored numeric value.
+
+## Field meanings
+
+- `visible` is a conversation presentation hint. Inputs and nonempty assistant
+  text normally use 1; protocol/tool records and checkpoints normally use 0.
+  The conversation can still render 0-valued records as specialized or collapsed
+  entries. It is not an access-control flag or a context-replay filter.
+- `request_input_id` references the input row that caused an output. This groups
+  assistant/tool outputs with their source request and keeps outputs superseded
+  by later inputs out of context replay. Input rows, checkpoints, and some
+  activity rows have NULL because they are not assigned to an input this way.
+- `payload` stores the complete structured record as JSON text. `content` is a
+  separate, derived display-text column: message text, reasoning summary, tool
+  output text, or a protocol-item label. Context replay reads `payload`; parts
+  of conversation rendering, thread naming, and text search read `content`.
+  Keeping `content` is a convenience, not an independent source of truth. A
+  payload-only design is possible by deriving the text at these read sites.
 
 Both endpoints resolve the database from the authenticated identity. A thread
 filter or record ID cannot select another user's database. The existing
