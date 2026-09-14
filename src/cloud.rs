@@ -55,7 +55,8 @@ const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 7;
+const USER_SCHEMA_VERSION: i64 = 8;
+const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -363,6 +364,13 @@ fn app(state: AppState) -> Router {
         .route("/api/insights", get(insights))
         .route("/api/reasoning-audits", get(reasoning_audits))
         .route("/api/worker-calls", get(worker_call_audits))
+        .route("/api/contexts", get(list_contexts).post(create_context))
+        .route(
+            "/api/contexts/{id}",
+            get(read_context)
+                .patch(update_context)
+                .delete(delete_context),
+        )
         .route("/api/system/resources", get(system_resources))
         .route("/api/status", get(status))
         .route("/api/integrations", get(integrations))
@@ -762,6 +770,14 @@ CREATE TABLE IF NOT EXISTS worker_calls (
 );
 CREATE INDEX IF NOT EXISTS worker_calls_delivery ON worker_calls(worker_id,status,created_at);
 CREATE INDEX IF NOT EXISTS worker_calls_thread_created ON worker_calls(thread_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS contexts (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  content TEXT NOT NULL,
+  parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS contexts_parent_name ON contexts(parent_id,name,id);
 "#;
 
 const USER_HISTORY_INDEXES: &str = r#"
@@ -784,7 +800,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     let version: i64 = transaction
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(ApiError::internal)?;
-    if version != USER_SCHEMA_VERSION {
+    if version < RESETTABLE_USER_SCHEMA_VERSION {
         // The hosted schema was intentionally reset after the context model was corrected.
         // There is no supported migration from the discarded pre-release user databases.
         transaction
@@ -854,9 +870,11 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
-    transaction
-        .execute_batch(&format!("PRAGMA user_version = {USER_SCHEMA_VERSION};"))
-        .map_err(ApiError::internal)?;
+    if version < USER_SCHEMA_VERSION {
+        transaction
+            .execute_batch(&format!("PRAGMA user_version = {USER_SCHEMA_VERSION};"))
+            .map_err(ApiError::internal)?;
+    }
     transaction.commit()?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -1180,6 +1198,47 @@ struct WorkerView {
     resource: Option<Value>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ContextView {
+    id: String,
+    name: String,
+    description: String,
+    content: String,
+    parent_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ContextSummary {
+    id: String,
+    name: String,
+    description: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateContextInput {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    parent_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateContextInput {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    parent_id: Option<Option<String>>,
+}
+
 #[derive(Serialize)]
 struct WorkerPairing {
     controller_url: &'static str,
@@ -1278,6 +1337,16 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     })
 }
 
+fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextView> {
+    Ok(ContextView {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        content: row.get(3)?,
+        parent_id: row.get(4)?,
+    })
+}
+
 fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
     let payload = serde_json::from_str::<Value>(&row.get::<_, String>(6)?)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -1314,6 +1383,44 @@ fn label(value: &str, field: &str, max: usize) -> Result<String, ApiError> {
         )));
     }
     Ok(value.to_owned())
+}
+
+fn context_text(value: String, field: &str, max: usize, trim: bool) -> Result<String, ApiError> {
+    let value = if trim { value.trim().to_owned() } else { value };
+    if value.is_empty() && field == "name" {
+        return Err(ApiError::bad_request(
+            "name must contain 1-160 visible characters",
+        ));
+    }
+    if value.chars().count() > max
+        || value.chars().any(|character| {
+            character == '\0'
+                || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        })
+    {
+        return Err(ApiError::bad_request(format!(
+            "{field} must contain at most {max} characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn context_name(value: String) -> Result<String, ApiError> {
+    context_text(value, "name", 160, true)
+}
+
+fn context_description(value: String) -> Result<String, ApiError> {
+    context_text(value, "description", 10_000, true)
+}
+
+fn context_content(value: String) -> Result<String, ApiError> {
+    context_text(value, "content", 200_000, false)
+}
+
+fn context_id(value: &str) -> Result<String, ApiError> {
+    Uuid::parse_str(value)
+        .map(|id| id.to_string())
+        .map_err(|_| ApiError::not_found("context not found"))
 }
 
 fn optional_title(value: Option<String>) -> Result<String, ApiError> {
@@ -2270,6 +2377,193 @@ async fn list_workers(
     Ok(Json(workers))
 }
 
+fn validate_context_parent(
+    connection: &Connection,
+    context_id: Option<&str>,
+    parent_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(parent_id) = parent_id else {
+        return Ok(());
+    };
+    if context_id == Some(parent_id) {
+        return Err(ApiError::conflict("a context cannot be its own parent"));
+    }
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contexts WHERE id=?)",
+        [parent_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(ApiError::not_found("parent context not found"));
+    }
+    if let Some(context_id) = context_id {
+        let creates_cycle: bool = connection.query_row(
+            "WITH RECURSIVE descendants(id) AS (
+               SELECT ?1
+               UNION ALL
+               SELECT contexts.id FROM contexts JOIN descendants ON contexts.parent_id=descendants.id
+             )
+             SELECT EXISTS(SELECT 1 FROM descendants WHERE id=?2)",
+            params![context_id, parent_id],
+            |row| row.get(0),
+        )?;
+        if creates_cycle {
+            return Err(ApiError::conflict("context parent would create a cycle"));
+        }
+    }
+    Ok(())
+}
+
+async fn list_contexts(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<Vec<ContextView>>, ApiError> {
+    let contexts = user_db(&state, &identity.user, true, |connection| {
+        let mut statement = connection.prepare(
+            "SELECT id,name,description,content,parent_id FROM contexts ORDER BY parent_id IS NOT NULL,name,id",
+        )?;
+        let rows = statement.query_map([], context_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    })
+    .await?;
+    Ok(Json(contexts))
+}
+
+async fn create_context(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<CreateContextInput>,
+) -> Result<Json<ContextView>, ApiError> {
+    let name = context_name(input.name)?;
+    let description = context_description(input.description)?;
+    let content = context_content(input.content)?;
+    let parent_id = input
+        .parent_id
+        .map(|value| context_id(&value))
+        .transpose()?;
+    let context = user_db(&state, &identity.user, true, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_context_parent(&transaction, None, parent_id.as_deref())?;
+        let context = ContextView {
+            id: Uuid::new_v4().to_string(),
+            name,
+            description,
+            content,
+            parent_id,
+        };
+        transaction.execute(
+            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+            params![
+                &context.id,
+                &context.name,
+                &context.description,
+                &context.content,
+                &context.parent_id,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(context)
+    })
+    .await?;
+    Ok(Json(context))
+}
+
+async fn read_context(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ContextView>, ApiError> {
+    let id = context_id(&id)?;
+    let context = user_db(&state, &identity.user, true, move |connection| {
+        connection
+            .query_row(
+                "SELECT id,name,description,content,parent_id FROM contexts WHERE id=?",
+                [&id],
+                context_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    })
+    .await?
+    .ok_or_else(|| ApiError::not_found("context not found"))?;
+    Ok(Json(context))
+}
+
+async fn update_context(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<UpdateContextInput>,
+) -> Result<Json<ContextView>, ApiError> {
+    let id = context_id(&id)?;
+    let context = user_db(&state, &identity.user, true, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "SELECT id,name,description,content,parent_id FROM contexts WHERE id=?",
+                [&id],
+                context_from_row,
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(ApiError::not_found("context not found"));
+        };
+        let name = input
+            .name
+            .map(context_name)
+            .transpose()?
+            .unwrap_or(current.name);
+        let description = input
+            .description
+            .map(context_description)
+            .transpose()?
+            .unwrap_or(current.description);
+        let content = input
+            .content
+            .map(context_content)
+            .transpose()?
+            .unwrap_or(current.content);
+        let parent_id = input
+            .parent_id
+            .map(|value| value.map(|value| context_id(&value)).transpose())
+            .transpose()?
+            .unwrap_or(current.parent_id);
+        validate_context_parent(&transaction, Some(&id), parent_id.as_deref())?;
+        transaction.execute(
+            "UPDATE contexts SET name=?,description=?,content=?,parent_id=? WHERE id=?",
+            params![&name, &description, &content, &parent_id, &id],
+        )?;
+        transaction.commit()?;
+        Ok(ContextView {
+            id,
+            name,
+            description,
+            content,
+            parent_id,
+        })
+    })
+    .await?;
+    Ok(Json(context))
+}
+
+async fn delete_context(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    let id = context_id(&id)?;
+    user_db(&state, &identity.user, true, move |connection| {
+        let changed = connection.execute("DELETE FROM contexts WHERE id=?", [&id])?;
+        if changed == 0 {
+            return Err(ApiError::not_found("context not found"));
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_worker_pairing(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
@@ -3214,19 +3508,62 @@ fn available_workers(connection: &Connection) -> Result<Vec<WorkerSnapshot>, Api
         .map_err(Into::into)
 }
 
-fn worker_developer_prefix(workers: &[WorkerSnapshot]) -> Value {
+fn available_contexts(connection: &Connection) -> Result<Vec<ContextSummary>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT id,name,description FROM contexts WHERE parent_id IS NULL ORDER BY name,id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(ContextSummary {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSnapshot]) -> Value {
+    let context_section = if contexts.is_empty() {
+        None
+    } else {
+        let list = contexts
+            .iter()
+            .map(|context| {
+                format!(
+                    "- context_id: {} ({}) — {}",
+                    context.id, context.name, context.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(format!(
+            "Cybion Contexts (top-level; content is intentionally omitted from this initial context):\n{list}"
+        ))
+    };
     let list = workers
         .iter()
         .map(|worker| format!("- worker_id: {} ({})", worker.id, worker.label))
         .collect::<Vec<_>>()
         .join("\n");
+    let worker_section = format!(
+        "Cybion Workers:\n{}\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.",
+        list
+    );
+    let content = context_section
+        .into_iter()
+        .chain(std::iter::once(worker_section))
+        .collect::<Vec<_>>()
+        .join("\n\n");
     json!({
         "role": "developer",
-        "content": format!(
-            "Cybion Workers:\n{}\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.",
-            list
-        ),
+        "content": content,
     })
+}
+
+#[allow(dead_code)]
+fn worker_developer_prefix(workers: &[WorkerSnapshot]) -> Value {
+    developer_prefix(&[], workers)
 }
 
 async fn notify_thread(
@@ -3313,7 +3650,12 @@ async fn request_agent(
         })
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
-        let prefix = worker_developer_prefix(&workers);
+        let contexts = user_db(state, user, false, |connection| {
+            available_contexts(connection)
+        })
+        .await
+        .map_err(|error| (thread.clone(), Box::new(error)))?;
+        let prefix = developer_prefix(&contexts, &workers);
         let response = match responses_request_with_options(
             state,
             user,
@@ -3562,6 +3904,10 @@ async fn compact_thread_context(
         available_workers(connection)
     })
     .await?;
+    let contexts = user_db(state, user, false, |connection| {
+        available_contexts(connection)
+    })
+    .await?;
     let summary = compact_protocol_context(
         state,
         user,
@@ -3574,7 +3920,7 @@ async fn compact_thread_context(
         &context.protocol_items,
         &context.record_metadata,
         cancellation.clone(),
-        worker_developer_prefix(&workers),
+        developer_prefix(&contexts, &workers),
     )
     .await?;
     persist_thread_checkpoint(state, user, thread, context.idx_tail, summary).await
@@ -5733,6 +6079,118 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert!(!tables.iter().any(|name| name == "thread_runs"));
+    }
+
+    #[test]
+    fn contexts_are_added_to_an_existing_v7_database_without_resetting_threads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("v7.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(THREAD_SCHEMA).unwrap();
+        connection.execute_batch(USER_SCHEMA).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX contexts_parent_name;
+                 DROP TABLE contexts;
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads(id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at)
+                 VALUES('thread','kept','model','medium',0,'idle',1,1)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        let title: String = connection
+            .query_row("SELECT title FROM threads WHERE id='thread'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "kept");
+        let columns = connection
+            .prepare("PRAGMA table_info(contexts)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            columns,
+            ["id", "name", "description", "content", "parent_id"]
+        );
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, USER_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn developer_prefix_lists_only_top_level_context_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("contexts.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(USER_SCHEMA).unwrap();
+        let parent = Uuid::new_v4().to_string();
+        let child = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO contexts(id,name,description,content) VALUES(?,?,?,?)",
+                params![
+                    &parent,
+                    "Skills",
+                    "Reusable worker skills",
+                    "top-secret parent content"
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+                params![
+                    &child,
+                    "Bash skill",
+                    "Run bash",
+                    "worker_id = 'worker'; path = '/skill'",
+                    &parent
+                ],
+            )
+            .unwrap();
+        let contexts = available_contexts(&connection).unwrap();
+        let prefix = developer_prefix(&contexts, &[]);
+        let content = prefix["content"].as_str().unwrap();
+        assert!(content.contains(&parent));
+        assert!(content.contains("Skills"));
+        assert!(content.contains("Reusable worker skills"));
+        assert!(!content.contains(&child));
+        assert!(!content.contains("top-secret parent content"));
+        assert!(!content.contains("worker_id = 'worker'"));
+    }
+
+    #[test]
+    fn context_parent_validation_rejects_cycles() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("contexts.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(USER_SCHEMA).unwrap();
+        let first = Uuid::new_v4().to_string();
+        let second = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+                params![&first, "First", "", "", Option::<String>::None],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+                params![&second, "Second", "", "", &first],
+            )
+            .unwrap();
+        assert!(validate_context_parent(&connection, Some(&first), Some(&second)).is_err());
     }
 
     #[tokio::test]

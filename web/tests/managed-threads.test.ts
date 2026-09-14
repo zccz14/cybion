@@ -29,6 +29,14 @@ test("new thread preparation waits for the first message before creating a threa
   assert.match(source, /newThreadPrompt/)
 })
 
+test("contexts are managed through a progressive disclosure tree", () => {
+  assert.match(source, /path="\/contexts" element=\{<ContextsPage/)
+  assert.match(source, /\/api\/contexts/)
+  assert.match(source, /<ul role="tree"/)
+  assert.match(source, /parent_id/)
+  assert.match(source, /contextContent/)
+})
+
 test("every thread renders through the shared chat primitives", () => {
   assert.match(source, /<MessageScrollerProvider autoScroll defaultScrollPosition="end">/)
   assert.match(source, /<MessageScrollerViewport>/)

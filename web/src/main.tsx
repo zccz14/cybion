@@ -279,6 +279,13 @@ type SystemResources = {
   }
 }
 type CurrentUser = { user_id: string; hosted: boolean; is_admin: boolean }
+type Context = {
+  id: string
+  name: string
+  description: string
+  content: string
+  parent_id: string | null
+}
 type WorkerCallAudit = {
   id: string
   worker_id: string
@@ -372,6 +379,28 @@ const copy = {
     recordHidden: "Internal",
     recordPayload: "View raw payload",
     navWork: "Work",
+    contexts: "Contexts",
+    contextsTitle: "Contexts",
+    contextsDescription: "Organize reusable context as a tree. Content is loaded only when you open a context.",
+    contextEmpty: "No contexts yet.",
+    contextName: "Context name",
+    contextDescription: "Description",
+    contextContent: "Content",
+    contextParent: "Parent context",
+    contextRoot: "Top-level context",
+    newContext: "New context",
+    editContext: "Edit context",
+    createContext: "Create context",
+    saveContext: "Save context",
+    deleteContext: "Delete context",
+    deleteContextTitle: "Delete this context?",
+    deleteContextDescription: "Child contexts will become top-level contexts.",
+    contextSaved: "Context saved",
+    contextCreated: "Context created",
+    contextUpdated: "Context updated",
+    contextDeleted: "Context deleted",
+    contextCollapse: "Collapse context",
+    contextExpand: "Expand context",
     navAudit: "Audit",
     inferenceStats: "Inference statistics",
     navSystem: "System",
@@ -588,6 +617,28 @@ const copy = {
     recordHidden: "内部记录",
     recordPayload: "查看原始负载",
     navWork: "工作",
+    contexts: "上下文",
+    contextsTitle: "上下文",
+    contextsDescription: "用树形结构组织可复用上下文。只有打开上下文时才加载内容。",
+    contextEmpty: "还没有上下文。",
+    contextName: "上下文名称",
+    contextDescription: "描述",
+    contextContent: "内容",
+    contextParent: "父级上下文",
+    contextRoot: "顶层上下文",
+    newContext: "新建上下文",
+    editContext: "编辑上下文",
+    createContext: "创建上下文",
+    saveContext: "保存上下文",
+    deleteContext: "删除上下文",
+    deleteContextTitle: "删除这个上下文？",
+    deleteContextDescription: "子上下文会变成顶层上下文。",
+    contextSaved: "上下文已保存",
+    contextCreated: "上下文已创建",
+    contextUpdated: "上下文已更新",
+    contextDeleted: "上下文已删除",
+    contextCollapse: "收起上下文",
+    contextExpand: "展开上下文",
     navAudit: "审计",
     inferenceStats: "推理统计",
     navSystem: "系统",
@@ -940,6 +991,7 @@ function WorkspaceShell({
   const routeTitle = pageTitle(location.pathname, t)
   const workNav = [
     { to: "/threads", label: t("threads"), icon: TerminalSquareIcon },
+    { to: "/contexts", label: t("contexts"), icon: NetworkIcon },
   ]
   const auditNav = [
     { to: "/insights", label: t("inferenceStats"), icon: ActivityIcon },
@@ -1016,6 +1068,7 @@ function WorkspaceShell({
             <Route path="/threads" element={<NewThreadPage sdk={sdk} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
             <Route path="/threads/new" element={<NewThreadPage sdk={sdk} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
             <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={() => navigate("/threads")} />} />
+            <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
@@ -1037,6 +1090,7 @@ function WorkspaceShell({
 }
 
 function pageTitle(pathname: string, t: (key: CopyKey) => string) {
+  if (pathname.startsWith("/contexts")) return t("contextsTitle")
   if (pathname.startsWith("/insights")) return t("inferenceStats")
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
@@ -1489,6 +1543,178 @@ function historyRecordText(record: HistoryRecord) {
   if (record.kind === "tool_output" && typeof object?.output === "string") return object.output
   if (record.content.trim()) return record.content
   return JSON.stringify(payload, null, 2)
+}
+
+type ContextDraft = {
+  id: string | null
+  name: string
+  description: string
+  content: string
+  parent_id: string | null
+}
+
+const ROOT_CONTEXT_VALUE = "__root__"
+
+function contextDraft(context?: Context): ContextDraft {
+  return {
+    id: context?.id ?? null,
+    name: context?.name ?? "",
+    description: context?.description ?? "",
+    content: context?.content ?? "",
+    parent_id: context?.parent_id ?? null,
+  }
+}
+
+function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t } = useUi()
+  const client = useQueryClient()
+  const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts") })
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [draft, setDraft] = useState<ContextDraft | null>(null)
+  const [initialized, setInitialized] = useState(false)
+  const selected = contexts.data?.find((context) => context.id === selectedId)
+
+  useEffect(() => {
+    if (!contexts.data || initialized) return
+    setInitialized(true)
+    const first = contexts.data[0]
+    setSelectedId(first?.id ?? null)
+    setDraft(first ? contextDraft(first) : null)
+  }, [contexts.data, initialized])
+
+  const save = useMutation({
+    mutationFn: (value: ContextDraft) => api<Context>(sdk, value.id ? `/api/contexts/${encodeURIComponent(value.id)}` : "/api/contexts", {
+      method: value.id ? "PATCH" : "POST",
+      body: JSON.stringify({
+        name: value.name,
+        description: value.description,
+        content: value.content,
+        parent_id: value.parent_id,
+      }),
+    }),
+    onSuccess: (value) => {
+      setSelectedId(value.id)
+      setDraft(contextDraft(value))
+      void client.invalidateQueries({ queryKey: ["contexts"] })
+    },
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => api<unknown>(sdk, `/api/contexts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: (_value, id) => {
+      setSelectedId((current) => current === id ? null : current)
+      setDraft(null)
+      void client.invalidateQueries({ queryKey: ["contexts"] })
+    },
+  })
+
+  function selectContext(context: Context) {
+    setSelectedId(context.id)
+    setDraft(contextDraft(context))
+    save.reset()
+    remove.reset()
+  }
+
+  function createNew() {
+    setSelectedId(null)
+    setDraft(contextDraft())
+    save.reset()
+    remove.reset()
+  }
+
+  function submit() {
+    if (!draft || !draft.name.trim() || save.isPending) return
+    save.mutate(draft)
+  }
+
+  function deleteSelected() {
+    if (!draft?.id || remove.isPending || !window.confirm(`${t("deleteContextTitle")}\n\n${t("deleteContextDescription")}`)) return
+    remove.mutate(draft.id)
+  }
+
+  return <Page title={t("contextsTitle")} description={t("contextsDescription")}>
+    <div className="grid gap-6 xl:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.6fr)]">
+      <Card className="h-fit">
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div><CardTitle>{t("contexts")}</CardTitle><CardDescription>{t("contextsDescription")}</CardDescription></div>
+          <Button size="sm" variant="outline" onClick={createNew}><PlusIcon data-icon="inline-start" />{t("newContext")}</Button>
+        </CardHeader>
+        <CardContent>
+          {contexts.error && <RequestError error={contexts.error} onRetry={() => void contexts.refetch()} />}
+          {contexts.isLoading && <div className="flex flex-col gap-2"><Skeleton className="h-8" /><Skeleton className="h-8" /><Skeleton className="h-8" /></div>}
+          {contexts.data?.length === 0 && <p className="text-sm text-muted-foreground">{t("contextEmpty")}</p>}
+          {contexts.data && contexts.data.length > 0 && <ContextTree contexts={contexts.data} selectedId={selectedId} onSelect={selectContext} label={t("contexts")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>{draft?.id ? t("editContext") : t("newContext")}</CardTitle><CardDescription>{t("contextsDescription")}</CardDescription></CardHeader>
+        <CardContent>
+          {draft ? <form className="flex flex-col gap-5" onSubmit={(event) => { event.preventDefault(); submit() }}>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="context-name">{t("contextName")}</FieldLabel>
+                <Input id="context-name" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder={t("contextName")} />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="context-description">{t("contextDescription")}</FieldLabel>
+                <Textarea id="context-description" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} rows={3} />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
+                <Textarea id="context-content" className="min-h-56 font-mono text-sm" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="context-parent">{t("contextParent")}</FieldLabel>
+                <Select value={draft.parent_id ?? ROOT_CONTEXT_VALUE} onValueChange={(value) => setDraft({ ...draft, parent_id: value === ROOT_CONTEXT_VALUE ? null : value })}>
+                  <SelectTrigger id="context-parent"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ROOT_CONTEXT_VALUE}>{t("contextRoot")}</SelectItem>
+                    {contexts.data?.filter((context) => context.id !== draft.id).map((context) => <SelectItem key={context.id} value={context.id}>{context.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </Field>
+            </FieldGroup>
+            {save.error && <RequestError error={save.error} onRetry={submit} />}
+            {remove.error && <RequestError error={remove.error} />}
+            <div className="flex flex-wrap items-center gap-3">
+              <Button disabled={!draft.name.trim() || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{draft.id ? t("saveContext") : t("createContext")}</Button>
+              {draft.id && <Button type="button" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
+              {save.isSuccess && <span role="status" className="text-sm text-muted-foreground">{t("contextSaved")}</span>}
+            </div>
+          </form> : <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">{t("contextEmpty")}</div>}
+          {selected && draft?.id === selected.id && <p className="mt-5 break-all font-mono text-xs text-muted-foreground">{selected.id}</p>}
+        </CardContent>
+      </Card>
+    </div>
+  </Page>
+}
+
+function ContextTree({ contexts, selectedId, onSelect, label, collapseLabel, expandLabel }: { contexts: Context[]; selectedId: string | null; onSelect: (context: Context) => void; label: string; collapseLabel: string; expandLabel: string }) {
+  const children = useMemo(() => {
+    const grouped = new Map<string | null, Context[]>()
+    for (const context of contexts) grouped.set(context.parent_id, [...(grouped.get(context.parent_id) ?? []), context])
+    for (const values of grouped.values()) values.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
+    return grouped
+  }, [contexts])
+  return <ul role="tree" aria-label={label} className="space-y-1">
+    {(children.get(null) ?? []).map((context) => <ContextTreeNode key={context.id} context={context} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}
+  </ul>
+}
+
+function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabel, expandLabel }: { context: Context; children: Map<string | null, Context[]>; selectedId: string | null; onSelect: (context: Context) => void; collapseLabel: string; expandLabel: string }) {
+  const [expanded, setExpanded] = useState(true)
+  const nested = children.get(context.id) ?? []
+  return <li role="treeitem" aria-expanded={nested.length > 0 ? expanded : undefined}>
+    <div className="flex items-center gap-1">
+      <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={expanded ? collapseLabel : expandLabel} disabled={nested.length === 0} onClick={() => setExpanded((value) => !value)}>
+        {nested.length > 0 && <ChevronDownIcon className={expanded ? "" : "-rotate-90"} />}
+      </Button>
+      <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === context.id ? "bg-accent" : ""}`} onClick={() => onSelect(context)}>
+        <span className="min-w-0 truncate font-medium">{context.name}</span>
+        {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
+      </Button>
+    </div>
+    {expanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
+  </li>
 }
 
 function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
