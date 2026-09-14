@@ -22,6 +22,13 @@ test("threads are the only conversation hierarchy", () => {
   assert.doesNotMatch(source, /GoalState/)
 })
 
+test("new thread preparation waits for the first message before creating a thread", () => {
+  assert.match(source, /path="\/threads" element=\{<NewThreadPage/)
+  assert.match(source, /function NewThreadPage\(/)
+  assert.match(source, /\/api\/threads\/start/)
+  assert.match(source, /newThreadPrompt/)
+})
+
 test("every thread renders through the shared chat primitives", () => {
   assert.match(source, /<MessageScrollerProvider autoScroll defaultScrollPosition="end">/)
   assert.match(source, /<MessageScrollerViewport>/)

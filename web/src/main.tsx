@@ -142,6 +142,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
+type StartThreadInput = ThreadDefaults & { input: string }
 type ApiKey = {
   id: string
   label: string
@@ -308,6 +309,10 @@ const copy = {
   en: {
     threads: "Threads",
     newThread: "New thread",
+    newThreadDescription: "Set the working context, then send the first instruction. Cybion will name the thread for you.",
+    newThreadPrompt: "What should Cybion work on?",
+    startThread: "Start thread",
+    startThreadHint: "Your first message creates the thread and starts the model request.",
     threadName: "Thread name",
     create: "Create",
     cancel: "Cancel",
@@ -520,6 +525,10 @@ const copy = {
   zh: {
     threads: "线程",
     newThread: "新建线程",
+    newThreadDescription: "先设置工作上下文，再发送第一条指令。Cybion 会自动为线程命名。",
+    newThreadPrompt: "你希望 Cybion 处理什么？",
+    startThread: "开始线程",
+    startThreadHint: "发送第一条消息后才会创建线程并开始模型请求。",
     threadName: "线程名称",
     create: "创建",
     cancel: "取消",
@@ -863,9 +872,7 @@ function WorkspaceNav({ nav }: { nav: WorkspaceNavGroup[] }) {
 function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("cybion.language") === "zh" ? "zh" : "en")
   const [dark, setDark] = useState(() => localStorage.getItem("cybion.theme") === "dark" || (!localStorage.getItem("cybion.theme") && matchMedia("(prefers-color-scheme: dark)").matches))
-  const [createOpen, setCreateOpen] = useState(false)
   const labels = copy[language]
-  const client = useQueryClient()
   const currentUser = useQuery({
     queryKey: ["me"],
     queryFn: () => api<CurrentUser>(sdk, "/api/me"),
@@ -875,17 +882,6 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
     queryKey: ["threads"],
     queryFn: () => api<Thread[]>(sdk, "/api/threads"),
     refetchInterval: 2000,
-  })
-  const createThread = useMutation({
-    mutationFn: (title: string) => api<Thread>(sdk, "/api/threads", {
-      method: "POST",
-      body: JSON.stringify({ title }),
-    }),
-    onSuccess: (thread) => {
-      void client.invalidateQueries({ queryKey: ["threads"] })
-      setCreateOpen(false)
-      location.hash = `#/threads/${thread.id}`
-    },
   })
   useEffect(() => {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en"
@@ -919,25 +915,6 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
           threads={threads.data ?? []}
           threadsLoading={threads.isLoading}
           threadsError={threads.error}
-          onCreate={() => setCreateOpen(true)}
-        />
-      </ErrorBoundary>
-      <ErrorBoundary fallback={({ error, reset }) => <ErrorBoundaryFallback
-        error={error}
-        reset={reset}
-        title={labels.pageErrorTitle}
-        description={labels.pageErrorDescription}
-        detailsLabel={labels.errorDetails}
-        retryLabel={labels.tryAgain}
-        reloadLabel={labels.reload}
-      />}>
-        <CreateThreadDialog
-          language={language}
-          open={createOpen}
-          pending={createThread.isPending}
-          error={createThread.error}
-          onClose={() => setCreateOpen(false)}
-          onCreate={(title) => createThread.mutate(title)}
         />
       </ErrorBoundary>
     </UiContext.Provider>
@@ -950,17 +927,16 @@ function WorkspaceShell({
   threads,
   threadsLoading,
   threadsError,
-  onCreate,
 }: {
   sdk: AuthMiniApi
   isAdmin: boolean
   threads: Thread[]
   threadsLoading: boolean
   threadsError: unknown
-  onCreate: () => void
 }) {
   const { language, dark, toggleTheme, setLanguage, t } = useUi()
   const location = useLocation()
+  const navigate = useNavigate()
   const routeTitle = pageTitle(location.pathname, t)
   const workNav = [
     { to: "/threads", label: t("threads"), icon: TerminalSquareIcon },
@@ -1037,8 +1013,9 @@ function WorkspaceShell({
           />}
         >
           <Routes>
-            <Route path="/threads" element={<ThreadsPage threads={threads} loading={threadsLoading} error={threadsError} onCreate={onCreate} />} />
-            <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={onCreate} />} />
+            <Route path="/threads" element={<NewThreadPage sdk={sdk} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
+            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
+            <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={() => navigate("/threads")} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
@@ -1072,31 +1049,89 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   return t("threads")
 }
 
-function ThreadsPage({ threads, loading, error, onCreate }: { threads: Thread[]; loading: boolean; error: unknown; onCreate: () => void }) {
+function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
   const { t } = useUi()
-  return <Page title={t("threads")} description={t("emptyDescription")}>
-    <div className="grid gap-4 lg:grid-cols-[minmax(15rem,20rem)_minmax(0,1fr)]">
-      <Card className="min-h-[24rem]">
-        <CardHeader className="flex flex-row items-start justify-between gap-3">
-          <div><CardTitle>{t("threads")}</CardTitle><CardDescription>{t("hosted")}</CardDescription></div>
-          <Button size="icon-sm" aria-label={t("newThread")} onClick={onCreate}><PlusIcon /></Button>
-        </CardHeader>
-        <CardContent className="min-h-0 p-2">
-          {Boolean(error) && <RequestError error={error} />}
-          {loading && <div className="flex flex-col gap-2 p-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div>}
-          {!loading && threads.length === 0 && <div className="p-3 text-sm text-muted-foreground">{t("emptyTitle")}</div>}
-          {!loading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} />)}
-        </CardContent>
-      </Card>
-      <Card className="flex min-h-[24rem] items-center justify-center">
-        <CardContent className="max-w-md text-center">
-          <h2 className="text-lg font-semibold">{t("emptyTitle")}</h2>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">{t("emptyDescription")}</p>
-          <Button className="mt-5" onClick={onCreate}><PlusIcon data-icon="inline-start" />{t("start")}</Button>
-        </CardContent>
-      </Card>
-    </div>
-  </Page>
+  const navigate = useNavigate()
+  const client = useQueryClient()
+  const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
+  const [draft, setDraft] = useState<ThreadDefaults | null>(null)
+  const [input, setInput] = useState("")
+  const value = draft ?? defaults.data
+  const start = useMutation({
+    mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify(payload) }),
+    onSuccess: (request) => {
+      setInput("")
+      void client.invalidateQueries({ queryKey: ["threads"] })
+      navigate(`/threads/${request.thread_id}`)
+    },
+  })
+  const edit = (next: ThreadDefaults) => {
+    setDraft(next)
+    start.reset()
+  }
+  const submit = () => {
+    const message = input.trim()
+    if (!value || !message || start.isPending) return
+    start.mutate({ ...value, input: message })
+  }
+  return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
+    <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
+      <div className="flex items-center justify-between gap-2 px-2 pb-2">
+        <p className="text-xs font-medium text-muted-foreground">{t("threads")}</p>
+        <Button size="icon-sm" variant="ghost" aria-label={t("newThread")} onClick={() => navigate("/threads")}><PlusIcon /></Button>
+      </div>
+      <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-9rem)]" aria-label={t("threads")}>
+        {threadsLoading && <div className="flex flex-col gap-2 px-2 py-1"><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>}
+        {!threadsLoading && threads.length === 0 && <p className="px-3 py-2 text-sm text-muted-foreground">{t("emptyTitle")}</p>}
+        {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} />)}
+        {Boolean(threadsError) && <p className="px-3 py-2 text-xs text-destructive">{errorMessage(threadsError)}</p>}
+      </nav>
+    </aside>
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <header className="shrink-0 border-b px-4 py-4 sm:px-6">
+        <div className="mx-auto w-full max-w-3xl">
+          <h1 className="text-lg font-semibold tracking-tight">{t("newThread")}</h1>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">{t("newThreadDescription")}</p>
+        </div>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 sm:py-8">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+          {defaults.error && <RequestError error={defaults.error} onRetry={() => void defaults.refetch()} />}
+          {defaults.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-24" /><Skeleton className="h-20" /></div>}
+          {value && <section className="rounded-xl border bg-card p-4 sm:p-5" aria-labelledby="new-thread-settings">
+            <div className="mb-5"><h2 id="new-thread-settings" className="text-sm font-semibold">{t("threadDefaults")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("threadDefaultsDescription")}</p></div>
+            <div className="grid gap-5 md:grid-cols-2">
+              <Field data-disabled={start.isPending}>
+                <FieldLabel htmlFor="new-thread-model">{t("model")}</FieldLabel>
+                <Select value={value.model} disabled={start.isPending} onValueChange={(model) => edit({ ...value, model })}>
+                  <SelectTrigger id="new-thread-model"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectGroup>{!THREAD_MODELS.some((model) => model === value.model) && <SelectItem value={value.model}>{value.model}</SelectItem>}{THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent>
+                </Select>
+              </Field>
+              <Field data-disabled={start.isPending}>
+                <FieldLabel htmlFor="new-thread-reasoning">{t("reasoningEffort")}</FieldLabel>
+                <Select value={value.reasoning_effort} disabled={start.isPending} onValueChange={(reasoning_effort) => edit({ ...value, reasoning_effort: reasoning_effort as ThreadDefaults["reasoning_effort"] })}>
+                  <SelectTrigger id="new-thread-reasoning"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectGroup>{REASONING_EFFORTS.map((effort) => <SelectItem key={effort} value={effort}>{effort}</SelectItem>)}</SelectGroup></SelectContent>
+                </Select>
+              </Field>
+              <Field orientation="horizontal" className="md:col-span-2" data-disabled={start.isPending}>
+                <FieldContent><FieldLabel htmlFor="new-thread-fast">{t("fastMode")}</FieldLabel><FieldDescription id="new-thread-fast-description">{t("fastModeDescription")}</FieldDescription></FieldContent>
+                <Switch id="new-thread-fast" aria-describedby="new-thread-fast-description" checked={value.service_tier_fast} disabled={start.isPending} onCheckedChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />
+              </Field>
+            </div>
+          </section>}
+          <div className="rounded-xl border border-dashed bg-muted/20 p-5 sm:p-6">
+            <div className="flex items-start gap-3"><div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><SparklesIcon className="size-4" /></div><div><h2 className="text-sm font-semibold">{t("startThread")}</h2><p className="mt-1 text-sm leading-6 text-muted-foreground">{t("startThreadHint")}</p></div></div>
+          </div>
+          {start.error && <RequestError error={start.error} onRetry={submit} />}
+        </div>
+      </div>
+      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
+        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submit() } }} disabled={!value || start.isPending} /></Field><div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter</span><Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+      </form>
+    </section>
+  </main>
 }
 
 function ThreadLink({ thread }: { thread: Thread }) {
@@ -1837,13 +1872,6 @@ function workerToml(pairing: WorkerPairing) {
 function SecretValue({ value }: { value: string }) {
   const [copied, setCopied] = useState(false)
   return <div className="flex items-start gap-2"><code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1.5 text-xs leading-5 text-foreground">{value}</code><Button size="icon-sm" variant="outline" aria-label="Copy" onClick={() => { void navigator.clipboard.writeText(value); setCopied(true); window.setTimeout(() => setCopied(false), 1500) }}>{copied ? <CheckIcon /> : <CopyIcon />}</Button></div>
-}
-
-function CreateThreadDialog({ language, open, pending, error, onClose, onCreate }: { language: Language; open: boolean; pending: boolean; error: unknown; onClose: () => void; onCreate: (title: string) => void }) {
-  const t = copy[language]
-  const [title, setTitle] = useState("")
-  useEffect(() => { if (!open) setTitle("") }, [open])
-  return <Dialog open={open} onOpenChange={(next) => { if (!next) onClose() }}><DialogContent><form onSubmit={(event) => { event.preventDefault(); onCreate(title.trim() || "Untitled thread") }}><DialogHeader><DialogTitle>{t.newThread}</DialogTitle><DialogDescription>{t.emptyDescription}</DialogDescription></DialogHeader><FieldGroup className="py-2"><Field><FieldLabel htmlFor="thread-title">{t.threadName}</FieldLabel><Input id="thread-title" autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder={t.threadName} /></Field></FieldGroup>{Boolean(error) && <RequestError error={error} onRetry={() => onCreate(title.trim() || "Untitled thread")} />}<DialogFooter><Button type="button" variant="outline" onClick={onClose}>{t.cancel}</Button><Button disabled={pending}>{pending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t.create}</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 function RequestError({ error, onRetry }: { error: unknown; onRetry?: () => void }) {

@@ -200,6 +200,8 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
             Json(CreateThreadInput {
                 title: None,
                 model: model.map(str::to_owned),
+                reasoning_effort: None,
+                service_tier_fast: None,
             }),
         )
         .await

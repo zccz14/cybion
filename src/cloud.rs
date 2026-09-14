@@ -352,6 +352,7 @@ fn app(state: AppState) -> Router {
             get(read_thread_defaults).put(update_thread_defaults),
         )
         .route("/api/threads", get(list_threads).post(create_thread))
+        .route("/api/threads/start", post(start_thread))
         .route(
             "/api/threads/{id}",
             get(read_thread).patch(update_thread).delete(delete_thread),
@@ -1083,6 +1084,19 @@ struct CreateThreadInput {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    service_tier_fast: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartThreadInput {
+    model: String,
+    reasoning_effort: String,
+    service_tier_fast: bool,
+    input: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1412,6 +1426,8 @@ async fn create_thread_for(
 ) -> Result<ThreadView, ApiError> {
     let title = optional_title(input.title)?;
     let model = input.model.map(model_id).transpose()?;
+    let reasoning_effort = input.reasoning_effort.map(reasoning_effort).transpose()?;
+    let service_tier_fast = input.service_tier_fast;
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let defaults = load_thread_defaults(&transaction)?;
@@ -1419,8 +1435,8 @@ async fn create_thread_for(
             id: Uuid::new_v4().to_string(),
             title,
             model: model.unwrap_or(defaults.model),
-            reasoning_effort: defaults.reasoning_effort,
-            service_tier_fast: defaults.service_tier_fast,
+            reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
+            service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
             status: "idle".to_owned(),
             created_at: now(),
             updated_at: now(),
@@ -1960,6 +1976,31 @@ async fn create_thread(
 ) -> Result<Json<ThreadView>, ApiError> {
     Ok(Json(
         create_thread_for(&state, &identity.user, input).await?,
+    ))
+}
+
+async fn start_thread(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<StartThreadInput>,
+) -> Result<Json<RequestView>, ApiError> {
+    let message = input_text(input.input)?;
+    let model = model_id(input.model)?;
+    let reasoning_effort = reasoning_effort(input.reasoning_effort)?;
+    ensure_integrations(&state, &identity.user, &identity.bearer).await?;
+    let thread = create_thread_for(
+        &state,
+        &identity.user,
+        CreateThreadInput {
+            title: None,
+            model: Some(model),
+            reasoning_effort: Some(reasoning_effort),
+            service_tier_fast: Some(input.service_tier_fast),
+        },
+    )
+    .await?;
+    Ok(Json(
+        enqueue_request(state, identity.user, thread.id, message).await?,
     ))
 }
 
@@ -2675,6 +2716,7 @@ async fn process_request(
         Ok((thread, integrations, output)) => {
             match finalize_request_success(&state, &user, &thread_id, record_idx).await {
                 Ok(true) => {
+                    let thread = maybe_name_thread(&state, &user, &thread, record_idx).await;
                     notify_thread(&state, &integrations, &thread, true, &output).await;
                 }
                 Ok(false) => {}
@@ -2695,6 +2737,107 @@ async fn process_request(
         }
     }
     clear_current_request(&state, &user, &thread_id, record_idx).await;
+}
+
+async fn maybe_name_thread(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input_record_id: i64,
+) -> ThreadView {
+    if thread.title != "Untitled thread" {
+        return thread.clone();
+    }
+    let source = user_db(state, user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            connection
+                .query_row(
+                    "SELECT content FROM history_records WHERE id=? AND thread_id=? AND kind='input'",
+                    params![input_record_id, thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(ApiError::from)
+        }
+    })
+    .await;
+    let Ok(Some(input)) = source else {
+        return thread.clone();
+    };
+    let prompt = json!([
+        {
+            "role": "developer",
+            "content": "You name Cybion threads. Return only a concise title of 2-8 words that describes the user's request. Do not use quotes, Markdown, a period, or a generic title like Untitled thread."
+        },
+        {"role": "user", "content": input}
+    ]);
+    let Ok(integrations) = user_db(state, user, false, |connection| {
+        integration_settings(connection)
+    })
+    .await
+    else {
+        return thread.clone();
+    };
+    let response = responses_request_with_options(
+        state,
+        user,
+        &thread.id,
+        Some(input_record_id),
+        "title_generation",
+        input_record_id,
+        input_record_id,
+        &integrations,
+        &thread.model,
+        None,
+        thread.service_tier_fast,
+        prompt,
+        false,
+        Some(40),
+        None,
+        None,
+    )
+    .await;
+    let Ok(response) = response else {
+        return thread.clone();
+    };
+    let Some(title) =
+        generated_thread_title(response_text(&response.value).as_deref().unwrap_or(""))
+    else {
+        return thread.clone();
+    };
+    let thread_id = thread.id.clone();
+    let title_for_db = title.clone();
+    let updated = user_db(state, user, false, move |connection| {
+        let changed = connection.execute(
+            "UPDATE threads SET title=?,updated_at=? WHERE id=? AND title='Untitled thread'",
+            params![title_for_db, now(), thread_id],
+        )?;
+        Ok(changed > 0)
+    })
+    .await
+    .unwrap_or(false);
+    if updated {
+        let mut named = thread.clone();
+        named.title = title;
+        named.updated_at = now();
+        named
+    } else {
+        thread.clone()
+    }
+}
+
+fn generated_thread_title(value: &str) -> Option<String> {
+    let title = value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .trim_matches(|character| matches!(character, '"' | '\'' | '`' | '#' | '*'))
+        .trim();
+    let title = title.chars().take(160).collect::<String>();
+    (title != "Untitled thread")
+        .then(|| label(&title, "title", 160).ok())
+        .flatten()
 }
 
 async fn finalize_request_success(
@@ -5360,6 +5503,8 @@ mod tests {
             CreateThreadInput {
                 title: Some("Test".to_owned()),
                 model: Some("test-model".to_owned()),
+                reasoning_effort: None,
+                service_tier_fast: None,
             },
         )
         .await
@@ -5398,6 +5543,16 @@ mod tests {
     }
 
     #[test]
+    fn generated_thread_title_accepts_a_single_clean_line() {
+        assert_eq!(
+            generated_thread_title("\"Fix the order history\"\nExtra detail"),
+            Some("Fix the order history".to_owned())
+        );
+        assert!(generated_thread_title("Untitled thread").is_none());
+        assert!(generated_thread_title("\n\n").is_none());
+    }
+
+    #[test]
     fn user_ids_are_direct_and_safe_for_database_paths() {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "auth-user-123").unwrap();
@@ -5417,6 +5572,8 @@ mod tests {
             CreateThreadInput {
                 title: Some("Second".to_owned()),
                 model: Some("second-model".to_owned()),
+                reasoning_effort: None,
+                service_tier_fast: None,
             },
         )
         .await
