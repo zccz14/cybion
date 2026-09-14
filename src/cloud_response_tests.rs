@@ -9,11 +9,8 @@ async fn input_record(state: &AppState, user: &User, thread: &ThreadView) -> i64
         Ok(insert_record(
             connection,
             &id,
-            "user",
             "input",
-            "hello",
             json!({"role":"user","content":"hello"}),
-            true,
         ))
     })
     .await
