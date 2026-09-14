@@ -316,17 +316,16 @@ fn recover_interrupted_requests(data_dir: &Path) -> Result<()> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for thread_id in interrupted {
             let content = "Request interrupted by a Cybion restart";
-            transaction.execute(
-                "INSERT INTO history_records(thread_id,role,content,kind,payload,visible,created_at)
-                 VALUES(?,?,?,'activity',?,1,?)",
-                params![
-                    &thread_id,
-                    "system",
-                    content,
-                    serde_json::to_string(&json!({"role":"system","content":content}))?,
-                    finished_at,
-                ],
-            )?;
+            persist_history_record(
+                &transaction,
+                HistoryRecordInsert {
+                    thread_id: &thread_id,
+                    kind: "activity",
+                    payload: &json!({"role":"system","content":content}),
+                    created_at: finished_at,
+                },
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
             transaction.execute(
                 "UPDATE reasoning_audits SET status='failed',error=?,finished_at=?
                  WHERE thread_id=? AND status='in_flight'",
@@ -2883,15 +2882,8 @@ async fn enqueue_request(
             &transaction,
             HistoryRecordInsert {
                 thread_id: &queued_thread_id,
-                request_input_id: None,
-                role: "user",
-                content: input_payload
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .expect("validated input is a string"),
                 kind: "input",
                 payload: &input_payload,
-                visible: true,
                 created_at: started_at,
             },
         )?;
@@ -3199,12 +3191,8 @@ async fn finalize_request_failure(
             &transaction,
             HistoryRecordInsert {
                 thread_id: &thread_id,
-                request_input_id: None,
-                role: "system",
-                content: &content,
                 kind: "activity",
                 payload: &json!({"role":"system","content":&content,"record_idx":record_idx}),
-                visible: true,
                 created_at: now(),
             },
         )?;
@@ -3235,12 +3223,8 @@ async fn finalize_request_failure(
 
 struct HistoryRecordInsert<'a> {
     thread_id: &'a str,
-    request_input_id: Option<i64>,
-    role: &'a str,
-    content: &'a str,
     kind: &'a str,
     payload: &'a Value,
-    visible: bool,
     created_at: i64,
 }
 
@@ -3248,17 +3232,16 @@ fn persist_history_record(
     connection: &Connection,
     record: HistoryRecordInsert<'_>,
 ) -> Result<i64, ApiError> {
+    // COMPATIBILITY: schema 8 requires role/content without defaults. The history
+    // schema migration removes these fixed placeholders together with the columns;
+    // no caller supplies or reads them.
     connection.execute(
-        "INSERT INTO history_records(thread_id,request_input_id,role,content,kind,payload,visible,created_at)
-         VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO history_records(thread_id,kind,payload,created_at,role,content)
+         VALUES(?,?,?,?,'system','')",
         params![
             record.thread_id,
-            record.request_input_id,
-            record.role,
-            record.content,
             record.kind,
             serde_json::to_string(record.payload).map_err(ApiError::internal)?,
-            if record.visible { 1 } else { 0 },
             record.created_at,
         ],
     )?;
@@ -3763,39 +3746,16 @@ fn output_text(items: &[Value]) -> String {
         .collect()
 }
 
-fn response_item_display(item: &ResponseItem) -> (String, String, bool) {
-    match item {
-        ResponseItem::Message(_) | ResponseItem::Reasoning(_) => {
-            let content = item.text();
-            let visible = !content.trim().is_empty();
-            ("assistant".to_owned(), content, visible)
-        }
-        _ => (
-            "tool".to_owned(),
-            "Responses protocol item recorded".to_owned(),
-            false,
-        ),
-    }
-}
-
 async fn append_response_output_items(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
-    request_input_id: i64,
+    input_record_id: i64,
     output: &[ResponseItem],
 ) -> Result<Vec<i64>, ApiError> {
     let records = output
         .iter()
-        .map(|item| {
-            let (role, content, visible) = response_item_display(item);
-            Ok((
-                role,
-                content,
-                serde_json::to_string(item).map_err(ApiError::internal)?,
-                visible,
-            ))
-        })
+        .map(|item| serde_json::to_value(item).map_err(ApiError::internal))
         .collect::<std::result::Result<Vec<_>, ApiError>>()?;
     let thread_id = thread.id.clone();
     let created_at = now();
@@ -3806,7 +3766,7 @@ async fn append_response_output_items(
                SELECT 1 FROM history_records
                WHERE thread_id=? AND kind='input' AND id>?
              )",
-            params![&thread_id, request_input_id],
+            params![&thread_id, input_record_id],
             |row| row.get(0),
         )?;
         let kind = if superseded {
@@ -3815,22 +3775,16 @@ async fn append_response_output_items(
             "response_output"
         };
         let mut ids = Vec::with_capacity(records.len());
-        for (role, content, payload, visible) in records {
-            transaction.execute(
-                "INSERT INTO history_records(thread_id,request_input_id,role,content,kind,payload,visible,created_at)
-                 VALUES(?,?,?,?,?,?,?,?)",
-                params![
-                    &thread_id,
-                    request_input_id,
-                    role,
-                    content,
+        for payload in records {
+            ids.push(persist_history_record(
+                &transaction,
+                HistoryRecordInsert {
+                    thread_id: &thread_id,
                     kind,
-                    payload,
-                    if visible { 1 } else { 0 },
+                    payload: &payload,
                     created_at,
-                ],
-            )?;
-            ids.push(transaction.last_insert_rowid());
+                },
+            )?);
         }
         transaction.commit()?;
         Ok(ids)
@@ -3842,15 +3796,10 @@ async fn append_tool_output_item(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
-    request_input_id: i64,
+    input_record_id: i64,
     item: &Value,
 ) -> Result<i64, ApiError> {
-    let content = item
-        .get("output")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| item.to_string());
-    let payload = serde_json::to_string(item).map_err(ApiError::internal)?;
+    let payload = item.clone();
     let thread_id = thread.id.clone();
     let created_at = now();
     user_db(state, user, false, move |connection| {
@@ -3860,16 +3809,23 @@ async fn append_tool_output_item(
                SELECT 1 FROM history_records
                WHERE thread_id=? AND kind='input' AND id>?
              )",
-            params![&thread_id, request_input_id],
+            params![&thread_id, input_record_id],
             |row| row.get(0),
         )?;
-        let kind = if superseded { "activity" } else { "tool_output" };
-        transaction.execute(
-            "INSERT INTO history_records(thread_id,request_input_id,role,content,kind,payload,visible,created_at)
-             VALUES(?,?,?,?,?,?,0,?)",
-            params![thread_id, request_input_id, "tool", content, kind, payload, created_at,],
+        let kind = if superseded {
+            "activity"
+        } else {
+            "tool_output"
+        };
+        let id = persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id: &thread_id,
+                kind,
+                payload: &payload,
+                created_at,
+            },
         )?;
-        let id = transaction.last_insert_rowid();
         transaction.commit()?;
         Ok(id)
     })
@@ -3926,8 +3882,7 @@ async fn persist_thread_checkpoint(
     idx_tail: i64,
     summary: String,
 ) -> Result<i64, ApiError> {
-    let payload_value = json!({"role":"developer","content":summary});
-    let payload = serde_json::to_string(&payload_value).map_err(ApiError::internal)?;
+    let payload = json!({"role":"developer","content":summary});
     let thread_id = thread.id.clone();
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -3943,20 +3898,15 @@ async fn persist_thread_checkpoint(
                 "thread context changed while its checkpoint was being compacted",
             ));
         }
-        transaction.execute(
-            "INSERT INTO history_records(thread_id,role,content,kind,payload,visible,created_at)
-             VALUES(?,?,?,'checkpoint',?,0,?)",
-            params![
-                &thread_id,
-                "system",
-                payload_value["content"]
-                    .as_str()
-                    .unwrap_or("Context checkpoint"),
-                payload,
-                now(),
-            ],
+        let id = persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id: &thread_id,
+                kind: "checkpoint",
+                payload: &payload,
+                created_at: now(),
+            },
         )?;
-        let id = transaction.last_insert_rowid();
         transaction.commit()?;
         Ok(id)
     })
@@ -5695,8 +5645,6 @@ async fn worker_result(
             "call_id": if responses_call_id.is_empty() { call_id.clone() } else { responses_call_id.clone() },
             "output": input.result.to_string(),
         });
-        let output_content = output["output"].as_str().unwrap_or_default().to_owned();
-        let output_payload = serde_json::to_string(&output).map_err(ApiError::internal)?;
         let accepted = matches!(call_status.as_str(), "queued" | "delivered");
         if accepted {
             transaction.execute(
@@ -5727,20 +5675,15 @@ async fn worker_result(
             true
         };
         let kind = if superseded { "activity" } else { "tool_output" };
-        transaction.execute(
-            "INSERT INTO history_records(thread_id,request_input_id,role,content,kind,payload,visible,created_at)
-             VALUES(?,?,?,?,?,?,0,?)",
-            params![
-                &thread_id,
-                input_record_id,
-                "tool",
-                output_content,
+        let output_record_id = persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id: &thread_id,
                 kind,
-                output_payload,
-                now()
-            ],
+                payload: &output,
+                created_at: now(),
+            },
         )?;
-        let output_record_id = transaction.last_insert_rowid();
         transaction.execute(
             "UPDATE worker_calls SET output_record_id=? WHERE id=?",
             params![output_record_id, &call_id],
@@ -5853,22 +5796,15 @@ mod tests {
     pub(super) fn insert_record(
         connection: &Connection,
         thread_id: &str,
-        role: &str,
         kind: &str,
-        content: &str,
         payload: Value,
-        visible: bool,
     ) -> i64 {
         persist_history_record(
             connection,
             HistoryRecordInsert {
                 thread_id,
-                request_input_id: None,
-                role,
-                content,
                 kind,
                 payload: &payload,
-                visible,
                 created_at: now(),
             },
         )
@@ -5992,29 +5928,20 @@ mod tests {
                 insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "hello",
                     json!({"role":"user","content":"hello"}),
-                    true,
                 );
                 insert_record(
                     connection,
                     &thread_id,
-                    "system",
                     "activity",
-                    "internal",
                     json!({"role":"system","content":"internal"}),
-                    true,
                 );
                 insert_record(
                     connection,
                     &thread_id,
-                    "system",
-                    "checkpoint",
                     "checkpoint",
                     json!({"role":"developer","content":valid_checkpoint("state")}),
-                    false,
                 );
                 Ok(())
             }
@@ -6199,56 +6126,38 @@ mod tests {
                 let first = insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "old",
                     json!({"role":"user","content":"old"}),
-                    true,
                 );
                 insert_record(
                     connection,
                     &sibling_id,
-                    "user",
                     "input",
-                    "sibling",
                     json!({"role":"user","content":"sibling"}),
-                    true,
                 );
                 let checkpoint = insert_record(
                     connection,
                     &thread_id,
-                    "system",
-                    "checkpoint",
                     "checkpoint",
                     json!({"role":"developer","content":valid_checkpoint("old state")}),
-                    false,
                 );
                 insert_record(
                     connection,
                     &thread_id,
-                    "system",
                     "activity",
-                    "not context",
                     json!({"role":"system","content":"not context"}),
-                    true,
                 );
                 let second = insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "new",
                     json!({"role":"user","content":"new"}),
-                    true,
                 );
                 let future = insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "future",
                     json!({"role":"user","content":"future"}),
-                    true,
                 );
                 Ok((first, checkpoint, second, future))
             }
@@ -6301,29 +6210,20 @@ mod tests {
                 let input = insert_record(
                     connection,
                     &thread_id,
-                    "user",
-                    "input",
                     "input",
                     json!({"role":"user","content":"input"}),
-                    true,
                 );
                 let activity = insert_record(
                     connection,
                     &thread_id,
-                    "system",
-                    "activity",
                     "activity",
                     json!({"role":"system","content":"activity"}),
-                    true,
                 );
                 let sibling_input = insert_record(
                     connection,
                     &sibling_id,
-                    "user",
                     "input",
-                    "sibling",
                     json!({"role":"user","content":"sibling"}),
-                    true,
                 );
                 Ok((input, activity, sibling_input))
             }
@@ -6367,20 +6267,14 @@ mod tests {
                 let first = insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "first",
                     json!({"role":"user","content":"first"}),
-                    true,
                 );
                 let second = insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "second",
                     json!({"role":"user","content":"second"}),
-                    true,
                 );
                 Ok((first, second))
             }
@@ -6407,11 +6301,8 @@ mod tests {
                 Ok(insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "third",
                     json!({"role":"user","content":"third"}),
-                    true,
                 ))
             }
         })
@@ -6526,25 +6417,6 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_output_uses_summary_as_visible_assistant_content() {
-        let item = json!({
-            "type":"reasoning",
-            "summary":[
-                {"type":"summary_text","text":"First thought."},
-                {"type":"summary_text","text":"Second thought."}
-            ]
-        });
-        assert_eq!(
-            response_item_display(&ResponseItem::from_value(item).unwrap()),
-            (
-                "assistant".to_owned(),
-                "First thought.\n\nSecond thought.".to_owned(),
-                true
-            )
-        );
-    }
-
-    #[test]
     fn worker_developer_prefix_uses_markdown_ids_and_names_only() {
         let prefix = worker_developer_prefix(&[WorkerSnapshot {
             id: "4b9aa3ae-f5a3-483b-975a-3fdcd148d680".to_owned(),
@@ -6579,11 +6451,8 @@ mod tests {
                 Ok(insert_record(
                     connection,
                     &thread_id,
-                    "user",
                     "input",
-                    "hello",
                     json!({"role":"user","content":"hello"}),
-                    true,
                 ))
             }
         })

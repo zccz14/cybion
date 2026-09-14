@@ -38,5 +38,12 @@ JSON. The conversation renders inputs, messages, reasoning summaries, tool
 results, and runtime activity directly from `kind` and `payload`. Thread naming
 reads the input text from its payload.
 
+All runtime appends use one writer accepting only `thread_id`, `kind`, `payload`,
+and `created_at`; SQLite assigns `id`. No caller derives display columns or
+stores a request association on history. Schema 8 still requires `role` and
+`content`, so the writer temporarily supplies constant `system` and empty-text
+placeholders. The next schema migration removes those columns and placeholders;
+`visible` and `request_input_id` already use their database defaults.
+
 Both endpoints resolve the database from the authenticated identity. A thread
 filter or record ID cannot select another user's database.
