@@ -12,23 +12,24 @@ test("history table renders database fields and server pagination without transf
   try {
     const { HistoryTable } = await server.ssrLoadModule("/src/components/history-table.tsx")
     client.setQueryData(["history-table", "page=2"], {
-      items: [{ id: 580, thread_id: "thread-raw-id", thread_title: "History inspection", request_input_id: null, role: "assistant", content: "", kind: "response_output", payload: "not JSON: persisted text", visible: 0, created_at: 1789373448, content_truncated: false, payload_truncated: true }],
+      items: [{ id: 580, thread_id: "thread-raw-id", thread_title: "History inspection", kind: "response_output", payload: "not JSON: persisted text", created_at: 1789373448, payload_truncated: true }],
       total: 21, page: 2, page_size: 20, sort: "id", direction: "desc",
     })
     for (const language of ["en", "zh"]) {
       const html = renderToStaticMarkup(createElement(QueryClientProvider, { client },
-        createElement(MemoryRouter, { initialEntries: ["/history?page=2"] },
+        createElement(MemoryRouter, { initialEntries: ["/history?page=2&visible=0&sort=content"] },
           createElement(HistoryTable, { language, request: () => { throw new Error("Rows must use the page response; details load only when expanded") } }),
         ),
       ))
       assert.match(html, /aria-label="history_records"/)
-      for (const column of ["id", "thread_id", "request_input_id", "role", "content", "kind", "payload", "visible", "created_at"]) {
+      for (const column of ["id", "thread_id", "kind", "payload", "created_at"]) {
         assert.ok(html.includes(`<span class="font-mono">${column}</span>`), column)
       }
       assert.match(html, /aria-sort="descending"/)
       assert.match(html, />580<\/code>/)
-      assert.match(html, />NULL<\/code>/)
-      assert.match(html, />0<\/code>/)
+      for (const column of ["request_input_id", "role", "content", "visible"]) {
+        assert.ok(!html.includes(`<span class="font-mono">${column}</span>`), column)
+      }
       assert.match(html, /not JSON: persisted text/)
       assert.ok(!html.includes("1789373448"))
       assert.ok(html.includes(new Date(1789373448 * 1000).toLocaleString(language === "zh" ? "zh-CN" : "en-US")))

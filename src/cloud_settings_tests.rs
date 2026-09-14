@@ -311,7 +311,7 @@ fn max_reasoning_upgrade_preserves_existing_history_and_foreign_keys() {
     connection.execute_batch(
         "DROP TABLE thread_defaults;
          INSERT INTO threads VALUES('existing-thread','Keep me','gpt-6-astra','high',1,'running',1,2);
-         INSERT INTO history_records(id,thread_id,role,content,kind,payload,created_at) VALUES(11,'existing-thread','user','Keep my history','input','{}',1);
+         INSERT INTO history_records(id,thread_id,role,content,kind,payload,created_at) VALUES(11,'existing-thread','user','Keep my history','input','{\"role\":\"user\",\"content\":\"Keep my history\"}',1);
          INSERT INTO workers(id,label,token_hash,created_at) VALUES('worker-1','Worker','worker-hash',1);
          INSERT INTO api_keys(id,label,prefix,secret_hash,created_at) VALUES('key-1','Key','prefix','key-hash',1);
          INSERT INTO worker_calls(id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at) VALUES('call-1','worker-1','existing-thread',11,'bash','{}','queued',1);
@@ -343,14 +343,14 @@ fn max_reasoning_upgrade_preserves_existing_history_and_foreign_keys() {
                 .unwrap();
             assert_eq!(count, 1, "lost rows in {table}");
         }
-        let content: String = connection
+        let payload: String = connection
             .query_row(
-                "SELECT content FROM history_records WHERE id=11",
+                "SELECT payload FROM history_records WHERE id=11",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(content, "Keep my history");
+        assert_eq!(payload, r#"{"role":"user","content":"Keep my history"}"#);
         assert_eq!(
             load_thread_defaults(&connection).unwrap(),
             ThreadDefaults::default()

@@ -6,17 +6,7 @@ use axum::{
 use rusqlite::{Connection, OptionalExtension, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 
-const COLUMNS: [&str; 9] = [
-    "id",
-    "thread_id",
-    "request_input_id",
-    "role",
-    "content",
-    "kind",
-    "payload",
-    "visible",
-    "created_at",
-];
+const COLUMNS: [&str; 5] = ["id", "thread_id", "kind", "payload", "created_at"];
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,10 +17,7 @@ pub(super) struct HistoryQuery {
     direction: Option<String>,
     id: Option<i64>,
     thread_id: Option<String>,
-    request_input_id: Option<i64>,
-    role: Option<String>,
     kind: Option<String>,
-    visible: Option<i64>,
     created_from: Option<i64>,
     created_to: Option<i64>,
     q: Option<String>,
@@ -40,12 +27,8 @@ pub(super) struct HistoryQuery {
 pub(super) struct RawHistoryRecord {
     id: i64,
     thread_id: String,
-    request_input_id: Option<i64>,
-    role: String,
-    content: String,
     kind: String,
     payload: String,
-    visible: i64,
     created_at: i64,
 }
 
@@ -54,7 +37,6 @@ struct HistoryPreview {
     #[serde(flatten)]
     record: RawHistoryRecord,
     thread_title: String,
-    content_truncated: bool,
     payload_truncated: bool,
 }
 
@@ -96,20 +78,16 @@ fn raw_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHistoryRecord> {
     Ok(RawHistoryRecord {
         id: row.get(0)?,
         thread_id: row.get(1)?,
-        request_input_id: row.get(2)?,
-        role: row.get(3)?,
-        content: row.get(4)?,
-        kind: row.get(5)?,
-        payload: row.get(6)?,
-        visible: row.get(7)?,
-        created_at: row.get(8)?,
+        kind: row.get(2)?,
+        payload: row.get(3)?,
+        created_at: row.get(4)?,
     })
 }
 
 fn load_record(connection: &Connection, id: i64) -> Result<RawHistoryRecord, ApiError> {
     connection
         .query_row(
-            "SELECT id,thread_id,request_input_id,role,content,kind,payload,visible,created_at
+            "SELECT id,thread_id,kind,payload,created_at
          FROM history_records WHERE id=?",
             [id],
             raw_record,
@@ -133,9 +111,6 @@ fn load_page(connection: &mut Connection, query: HistoryQuery) -> Result<History
             "invalid history sort column or direction",
         ));
     }
-    if query.visible.is_some_and(|value| value != 0 && value != 1) {
-        return Err(ApiError::bad_request("visible must be 0 or 1"));
-    }
     if let (Some(from), Some(to)) = (query.created_from, query.created_to)
         && from > to
     {
@@ -146,21 +121,11 @@ fn load_page(connection: &mut Connection, query: HistoryQuery) -> Result<History
 
     let mut filters = Vec::new();
     let mut values = Vec::<Value>::new();
-    for (column, value) in [
-        ("id", query.id),
-        ("request_input_id", query.request_input_id),
-        ("visible", query.visible),
-    ] {
-        if let Some(value) = value {
-            filters.push(format!("{column} = ?"));
-            values.push(value.into());
-        }
+    if let Some(id) = query.id {
+        filters.push("id = ?".to_owned());
+        values.push(id.into());
     }
-    for (column, value) in [
-        ("thread_id", query.thread_id),
-        ("role", query.role),
-        ("kind", query.kind),
-    ] {
+    for (column, value) in [("thread_id", query.thread_id), ("kind", query.kind)] {
         if let Some(value) = value {
             filters.push(format!("{column} = ?"));
             values.push(value.into());
@@ -173,8 +138,8 @@ fn load_page(connection: &mut Connection, query: HistoryQuery) -> Result<History
         }
     }
     if let Some(value) = query.q.filter(|value| !value.is_empty()) {
-        filters.push("(instr(content, ?) > 0 OR instr(payload, ?) > 0)".to_owned());
-        values.extend([Value::Text(value.clone()), Value::Text(value)]);
+        filters.push("instr(payload, ?) > 0".to_owned());
+        values.push(Value::Text(value));
     }
     let predicate = if filters.is_empty() {
         "1".to_owned()
@@ -195,8 +160,8 @@ fn load_page(connection: &mut Connection, query: HistoryQuery) -> Result<History
     ]);
     // Only allowlisted column/direction identifiers enter SQL; all filter values are bound.
     let mut statement = transaction.prepare(&format!(
-        "SELECT id,thread_id,request_input_id,role,substr(content,1,240),kind,substr(payload,1,240),visible,created_at,
-                length(CAST(content AS BLOB)),length(CAST(payload AS BLOB)),
+        "SELECT id,thread_id,kind,substr(payload,1,240),created_at,
+                length(CAST(payload AS BLOB)),
                 (SELECT t.title FROM threads t WHERE t.id=history_records.thread_id)
          FROM history_records WHERE {predicate} ORDER BY {sort} {direction},id {direction} LIMIT ? OFFSET ?"
     ))?;
@@ -204,9 +169,8 @@ fn load_page(connection: &mut Connection, query: HistoryQuery) -> Result<History
         .query_map(params_from_iter(&values), |row| {
             let record = raw_record(row)?;
             Ok(HistoryPreview {
-                thread_title: row.get(11)?,
-                content_truncated: row.get::<_, usize>(9)? > record.content.len(),
-                payload_truncated: row.get::<_, usize>(10)? > record.payload.len(),
+                thread_title: row.get(6)?,
+                payload_truncated: row.get::<_, usize>(5)? > record.payload.len(),
                 record,
             })
         })?
@@ -331,12 +295,63 @@ mod tests {
     }
 
     #[test]
+    fn history_reads_and_context_replay_use_only_core_columns() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(cloud::THREAD_SCHEMA).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE history_records (
+               id INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, kind TEXT NOT NULL,
+               payload TEXT NOT NULL, created_at INTEGER NOT NULL
+             );
+             INSERT INTO threads(id,title,model,status,created_at,updated_at)
+               VALUES('thread','Core history','model','idle',1,1);",
+            )
+            .unwrap();
+        for (id, kind, payload) in [
+            (1, "input", json!({"role":"user","content":"hello"})),
+            (2, "activity", json!({"role":"system","content":"internal"})),
+            (
+                3,
+                "response_output",
+                json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"world"}]}),
+            ),
+        ] {
+            connection.execute(
+                "INSERT INTO history_records(id,thread_id,kind,payload,created_at) VALUES(?,'thread',?,?,?)",
+                params![id, kind, payload.to_string(), id],
+            ).unwrap();
+        }
+        let page = load_page(&mut connection, query(json!({"q":"world"}))).unwrap();
+        assert_eq!(ids(&page), [3]);
+        assert_eq!(page.items[0].thread_title, "Core history");
+        assert_eq!(load_record(&connection, 1).unwrap().kind, "input");
+        let record = connection
+            .query_row(
+                "SELECT id,thread_id,kind,payload,created_at FROM history_records WHERE id=1",
+                [],
+                cloud::history_from_row,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(record)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            COLUMNS.len()
+        );
+        let context = cloud::compile_thread_context(&connection, "thread", 3).unwrap();
+        assert_eq!(context.record_ids, [1, 3]);
+    }
+
+    #[test]
     fn pagination_sorts_all_rows_with_stable_ties_and_clamps_deleted_pages() {
         let mut connection = database();
         let first = load_page(&mut connection, HistoryQuery::default()).unwrap();
         assert_eq!(first.total, 6);
         assert_eq!(ids(&first), [6, 5, 4, 3, 2, 1]);
-        assert_eq!(first.items[2].record.visible, 0);
+        assert_eq!(first.items[2].record.kind, "checkpoint");
         assert_eq!(first.items[4].record.payload, "not JSON");
         assert_eq!(first.items[0].thread_title, "Beta");
         assert_eq!(first.items[1].thread_title, "Alpha");
@@ -374,16 +389,15 @@ mod tests {
     fn filters_use_full_stored_values_and_share_the_count_predicate() {
         let mut connection = database();
         for (input, expected) in [
-            (json!({"q":"needle"}), vec![6, 3]),
-            (json!({"q":"%_literal"}), vec![2]),
+            (json!({"q":"needle"}), vec![3]),
+            (json!({"q":"%_literal"}), vec![]),
             (json!({"q":"hello"}), vec![]),
             (json!({"q":"' OR 1=1 --"}), vec![]),
             (
-                json!({"thread_id":"a","request_input_id":1,"role":"tool","kind":"tool_output","visible":0,"created_from":100,"created_to":100,"q":"needle"}),
+                json!({"thread_id":"a","kind":"tool_output","created_from":100,"created_to":100,"q":"needle"}),
                 vec![3],
             ),
             (json!({"id":4}), vec![4]),
-            (json!({"visible":0}), vec![4, 3, 2]),
             (
                 json!({"created_from":200,"created_to":300}),
                 vec![6, 5, 4, 1],
@@ -396,29 +410,26 @@ mod tests {
         }
         let filtered = load_page(
             &mut connection,
-            query(json!({"q":"needle","page_size":1,"page":2})),
+            query(json!({"q":"{}","page_size":1,"page":2})),
         )
         .unwrap();
-        assert_eq!(filtered.total, 2);
-        assert_eq!(ids(&filtered), [3]);
+        assert_eq!(filtered.total, 3);
+        assert_eq!(ids(&filtered), [5]);
     }
 
     #[test]
-    fn previews_are_bounded_and_detail_preserves_raw_text_nulls_and_integers() {
+    fn previews_are_bounded_and_detail_preserves_raw_payload() {
         let mut connection = database();
         let page = load_page(&mut connection, query(json!({"id":3}))).unwrap();
         let preview = &page.items[0];
         assert_eq!(preview.record.payload.chars().count(), 240);
         assert!(preview.payload_truncated);
-        assert!(!preview.content_truncated);
         let raw = load_record(&connection, 3).unwrap();
         assert_eq!(raw.payload, format!("{}needle", "数据🧪".repeat(400)));
         let raw = serde_json::to_value(load_record(&connection, 1).unwrap()).unwrap();
         assert_eq!(raw["payload"], " {\n  \"a\":1, \"a\":2 } ");
-        assert_eq!(raw["visible"], 1);
-        assert!(raw["request_input_id"].is_null());
         assert_eq!(raw.as_object().unwrap().len(), COLUMNS.len());
-        assert_eq!(load_record(&connection, 4).unwrap().content, "");
+        assert_eq!(load_record(&connection, 4).unwrap().payload, "{}");
         assert_eq!(load_record(&connection, 2).unwrap().payload, "not JSON");
         assert_eq!(
             load_record(&connection, 99).err().unwrap().status,
@@ -432,12 +443,8 @@ mod tests {
         for (column, ascending) in [
             ("id", vec![1, 2, 3, 4, 5, 6]),
             ("thread_id", vec![1, 3, 5, 2, 4, 6]),
-            ("request_input_id", vec![1, 2, 3, 5, 4, 6]),
-            ("role", vec![2, 6, 4, 5, 3, 1]),
-            ("content", vec![4, 2, 1, 6, 5, 3]),
             ("kind", vec![5, 4, 1, 2, 6, 3]),
             ("payload", vec![1, 2, 4, 5, 6, 3]),
-            ("visible", vec![2, 3, 4, 1, 5, 6]),
             ("created_at", vec![2, 3, 4, 5, 1, 6]),
         ] {
             for (direction, expected) in [
@@ -457,9 +464,12 @@ mod tests {
             json!({"page":-1}),
             json!({"page_size":0}),
             json!({"page_size":101}),
+            json!({"sort":"request_input_id"}),
+            json!({"sort":"role"}),
+            json!({"sort":"content"}),
+            json!({"sort":"visible"}),
             json!({"sort":"id; DROP TABLE history_records"}),
             json!({"direction":"desc;--"}),
-            json!({"visible":2}),
             json!({"created_from":200,"created_to":100}),
         ] {
             assert_eq!(
