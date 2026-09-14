@@ -67,6 +67,20 @@ test("the management surfaces expose integration keys and SQLite-free Worker pai
   assert.doesNotMatch(source, /tenant_id|\/turn|run_id|turn_index/)
 })
 
+test("the Worker page exposes every asset from the current standalone release", () => {
+  assert.match(source, /version: "v0\.1\.2"/)
+  assert.match(source, /releases\/tag\/v0\.1\.2/)
+  for (const asset of [
+    "cybion-worker-macos-aarch64.tar.gz",
+    "cybion-worker-macos-x86_64.tar.gz",
+    "cybion-worker-linux-x86_64.tar.gz",
+    "cybion-worker-linux-aarch64.tar.gz",
+    "cybion-worker-windows-x86_64.tar.gz",
+  ]) {
+    assert.match(source, new RegExp(asset.replaceAll(".", "\\.")))
+  }
+})
+
 test("the hosted shell keeps the outer navigation and Linkit account surface", () => {
   for (const group of ["navWork", "navAudit", "navSystem", "navConfiguration"]) {
     assert.match(source, new RegExp(`${group}:`))
