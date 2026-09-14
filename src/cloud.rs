@@ -32,6 +32,7 @@ use tokio::sync::{Mutex, OnceCell, watch};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+use crate::resources;
 use crate::responses::{
     ResponseItem, ResponseState, ResponseStream, ResponsesStreamError, json_response_events,
     response_stream,
@@ -63,10 +64,12 @@ const USER_SCHEMA_VERSION: i64 = 7;
 #[derive(Clone)]
 struct AppState {
     data_dir: Arc<PathBuf>,
+    admin_db_path: Arc<PathBuf>,
     client: reqwest::Client,
     auth: Arc<OnceCell<AuthMiniLayer>>,
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     active_requests: Arc<Mutex<HashMap<String, ActiveRequest>>>,
+    resources: Arc<Mutex<resources::ResourceMonitor>>,
 }
 
 #[derive(Clone)]
@@ -118,6 +121,14 @@ impl ApiError {
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+            kind: ApiErrorKind::Ordinary,
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
             kind: ApiErrorKind::Ordinary,
         }
@@ -217,6 +228,8 @@ pub async fn serve() -> Result<()> {
         .to_path_buf();
     let data_dir = home.join(".cybion");
     prepare_data_dir(&data_dir)?;
+    let admin_db_path = data_dir.join("default.sqlite3");
+    prepare_admin_db(&admin_db_path)?;
     recover_interrupted_requests(&data_dir)?;
     let run_dir = data_dir.join("run");
     fs::create_dir_all(&run_dir)?;
@@ -226,6 +239,7 @@ pub async fn serve() -> Result<()> {
     )?;
     let state = AppState {
         data_dir: Arc::new(data_dir),
+        admin_db_path: Arc::new(admin_db_path.clone()),
         client: reqwest::Client::builder()
             .user_agent(format!("cybion-cloud/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
@@ -234,6 +248,7 @@ pub async fn serve() -> Result<()> {
         auth: Arc::new(OnceCell::new()),
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
         active_requests: Arc::new(Mutex::new(HashMap::new())),
+        resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
     };
     let address: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     tracing::info!(%address, "Cybion Cloud listening");
@@ -249,6 +264,29 @@ fn prepare_data_dir(data_dir: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
         fs::set_permissions(data_dir.join("users"), fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn prepare_admin_db(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("administrator database path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS app_meta (
+           key TEXT PRIMARY KEY,
+           value TEXT NOT NULL
+         );",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -548,6 +586,70 @@ where
     })
     .await
     .map_err(ApiError::internal)?
+}
+
+fn admin_user_sync(path: &Path, user_id: &str, bootstrap: bool) -> Result<bool, ApiError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ApiError::internal("administrator database path has no parent"))?;
+    fs::create_dir_all(parent).map_err(ApiError::internal)?;
+    let mut connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(ApiError::internal)?;
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(ApiError::internal)?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );",
+        )
+        .map_err(ApiError::internal)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(ApiError::internal)?;
+    let root_user_id: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM app_meta WHERE key='root_user_id' AND trim(value) <> ''",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(ApiError::internal)?;
+    let is_admin = match root_user_id {
+        Some(root_user_id) => root_user_id == user_id,
+        None if bootstrap => {
+            transaction
+                .execute(
+                    "INSERT INTO app_meta(key,value) VALUES('root_user_id',?)",
+                    [user_id],
+                )
+                .map_err(ApiError::internal)?;
+            true
+        }
+        None => false,
+    };
+    transaction.commit().map_err(ApiError::internal)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(ApiError::internal)?;
+    }
+    Ok(is_admin)
+}
+
+async fn is_admin(state: &AppState, user_id: &str, bootstrap: bool) -> Result<bool, ApiError> {
+    let path = state.admin_db_path.clone();
+    let user_id = user_id.to_owned();
+    tokio::task::spawn_blocking(move || admin_user_sync(&path, &user_id, bootstrap))
+        .await
+        .map_err(ApiError::internal)?
 }
 
 const THREAD_SCHEMA: &str = r#"
@@ -974,19 +1076,6 @@ struct IntegrationStatusView {
     linkit_username: Option<String>,
 }
 
-#[derive(Serialize)]
-struct SystemResourcesView {
-    generated_at: i64,
-    version: &'static str,
-    process_id: u32,
-    user_id: String,
-    database_bytes: u64,
-    threads: usize,
-    active_requests: usize,
-    workers: usize,
-    online_workers: usize,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateThreadInput {
@@ -1382,9 +1471,15 @@ async fn read_thread_for(
 }
 
 async fn me(
+    State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({"user_id": identity.user.id, "hosted": true})))
+    let is_admin = is_admin(&state, &identity.user.id, true).await?;
+    Ok(Json(json!({
+        "user_id": identity.user.id,
+        "hosted": true,
+        "is_admin": is_admin,
+    })))
 }
 
 async fn status(
@@ -1433,40 +1528,12 @@ async fn refresh_integrations(
 async fn system_resources(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
-) -> Result<Json<SystemResourcesView>, ApiError> {
-    let database_path = identity.user.path.clone();
-    let user_id = identity.user.id.clone();
-    user_db(&state, &identity.user, true, move |connection| {
-        let threads: i64 =
-            connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
-        let active_requests: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM threads WHERE status='running'",
-            [],
-            |row| row.get(0),
-        )?;
-        let workers: i64 =
-            connection.query_row("SELECT COUNT(*) FROM workers", [], |row| row.get(0))?;
-        let online_workers: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM workers WHERE status='online' AND last_seen_at>=?",
-            [now() - WORKER_ONLINE_SECONDS],
-            |row| row.get(0),
-        )?;
-        Ok(SystemResourcesView {
-            generated_at: now(),
-            version: env!("CARGO_PKG_VERSION"),
-            process_id: std::process::id(),
-            user_id,
-            database_bytes: fs::metadata(database_path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
-            threads: threads.max(0) as usize,
-            active_requests: active_requests.max(0) as usize,
-            workers: workers.max(0) as usize,
-            online_workers: online_workers.max(0) as usize,
-        })
-    })
-    .await
-    .map(Json)
+) -> Result<Json<resources::SystemResourcesSnapshot>, ApiError> {
+    if !is_admin(&state, &identity.user.id, false).await? {
+        return Err(ApiError::forbidden("administrator access is required"));
+    }
+    let mut monitor = state.resources.lock().await;
+    monitor.sample().map(Json).map_err(ApiError::internal)
 }
 
 async fn insights(
@@ -5220,16 +5287,42 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         prepare_data_dir(root.path()).unwrap();
         let data_dir = root.path().to_path_buf();
+        let admin_db_path = data_dir.join("default.sqlite3");
+        prepare_admin_db(&admin_db_path).unwrap();
         (
             root,
             AppState {
                 data_dir: Arc::new(data_dir),
+                admin_db_path: Arc::new(admin_db_path.clone()),
                 client: reqwest::Client::new(),
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
                 active_requests: Arc::new(Mutex::new(HashMap::new())),
+                resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
             },
         )
+    }
+
+    #[test]
+    fn administrator_root_user_is_bootstrapped_once_in_app_meta() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("default.sqlite3");
+        prepare_admin_db(&path).unwrap();
+        assert!(!admin_user_sync(&path, "second-user", false).unwrap());
+        assert!(admin_user_sync(&path, "root-user", true).unwrap());
+        assert!(!admin_user_sync(&path, "second-user", true).unwrap());
+        assert!(admin_user_sync(&path, "root-user", false).unwrap());
+        let connection = Connection::open(path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM app_meta WHERE key='root_user_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "root-user"
+        );
     }
 
     pub(super) async fn read_json_request(stream: &mut tokio::net::TcpStream) -> Value {
