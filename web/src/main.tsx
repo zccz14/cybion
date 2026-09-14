@@ -55,6 +55,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
+import { HistoryTable } from "@/components/history-table"
 import {
   Dialog,
   DialogContent,
@@ -539,7 +540,7 @@ const copy = {
     toolImageGeneration: "Image generation",
     toolOpenAi: "OpenAI",
     history: "History",
-    historyDescription: "Choose a thread to inspect its durable conversation history.",
+    historyDescription: "Browse the rows and stored fields in history_records across your workspace.",
     noHistory: "No messages in this thread yet.",
     connection: "Connected",
     hosted: "Hosted workspace",
@@ -777,7 +778,7 @@ const copy = {
     toolImageGeneration: "图像生成",
     toolOpenAi: "OpenAI",
     history: "历史",
-    historyDescription: "选择一个线程查看它的持久对话历史。",
+    historyDescription: "查看当前工作区 history_records 表中的记录与原始字段。",
     noHistory: "这个线程还没有消息。",
     connection: "已连接",
     hosted: "托管工作区",
@@ -1072,7 +1073,7 @@ function WorkspaceShell({
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
-            <Route path="/history" element={<HistoryPage threads={threads} />} />
+            <Route path="/history" element={<HistoryPage sdk={sdk} />} />
             <Route path="/admin/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
@@ -1893,9 +1894,9 @@ function workerCallStatusLabel(status: WorkerCallAudit["status"], t: (key: CopyK
   return status === "queued" ? t("workerQueued") : status === "delivered" ? t("workerDelivered") : status === "completed" ? t("workerCompleted") : t("workerFailed")
 }
 
-function HistoryPage({ threads }: { threads: Thread[] }) {
+function HistoryPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
-  return <Page title={t("history")} description={t("historyDescription")}><Card><CardHeader><CardTitle>{t("threads")}</CardTitle><CardDescription>{t("historyDescription")}</CardDescription></CardHeader><CardContent className="divide-y p-0">{threads.length === 0 ? <p className="p-4 text-sm text-muted-foreground">{t("emptyTitle")}</p> : threads.map((thread) => <Link key={thread.id} to={`/threads/${thread.id}`} className="flex items-center gap-3 px-4 py-3 hover:bg-accent"><StatusDot status={thread.status} /><span className="min-w-0 flex-1 truncate text-sm font-medium">{thread.title}</span><span className="text-xs text-muted-foreground">{formattedTime(language, thread.updated_at)}</span></Link>)}</CardContent></Card></Page>
+  return <Page title={t("history")} description={t("historyDescription")}><HistoryTable language={language} request={(path, signal) => api(sdk, path, { signal })} /></Page>
 }
 
 function SystemPage({ sdk }: { sdk: AuthMiniApi }) {

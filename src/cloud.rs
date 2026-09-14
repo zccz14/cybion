@@ -32,6 +32,8 @@ use tokio::sync::{Mutex, OnceCell, watch};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod history;
+
 use crate::resources;
 use crate::responses::{
     ResponseItem, ResponseState, ResponseStream, ResponsesStreamError, json_response_events,
@@ -362,6 +364,8 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
         .route("/api/insights", get(insights))
+        .route("/api/history", get(history::list))
+        .route("/api/history/{id}", get(history::read))
         .route("/api/reasoning-audits", get(reasoning_audits))
         .route("/api/worker-calls", get(worker_call_audits))
         .route("/api/contexts", get(list_contexts).post(create_context))
@@ -781,6 +785,8 @@ CREATE INDEX IF NOT EXISTS contexts_parent_name ON contexts(parent_id,name,id);
 "#;
 
 const USER_HISTORY_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS history_records_created_id
+  ON history_records(created_at,id);
 CREATE INDEX IF NOT EXISTS history_records_thread_kind_created
   ON history_records(thread_id,kind,id);
 CREATE INDEX IF NOT EXISTS reasoning_audits_input_record
