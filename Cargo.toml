@@ -1,6 +1,6 @@
 [package]
 name = "cybion"
-version = "0.3.27"
+version = "0.3.28"
 edition = "2024"
 license = "MIT"
 description = "Hosted multi-tenant AI execution service with paired Workers."
@@ -26,6 +26,7 @@ rust-embed = "8"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
 sha2 = "0.10.9"
+sysinfo = { version = "0.38.4", default-features = false, features = ["disk", "network", "system"] }
 tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tower-http = { version = "0.6.6", features = ["cors", "trace"] }
 tracing = "0.1.41"

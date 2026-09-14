@@ -12,6 +12,11 @@ Each user is stored in one SQLite database:
 
 The databases use WAL mode, foreign keys, and owner-only file permissions.
 
+Administrator metadata is stored separately in `~/.cybion/default.sqlite3`.
+Its `app_meta` table contains the single `root_user_id` key used to expose the
+administrator navigation and system resource monitor. On a fresh installation,
+the first authenticated browser session initializes that key atomically.
+
 ## Product boundary
 
 - Auth is fixed to `https://auth.ntnl.io`. The browser obtains one token for

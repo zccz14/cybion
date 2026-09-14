@@ -237,15 +237,47 @@ type IntegrationStatus = {
 }
 type SystemResources = {
   generated_at: number
-  version: string
+  sample_interval_ms: number
   process_id: number
-  user_id: string
-  database_bytes: number
-  threads: number
-  active_requests: number
-  workers: number
-  online_workers: number
+  process_version: string
+  cpu: {
+    usage_percent: number
+    load_1m: number
+    logical_cpus: number
+  }
+  memory: {
+    used_bytes: number
+    total_bytes: number
+    available_bytes: number
+    process_used_bytes: number
+    usage_percent: number
+    swap_used_bytes: number
+    swap_total_bytes: number
+  }
+  network: {
+    receive_bytes_per_second: number
+    transmit_bytes_per_second: number
+    total_received_bytes: number
+    total_transmitted_bytes: number
+    interfaces: number
+  }
+  disk: {
+    mount_point: string
+    used_bytes: number
+    total_bytes: number
+    available_bytes: number
+    usage_percent: number
+  } | null
+  sqlite: {
+    main_bytes: number
+    wal_bytes: number
+    shm_bytes: number
+    total_bytes: number
+    freelist_bytes: number
+    freelist_percent: number
+  }
 }
+type CurrentUser = { user_id: string; hosted: boolean; is_admin: boolean }
 type WorkerCallAudit = {
   id: string
   worker_id: string
@@ -338,6 +370,8 @@ const copy = {
     navAudit: "Audit",
     inferenceStats: "Inference statistics",
     navSystem: "System",
+    navAdministration: "Administration",
+    systemResources: "System resources",
     navConfiguration: "Configuration",
     audit: "Reasoning audit",
     auditDescription: "Every model request, including in-flight work, with its final outcome.",
@@ -412,13 +446,35 @@ const copy = {
     next: "Next",
     pageSize: "Per page",
     systemTitle: "System",
-    systemDescription: "Live runtime and capacity for this Cybion workspace.",
+    systemDescription: "Live host resources for Cybion administrators.",
     process: "Process",
-    database: "User database",
+    cpu: "CPU",
+    cpuLoad: "1-minute load",
+    logicalCpus: "Logical CPUs",
+    memory: "Memory",
+    memoryAvailable: "Available",
+    processMemory: "Cybion process",
+    swap: "Swap",
+    disk: "Disk",
+    diskAvailable: "Available",
+    sqlite: "SQLite",
+    sqliteMain: "Database",
+    sqliteWal: "Write-ahead log",
+    sqliteShm: "Shared memory",
+    sqliteFreelist: "Free pages",
+    network: "Network",
+    networkNow: "Instantaneous",
+    networkReceive: "Receive",
+    networkTransmit: "Transmit",
+    networkTotal: "Cumulative",
+    networkInterfaces: "Interfaces",
+    database: "Administrator database",
     activeRequests: "Active requests",
     workerCount: "Workers",
     userId: "User ID",
     sampled: "Sampled",
+    sampleInterval: "Sample interval",
+    unavailable: "Unavailable",
     configuration: "Configuration",
     configurationDescription: "Thread defaults, integrations, and workspace access.",
     threadDefaults: "New thread defaults",
@@ -526,6 +582,8 @@ const copy = {
     navAudit: "审计",
     inferenceStats: "推理统计",
     navSystem: "系统",
+    navAdministration: "管理员",
+    systemResources: "系统资源",
     navConfiguration: "配置",
     audit: "推理审计",
     auditDescription: "展示所有模型请求，包括在途请求及其最终结果。",
@@ -599,14 +657,36 @@ const copy = {
     previous: "上一页",
     next: "下一页",
     pageSize: "每页",
-    systemTitle: "系统",
-    systemDescription: "当前 Cybion 工作区的实时运行状态与容量。",
+    systemTitle: "系统资源",
+    systemDescription: "管理员查看 Cybion 主机的实时资源使用情况。",
     process: "进程",
-    database: "用户数据库",
+    cpu: "CPU",
+    cpuLoad: "1 分钟负载",
+    logicalCpus: "逻辑 CPU",
+    memory: "内存",
+    memoryAvailable: "可用",
+    processMemory: "Cybion 进程",
+    swap: "交换空间",
+    disk: "磁盘",
+    diskAvailable: "可用",
+    sqlite: "SQLite",
+    sqliteMain: "数据库",
+    sqliteWal: "预写日志",
+    sqliteShm: "共享内存",
+    sqliteFreelist: "空闲页",
+    network: "网络",
+    networkNow: "即时流量",
+    networkReceive: "接收",
+    networkTransmit: "发送",
+    networkTotal: "累计流量",
+    networkInterfaces: "网络接口",
+    database: "管理员数据库",
     activeRequests: "活动请求",
     workerCount: "Worker 数量",
     userId: "用户 ID",
     sampled: "采样时间",
+    sampleInterval: "采样间隔",
+    unavailable: "不可用",
     configuration: "配置",
     configurationDescription: "线程默认设置、外部集成和工作区访问入口。",
     threadDefaults: "新线程默认设置",
@@ -786,6 +866,11 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const [createOpen, setCreateOpen] = useState(false)
   const labels = copy[language]
   const client = useQueryClient()
+  const currentUser = useQuery({
+    queryKey: ["me"],
+    queryFn: () => api<CurrentUser>(sdk, "/api/me"),
+    staleTime: 60_000,
+  })
   const threads = useQuery({
     queryKey: ["threads"],
     queryFn: () => api<Thread[]>(sdk, "/api/threads"),
@@ -830,6 +915,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
       />}>
         <WorkspaceShell
           sdk={sdk}
+          isAdmin={currentUser.data?.is_admin === true}
           threads={threads.data ?? []}
           threadsLoading={threads.isLoading}
           threadsError={threads.error}
@@ -860,12 +946,14 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
 
 function WorkspaceShell({
   sdk,
+  isAdmin,
   threads,
   threadsLoading,
   threadsError,
   onCreate,
 }: {
   sdk: AuthMiniApi
+  isAdmin: boolean
   threads: Thread[]
   threadsLoading: boolean
   threadsError: unknown
@@ -884,9 +972,11 @@ function WorkspaceShell({
     { to: "/history", label: t("history"), icon: DatabaseIcon },
   ]
   const systemNav = [
-    { to: "/system", label: t("systemTitle"), icon: NetworkIcon },
     { to: "/workers", label: t("workers"), icon: NetworkIcon },
   ]
+  const administrationNav = isAdmin
+    ? [{ to: "/system", label: t("systemResources"), icon: ActivityIcon }]
+    : []
   const configurationNav = [
     { to: "/configuration", label: t("configuration"), icon: Settings2Icon },
     { to: "/api", label: t("api"), icon: FileKey2Icon },
@@ -896,6 +986,7 @@ function WorkspaceShell({
     { id: "work", label: t("navWork"), items: workNav },
     { id: "audit", label: t("navAudit"), items: auditNav },
     { id: "system", label: t("navSystem"), items: systemNav },
+    ...(administrationNav.length > 0 ? [{ id: "administration", label: t("navAdministration"), items: administrationNav }] : []),
     { id: "configuration", label: t("navConfiguration"), items: configurationNav },
   ]
   return <SidebarProvider>
@@ -952,6 +1043,7 @@ function WorkspaceShell({
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
             <Route path="/history" element={<HistoryPage threads={threads} />} />
+            <Route path="/admin/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/workers" element={<WorkersPage sdk={sdk} />} />
@@ -972,7 +1064,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/history")) return t("history")
-  if (pathname.startsWith("/system") || pathname.startsWith("/resources")) return t("systemTitle")
+  if (pathname.startsWith("/admin/resources") || pathname.startsWith("/system") || pathname.startsWith("/resources")) return t("systemTitle")
   if (pathname.startsWith("/workers")) return t("workers")
   if (pathname.startsWith("/configuration") || pathname.startsWith("/settings")) return t("configuration")
   if (pathname.startsWith("/api")) return t("api")
@@ -1551,8 +1643,32 @@ function SystemPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("systemTitle")} description={t("systemDescription")}>
     {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
     {!query.data && !query.error && <Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t("systemTitle")}</CardContent></Card>}
-    {query.data && <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label={t("process")} value={`PID ${query.data.process_id}`} detail={`v${query.data.version}`} /><MetricCard label={t("database")} value={formatBytes(query.data.database_bytes)} detail={query.data.user_id} /><MetricCard label={t("activeRequests")} value={String(query.data.active_requests)} detail={t("running")} progress={query.data.active_requests ? 100 : 0} /><MetricCard label={t("workerCount")} value={`${query.data.online_workers} / ${query.data.workers}`} detail={t("online")} progress={query.data.workers ? query.data.online_workers / query.data.workers * 100 : 0} /><Card className="sm:col-span-2 xl:col-span-4"><CardHeader><CardTitle>{t("connection")}</CardTitle><CardDescription>{t("sampled")}: {formattedTime(language, query.data.generated_at)}</CardDescription></CardHeader><CardContent><dl className="grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">{t("userId")}</dt><dd className="mt-1 break-all font-mono text-xs">{query.data.user_id}</dd></div><div><dt className="text-muted-foreground">{t("process")}</dt><dd className="mt-1">Cybion Cloud · {t("hosted")}</dd></div></dl></CardContent></Card></div>}
+    {query.data && <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <MetricCard label={t("cpu")} value={`${query.data.cpu.usage_percent.toFixed(1)}%`} detail={`${t("cpuLoad")} ${query.data.cpu.load_1m.toFixed(2)} · ${query.data.cpu.logical_cpus} ${t("logicalCpus")}`} progress={query.data.cpu.usage_percent} />
+      <MetricCard label={t("memory")} value={`${formatBytes(query.data.memory.used_bytes)} / ${formatBytes(query.data.memory.total_bytes)}`} detail={`${t("memoryAvailable")} ${formatBytes(query.data.memory.available_bytes)} · ${t("processMemory")} ${formatBytes(query.data.memory.process_used_bytes)}`} progress={query.data.memory.usage_percent} />
+      <MetricCard label={t("disk")} value={query.data.disk ? `${formatBytes(query.data.disk.used_bytes)} / ${formatBytes(query.data.disk.total_bytes)}` : "—"} detail={query.data.disk ? `${t("diskAvailable")} ${formatBytes(query.data.disk.available_bytes)} · ${query.data.disk.mount_point}` : t("unavailable")} progress={query.data.disk?.usage_percent} />
+      <MetricCard label={t("sqlite")} value={formatBytes(query.data.sqlite.total_bytes)} detail={`${t("sqliteMain")} ${formatBytes(query.data.sqlite.main_bytes)} · ${t("sqliteWal")} ${formatBytes(query.data.sqlite.wal_bytes)} · ${t("sqliteShm")} ${formatBytes(query.data.sqlite.shm_bytes)}`} />
+      <MetricCard label={t("process")} value={`PID ${query.data.process_id}`} detail={`v${query.data.process_version} · ${t("sampleInterval")} ${query.data.sample_interval_ms} ms`} />
+      <MetricCard label={t("swap")} value={`${formatBytes(query.data.memory.swap_used_bytes)} / ${formatBytes(query.data.memory.swap_total_bytes)}`} detail={t("memoryAvailable")} progress={query.data.memory.swap_total_bytes ? query.data.memory.swap_used_bytes / query.data.memory.swap_total_bytes * 100 : 0} />
+      <Card className="sm:col-span-2 xl:col-span-3">
+        <CardHeader><CardTitle>{t("network")}</CardTitle><CardDescription>{t("sampled")}: {formattedTime(language, query.data.generated_at)} · {query.data.network.interfaces} {t("networkInterfaces")}</CardDescription></CardHeader>
+        <CardContent className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+          <NetworkMetric label={`${t("networkNow")} · ${t("networkReceive")}`} value={`${formatBytes(query.data.network.receive_bytes_per_second)}/s`} />
+          <NetworkMetric label={`${t("networkNow")} · ${t("networkTransmit")}`} value={`${formatBytes(query.data.network.transmit_bytes_per_second)}/s`} />
+          <NetworkMetric label={`${t("networkTotal")} · ${t("networkReceive")}`} value={formatBytes(query.data.network.total_received_bytes)} />
+          <NetworkMetric label={`${t("networkTotal")} · ${t("networkTransmit")}`} value={formatBytes(query.data.network.total_transmitted_bytes)} />
+        </CardContent>
+      </Card>
+      <Card className="sm:col-span-2 xl:col-span-3">
+        <CardHeader><CardTitle>{t("sqlite")}</CardTitle><CardDescription>{t("database")}</CardDescription></CardHeader>
+        <CardContent><dl className="grid gap-4 text-sm sm:grid-cols-3"><div><dt className="text-muted-foreground">{t("sqliteFreelist")}</dt><dd className="mt-1 font-mono tabular-nums">{formatBytes(query.data.sqlite.freelist_bytes)} ({query.data.sqlite.freelist_percent.toFixed(1)}%)</dd></div><div><dt className="text-muted-foreground">{t("sqliteWal")}</dt><dd className="mt-1 font-mono tabular-nums">{formatBytes(query.data.sqlite.wal_bytes)}</dd></div><div><dt className="text-muted-foreground">{t("sqliteShm")}</dt><dd className="mt-1 font-mono tabular-nums">{formatBytes(query.data.sqlite.shm_bytes)}</dd></div></dl></CardContent>
+      </Card>
+    </div>}
   </Page>
+}
+
+function NetworkMetric({ label, value }: { label: string; value: string }) {
+  return <div><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 font-mono text-lg font-medium tabular-nums">{value}</p></div>
 }
 
 function MetricCard({ label, value, detail, progress }: { label: string; value: string; detail: string; progress?: number }) {
