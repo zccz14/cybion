@@ -27,3 +27,22 @@ export function historyPayloadText(payload: unknown): string {
   if (typeof object?.output === "string") return object.output
   return JSON.stringify(payload, null, 2) ?? String(payload)
 }
+
+export type BashFunctionCall = { workerId: string; command: string }
+
+export function bashFunctionCall(payload: unknown): BashFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || object.name !== "bash" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  if (typeof args?.worker_id !== "string" || typeof args.command !== "string") return null
+  return { workerId: args.worker_id, command: args.command }
+}
+
+function parseFunctionArguments(value: string): Record<string, unknown> | null {
+  try {
+    return historyPayloadObject(JSON.parse(value))
+  } catch {
+    // RECOVERY: Streamed arguments may be incomplete; keep the raw protocol event visible.
+    return null
+  }
+}
