@@ -348,6 +348,51 @@ async fn read_context_is_answered_by_the_controller_without_a_worker_call() {
 }
 
 #[tokio::test]
+async fn failed_worker_result_is_returned_as_a_tool_result_for_continuation() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "failed-worker-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let worker_id = "00000000-0000-4000-8000-000000000003";
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at,status) VALUES(?,'fixture',?,?, 'online')",
+            params![worker_id, hash_secret("fixture-token"), now()],
+        )?;
+        connection.execute(
+            "INSERT INTO worker_calls(
+                id,responses_call_id,worker_id,thread_id,input_record_id,name,arguments_json,status,
+                result_json,created_at,error
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            params![
+                "failed-call",
+                "responses-call",
+                worker_id,
+                &thread.id,
+                input,
+                "bash",
+                r#"{"worker_id":"worker","command":"false"}"#,
+                "failed",
+                r#"{"error":"command exited with status 1"}"#,
+                now(),
+                "command exited with status 1",
+            ],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let (_tx, mut cancellation) = watch::channel(false);
+    let (result, output_record_id) =
+        wait_worker_result(&state, &user, "failed-call", &mut cancellation)
+            .await
+            .unwrap();
+    assert_eq!(result["error"], "command exited with status 1");
+    assert!(output_record_id.is_none());
+}
+
+#[tokio::test]
 async fn additive_schema_upgrade_preserves_existing_history() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "migration-user").unwrap();
