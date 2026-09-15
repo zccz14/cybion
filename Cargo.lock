@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "cybion"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "anyhow",
  "async-stream",
