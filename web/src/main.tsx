@@ -49,7 +49,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
 import { generatedImageSource, pendingResponseRecords, type ThreadResponseView } from "@/lib/thread-response"
-import { historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
+import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -59,6 +59,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { HistoryTable } from "@/components/history-table"
+import { BashCommand } from "@/components/bash-command"
 import {
   Dialog,
   DialogContent,
@@ -1238,6 +1239,11 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
     refetchInterval: 1500,
     enabled: Boolean(threadId),
   })
+  const workers = useQuery({
+    queryKey: ["workers"],
+    queryFn: () => api<Worker[]>(sdk, "/api/workers"),
+    refetchInterval: 5000,
+  })
   const history = useQuery({
     queryKey: ["history", threadId],
     queryFn: () => api<HistoryRecord[]>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history`),
@@ -1324,9 +1330,9 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
             <MessageScrollerContent className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
               {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-              {history.data?.map((record) => <MessageScrollerItem key={record.id}><HistoryMessage language={language} record={record} /></MessageScrollerItem>)}
+              {history.data?.map((record) => <MessageScrollerItem key={record.id}><HistoryMessage language={language} record={record} workers={workers.data} /></MessageScrollerItem>)}
               {!history.isLoading && !history.error && history.data?.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
-              {pendingResponseRecords(liveResponse.data, history.data ?? [], threadId).map((record) => <MessageScrollerItem key={`live-${liveResponse.data?.audit_id}-${record.id}`}><HistoryMessage language={language} record={record} /></MessageScrollerItem>)}
+              {pendingResponseRecords(liveResponse.data, history.data ?? [], threadId).map((record) => <MessageScrollerItem key={`live-${liveResponse.data?.audit_id}-${record.id}`}><HistoryMessage language={language} record={record} workers={workers.data} /></MessageScrollerItem>)}
               {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
               {current.status === "running" && <MessageScrollerItem><div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("running")}</div></MessageScrollerItem>}
               <MessageScrollerItem scrollAnchor />
@@ -1357,7 +1363,7 @@ function ResponseMetadata({ language, view, running }: { language: Language; vie
   </div>
 }
 
-const HistoryMessage = memo(function HistoryMessage({ language, record }: { language: Language; record: HistoryRecord }) {
+const HistoryMessage = memo(function HistoryMessage({ language, record, workers }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined }) {
   const { t } = useUi()
   const time = formattedTime(language, record.created_at)
   const imageSource = generatedImageSource(record.payload)
@@ -1452,6 +1458,19 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
     </div>
   }
 
+  const bashCall = bashFunctionCall(payload)
+  if (bashCall) {
+    return <BashCommand language={language} call={bashCall} workers={workers} time={time}>
+      <details className="group mt-2">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+          <span>{t("recordPayload")}</span>
+          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <HistoryRecordPayload language={language} record={record} />
+      </details>
+    </BashCommand>
+  }
+
   if (record.kind === "checkpoint" || (typeof payload?.type === "string" && (payload.type !== "message" || !text.trim()))) {
     const Icon = record.kind === "checkpoint" ? DatabaseIcon : ActivityIcon
     return <div className="relative flex items-start gap-3 px-1">
@@ -1492,7 +1511,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record }: { lang
       </div>
     </div>
   </div>
-}, (previous, next) => previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at)
+}, (previous, next) => previous.workers === next.workers && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")
