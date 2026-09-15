@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { MemoryRouter } from "react-router-dom"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { createServer } from "vite"
+import { formattedTime } from "../src/lib/time.ts"
 
 test("history table renders database fields and server pagination without transforming protocol payloads", async () => {
   const server = await createServer({ server: { middlewareMode: true }, appType: "custom" })
@@ -15,7 +16,7 @@ test("history table renders database fields and server pagination without transf
       items: [{ id: 580, thread_id: "thread-raw-id", thread_title: "History inspection", kind: "response_output", payload: "not JSON: persisted text", created_at: 1789373448, payload_truncated: true }],
       total: 21, page: 2, page_size: 20, sort: "id", direction: "desc",
     })
-    for (const language of ["en", "zh"]) {
+    for (const language of ["en", "zh"] as const) {
       const html = renderToStaticMarkup(createElement(QueryClientProvider, { client },
         createElement(MemoryRouter, { initialEntries: ["/history?page=2&visible=0&sort=content"] },
           createElement(HistoryTable, { language, request: () => { throw new Error("Rows must use the page response; details load only when expanded") } }),
@@ -32,7 +33,8 @@ test("history table renders database fields and server pagination without transf
       }
       assert.match(html, /not JSON: persisted text/)
       assert.ok(!html.includes("1789373448"))
-      assert.ok(html.includes(new Date(1789373448 * 1000).toLocaleString(language === "zh" ? "zh-CN" : "en-US")))
+      assert.ok(html.includes(formattedTime(language, 1789373448)))
+      assert.match(html, /<time[^>]*>[^<]*\d{1,2}:\d{2}:48[^<]*<\/time>/)
       assert.match(html, /History inspection/)
       assert.ok(html.indexOf(">History inspection</span>") < html.indexOf(">thread-raw-id</code>"))
       assert.match(html, /aria-expanded="false"/)
