@@ -5419,9 +5419,15 @@ async fn wait_worker_result(
                 return Ok((result, value.2));
             }
             "failed" => {
-                return Err(ApiError::unavailable(
-                    value.3.as_deref().unwrap_or("Worker tool call failed"),
-                ));
+                let result = value
+                    .1
+                    .and_then(|result| serde_json::from_str(&result).ok())
+                    .unwrap_or_else(|| {
+                        json!({
+                            "error": value.3.as_deref().unwrap_or("Worker tool call failed")
+                        })
+                    });
+                return Ok((result, value.2));
             }
             _ => {
                 tokio::select! {
