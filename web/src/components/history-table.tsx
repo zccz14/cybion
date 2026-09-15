@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query"
 import { Link, useSearchParams } from "react-router-dom"
 import { ArrowDownIcon, ArrowUpIcon, ArrowUpDownIcon, ChevronDownIcon, ChevronRightIcon, DatabaseIcon, LinkIcon, RefreshCwIcon, SearchIcon } from "lucide-react"
 
+import { formattedTime } from "@/lib/time"
+
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -70,10 +72,6 @@ function localDateTime(value: string | null) {
   const date = new Date(Number(value) * 1000)
   if (!Number.isFinite(date.getTime())) return ""
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 19)
-}
-
-function historyTime(timestamp: number, language: Language) {
-  return new Date(timestamp * 1000).toLocaleString(language === "zh" ? "zh-CN" : "en-US")
 }
 
 function FilterSelect({ name, values, value, all }: { name: string; values: string[]; value: string | null; all: string }) {
@@ -196,7 +194,7 @@ function RecordRows({ record, language, request }: { record: Preview; language: 
       {columns.map((column) => <TableCell key={column}>
         {column === "payload" ? <div className="w-64"><pre className="line-clamp-2 whitespace-pre-wrap break-all font-mono text-xs leading-5">{record.payload === "" ? '""' : record.payload}</pre>{record.payload_truncated && <span className="text-xs text-muted-foreground">… {t.preview}</span>}</div>
           : column === "thread_id" ? <div className="flex max-w-80 flex-col gap-1"><span className="truncate font-medium" title={record.thread_title}>{record.thread_title}</span><div className="flex items-center gap-1"><code className="text-xs text-muted-foreground">{record.thread_id}</code><Button asChild size="icon-xs" variant="ghost"><Link to={`/threads/${encodeURIComponent(record.thread_id)}`} aria-label={`${t.openThread}: ${record.thread_title}`} title={t.openThread}><LinkIcon /></Link></Button></div></div>
-          : column === "created_at" ? <time dateTime={new Date(record.created_at * 1000).toISOString()} className="text-xs tabular-nums">{historyTime(record.created_at, language)}</time>
+          : column === "created_at" ? <time dateTime={new Date(record.created_at * 1000).toISOString()} className="text-xs tabular-nums">{formattedTime(language, record.created_at)}</time>
           : <code className="text-xs tabular-nums">{record[column]}</code>}
       </TableCell>)}
     </TableRow>
@@ -212,7 +210,7 @@ function RecordDetail({ id, request, language }: { id: number; request: Request;
         {detail.isPending && <Skeleton className="h-28 w-full" />}
         {detail.error && <LoadError error={detail.error} retry={() => void detail.refetch()} t={t} />}
         {detail.data && <>
-          <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2">{columns.filter((column) => column !== "payload").map((column) => <div key={column} className="flex flex-wrap gap-x-3"><dt className="font-mono text-xs text-muted-foreground">{column}</dt><dd className="break-all font-mono text-xs">{column === "created_at" ? historyTime(detail.data!.created_at, language) : detail.data![column]}</dd></div>)}</dl>
+          <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2">{columns.filter((column) => column !== "payload").map((column) => <div key={column} className="flex flex-wrap gap-x-3"><dt className="font-mono text-xs text-muted-foreground">{column}</dt><dd className="break-all font-mono text-xs">{column === "created_at" ? formattedTime(language, detail.data!.created_at) : detail.data![column]}</dd></div>)}</dl>
           <div><h4 className="mb-2 text-xs font-medium"><code>payload</code> · {t.raw}</h4><pre tabIndex={0} className="max-h-96 overflow-auto rounded-md border bg-background p-3 font-mono text-xs leading-5 whitespace-pre-wrap break-all">{detail.data.payload === "" ? '""' : detail.data.payload}</pre></div>
         </>}
       </div>

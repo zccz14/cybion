@@ -50,6 +50,7 @@ import remarkGfm from "remark-gfm"
 
 import { generatedImageSource, pendingResponseRecords, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
+import { formattedTime } from "@/lib/time"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -839,14 +840,6 @@ function errorMessage(error: unknown) {
 
 function callbackUrl() {
   return `${location.origin}${location.pathname}#/auth/callback`
-}
-
-function formattedTime(language: Language, value: number | null | undefined) {
-  if (!value) return "—"
-  return new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(value * 1000)
 }
 
 function formatBytes(value: number) {

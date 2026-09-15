@@ -11,7 +11,7 @@ test("bash commands render Worker names, language, command text and raw details"
     const { BashCommand } = await server.ssrLoadModule("/src/components/bash-command.tsx")
     const call = { workerId: "worker-1", command: 'pwd\necho "<script>alert(1)</script>"' }
     const render = (language: string, workers: { id: string; label: string }[] | undefined) => renderToStaticMarkup(createElement(BashCommand, {
-      language, call, workers, time: "12:34", children: createElement("details", null, "Raw protocol"),
+      language, call, workers, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
     for (const language of ["en", "zh"]) {
       const html = render(language, [{ id: "worker-2", label: "MBA" }, { id: "worker-1", label: "MacMini" }])
@@ -20,7 +20,7 @@ test("bash commands render Worker names, language, command text and raw details"
       assert.ok(!html.includes("MBA"))
       assert.ok(html.includes('pwd\necho &quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;'))
       assert.ok(!html.includes("<script>"))
-      assert.match(html, /<time[^>]*>12:34<\/time>/)
+      assert.match(html, /<time[^>]*>12:34:56<\/time>/)
       assert.ok(html.includes("<details>Raw protocol</details>"))
     }
     for (const workers of [undefined, [], [{ id: "worker-2", label: "MBA" }]]) {
