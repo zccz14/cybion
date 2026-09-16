@@ -32,7 +32,9 @@ use tokio::sync::{Mutex, OnceCell, watch};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod admin_users;
 mod history;
+mod traffic;
 
 use crate::resources;
 use crate::responses::{
@@ -73,6 +75,7 @@ struct AppState {
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     active_requests: Arc<Mutex<HashMap<String, ActiveRequest>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
+    traffic: Arc<traffic::Monitor>,
 }
 
 #[derive(Clone)]
@@ -240,6 +243,8 @@ pub async fn serve() -> Result<()> {
         run_dir.join("started.json"),
         json!({"pid": std::process::id(), "version": env!("CARGO_PKG_VERSION")}).to_string(),
     )?;
+    let traffic = Arc::new(traffic::Monitor::open(&admin_db_path)?);
+    tokio::spawn(traffic.clone().persist_periodically());
     let state = AppState {
         data_dir: Arc::new(data_dir),
         admin_db_path: Arc::new(admin_db_path.clone()),
@@ -252,6 +257,7 @@ pub async fn serve() -> Result<()> {
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
         active_requests: Arc::new(Mutex::new(HashMap::new())),
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
+        traffic,
     };
     let address: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     tracing::info!(%address, "Cybion Cloud listening");
@@ -374,6 +380,7 @@ fn app(state: AppState) -> Router {
                 .patch(update_context)
                 .delete(delete_context),
         )
+        .route("/api/admin/users", get(admin_users::list))
         .route("/api/system/resources", get(system_resources))
         .route("/api/status", get(status))
         .route("/api/integrations", get(integrations))
@@ -398,11 +405,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/threads/{id}/inputs", post(external_thread_input))
         .route_layer(from_fn_with_state(state.clone(), api_key_auth));
 
-    Router::new()
-        .route("/health", get(health))
-        .route("/api/config", get(public_config))
-        .merge(browser_api)
-        .merge(external_api)
+    let worker_api = Router::new()
         .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/events",
             get(worker_events),
@@ -419,6 +422,14 @@ fn app(state: AppState) -> Router {
             "/worker/v1/users/{user_id}/workers/{worker_id}/calls/{call_id}/result",
             post(worker_result),
         )
+        .route_layer(from_fn_with_state(state.clone(), traffic::worker_auth));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/config", get(public_config))
+        .merge(browser_api)
+        .merge(external_api)
+        .merge(worker_api)
         .fallback(static_asset)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -1608,6 +1619,7 @@ async fn me(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<Value>, ApiError> {
     let is_admin = is_admin(&state, &identity.user.id, true).await?;
+    user_db(&state, &identity.user, true, |_| Ok(())).await?;
     Ok(Json(json!({
         "user_id": identity.user.id,
         "hosted": true,
@@ -4464,7 +4476,11 @@ async fn send_responses_request(
         .header("Accept", "text/event-stream")
         .json(&payload);
     let mut cancellation = audit.as_ref().and_then(|(_, receiver)| receiver.clone());
-    let response = match send_with_cancellation(request, &mut cancellation).await {
+    let counters = audit
+        .as_ref()
+        .map(|(spec, _)| state.traffic.for_user(&spec.user.id));
+    let response = match send_with_cancellation(request, &mut cancellation, counters.clone()).await
+    {
         Ok(response) => response,
         Err(error) => {
             if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
@@ -4488,6 +4504,7 @@ async fn send_responses_request(
             return Err(error);
         }
     };
+    let response = traffic::upstream_response(response, counters);
     let status = response.status();
     let response_id = response
         .headers()
@@ -4845,6 +4862,7 @@ async fn abort_response_tools(
 async fn send_with_cancellation(
     request: reqwest::RequestBuilder,
     cancellation: &mut Option<watch::Receiver<bool>>,
+    counters: Option<Arc<traffic::Counters>>,
 ) -> Result<reqwest::Response, ApiError> {
     if cancellation
         .as_ref()
@@ -4852,12 +4870,13 @@ async fn send_with_cancellation(
     {
         return Err(ApiError::cancelled());
     }
+    let (client, request) = traffic::upstream_request(request, counters)?;
     match cancellation.as_mut() {
         Some(receiver) => tokio::select! {
-            result = request.send() => result.map_err(ApiError::from),
+            result = client.execute(request) => result.map_err(ApiError::from),
             _ = receiver.changed() => Err(ApiError::cancelled()),
         },
-        None => request.send().await.map_err(ApiError::from),
+        None => client.execute(request).await.map_err(ApiError::from),
     }
 }
 
@@ -5613,10 +5632,9 @@ fn claim_worker_call(
 
 async fn worker_events(
     State(state): State<AppState>,
-    AxumPath((user_id, worker_id)): AxumPath<(String, String)>,
-    headers: HeaderMap,
+    AxumPath((_user_id, worker_id)): AxumPath<(String, String)>,
+    axum::Extension(user): axum::Extension<User>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let user = worker_identity(&state, &headers, user_id, worker_id.clone()).await?;
     let worker_id = record_id(&worker_id)?;
     let event_state = state.clone();
     let stream = async_stream::stream! {
@@ -5647,11 +5665,10 @@ async fn worker_events(
 
 async fn worker_heartbeat(
     State(state): State<AppState>,
-    AxumPath((user_id, worker_id)): AxumPath<(String, String)>,
-    headers: HeaderMap,
+    AxumPath((_user_id, worker_id)): AxumPath<(String, String)>,
+    axum::Extension(user): axum::Extension<User>,
     Json(input): Json<WorkerHeartbeat>,
 ) -> Result<Json<Value>, ApiError> {
-    let user = worker_identity(&state, &headers, user_id, worker_id.clone()).await?;
     let worker_id = record_id(&worker_id)?;
     user_db(&state, &user, false, move |connection| {
         connection.execute(
@@ -5666,11 +5683,10 @@ async fn worker_heartbeat(
 
 async fn worker_resources(
     State(state): State<AppState>,
-    AxumPath((user_id, worker_id)): AxumPath<(String, String)>,
-    headers: HeaderMap,
+    AxumPath((_user_id, worker_id)): AxumPath<(String, String)>,
+    axum::Extension(user): axum::Extension<User>,
     Json(resource): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let user = worker_identity(&state, &headers, user_id, worker_id.clone()).await?;
     let worker_id = record_id(&worker_id)?;
     let resource = serde_json::to_string(&resource).map_err(ApiError::internal)?;
     user_db(&state, &user, false, move |connection| {
@@ -5686,11 +5702,10 @@ async fn worker_resources(
 
 async fn worker_result(
     State(state): State<AppState>,
-    AxumPath((user_id, worker_id, call_id)): AxumPath<(String, String, String)>,
-    headers: HeaderMap,
+    AxumPath((_user_id, worker_id, call_id)): AxumPath<(String, String, String)>,
+    axum::Extension(user): axum::Extension<User>,
     Json(input): Json<WorkerResultInput>,
 ) -> Result<Json<Value>, ApiError> {
-    let user = worker_identity(&state, &headers, user_id, worker_id.clone()).await?;
     let worker_id = record_id(&worker_id)?;
     let call_id = record_id(&call_id)?;
     let result_json = serde_json::to_string(&input.result).map_err(ApiError::internal)?;
@@ -5803,6 +5818,7 @@ mod tests {
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
                 active_requests: Arc::new(Mutex::new(HashMap::new())),
+                traffic: Arc::new(traffic::Monitor::open(&admin_db_path).unwrap()),
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
             },
         )

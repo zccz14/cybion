@@ -44,6 +44,7 @@ import {
   TerminalSquareIcon,
   Trash2Icon,
   WrenchIcon,
+  UsersIcon,
 } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -59,6 +60,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
+import { AdminUsers } from "@/components/admin-users"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
 import {
@@ -426,6 +428,8 @@ const copy = {
     inferenceStats: "Inference statistics",
     navSystem: "System",
     navAdministration: "Administration",
+    users: "Users",
+    usersDescription: "All Cybion users, inference usage, stored records and traffic. Updates every 5 seconds.",
     systemResources: "System resources",
     navConfiguration: "Configuration",
     audit: "Reasoning audit",
@@ -667,6 +671,8 @@ const copy = {
     inferenceStats: "推理统计",
     navSystem: "系统",
     navAdministration: "管理员",
+    users: "用户",
+    usersDescription: "所有 Cybion 用户的推理用量、数据记录与网络流量，每 5 秒刷新。",
     systemResources: "系统资源",
     navConfiguration: "配置",
     audit: "推理审计",
@@ -1019,7 +1025,7 @@ function WorkspaceShell({
     { to: "/workers", label: t("workers"), icon: NetworkIcon },
   ]
   const administrationNav = isAdmin
-    ? [{ to: "/system", label: t("systemResources"), icon: ActivityIcon }]
+    ? [{ to: "/admin/users", label: t("users"), icon: UsersIcon }, { to: "/system", label: t("systemResources"), icon: ActivityIcon }]
     : []
   const configurationNav = [
     { to: "/configuration", label: t("configuration"), icon: Settings2Icon },
@@ -1089,6 +1095,7 @@ function WorkspaceShell({
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
             <Route path="/history" element={<HistoryPage sdk={sdk} />} />
+            <Route path="/admin/users" element={<Page title={t("users")} description={t("usersDescription")}><AdminUsers language={language} allowed={isAdmin} sessionId={sdk.session.getState().sessionId} request={(signal) => api(sdk, "/api/admin/users", { signal })} /></Page>} />
             <Route path="/admin/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
@@ -1111,6 +1118,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/history")) return t("history")
+  if (pathname.startsWith("/admin/users")) return t("users")
   if (pathname.startsWith("/admin/resources") || pathname.startsWith("/system") || pathname.startsWith("/resources")) return t("systemTitle")
   if (pathname.startsWith("/workers")) return t("workers")
   if (pathname.startsWith("/configuration") || pathname.startsWith("/settings")) return t("configuration")
