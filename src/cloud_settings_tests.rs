@@ -2,7 +2,7 @@ use super::tests::test_state;
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 
-fn base64url(bytes: &[u8]) -> String {
+pub(super) fn base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut encoded = String::new();
     let mut buffer = 0_u32;

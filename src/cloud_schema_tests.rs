@@ -210,10 +210,16 @@ async fn history_appends_and_restart_recovery_use_only_core_columns() {
     let tail = append_tool_output_item(&state, &user, &thread, input_id, &tool_payload)
         .await
         .unwrap();
-    let checkpoint =
-        persist_thread_checkpoint(&state, &user, &thread, tail, "Checkpoint".to_owned())
-            .await
-            .unwrap();
+    let checkpoint = persist_thread_checkpoint(
+        &state,
+        &user,
+        &thread,
+        input_id,
+        tail,
+        "Checkpoint".to_owned(),
+    )
+    .await
+    .unwrap();
     assert!(finalize_request_failure(&state, &user, &thread, input_id, "fixture failure").await);
     user_db(&state, &user, false, {
         let id = thread.id.clone();

@@ -20,6 +20,40 @@ the source records.
 The UI exposes `idle`, `running`, and `failed` thread states. Failures append
 an activity record and leave the thread ready for a later input.
 
+The composer also offers **Stop**, **Continue reasoning**, and **Compact**:
+
+- Stop cancels the current model request and prevents further inference or
+  Worker dispatch for that request. Completed history records stay unchanged.
+  Already dispatched Worker actions may finish; their late results are kept as
+  activity and cannot restart reasoning. The thread returns to `idle`.
+- Continue reasoning starts from the latest saved protocol record without
+  appending a user message or sending a synthetic prompt. New outputs are
+  appended to the same thread. The composer draft is retained.
+- Compact creates a validated checkpoint from the current context, preserves
+  all source records, and returns to `idle` without resuming inference. The
+  next continuation starts from that checkpoint. Compaction can also be stopped.
+
+Continue and Compact require saved protocol history and an idle or failed
+thread. Stop the running request first. New user input can still supersede a
+running request as before. Control operations are recorded as `activity` with
+`type: "thread_control"` and an `action` of `cancel`, `continue`, or `compact`.
+These records are execution boundaries, never model input. They keep late
+responses and concurrent requests isolated even without a new user message.
+
+The authenticated browser endpoints accept an empty POST body:
+
+| Endpoint | Result |
+| --- | --- |
+| `/api/threads/{id}/cancel` | Updated thread; stopping an idle thread is a no-op |
+| `/api/threads/{id}/continue` | Accepted request with its activity `record_idx` |
+| `/api/threads/{id}/compact` | Accepted request with its activity `record_idx` |
+
+All three operate only within the signed-in user's database. Busy or empty
+threads reject Continue and Compact with HTTP 409. Poll thread history and
+status to observe completion; inference snapshots also follow continuation
+requests. Reasoning and Worker audits refer to the request's originating
+history record, which may be an input or a control activity.
+
 Deleting a thread removes its history, checkpoints, audit rows, and Worker-call
 rows within the owning user database. Other users and threads are independent.
 
