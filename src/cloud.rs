@@ -66,8 +66,10 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 const USER_SCHEMA_VERSION: i64 = 10;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
+const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
 const EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY: &str = "experimental_codex_turn_state_header";
 const THREAD_ID_HEADER: &str = "thread-id";
+const SESSION_ID_HEADER: &str = "session-id";
 const CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
@@ -1210,6 +1212,7 @@ struct IntegrationStatusView {
 #[derive(Clone, Serialize)]
 struct ExperimentalFeaturesView {
     thread_id_header: bool,
+    session_id_header: bool,
     codex_turn_state_header: bool,
 }
 
@@ -1217,6 +1220,7 @@ struct ExperimentalFeaturesView {
 #[serde(deny_unknown_fields)]
 struct UpdateExperimentalFeaturesInput {
     thread_id_header: Option<bool>,
+    session_id_header: Option<bool>,
     codex_turn_state_header: Option<bool>,
 }
 
@@ -1743,6 +1747,8 @@ async fn experimental_features(
     Ok(Json(ExperimentalFeaturesView {
         thread_id_header: experimental_header_enabled(&state, EXPERIMENTAL_THREAD_ID_HEADER_KEY)
             .await?,
+        session_id_header: experimental_header_enabled(&state, EXPERIMENTAL_SESSION_ID_HEADER_KEY)
+            .await?,
         codex_turn_state_header: experimental_header_enabled(
             &state,
             EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY,
@@ -1763,6 +1769,7 @@ async fn update_experimental_features(
     tokio::task::spawn_blocking(move || {
         for (key, enabled) in [
             (EXPERIMENTAL_THREAD_ID_HEADER_KEY, input.thread_id_header),
+            (EXPERIMENTAL_SESSION_ID_HEADER_KEY, input.session_id_header),
             (
                 EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY,
                 input.codex_turn_state_header,
@@ -4591,10 +4598,15 @@ async fn send_responses_request(
         .bearer_auth(&integrations.openai_consumer_secret)
         .header("Accept", "text/event-stream")
         .json(&payload);
-    if let Some((spec, _)) = audit.as_ref()
-        && experimental_header_enabled(state, EXPERIMENTAL_THREAD_ID_HEADER_KEY).await?
-    {
-        request = request.header(THREAD_ID_HEADER, &spec.thread_id);
+    if let Some((spec, _)) = audit.as_ref() {
+        for (key, header) in [
+            (EXPERIMENTAL_THREAD_ID_HEADER_KEY, THREAD_ID_HEADER),
+            (EXPERIMENTAL_SESSION_ID_HEADER_KEY, SESSION_ID_HEADER),
+        ] {
+            if experimental_header_enabled(state, key).await? {
+                request = request.header(header, &spec.thread_id);
+            }
+        }
     }
     let turn_state_key = if let Some((spec, _)) = audit.as_ref()
         && experimental_header_enabled(state, EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY).await?
@@ -5976,9 +5988,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("default.sqlite3");
         prepare_admin_db(&path).unwrap();
-        assert!(!admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY).unwrap());
-        set_admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY, true).unwrap();
-        assert!(admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY).unwrap());
+        for key in [
+            EXPERIMENTAL_THREAD_ID_HEADER_KEY,
+            EXPERIMENTAL_SESSION_ID_HEADER_KEY,
+        ] {
+            assert!(!admin_meta_bool_sync(&path, key).unwrap());
+            set_admin_meta_bool_sync(&path, key, true).unwrap();
+            prepare_admin_db(&path).unwrap();
+            assert!(admin_meta_bool_sync(&path, key).unwrap());
+        }
         assert!(!admin_user_sync(&path, "second-user", false).unwrap());
         assert!(admin_user_sync(&path, "root-user", true).unwrap());
         assert!(!admin_user_sync(&path, "second-user", true).unwrap());
@@ -6821,50 +6839,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn experimental_thread_id_header_uses_the_current_thread_uuid() {
+    async fn experimental_thread_identity_headers_follow_independent_global_switches() {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "thread-header-user").unwrap();
-        let thread = create_test_thread(&state, &user).await;
-        let input_idx = user_db(&state, &user, false, {
-            let thread_id = thread.id.clone();
-            move |connection| {
-                Ok(insert_record(
-                    connection,
-                    &thread_id,
-                    "input",
-                    json!({"role":"user","content":"hello"}),
-                ))
-            }
-        })
-        .await
-        .unwrap();
-        set_admin_meta_bool_sync(
-            &state.admin_db_path,
-            EXPERIMENTAL_THREAD_ID_HEADER_KEY,
-            true,
-        )
-        .unwrap();
-
+        let other = user_for_subject(&state, "other-header-user").unwrap();
+        let threads = [
+            (&user, create_test_thread(&state, &user).await),
+            (&user, create_test_thread(&state, &user).await),
+            (&other, create_test_thread(&state, &other).await),
+        ];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (sent, received) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let (headers, _) = read_http_request(&mut socket).await;
-            sent.send(headers).unwrap();
-            let body = json!({
-                "id":"response-1",
-                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]
-            })
-            .to_string();
-            socket
-                .write_all(format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(), body
-                ).as_bytes())
-                .await
-                .unwrap();
-        });
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let router = Router::new().route(
+            "/responses",
+            post(move |headers: HeaderMap, _: Json<Value>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(headers).unwrap();
+                    Json(json!({"id":"response-1","output":[]}))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let integrations = IntegrationSettings {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
@@ -6873,31 +6870,68 @@ mod tests {
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
         };
-        responses_request_with_options(
-            &state,
-            &user,
-            &thread.id,
-            Some(input_idx),
-            "inference",
-            input_idx,
-            input_idx,
-            &integrations,
-            &thread.model,
-            Some(&thread.reasoning_effort),
-            thread.service_tier_fast,
-            json!([{"role":"user","content":"hello"}]),
-            false,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        let headers = received.await.unwrap();
-        server.await.unwrap();
-        assert!(headers.lines().any(|line| {
-            line.eq_ignore_ascii_case(&format!("{THREAD_ID_HEADER}: {}", thread.id))
-        }));
+        for (thread_enabled, session_enabled) in [
+            (false, false),
+            (false, true),
+            (true, true),
+            (true, false),
+            (false, false),
+        ] {
+            for (key, enabled) in [
+                (EXPERIMENTAL_THREAD_ID_HEADER_KEY, thread_enabled),
+                (EXPERIMENTAL_SESSION_ID_HEADER_KEY, session_enabled),
+            ] {
+                set_admin_meta_bool_sync(&state.admin_db_path, key, enabled).unwrap();
+            }
+            for (user, thread) in &threads {
+                let thread_id = thread.id.clone();
+                let input_idx = user_db(&state, user, false, move |connection| {
+                    Ok(insert_record(
+                        connection,
+                        &thread_id,
+                        "input",
+                        json!({"role":"user","content":"hello"}),
+                    ))
+                })
+                .await
+                .unwrap();
+                for request_kind in ["inference", "checkpoint"] {
+                    responses_request_with_options(
+                        &state,
+                        user,
+                        &thread.id,
+                        Some(input_idx),
+                        request_kind,
+                        input_idx,
+                        input_idx,
+                        &integrations,
+                        &thread.model,
+                        Some(&thread.reasoning_effort),
+                        thread.service_tier_fast,
+                        json!([{"role":"user","content":"hello"}]),
+                        false,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    let headers = received.recv().await.unwrap();
+                    for (header, enabled) in [
+                        (THREAD_ID_HEADER, thread_enabled),
+                        (SESSION_ID_HEADER, session_enabled),
+                    ] {
+                        assert_eq!(
+                            headers.get(header).map(|value| value.to_str().unwrap()),
+                            enabled.then_some(thread.id.as_str()),
+                            "{header} for {request_kind} on {}",
+                            thread.id,
+                        );
+                    }
+                }
+            }
+        }
+        server.abort();
     }
 
     #[tokio::test]
