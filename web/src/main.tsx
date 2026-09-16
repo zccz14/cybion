@@ -240,6 +240,9 @@ type IntegrationStatus = {
   linkit_bot_id: string | null
   linkit_username: string | null
 }
+type ExperimentalFeatures = {
+  thread_id_header: boolean
+}
 type SystemResources = {
   generated_at: number
   sample_interval_ms: number
@@ -536,6 +539,11 @@ const copy = {
     unavailable: "Unavailable",
     configuration: "Configuration",
     configurationDescription: "Thread defaults, integrations, and workspace access.",
+    experimentalFeatures: "Experimental features",
+    experimentalFeaturesDescription: "Global controls for experimental request behavior.",
+    threadIdHeader: "Send Thread ID header",
+    threadIdHeaderDescription: "Add thread-id: <UUID> to upstream Responses requests for every thread and API client.",
+    saveExperimentalError: "Could not save experimental feature settings",
     threadDefaults: "New thread defaults",
     threadDefaultsDescription: "Applied when you create a thread. You can adjust these settings within each thread.",
     reasoningEffort: "Reasoning effort",
@@ -779,6 +787,11 @@ const copy = {
     unavailable: "不可用",
     configuration: "配置",
     configurationDescription: "线程默认设置、外部集成和工作区访问入口。",
+    experimentalFeatures: "实验性功能",
+    experimentalFeaturesDescription: "控制所有请求的实验性行为。",
+    threadIdHeader: "发送 Thread ID 请求头",
+    threadIdHeaderDescription: "向所有线程和 API 客户端的上游 Responses 请求添加 thread-id: <UUID>。",
+    saveExperimentalError: "无法保存实验性功能设置",
     threadDefaults: "新线程默认设置",
     threadDefaultsDescription: "创建新线程时自动应用，也可以在每个线程中单独调整。",
     reasoningEffort: "推理强度",
@@ -1100,8 +1113,8 @@ function WorkspaceShell({
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/workers" element={<WorkersPage sdk={sdk} />} />
-            <Route path="/configuration" element={<ConfigurationPage sdk={sdk} />} />
-            <Route path="/settings" element={<ConfigurationPage sdk={sdk} />} />
+            <Route path="/configuration" element={<ConfigurationPage sdk={sdk} isAdmin={isAdmin} />} />
+            <Route path="/settings" element={<ConfigurationPage sdk={sdk} isAdmin={isAdmin} />} />
             <Route path="/api" element={<ApiKeysPage sdk={sdk} />} />
             <Route path="/tools" element={<ToolsPage />} />
             <Route path="*" element={<Navigate to="/threads" replace />} />
@@ -2017,7 +2030,27 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   </Card>
 }
 
-function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
+function ExperimentalFeaturesCard({ sdk }: { sdk: AuthMiniApi }) {
+  const { t } = useUi()
+  const client = useQueryClient()
+  const queryKey = ["experimental-features"]
+  const features = useQuery({ queryKey, queryFn: ({ signal }) => api<ExperimentalFeatures>(sdk, "/api/experimental-features", { signal }) })
+  const save = useMutation({
+    mutationFn: (value: ExperimentalFeatures) => api<ExperimentalFeatures>(sdk, "/api/experimental-features", { method: "PUT", body: JSON.stringify(value) }),
+    onSuccess: (value) => client.setQueryData(queryKey, value),
+  })
+  return <Card><CardHeader><CardTitle>{t("experimentalFeatures")}</CardTitle><CardDescription>{t("experimentalFeaturesDescription")}</CardDescription></CardHeader><CardContent>
+    {features.error && <RequestError error={features.error} onRetry={() => void features.refetch()} />}
+    {features.isLoading && <Skeleton className="h-14 max-w-xl" />}
+    {features.data && <Field orientation="horizontal" className="max-w-xl" data-disabled={save.isPending}>
+      <FieldContent><FieldLabel htmlFor="experimental-thread-id-header">{t("threadIdHeader")}</FieldLabel><FieldDescription id="experimental-thread-id-header-description">{t("threadIdHeaderDescription")}</FieldDescription></FieldContent>
+      <Switch id="experimental-thread-id-header" aria-describedby="experimental-thread-id-header-description" checked={features.data.thread_id_header} disabled={save.isPending} onCheckedChange={(thread_id_header) => save.mutate({ thread_id_header })} />
+    </Field>}
+    {save.error && <Alert className="mt-4" variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveExperimentalError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
+  </CardContent></Card>
+}
+
+function ConfigurationPage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolean }) {
   const { t } = useUi()
   const { session } = useAuthMini()
   const client = useQueryClient()
@@ -2025,6 +2058,7 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   const refresh = useMutation({ mutationFn: () => api<IntegrationStatus>(sdk, "/api/integrations/refresh", { method: "POST" }), onSuccess: (value) => client.setQueryData(["integrations"], value) })
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
+    {isAdmin && <ExperimentalFeaturesCard sdk={sdk} />}
     <Card><CardHeader><CardTitle>{t("integration")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2">
       {integrations.error && <div className="sm:col-span-2"><RequestError error={integrations.error} onRetry={() => void integrations.refetch()} /></div>}
       {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><IntegrationRow label={t("linkit")} configured={integrations.data.linkit_configured} detail={integrations.data.linkit_username ? `@${integrations.data.linkit_username}` : t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
