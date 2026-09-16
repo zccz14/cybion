@@ -26,7 +26,7 @@ export function generatedImageSource(payload: unknown): string | null {
 }
 
 export function pendingResponseRecords(view: ThreadResponseView | null | undefined, history: { id: number }[], threadId: string) {
-  if (!view) return []
+  if (!view || view.status === "cancelled") return []
   const durableIds = new Set(history.map((record) => record.id))
   return view.response.output.flatMap((output, index) => {
     if (output.record_id !== null && durableIds.has(output.record_id)) return []
@@ -35,4 +35,26 @@ export function pendingResponseRecords(view: ThreadResponseView | null | undefin
       kind: "response_output" as const, payload: output.item, created_at: view.started_at,
     }]
   })
+}
+
+export type ThreadAction = "cancel" | "continue" | "compact"
+
+type ThreadActionRecord = { kind: string; payload: unknown }
+
+export function threadControlAction(record: ThreadActionRecord): ThreadAction | null {
+  const payload = record.payload
+  if (record.kind !== "activity" || !payload || typeof payload !== "object"
+    || !("type" in payload) || payload.type !== "thread_control" || !("action" in payload)) return null
+  const action = payload.action
+  return action === "cancel" || action === "continue" || action === "compact" ? action : null
+}
+
+export function latestThreadAction(history: ThreadActionRecord[]): ThreadAction | null {
+  for (let index = history.length - 1; index >= 0; index--) {
+    const record = history[index]
+    if (record.kind === "input") return null
+    const action = threadControlAction(record)
+    if (action) return action
+  }
+  return null
 }

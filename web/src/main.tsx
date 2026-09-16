@@ -27,6 +27,9 @@ import {
   ChevronDownIcon,
   CircleAlertIcon,
   CopyIcon,
+  Minimize2Icon,
+  PlayIcon,
+  SquareIcon,
   DatabaseIcon,
   DownloadIcon,
   ExternalLinkIcon,
@@ -49,7 +52,7 @@ import {
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
-import { generatedImageSource, pendingResponseRecords, type ThreadResponseView } from "@/lib/thread-response"
+import { generatedImageSource, pendingResponseRecords, threadControlAction, latestThreadAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
 
@@ -351,6 +354,16 @@ const copy = {
     emptyDescription: "Start a focused thread. Every thread has its own history and request state.",
     chat: "Thread",
     send: "Send",
+    stopThread: "Stop",
+    stopThreadHint: "Stop reasoning and keep saved records",
+    continueThread: "Continue reasoning",
+    continueThreadHint: "Continue from saved history without sending a new prompt",
+    compactThread: "Compact",
+    compactThreadHint: "Compress context into a checkpoint and keep the original records",
+    compacting: "Creating checkpoint…",
+    threadStopped: "Reasoning stopped. Saved records were kept.",
+    threadContinued: "Continued without a new prompt.",
+    threadCompactionRequested: "Checkpoint compaction requested.",
     input: "Give this thread its next instruction…",
     running: "Running",
     idle: "Idle",
@@ -601,6 +614,16 @@ const copy = {
     emptyDescription: "创建一个聚焦的线程。每个线程都拥有独立的历史和请求状态。",
     chat: "线程",
     send: "发送",
+    stopThread: "停止",
+    stopThreadHint: "停止推理，保留已保存的记录",
+    continueThread: "继续推理",
+    continueThreadHint: "从已有记录继续，不发送新的提示词",
+    compactThread: "压缩",
+    compactThreadHint: "将上下文压缩为 checkpoint，保留原始记录",
+    compacting: "正在生成 checkpoint…",
+    threadStopped: "推理已停止，已保存的记录保留。",
+    threadContinued: "已直接继续推理，未发送新提示词。",
+    threadCompactionRequested: "已请求压缩上下文，生成 checkpoint。",
     input: "为这个线程追加下一条指令…",
     running: "运行中",
     idle: "空闲",
@@ -1296,6 +1319,19 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
       void client.invalidateQueries({ queryKey: ["reasoning-audits"] })
     },
   })
+  const control = useMutation({
+    mutationFn: (action: "cancel" | "continue" | "compact") => api<unknown>(sdk, `/api/threads/${encodeURIComponent(threadId)}/${action}`, { method: "POST" }),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["history", threadId] }),
+        client.invalidateQueries({ queryKey: ["thread", threadId] }),
+        client.invalidateQueries({ queryKey: ["thread-response", threadId] }),
+        client.invalidateQueries({ queryKey: ["threads"] }),
+        client.invalidateQueries({ queryKey: ["reasoning-audits"] }),
+        client.invalidateQueries({ queryKey: ["worker-calls"] }),
+      ])
+    },
+  })
   const rename = useMutation({
     mutationFn: (nextTitle: string) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, {
       method: "PATCH",
@@ -1322,6 +1358,10 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
   if (thread.isLoading) return <Page title={t("chat")} description=""><div className="flex flex-col gap-3"><Skeleton className="h-8 w-56" /><Skeleton className="h-20" /><Skeleton className="h-20" /></div></Page>
   if (thread.isError || !thread.data) return <Page title={t("chat")} description=""><RequestError error={thread.error} /></Page>
   const current = thread.data
+  const running = current.status === "running"
+  const compacting = running && latestThreadAction(history.data ?? []) === "compact"
+  const busy = submit.isPending || control.isPending
+  const hasHistory = history.data?.some((record) => record.kind !== "activity") ?? false
   return <main className="flex h-full flex-col lg:flex-row">
     <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
@@ -1338,11 +1378,12 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
           <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} />
           <Button size="sm" disabled={rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
         </form> : <div className="min-w-0 flex-1"><h1 className="truncate text-base font-semibold">{current.title}</h1><p className="truncate text-xs text-muted-foreground">{current.model}</p></div>}
-        <Badge variant={current.status === "failed" ? "destructive" : current.status === "running" ? "secondary" : "outline"}>{statusLabel(current.status, t)}</Badge>
+        <Badge variant={current.status === "failed" ? "destructive" : current.status === "running" ? "secondary" : "outline"}>{compacting ? t("compacting") : statusLabel(current.status, t)}</Badge>
         {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
       {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input.trim())} /></div>}
+      {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
       <MessageScrollerProvider autoScroll defaultScrollPosition="end">
         <MessageScroller className="min-h-0 flex-1">
           <MessageScrollerViewport>
@@ -1353,15 +1394,23 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
               {!history.isLoading && !history.error && history.data?.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {pendingResponseRecords(liveResponse.data, history.data ?? [], threadId).map((record) => <MessageScrollerItem key={`live-${liveResponse.data?.audit_id}-${record.id}`}><HistoryMessage language={language} record={record} workers={workers.data} /></MessageScrollerItem>)}
               {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
-              {current.status === "running" && <MessageScrollerItem><div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("running")}</div></MessageScrollerItem>}
+              {running && <MessageScrollerItem><div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{compacting ? t("compacting") : t("running")}</div></MessageScrollerItem>}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton behavior="auto" />
         </MessageScroller>
       </MessageScrollerProvider>
-      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !submit.isPending) submit.mutate(value) }}>
-        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); const value = input.trim(); if (value && !submit.isPending) submit.mutate(value) } }} disabled={submit.isPending} /></Field>
-          <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter</span><Button disabled={!input.trim() || submit.isPending}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
+      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(value) }}>
+        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(value) } }} disabled={busy} /></Field>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {running
+                ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
+                : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
+              <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
+            </div>
+            <div className="flex items-center gap-3"><span className="hidden text-xs text-muted-foreground sm:inline">⌘ / Ctrl + Enter</span><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
+          </div>
         </FieldGroup>
       </form>
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>{remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
@@ -1384,6 +1433,11 @@ function ResponseMetadata({ language, view, running }: { language: Language; vie
 const HistoryMessage = memo(function HistoryMessage({ language, record, workers }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined }) {
   const { t } = useUi()
   const time = formattedTime(language, record.created_at)
+  const action = threadControlAction(record)
+  if (action) {
+    const label = action === "cancel" ? t("threadStopped") : action === "continue" ? t("threadContinued") : t("threadCompactionRequested")
+    return <Message><MessageContent><MessageFooter>{label} · {time}</MessageFooter></MessageContent></Message>
+  }
   const imageSource = generatedImageSource(record.payload)
   if (imageSource) {
     return <Message>

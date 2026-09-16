@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
+import { pendingResponseRecords, latestThreadAction, threadControlAction, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 test("streamed reasoning and messages become history rows without duplicating committed output", () => {
   const view: ThreadResponseView = {
@@ -22,4 +22,20 @@ test("streamed reasoning and messages become history rows without duplicating co
   view.response.output[1].done = true
   view.response.output[1].record_id = 12
   assert.deepEqual(pendingResponseRecords(view, [{ id: 11 }, { id: 12 }], "thread"), [])
+  view.status = "cancelled"
+  assert.deepEqual(pendingResponseRecords(view, [], "thread"), [], "cancelled previews must not display unsaved partial output")
+})
+
+test("compaction status follows request boundaries and ignores late activity", () => {
+  const input = { kind: "input", payload: { role: "user", content: "hello" } }
+  const compact = { kind: "activity", payload: { type: "thread_control", action: "compact" } }
+  const cancel = { kind: "activity", payload: { type: "thread_control", action: "cancel" } }
+  const resume = { kind: "activity", payload: { type: "thread_control", action: "continue" } }
+  const late = { kind: "activity", payload: { role: "assistant", content: "late" } }
+  assert.equal(latestThreadAction([input, compact, late]), "compact")
+  assert.equal(latestThreadAction([input, compact, cancel, late]), "cancel")
+  assert.equal(latestThreadAction([input, compact, cancel, resume, late]), "continue")
+  assert.equal(latestThreadAction([input, compact, input, late]), null)
+  assert.equal(threadControlAction({ ...compact, kind: "input" }), null)
+  assert.equal(threadControlAction({ kind: "activity", payload: null }), null)
 })

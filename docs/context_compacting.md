@@ -40,3 +40,9 @@ error stops the process immediately.
 Only the final validated Markdown is appended as a `checkpoint` record. The
 source records and every ordinary Responses output remain available through
 the history API and their original record indices.
+
+Manual compaction uses this same compiler, reduction algorithm, and checkpoint
+validation. It does not execute tools or continue the task afterward. The
+checkpoint is committed only if both the source tail and the request boundary
+are still current. Stopping compaction or submitting a newer request prevents
+an obsolete checkpoint from replacing the active context.

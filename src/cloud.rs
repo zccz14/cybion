@@ -34,8 +34,11 @@ use uuid::Uuid;
 
 mod admin_users;
 mod history;
+mod thread_controls;
 mod traffic;
 mod turn_state;
+
+use thread_controls::{RequestOperation, latest_request_record_id, request_superseded};
 
 use crate::resources;
 use crate::responses::{
@@ -180,7 +183,7 @@ impl ApiError {
     fn cancelled() -> Self {
         Self {
             status: StatusCode::REQUEST_TIMEOUT,
-            message: "request superseded by a newer input".to_owned(),
+            message: "request cancelled or superseded".to_owned(),
             kind: ApiErrorKind::Cancelled,
         }
     }
@@ -373,6 +376,12 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/history", get(thread_history))
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
+        .route("/api/threads/{id}/cancel", post(thread_controls::cancel))
+        .route(
+            "/api/threads/{id}/continue",
+            post(thread_controls::continue_thread),
+        )
+        .route("/api/threads/{id}/compact", post(thread_controls::compact))
         .route("/api/insights", get(insights))
         .route("/api/history", get(history::list))
         .route("/api/history/{id}", get(history::read))
@@ -2354,18 +2363,37 @@ async fn response_for(
 ) -> Result<Option<ThreadResponseView>, ApiError> {
     user_db(state, user, true, move |connection| {
         load_thread(connection, &id)?;
-        connection.query_row(
-            "SELECT a.id,a.input_record_id,a.started_at,a.status,s.snapshot
+        let request_id = latest_request_record_id(connection, &id)?;
+        connection
+            .query_row(
+                "SELECT a.id,a.input_record_id,a.started_at,a.status,s.snapshot
              FROM reasoning_audits a JOIN response_states s ON s.audit_id=a.id
              WHERE a.thread_id=? AND a.request_kind='inference'
-               AND a.input_record_id=(SELECT MAX(id) FROM history_records WHERE thread_id=a.thread_id AND kind='input')
-             ORDER BY a.id DESC LIMIT 1", [id], |row| {
-                let snapshot: String = row.get(4)?;
-                let response = serde_json::from_str(&snapshot).map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
-                Ok(ThreadResponseView { audit_id: row.get(0)?, input_record_id: row.get(1)?, started_at: row.get(2)?, status: row.get(3)?, response })
-            }
-        ).optional().map_err(ApiError::from)
-    }).await
+               AND a.input_record_id=?
+             ORDER BY a.id DESC LIMIT 1",
+                params![id, request_id],
+                |row| {
+                    let snapshot: String = row.get(4)?;
+                    let response = serde_json::from_str(&snapshot).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                    Ok(ThreadResponseView {
+                        audit_id: row.get(0)?,
+                        input_record_id: row.get(1)?,
+                        started_at: row.get(2)?,
+                        status: row.get(3)?,
+                        response,
+                    })
+                },
+            )
+            .optional()
+            .map_err(ApiError::from)
+    })
+    .await
 }
 
 async fn thread_response(
@@ -3038,68 +3066,13 @@ async fn enqueue_request(
     thread_id: String,
     input: String,
 ) -> Result<RequestView, ApiError> {
-    let started_at = now();
-    let queued_thread_id = thread_id.clone();
-    let input_payload = json!({"role":"user","content":input});
-    let record_idx = user_db(&state, &user, true, move |connection| {
-        load_thread(connection, &queued_thread_id)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let record_idx = persist_history_record(
-            &transaction,
-            HistoryRecordInsert {
-                thread_id: &queued_thread_id,
-                kind: "input",
-                payload: &input_payload,
-                created_at: started_at,
-            },
-        )?;
-        transaction.execute(
-            "UPDATE threads SET status='running',updated_at=? WHERE id=?",
-            params![started_at, &queued_thread_id],
-        )?;
-        transaction.commit()?;
-        Ok(record_idx)
-    })
-    .await?;
-
-    let (cancellation, receiver) = watch::channel(false);
-    let key = request_key(&user, &thread_id);
-    let mut active = state.active_requests.lock().await;
-    let replace = active
-        .get(&key)
-        .is_none_or(|current| current.record_idx < record_idx);
-    if replace {
-        if let Some(previous) = active.insert(
-            key,
-            ActiveRequest {
-                record_idx,
-                cancellation,
-            },
-        ) {
-            let _ = previous.cancellation.send(true);
-        }
-    } else {
-        let _ = cancellation.send(true);
-    }
-    drop(active);
-    let background_state = state.clone();
-    let background_user = user.clone();
-    let background_thread_id = thread_id.clone();
-    tokio::spawn(async move {
-        process_request(
-            background_state,
-            background_user,
-            background_thread_id,
-            record_idx,
-            receiver,
-        )
-        .await;
-    });
-    Ok(RequestView {
+    thread_controls::enqueue(
+        state,
+        user,
         thread_id,
-        record_idx,
-        status: "accepted".to_owned(),
-    })
+        thread_controls::RequestInput::Prompt(input),
+    )
+    .await
 }
 
 async fn process_request(
@@ -3107,6 +3080,7 @@ async fn process_request(
     user: User,
     thread_id: String,
     record_idx: i64,
+    operation: RequestOperation,
     mut cancellation: watch::Receiver<bool>,
 ) {
     let loaded = user_db(&state, &user, false, {
@@ -3120,15 +3094,29 @@ async fn process_request(
     .await;
     let result = match loaded {
         Ok((thread, integrations)) if integrations_ready(&integrations) => {
-            request_agent(
-                &state,
-                &user,
-                &thread,
-                &integrations,
-                record_idx,
-                &mut cancellation,
-            )
-            .await
+            if operation == RequestOperation::Compact {
+                thread_controls::compact_request(
+                    &state,
+                    &user,
+                    &thread,
+                    &integrations,
+                    record_idx,
+                    &mut cancellation,
+                )
+                .await
+                .map(|()| (thread.clone(), integrations, String::new()))
+                .map_err(|error| (thread, Box::new(error)))
+            } else {
+                request_agent(
+                    &state,
+                    &user,
+                    &thread,
+                    &integrations,
+                    record_idx,
+                    &mut cancellation,
+                )
+                .await
+            }
         }
         Ok((thread, _)) => Err((
             thread,
@@ -3165,11 +3153,11 @@ async fn process_request(
     match result {
         Ok((thread, integrations, output)) => {
             match finalize_request_success(&state, &user, &thread_id, record_idx).await {
-                Ok(true) => {
+                Ok(true) if operation == RequestOperation::Inference => {
                     let thread = maybe_name_thread(&state, &user, &thread, record_idx).await;
                     notify_thread(&state, &integrations, &thread, true, &output).await;
                 }
-                Ok(false) => {}
+                Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(error = %error.message, "could not finalize a completed request");
                 }
@@ -3305,12 +3293,8 @@ async fn finalize_request_success(
     let thread_id = thread_id.to_owned();
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let latest_input: Option<i64> = transaction.query_row(
-            "SELECT MAX(id) FROM history_records WHERE thread_id=? AND kind='input'",
-            [&thread_id],
-            |row| row.get(0),
-        )?;
-        if latest_input != Some(record_idx) {
+        let latest_request = latest_request_record_id(&transaction, &thread_id)?;
+        if latest_request != Some(record_idx) {
             transaction.commit()?;
             return Ok(false);
         }
@@ -3347,12 +3331,8 @@ async fn finalize_request_failure(
     let content = format!("Request failed: {error_for_db}");
     let result = user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let latest_input: Option<i64> = transaction.query_row(
-            "SELECT MAX(id) FROM history_records WHERE thread_id=? AND kind='input'",
-            [&thread_id],
-            |row| row.get(0),
-        )?;
-        let current = latest_input == Some(record_idx);
+        let latest_request = latest_request_record_id(&transaction, &thread_id)?;
+        let current = latest_request == Some(record_idx);
         persist_history_record(
             &transaction,
             HistoryRecordInsert {
@@ -3773,7 +3753,14 @@ async fn request_agent(
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(ThreadView, IntegrationSettings, String), (ThreadView, Box<ApiError>)> {
     let mut checkpoint_retries = 0;
-    let mut idx_tail = source_record_idx;
+    let mut idx_tail = user_db(state, user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            thread_controls::request_context_tail(connection, &thread_id, source_record_idx)
+        }
+    })
+    .await
+    .map_err(|error| (thread.clone(), Box::new(error)))?;
     loop {
         if *cancellation.borrow() {
             return Err((thread.clone(), Box::new(ApiError::cancelled())));
@@ -3924,14 +3911,7 @@ async fn append_response_output_items(
     let created_at = now();
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let superseded: bool = transaction.query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM history_records
-               WHERE thread_id=? AND kind='input' AND id>?
-             )",
-            params![&thread_id, input_record_id],
-            |row| row.get(0),
-        )?;
+        let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
         let kind = if superseded {
             "activity"
         } else {
@@ -3967,14 +3947,7 @@ async fn append_tool_output_item(
     let created_at = now();
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let superseded: bool = transaction.query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM history_records
-               WHERE thread_id=? AND kind='input' AND id>?
-             )",
-            params![&thread_id, input_record_id],
-            |row| row.get(0),
-        )?;
+        let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
         let kind = if superseded {
             "activity"
         } else {
@@ -4035,13 +4008,25 @@ async fn compact_thread_context(
         developer_prefix(&contexts, &workers),
     )
     .await?;
-    persist_thread_checkpoint(state, user, thread, context.idx_tail, summary).await
+    if *cancellation.borrow() {
+        return Err(ApiError::cancelled());
+    }
+    persist_thread_checkpoint(
+        state,
+        user,
+        thread,
+        source_record_idx,
+        context.idx_tail,
+        summary,
+    )
+    .await
 }
 
 async fn persist_thread_checkpoint(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
+    source_record_idx: i64,
     idx_tail: i64,
     summary: String,
 ) -> Result<i64, ApiError> {
@@ -4049,6 +4034,9 @@ async fn persist_thread_checkpoint(
     let thread_id = thread.id.clone();
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if request_superseded(&transaction, &thread_id, source_record_idx)? {
+            return Err(ApiError::cancelled());
+        }
         let latest: Option<i64> = transaction.query_row(
             "SELECT MAX(id) FROM history_records
              WHERE thread_id=?
@@ -5108,7 +5096,9 @@ async fn finish_reasoning_audit(
         move |connection| {
             connection.execute(
                 "UPDATE reasoning_audits
-                 SET status=?,finished_at=?,input_tokens=?,output_tokens=?,cached_tokens=?,openai_lb_request_id=?,error=?
+                 SET status=CASE WHEN status='cancelled' THEN status ELSE ? END,
+                     finished_at=?,input_tokens=?,output_tokens=?,cached_tokens=?,openai_lb_request_id=?,
+                     error=CASE WHEN status='cancelled' THEN error ELSE ? END
                  WHERE id=?",
                 params![
                     status,
@@ -5502,7 +5492,7 @@ async fn enqueue_worker_call(
     let call_id_for_db = call_id.clone();
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let superseded: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM history_records WHERE thread_id=? AND kind='input' AND id>?)", params![&thread_id, input_record_id], |row| row.get(0))?;
+        let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
         if superseded { return Err(ApiError::cancelled()); }
         let snapshot = transaction
             .query_row(
@@ -5914,14 +5904,7 @@ async fn worker_result(
             )?;
         }
         let superseded = if let Some(input_record_id) = input_record_id {
-            transaction.query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM history_records
-                   WHERE thread_id=? AND kind='input' AND id>?
-                 )",
-                params![&thread_id, input_record_id],
-                |row| row.get(0),
-            )?
+            request_superseded(&transaction, &thread_id, input_record_id)?
         } else {
             true
         };
