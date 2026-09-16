@@ -242,6 +242,7 @@ type IntegrationStatus = {
 }
 type ExperimentalFeatures = {
   thread_id_header: boolean
+  codex_turn_state_header: boolean
 }
 type SystemResources = {
   generated_at: number
@@ -543,6 +544,8 @@ const copy = {
     experimentalFeaturesDescription: "Global controls for experimental request behavior.",
     threadIdHeader: "Send Thread ID header",
     threadIdHeaderDescription: "Add thread-id: <UUID> to upstream Responses requests for every thread and API client.",
+    codexTurnStateHeader: "Return x-codex-turn-state header",
+    codexTurnStateHeaderDescription: "Save the latest x-codex-turn-state response header per thread and send it with subsequent requests. Disabled by default.",
     saveExperimentalError: "Could not save experimental feature settings",
     threadDefaults: "New thread defaults",
     threadDefaultsDescription: "Applied when you create a thread. You can adjust these settings within each thread.",
@@ -791,6 +794,8 @@ const copy = {
     experimentalFeaturesDescription: "控制所有请求的实验性行为。",
     threadIdHeader: "发送 Thread ID 请求头",
     threadIdHeaderDescription: "向所有线程和 API 客户端的上游 Responses 请求添加 thread-id: <UUID>。",
+    codexTurnStateHeader: "回传 x-codex-turn-state 请求头",
+    codexTurnStateHeaderDescription: "为每个 Thread 缓存最新的 x-codex-turn-state 响应头，并在后续请求中回传。默认关闭。",
     saveExperimentalError: "无法保存实验性功能设置",
     threadDefaults: "新线程默认设置",
     threadDefaultsDescription: "创建新线程时自动应用，也可以在每个线程中单独调整。",
@@ -2036,16 +2041,19 @@ function ExperimentalFeaturesCard({ sdk }: { sdk: AuthMiniApi }) {
   const queryKey = ["experimental-features"]
   const features = useQuery({ queryKey, queryFn: ({ signal }) => api<ExperimentalFeatures>(sdk, "/api/experimental-features", { signal }) })
   const save = useMutation({
-    mutationFn: (value: ExperimentalFeatures) => api<ExperimentalFeatures>(sdk, "/api/experimental-features", { method: "PUT", body: JSON.stringify(value) }),
+    mutationFn: (value: Partial<ExperimentalFeatures>) => api<ExperimentalFeatures>(sdk, "/api/experimental-features", { method: "PUT", body: JSON.stringify(value) }),
     onSuccess: (value) => client.setQueryData(queryKey, value),
   })
   return <Card><CardHeader><CardTitle>{t("experimentalFeatures")}</CardTitle><CardDescription>{t("experimentalFeaturesDescription")}</CardDescription></CardHeader><CardContent>
     {features.error && <RequestError error={features.error} onRetry={() => void features.refetch()} />}
-    {features.isLoading && <Skeleton className="h-14 max-w-xl" />}
-    {features.data && <Field orientation="horizontal" className="max-w-xl" data-disabled={save.isPending}>
+    {features.isLoading && <Skeleton className="h-36 max-w-xl" />}
+    {features.data && <FieldGroup className="max-w-xl"><Field orientation="horizontal" data-disabled={save.isPending}>
       <FieldContent><FieldLabel htmlFor="experimental-thread-id-header">{t("threadIdHeader")}</FieldLabel><FieldDescription id="experimental-thread-id-header-description">{t("threadIdHeaderDescription")}</FieldDescription></FieldContent>
       <Switch id="experimental-thread-id-header" aria-describedby="experimental-thread-id-header-description" checked={features.data.thread_id_header} disabled={save.isPending} onCheckedChange={(thread_id_header) => save.mutate({ thread_id_header })} />
-    </Field>}
+    </Field><Field orientation="horizontal" data-disabled={save.isPending}>
+      <FieldContent><FieldLabel htmlFor="experimental-codex-turn-state-header">{t("codexTurnStateHeader")}</FieldLabel><FieldDescription id="experimental-codex-turn-state-header-description">{t("codexTurnStateHeaderDescription")}</FieldDescription></FieldContent>
+      <Switch id="experimental-codex-turn-state-header" aria-describedby="experimental-codex-turn-state-header-description" checked={features.data.codex_turn_state_header} disabled={save.isPending} onCheckedChange={(codex_turn_state_header) => save.mutate({ codex_turn_state_header })} />
+    </Field></FieldGroup>}
     {save.error && <Alert className="mt-4" variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveExperimentalError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
   </CardContent></Card>
 }

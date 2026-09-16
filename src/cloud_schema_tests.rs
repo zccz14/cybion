@@ -84,7 +84,7 @@ fn assert_core_history_schema(connection: &Connection) {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        9
+        USER_SCHEMA_VERSION
     );
     assert_eq!(
         connection

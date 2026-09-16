@@ -58,6 +58,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
+    assert!(admin_user_sync(&state.admin_db_path, "http-settings-owner", true).unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
     let client = reqwest::Client::new();
     let settings_url = format!("{base}/api/thread-defaults");
@@ -125,6 +126,72 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     for field in ["model", "reasoning_effort", "service_tier_fast"] {
         assert_eq!(created[field], defaults[field]);
     }
+    let experiments_url = format!("{base}/api/experimental-features");
+    let initial: Value = client
+        .get(&experiments_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        initial,
+        json!({"thread_id_header":false,"codex_turn_state_header":false})
+    );
+    for (update, expected) in [
+        (
+            json!({"codex_turn_state_header":true}),
+            json!({"thread_id_header":false,"codex_turn_state_header":true}),
+        ),
+        (
+            json!({"thread_id_header":true}),
+            json!({"thread_id_header":true,"codex_turn_state_header":true}),
+        ),
+        (
+            json!({"codex_turn_state_header":false}),
+            json!({"thread_id_header":true,"codex_turn_state_header":false}),
+        ),
+    ] {
+        let saved: Value = client
+            .put(&experiments_url)
+            .bearer_auth(&token)
+            .json(&update)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(saved, expected);
+        let loaded: Value = client
+            .get(&experiments_url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(loaded, expected);
+    }
+    assert_eq!(
+        client
+            .put(&experiments_url)
+            .json(&json!({"codex_turn_state_header":true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
     server.abort();
     issuer_task.abort();
 }
@@ -134,6 +201,29 @@ fn browser_identity_for(user: &User) -> axum::Extension<BrowserIdentity> {
         user: user.clone(),
         bearer: String::new(),
     })
+}
+
+#[tokio::test]
+async fn experimental_features_can_only_be_changed_by_the_administrator() {
+    let (_root, state) = test_state();
+    assert!(admin_user_sync(&state.admin_db_path, "root", true).unwrap());
+    let user = user_for_subject(&state, "other-user").unwrap();
+    let error = update_experimental_features(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(serde_json::from_value(json!({"codex_turn_state_header":true})).unwrap()),
+    )
+    .await
+    .err()
+    .expect("non-administrator must be rejected");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert!(
+        !experimental_features(State(state))
+            .await
+            .unwrap()
+            .0
+            .codex_turn_state_header
+    );
 }
 
 #[tokio::test]

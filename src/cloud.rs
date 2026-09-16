@@ -35,6 +35,7 @@ use uuid::Uuid;
 mod admin_users;
 mod history;
 mod traffic;
+mod turn_state;
 
 use crate::resources;
 use crate::responses::{
@@ -59,10 +60,12 @@ const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 9;
+const USER_SCHEMA_VERSION: i64 = 10;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
+const EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY: &str = "experimental_codex_turn_state_header";
 const THREAD_ID_HEADER: &str = "thread-id";
+const CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -734,13 +737,14 @@ fn set_admin_meta_bool_sync(path: &Path, key: &str, enabled: bool) -> Result<(),
     Ok(())
 }
 
-async fn experimental_thread_id_header_enabled(state: &AppState) -> Result<bool, ApiError> {
+async fn experimental_header_enabled(
+    state: &AppState,
+    key: &'static str,
+) -> Result<bool, ApiError> {
     let path = state.admin_db_path.clone();
-    tokio::task::spawn_blocking(move || {
-        admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY)
-    })
-    .await
-    .map_err(ApiError::internal)?
+    tokio::task::spawn_blocking(move || admin_meta_bool_sync(&path, key))
+        .await
+        .map_err(ApiError::internal)?
 }
 
 const THREAD_SCHEMA: &str = r#"
@@ -757,6 +761,11 @@ CREATE TABLE IF NOT EXISTS threads (
 "#;
 
 const USER_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_turn_states (
+  thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+  upstream_key TEXT NOT NULL,
+  value BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS thread_defaults (
   id INTEGER PRIMARY KEY CHECK(id=1),
   model TEXT NOT NULL,
@@ -884,7 +893,8 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // There is no supported migration from the discarded pre-release user databases.
         transaction
             .execute_batch(
-                "DROP TABLE IF EXISTS response_states;
+                "DROP TABLE IF EXISTS thread_turn_states;
+                 DROP TABLE IF EXISTS response_states;
                  DROP TABLE IF EXISTS worker_calls;
                  DROP TABLE IF EXISTS workers;
                  DROP TABLE IF EXISTS api_keys;
@@ -1191,12 +1201,14 @@ struct IntegrationStatusView {
 #[derive(Clone, Serialize)]
 struct ExperimentalFeaturesView {
     thread_id_header: bool,
+    codex_turn_state_header: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateExperimentalFeaturesInput {
-    thread_id_header: bool,
+    thread_id_header: Option<bool>,
+    codex_turn_state_header: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1720,7 +1732,13 @@ async fn experimental_features(
     State(state): State<AppState>,
 ) -> Result<Json<ExperimentalFeaturesView>, ApiError> {
     Ok(Json(ExperimentalFeaturesView {
-        thread_id_header: experimental_thread_id_header_enabled(&state).await?,
+        thread_id_header: experimental_header_enabled(&state, EXPERIMENTAL_THREAD_ID_HEADER_KEY)
+            .await?,
+        codex_turn_state_header: experimental_header_enabled(
+            &state,
+            EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY,
+        )
+        .await?,
     }))
 }
 
@@ -1733,15 +1751,23 @@ async fn update_experimental_features(
         return Err(ApiError::forbidden("administrator access is required"));
     }
     let path = state.admin_db_path.clone();
-    let enabled = input.thread_id_header;
     tokio::task::spawn_blocking(move || {
-        set_admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY, enabled)
+        for (key, enabled) in [
+            (EXPERIMENTAL_THREAD_ID_HEADER_KEY, input.thread_id_header),
+            (
+                EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY,
+                input.codex_turn_state_header,
+            ),
+        ] {
+            if let Some(enabled) = enabled {
+                set_admin_meta_bool_sync(&path, key, enabled)?;
+            }
+        }
+        Ok::<_, ApiError>(())
     })
     .await
     .map_err(ApiError::internal)??;
-    Ok(Json(ExperimentalFeaturesView {
-        thread_id_header: enabled,
-    }))
+    experimental_features(State(state)).await
 }
 
 fn integration_status_view(settings: &IntegrationSettings) -> IntegrationStatusView {
@@ -4558,11 +4584,6 @@ async fn send_responses_request(
     developer_prefix: Option<Value>,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
 ) -> Result<ResponsesResult, ApiError> {
-    let audit_id = if let Some((spec, _)) = audit.as_ref() {
-        Some(begin_reasoning_audit(state, spec).await?)
-    } else {
-        None
-    };
     let payload = responses_payload_with_prefix(
         model,
         reasoning_effort,
@@ -4583,16 +4604,43 @@ async fn send_responses_request(
         .header("Accept", "text/event-stream")
         .json(&payload);
     if let Some((spec, _)) = audit.as_ref()
-        && experimental_thread_id_header_enabled(state).await?
+        && experimental_header_enabled(state, EXPERIMENTAL_THREAD_ID_HEADER_KEY).await?
     {
         request = request.header(THREAD_ID_HEADER, &spec.thread_id);
     }
+    let turn_state_key = if let Some((spec, _)) = audit.as_ref()
+        && experimental_header_enabled(state, EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY).await?
+    {
+        let key = turn_state::upstream_key(integrations);
+        if let Some(value) = turn_state::load(state, spec, &key).await? {
+            request = request.header(CODEX_TURN_STATE_HEADER, value);
+        }
+        Some(key)
+    } else {
+        None
+    };
+    let audit_id = if let Some((spec, _)) = audit.as_ref() {
+        Some(begin_reasoning_audit(state, spec).await?)
+    } else {
+        None
+    };
     let mut cancellation = audit.as_ref().and_then(|(_, receiver)| receiver.clone());
     let counters = audit
         .as_ref()
         .map(|(spec, _)| state.traffic.for_user(&spec.user.id));
-    let response = match send_with_cancellation(request, &mut cancellation, counters.clone()).await
-    {
+    let response = async {
+        let response = send_with_cancellation(request, &mut cancellation, counters.clone()).await?;
+        if let (Some((spec, _)), Some(key), Some(value)) = (
+            audit.as_ref(),
+            turn_state_key.as_ref(),
+            response.headers().get(CODEX_TURN_STATE_HEADER),
+        ) {
+            turn_state::save(state, spec, key, value).await?;
+        }
+        Ok::<_, ApiError>(response)
+    }
+    .await;
+    let response = match response {
         Ok(response) => response,
         Err(error) => {
             if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
@@ -5909,6 +5957,10 @@ mod settings_tests;
 #[cfg(test)]
 #[path = "cloud_schema_tests.rs"]
 mod schema_tests;
+
+#[cfg(test)]
+#[path = "cloud_turn_state_tests.rs"]
+mod turn_state_tests;
 
 #[cfg(test)]
 mod tests {
