@@ -245,6 +245,7 @@ type IntegrationStatus = {
 }
 type ExperimentalFeatures = {
   thread_id_header: boolean
+  session_id_header: boolean
   codex_turn_state_header: boolean
 }
 type SystemResources = {
@@ -557,6 +558,8 @@ const copy = {
     experimentalFeaturesDescription: "Global controls for experimental request behavior.",
     threadIdHeader: "Send Thread ID header",
     threadIdHeaderDescription: "Add thread-id: <UUID> to upstream Responses requests for every thread and API client.",
+    sessionIdHeader: "Send Session ID header",
+    sessionIdHeaderDescription: "Add session-id: <Thread ID> to upstream Responses requests for every thread and API client. Disabled by default and independent of the Thread ID header switch.",
     codexTurnStateHeader: "Return x-codex-turn-state header",
     codexTurnStateHeaderDescription: "Save the latest x-codex-turn-state response header per thread and send it with subsequent requests. Disabled by default.",
     saveExperimentalError: "Could not save experimental feature settings",
@@ -817,6 +820,8 @@ const copy = {
     experimentalFeaturesDescription: "控制所有请求的实验性行为。",
     threadIdHeader: "发送 Thread ID 请求头",
     threadIdHeaderDescription: "向所有线程和 API 客户端的上游 Responses 请求添加 thread-id: <UUID>。",
+    sessionIdHeader: "发送 Session ID 请求头",
+    sessionIdHeaderDescription: "向所有线程和 API 客户端的上游 Responses 请求添加 session-id: <Thread ID>。默认关闭，独立于 Thread ID 请求头开关。",
     codexTurnStateHeader: "回传 x-codex-turn-state 请求头",
     codexTurnStateHeaderDescription: "为每个 Thread 缓存最新的 x-codex-turn-state 响应头，并在后续请求中回传。默认关闭。",
     saveExperimentalError: "无法保存实验性功能设置",
@@ -2104,6 +2109,9 @@ function ExperimentalFeaturesCard({ sdk }: { sdk: AuthMiniApi }) {
     {features.data && <FieldGroup className="max-w-xl"><Field orientation="horizontal" data-disabled={save.isPending}>
       <FieldContent><FieldLabel htmlFor="experimental-thread-id-header">{t("threadIdHeader")}</FieldLabel><FieldDescription id="experimental-thread-id-header-description">{t("threadIdHeaderDescription")}</FieldDescription></FieldContent>
       <Switch id="experimental-thread-id-header" aria-describedby="experimental-thread-id-header-description" checked={features.data.thread_id_header} disabled={save.isPending} onCheckedChange={(thread_id_header) => save.mutate({ thread_id_header })} />
+    </Field><Field orientation="horizontal" data-disabled={save.isPending}>
+      <FieldContent><FieldLabel htmlFor="experimental-session-id-header">{t("sessionIdHeader")}</FieldLabel><FieldDescription id="experimental-session-id-header-description">{t("sessionIdHeaderDescription")}</FieldDescription></FieldContent>
+      <Switch id="experimental-session-id-header" aria-describedby="experimental-session-id-header-description" checked={features.data.session_id_header} disabled={save.isPending} onCheckedChange={(session_id_header) => save.mutate({ session_id_header })} />
     </Field><Field orientation="horizontal" data-disabled={save.isPending}>
       <FieldContent><FieldLabel htmlFor="experimental-codex-turn-state-header">{t("codexTurnStateHeader")}</FieldLabel><FieldDescription id="experimental-codex-turn-state-header-description">{t("codexTurnStateHeaderDescription")}</FieldDescription></FieldContent>
       <Switch id="experimental-codex-turn-state-header" aria-describedby="experimental-codex-turn-state-header-description" checked={features.data.codex_turn_state_header} disabled={save.isPending} onCheckedChange={(codex_turn_state_header) => save.mutate({ codex_turn_state_header })} />

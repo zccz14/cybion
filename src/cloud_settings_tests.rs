@@ -140,20 +140,28 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         .unwrap();
     assert_eq!(
         initial,
-        json!({"thread_id_header":false,"codex_turn_state_header":false})
+        json!({"thread_id_header":false,"session_id_header":false,"codex_turn_state_header":false})
     );
     for (update, expected) in [
         (
             json!({"codex_turn_state_header":true}),
-            json!({"thread_id_header":false,"codex_turn_state_header":true}),
+            json!({"thread_id_header":false,"session_id_header":false,"codex_turn_state_header":true}),
+        ),
+        (
+            json!({"session_id_header":true}),
+            json!({"thread_id_header":false,"session_id_header":true,"codex_turn_state_header":true}),
         ),
         (
             json!({"thread_id_header":true}),
-            json!({"thread_id_header":true,"codex_turn_state_header":true}),
+            json!({"thread_id_header":true,"session_id_header":true,"codex_turn_state_header":true}),
         ),
         (
             json!({"codex_turn_state_header":false}),
-            json!({"thread_id_header":true,"codex_turn_state_header":false}),
+            json!({"thread_id_header":true,"session_id_header":true,"codex_turn_state_header":false}),
+        ),
+        (
+            json!({"session_id_header":false}),
+            json!({"thread_id_header":true,"session_id_header":false,"codex_turn_state_header":false}),
         ),
     ] {
         let saved: Value = client
@@ -185,7 +193,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(
         client
             .put(&experiments_url)
-            .json(&json!({"codex_turn_state_header":true}))
+            .json(&json!({"session_id_header":true}))
             .send()
             .await
             .unwrap()
@@ -208,22 +216,25 @@ async fn experimental_features_can_only_be_changed_by_the_administrator() {
     let (_root, state) = test_state();
     assert!(admin_user_sync(&state.admin_db_path, "root", true).unwrap());
     let user = user_for_subject(&state, "other-user").unwrap();
-    let error = update_experimental_features(
-        State(state.clone()),
-        browser_identity_for(&user),
-        Json(serde_json::from_value(json!({"codex_turn_state_header":true})).unwrap()),
-    )
-    .await
-    .err()
-    .expect("non-administrator must be rejected");
-    assert_eq!(error.status, StatusCode::FORBIDDEN);
-    assert!(
-        !experimental_features(State(state))
-            .await
-            .unwrap()
-            .0
-            .codex_turn_state_header
-    );
+    for feature in [
+        "thread_id_header",
+        "session_id_header",
+        "codex_turn_state_header",
+    ] {
+        let error = update_experimental_features(
+            State(state.clone()),
+            browser_identity_for(&user),
+            Json(serde_json::from_value(json!({feature:true})).unwrap()),
+        )
+        .await
+        .err()
+        .expect("non-administrator must be rejected");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+    let features = experimental_features(State(state)).await.unwrap().0;
+    assert!(!features.thread_id_header);
+    assert!(!features.session_id_header);
+    assert!(!features.codex_turn_state_header);
 }
 
 #[tokio::test]
