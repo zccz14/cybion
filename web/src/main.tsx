@@ -55,6 +55,8 @@ import remarkGfm from "remark-gfm"
 import { generatedImageSource, pendingResponseRecords, threadControlAction, latestThreadAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
+import { handleChatInputKeyDown } from "@/lib/chat-input"
+import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -355,6 +357,8 @@ const copy = {
     emptyDescription: "Start a focused thread. Every thread has its own history and request state.",
     chat: "Thread",
     send: "Send",
+    sendShortcut: "Enter to send · Shift + Enter for a new line",
+    startThreadShortcut: "Enter to start · Shift + Enter for a new line",
     stopThread: "Stop",
     stopThreadHint: "Stop reasoning and keep saved records",
     continueThread: "Continue reasoning",
@@ -463,7 +467,9 @@ const copy = {
     auditStarted: "Started",
     auditFinished: "Finished",
     auditUsage: "Usage",
-    auditLink: "OpenAI LB request",
+    auditLink: "OpenAI Request ID",
+    auditOpenLink: "Open audit in OpenAI-LB (new tab)",
+    auditCacheRateDescription: "Cached input tokens ÷ input tokens. — when usage is unavailable or input is zero.",
     auditEmpty: "No reasoning requests yet.",
     workerAudit: "Worker call audit",
     workerAuditDescription: "Every Worker call, including queued and in-flight calls.",
@@ -617,6 +623,8 @@ const copy = {
     emptyDescription: "创建一个聚焦的线程。每个线程都拥有独立的历史和请求状态。",
     chat: "线程",
     send: "发送",
+    sendShortcut: "Enter 发送 · Shift + Enter 换行",
+    startThreadShortcut: "Enter 开始线程 · Shift + Enter 换行",
     stopThread: "停止",
     stopThreadHint: "停止推理，保留已保存的记录",
     continueThread: "继续推理",
@@ -725,7 +733,9 @@ const copy = {
     auditStarted: "发起时间",
     auditFinished: "结束时间",
     auditUsage: "用量",
-    auditLink: "OpenAI LB 请求",
+    auditLink: "OpenAI Request ID",
+    auditOpenLink: "在 OpenAI-LB 中查看审计（新标签页）",
+    auditCacheRateDescription: "缓存输入 Token ÷ 输入 Token。用量尚未上报或输入为零时显示 —。",
     auditEmpty: "尚无推理请求。",
     workerAudit: "Worker 调用审计",
     workerAuditDescription: "展示所有 Worker 调用，包括排队和在途调用。",
@@ -1252,7 +1262,7 @@ function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: Au
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submit() } }} disabled={!value || start.isPending} /></Field><div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter</span><Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} aria-describedby="new-thread-input-shortcut" disabled={!value || start.isPending} /></Field><div className="flex items-center justify-between gap-3"><span id="new-thread-input-shortcut" className="text-xs text-muted-foreground">{t("startThreadShortcut")}</span><Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -1406,7 +1416,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
         </MessageScroller>
       </MessageScrollerProvider>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(value) }}>
-        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(value) } }} disabled={busy} /></Field>
+        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} aria-describedby="thread-input-shortcut" disabled={busy} /></Field>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">
               {running
@@ -1414,7 +1424,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
                 : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
               <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
             </div>
-            <div className="flex items-center gap-3"><span className="hidden text-xs text-muted-foreground sm:inline">⌘ / Ctrl + Enter</span><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
+            <div className="flex items-center gap-3"><span id="thread-input-shortcut" className="hidden text-xs text-muted-foreground sm:inline">{t("sendShortcut")}</span><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
           </div>
         </FieldGroup>
       </form>
@@ -1914,7 +1924,7 @@ function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
       {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
       {!query.data && !query.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("audit")}</div>}
       {query.data && query.data.items.length === 0 && <p className="py-8 text-sm text-muted-foreground">{t("auditEmpty")}</p>}
-      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[50rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <code className="break-all text-xs">{item.openai_lb_request_id}</code> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
+      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[56rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium" title={t("auditCacheRateDescription")}>{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{auditCacheRate(item.input_tokens, item.cached_tokens, language)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <a href={openaiAuditUrl(item.openai_lb_request_id)} target="_blank" rel="noopener noreferrer" title={t("auditOpenLink")} className="inline-flex max-w-full items-start gap-1 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><code className="break-all text-xs">{item.openai_lb_request_id}</code><ExternalLinkIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="sr-only">{t("auditOpenLink")}</span></a> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
       {query.data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-sm text-muted-foreground">{range}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</Button><Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>{t("next")}</Button></div></div>}
     </CardContent></Card>
   </Page>
