@@ -61,6 +61,8 @@ const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 const USER_SCHEMA_VERSION: i64 = 9;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
+const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
+const THREAD_ID_HEADER: &str = "thread-id";
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -383,6 +385,10 @@ fn app(state: AppState) -> Router {
         .route("/api/admin/users", get(admin_users::list))
         .route("/api/system/resources", get(system_resources))
         .route("/api/status", get(status))
+        .route(
+            "/api/experimental-features",
+            get(experimental_features).put(update_experimental_features),
+        )
         .route("/api/integrations", get(integrations))
         .route("/api/integrations/refresh", post(refresh_integrations))
         .route("/api/api-keys", get(list_api_keys).post(create_api_key))
@@ -673,6 +679,68 @@ async fn is_admin(state: &AppState, user_id: &str, bootstrap: bool) -> Result<bo
     tokio::task::spawn_blocking(move || admin_user_sync(&path, &user_id, bootstrap))
         .await
         .map_err(ApiError::internal)?
+}
+
+fn admin_meta_bool_sync(path: &Path, key: &str) -> Result<bool, ApiError> {
+    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(ApiError::internal)?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );",
+        )
+        .map_err(ApiError::internal)?;
+    let value: Option<String> = connection
+        .query_row("SELECT value FROM app_meta WHERE key=?", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(ApiError::internal)?;
+    Ok(value
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE")))
+}
+
+fn set_admin_meta_bool_sync(path: &Path, key: &str, enabled: bool) -> Result<(), ApiError> {
+    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(ApiError::internal)?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );",
+        )
+        .map_err(ApiError::internal)?;
+    connection
+        .execute(
+            "INSERT INTO app_meta(key,value) VALUES(?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, if enabled { "1" } else { "0" }],
+        )
+        .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+async fn experimental_thread_id_header_enabled(state: &AppState) -> Result<bool, ApiError> {
+    let path = state.admin_db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY)
+    })
+    .await
+    .map_err(ApiError::internal)?
 }
 
 const THREAD_SCHEMA: &str = r#"
@@ -1118,6 +1186,17 @@ struct IntegrationStatusView {
     linkit_configured: bool,
     linkit_bot_id: Option<String>,
     linkit_username: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct ExperimentalFeaturesView {
+    thread_id_header: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateExperimentalFeaturesInput {
+    thread_id_header: bool,
 }
 
 #[derive(Deserialize)]
@@ -1635,6 +1714,34 @@ async fn status(
         "version": env!("CARGO_PKG_VERSION"),
         "user_id": identity.user.id,
     })))
+}
+
+async fn experimental_features(
+    State(state): State<AppState>,
+) -> Result<Json<ExperimentalFeaturesView>, ApiError> {
+    Ok(Json(ExperimentalFeaturesView {
+        thread_id_header: experimental_thread_id_header_enabled(&state).await?,
+    }))
+}
+
+async fn update_experimental_features(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<UpdateExperimentalFeaturesInput>,
+) -> Result<Json<ExperimentalFeaturesView>, ApiError> {
+    if !is_admin(&state, &identity.user.id, false).await? {
+        return Err(ApiError::forbidden("administrator access is required"));
+    }
+    let path = state.admin_db_path.clone();
+    let enabled = input.thread_id_header;
+    tokio::task::spawn_blocking(move || {
+        set_admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY, enabled)
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok(Json(ExperimentalFeaturesView {
+        thread_id_header: enabled,
+    }))
 }
 
 fn integration_status_view(settings: &IntegrationSettings) -> IntegrationStatusView {
@@ -4466,7 +4573,7 @@ async fn send_responses_request(
         max_output_tokens,
         developer_prefix,
     );
-    let request = state
+    let mut request = state
         .client
         .post(format!(
             "{}/responses",
@@ -4475,6 +4582,11 @@ async fn send_responses_request(
         .bearer_auth(&integrations.openai_consumer_secret)
         .header("Accept", "text/event-stream")
         .json(&payload);
+    if let Some((spec, _)) = audit.as_ref()
+        && experimental_thread_id_header_enabled(state).await?
+    {
+        request = request.header(THREAD_ID_HEADER, &spec.thread_id);
+    }
     let mut cancellation = audit.as_ref().and_then(|(_, receiver)| receiver.clone());
     let counters = audit
         .as_ref()
@@ -5829,6 +5941,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("default.sqlite3");
         prepare_admin_db(&path).unwrap();
+        assert!(!admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY).unwrap());
+        set_admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY, true).unwrap();
+        assert!(admin_meta_bool_sync(&path, EXPERIMENTAL_THREAD_ID_HEADER_KEY).unwrap());
         assert!(!admin_user_sync(&path, "second-user", false).unwrap());
         assert!(admin_user_sync(&path, "root-user", true).unwrap());
         assert!(!admin_user_sync(&path, "second-user", true).unwrap());
@@ -5846,7 +5961,7 @@ mod tests {
         );
     }
 
-    pub(super) async fn read_json_request(stream: &mut tokio::net::TcpStream) -> Value {
+    pub(super) async fn read_http_request(stream: &mut tokio::net::TcpStream) -> (String, Value) {
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 4096];
         loop {
@@ -5868,10 +5983,17 @@ mod tests {
                 .unwrap();
             let body_start = headers_end + 4;
             if bytes.len() >= body_start + content_length {
-                return serde_json::from_slice(&bytes[body_start..body_start + content_length])
-                    .unwrap();
+                return (
+                    headers.to_owned(),
+                    serde_json::from_slice(&bytes[body_start..body_start + content_length])
+                        .unwrap(),
+                );
             }
         }
+    }
+
+    pub(super) async fn read_json_request(stream: &mut tokio::net::TcpStream) -> Value {
+        read_http_request(stream).await.1
     }
 
     pub(super) async fn create_test_thread(state: &AppState, user: &User) -> ThreadView {
@@ -6661,6 +6783,86 @@ mod tests {
                 Some(1)
             )
         );
+    }
+
+    #[tokio::test]
+    async fn experimental_thread_id_header_uses_the_current_thread_uuid() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "thread-header-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let input_idx = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                Ok(insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"hello"}),
+                ))
+            }
+        })
+        .await
+        .unwrap();
+        set_admin_meta_bool_sync(
+            &state.admin_db_path,
+            EXPERIMENTAL_THREAD_ID_HEADER_KEY,
+            true,
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (headers, _) = read_http_request(&mut socket).await;
+            sent.send(headers).unwrap();
+            let body = json!({
+                "id":"response-1",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]
+            })
+            .to_string();
+            socket
+                .write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                ).as_bytes())
+                .await
+                .unwrap();
+        });
+        let integrations = IntegrationSettings {
+            openai_consumer_id: "consumer".to_owned(),
+            openai_consumer_secret: "secret".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            linkit_bot_id: String::new(),
+            linkit_bot_token: String::new(),
+            linkit_username: String::new(),
+        };
+        responses_request_with_options(
+            &state,
+            &user,
+            &thread.id,
+            Some(input_idx),
+            "inference",
+            input_idx,
+            input_idx,
+            &integrations,
+            &thread.model,
+            Some(&thread.reasoning_effort),
+            thread.service_tier_fast,
+            json!([{"role":"user","content":"hello"}]),
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let headers = received.await.unwrap();
+        server.await.unwrap();
+        assert!(headers.lines().any(|line| {
+            line.eq_ignore_ascii_case(&format!("{THREAD_ID_HEADER}: {}", thread.id))
+        }));
     }
 
     #[tokio::test]
