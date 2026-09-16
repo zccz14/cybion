@@ -136,12 +136,10 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
             .count(),
         2
     );
-    let mut headers = HeaderMap::new();
-    headers.insert("authorization", "Bearer fixture-token".parse().unwrap());
     let _ = worker_result(
         State(state.clone()),
         AxumPath((user.id.clone(), worker_id.to_owned(), worker_call)),
-        headers,
+        axum::Extension(user.clone()),
         Json(WorkerResultInput {
             result: json!({"stdout":"fixture"}),
             failed: false,
@@ -437,12 +435,10 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
     let second = input_record(&state, &user, &thread).await;
     cancel_worker_call(&state, &user, &call_id).await;
     for _ in 0..2 {
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer fixture-token".parse().unwrap());
         let _ = worker_result(
             State(state.clone()),
             AxumPath((user.id.clone(), worker_id.to_owned(), call_id.clone())),
-            headers,
+            axum::Extension(user.clone()),
             Json(WorkerResultInput {
                 result: json!({"stdout":"late result"}),
                 failed: false,
