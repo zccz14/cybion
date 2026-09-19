@@ -95,7 +95,7 @@ fn record_request(
         }
     };
     transaction.execute(
-        "UPDATE threads SET status='running',updated_at=? WHERE id=?",
+        "UPDATE threads SET status='running',retry_count=0,next_retry_at=NULL,updated_at=? WHERE id=?",
         params![now(), thread_id],
     )?;
     transaction.commit()?;
@@ -225,25 +225,37 @@ pub(super) async fn compact_request(
     record_idx: i64,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(), ApiError> {
-    let context = user_db(state, user, false, {
-        let thread_id = thread.id.clone();
-        move |connection| {
-            let tail = request_context_tail(connection, &thread_id, record_idx)?;
-            compile_thread_context(connection, &thread_id, tail)
+    loop {
+        recovery::wait_retry(state, user, &thread.id, record_idx, cancellation).await?;
+        let result = async {
+            let context = user_db(state, user, false, {
+                let thread_id = thread.id.clone();
+                move |connection| {
+                    let tail = request_context_tail(connection, &thread_id, record_idx)?;
+                    compile_thread_context(connection, &thread_id, tail)
+                }
+            })
+            .await?;
+            compact_thread_context(
+                state,
+                user,
+                thread,
+                &context,
+                integrations,
+                record_idx,
+                cancellation,
+            )
+            .await?;
+            Ok(())
         }
-    })
-    .await?;
-    compact_thread_context(
-        state,
-        user,
-        thread,
-        &context,
-        integrations,
-        record_idx,
-        cancellation,
-    )
-    .await?;
-    Ok(())
+        .await;
+        if let Err(error) = &result
+            && recovery::retry(state, user, &thread.id, record_idx, error).await?
+        {
+            continue;
+        }
+        return result;
+    }
 }
 
 #[cfg(test)]

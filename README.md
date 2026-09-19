@@ -22,6 +22,9 @@ the first authenticated browser session initializes that key atomically.
 - Auth is fixed to `https://auth.ntnl.io`. The browser obtains one token for
   `cybion.ntnl.io`, `linkit.ntnl.io`, and `openai.ntnl.io`; each service checks
   its own audience.
+- Controller restarts automatically resume `running` Threads from committed
+  history and original Worker calls. Transient model failures retry within a
+  persisted five-attempt budget; stopped/completed Threads stay stopped.
 - Threads are independent. A user can create, rename, inspect, and delete
   them from the web UI.
 - Configuration lets each user save the default model, reasoning effort, and
@@ -84,7 +87,11 @@ Worker opens browser authorization and prints a short-lived pairing code for
 headless devices. Match the device/code and explicitly authorize in Cybion;
 configuration is written on the device automatically. The guide verifies task
 delivery, fixed command execution and result upload before reporting readiness.
-Existing configuration is reused. Background mode does not install automatic
+Existing configuration is reused. Worker 0.2.0 keeps call deduplication and
+result retries in memory across network reconnects; Worker restarts may lose
+state. The device page shows the reported version and lets the owner request
+a newer recommended official release after current work drains. A 0.1.x Worker
+needs a one-time manual installation of 0.2.0. Background mode does not install automatic
 startup. `status`, `doctor` and the guide provide diagnostics and recovery.
 
 See [Worker onboarding](docs/worker-onboarding.md) for the protocol, security,

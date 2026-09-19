@@ -43,6 +43,22 @@ install -d -m 0755 "$data_dir/bin" "$data_dir/releases" "$backup_dir" "$release_
 if [ -f "$installed_binary" ]; then
   install -m 0755 "$installed_binary" "$previous_binary"
 fi
+# Keep consistent, private SQLite snapshots before an additive schema upgrade.
+# Binary rollback deliberately does not restore these snapshots or discard newer history.
+python3 - "$data_dir" "$backup_dir/databases" <<'PYBACKUP'
+import os
+from pathlib import Path
+import sqlite3
+import sys
+root, backup = map(Path, sys.argv[1:])
+backup.mkdir(parents=True, exist_ok=True, mode=0o700)
+for source in sorted([*root.glob("*.sqlite3"), *root.joinpath("users").glob("*.sqlite3")]):
+    target = backup / source.relative_to(root)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30) as src, sqlite3.connect(target) as dst:
+        src.backup(dst)
+    os.chmod(target, 0o600)
+PYBACKUP
 install -m 0755 "$new_binary" "$release_dir/cybion"
 install -m 0755 "$release_dir/cybion" "$installed_binary"
 

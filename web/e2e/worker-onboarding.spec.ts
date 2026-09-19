@@ -67,3 +67,27 @@ test("timed-out task channel exposes recovery instead of a success CTA", async (
   await expect(page.getByText(/检查超时。可能是/)).toBeVisible()
   await expect(page.getByRole("link",{name:"开始使用这台设备"})).toHaveCount(0)
 })
+
+test("shows the reported version and confirms an owner-requested remote upgrade", async ({ page }) => {
+  let posts=0
+  let status="queued"
+  const device={id:"upgradable",label:"Upgrade Mac",created_at:1,last_seen_at:Math.floor(Date.now()/1000),status:"online",version:"0.2.0",can_upgrade:true}
+  await page.route("**/api/**",async route=>{
+    const path=new URL(route.request().url()).pathname
+    let body:unknown={}
+    if(path==="/api/worker-release") body={...release,version:"v0.2.1"}
+    if(path==="/api/workers") body=[{...device,upgrade:posts ? {version:"v0.2.1",status,error:status==="failed"?"checksum mismatch":null}:null}]
+    if(path==="/api/workers/upgradable/upgrade") {posts++;body={ok:true}}
+    await route.fulfill({json:body})
+  })
+  await page.goto("/e2e/fixture.html#/workers")
+  await expect(page.getByText("运行版本: 0.2.0",{exact:true})).toBeVisible()
+  page.on("dialog",dialog=>dialog.accept())
+  await page.getByRole("button",{name:/升级 Worker/}).click()
+  await expect(page.getByText("正在等待任务结束或安装升级…",{exact:true})).toBeVisible()
+  expect(posts).toBe(1)
+  await expect(page.getByRole("button",{name:/升级 Worker/})).toBeDisabled()
+  status="failed"
+  await page.reload()
+  await expect(page.getByText(/checksum mismatch/)).toBeVisible()
+})
