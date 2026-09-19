@@ -228,8 +228,6 @@ async fn false_end_turn_continues_and_preserves_commentary_phase_in_replay() {
         openai_consumer_id: "fixture".to_owned(),
         openai_consumer_secret: "fixture".to_owned(),
         openai_base_url: format!("http://{address}"),
-        user_agent: String::new(),
-        originator: String::new(),
         linkit_bot_id: String::new(),
         linkit_bot_token: String::new(),
         linkit_username: String::new(),

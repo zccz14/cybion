@@ -56,8 +56,6 @@ async fn upstream(
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
-            user_agent: String::new(),
-            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),

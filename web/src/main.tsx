@@ -590,7 +590,7 @@ const copy = {
     notConfigured: "Not configured",
     baseUrl: "Base URL",
     requestHeaders: "Request headers",
-    requestHeadersDescription: "Customize the User-Agent and originator headers sent with your upstream Responses requests.",
+    requestHeadersDescription: "Administrator-only global headers sent with every upstream Responses request.",
     userAgent: "User-Agent",
     userAgentDescription: "Leave blank to use Cybion's default User-Agent.",
     originator: "Originator",
@@ -866,7 +866,7 @@ const copy = {
     notConfigured: "未配置",
     baseUrl: "基础地址",
     requestHeaders: "请求头",
-    requestHeadersDescription: "自定义上游 Responses 请求使用的 User-Agent 和 originator 请求头。",
+    requestHeadersDescription: "管理员专用的全局请求头，会发送到所有上游 Responses 请求。",
     userAgent: "User-Agent",
     userAgentDescription: "留空则使用 Cybion 默认 User-Agent。",
     originator: "Originator",
@@ -2176,7 +2176,7 @@ function ConfigurationPage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolea
       {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
       <div className="sm:col-span-2"><Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>{refresh.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{refresh.isPending ? t("refreshing") : t("refreshIntegrations")}</Button>{refresh.error && <p className="mt-2 text-sm text-destructive">{errorMessage(refresh.error)}</p>}</div>
     </CardContent></Card>
-    <Card><CardHeader><CardTitle>{t("requestHeaders")}</CardTitle><CardDescription>{t("requestHeadersDescription")}</CardDescription></CardHeader><CardContent>
+    {isAdmin && <Card><CardHeader><CardTitle>{t("requestHeaders")}</CardTitle><CardDescription>{t("requestHeadersDescription")}</CardDescription></CardHeader><CardContent>
       <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (headersChanged && !saveHeaders.isPending) saveHeaders.mutate(headers) }}>
         <FieldGroup>
           <Field data-disabled={saveHeaders.isPending}><FieldLabel htmlFor="integration-user-agent">{t("userAgent")}</FieldLabel><Input id="integration-user-agent" value={headers.user_agent} disabled={saveHeaders.isPending} onChange={(event) => setHeaders({ ...headers, user_agent: event.target.value })} /><FieldDescription>{t("userAgentDescription")}</FieldDescription></Field>
@@ -2185,7 +2185,7 @@ function ConfigurationPage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolea
         {saveHeaders.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveRequestHeadersError")}</AlertTitle><AlertDescription>{errorMessage(saveHeaders.error)}</AlertDescription></Alert>}
         <div className="flex flex-wrap items-center gap-3"><Button disabled={!headersChanged || saveHeaders.isPending}>{saveHeaders.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{saveHeaders.isPending ? t("savingRequestHeaders") : t("saveRequestHeaders")}</Button><p role="status" className="text-sm text-muted-foreground">{saveHeaders.isSuccess && t("requestHeadersSaved")}</p></div>
       </form>
-    </CardContent></Card>
+    </CardContent></Card>}
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
     <Card><CardHeader><CardTitle>{t("workers")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/workers">{t("workers")}</Link></Button></CardContent></Card>
   </Page>
