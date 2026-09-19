@@ -60,7 +60,8 @@ which is visible and removable. There is no claim of cross-database atomicity.
   can be ready for shell work without desktop capability. No automatic desktop
   input or screen capture occurs during diagnosis.
 - Checking old Workers returns an explicit v0.1.4 upgrade requirement. Existing
-  execution remains unchanged. Deleted Workers' open event streams terminate.
+  execution remains unchanged. Stop pre-v0.1.4 processes before starting the new
+  binary: old releases do not participate in the per-config process lock. Deleted Workers' open event streams terminate.
 
 ## Scope and complexity review
 

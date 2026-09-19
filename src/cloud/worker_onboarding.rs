@@ -387,7 +387,7 @@ pub(super) async fn check_start(
             // and stored/active Worker versions have been audited; keep a version test.
             if !version.as_deref().is_some_and(supports_checks) {
                 return Err(ApiError::conflict(
-                    "Connect Worker v0.1.4 or newer before running diagnostics",
+                    "Stop the old Worker process, then start v0.1.4 or newer before running diagnostics",
                 ));
             }
             tx.execute("DELETE FROM worker_checks WHERE worker_id=?", [&id])?;
