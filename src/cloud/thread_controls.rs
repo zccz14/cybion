@@ -198,7 +198,7 @@ pub(super) async fn continue_thread(
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
     read_thread_for(&state, &identity.user, id.clone()).await?;
-    ensure_integrations(&state, &identity.user, &identity.bearer).await?;
+    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
     Ok(Json(
         enqueue(state, identity.user, id, RequestInput::Continue).await?,
     ))
@@ -211,7 +211,7 @@ pub(super) async fn compact(
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
     read_thread_for(&state, &identity.user, id.clone()).await?;
-    ensure_integrations(&state, &identity.user, &identity.bearer).await?;
+    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
     Ok(Json(
         enqueue(state, identity.user, id, RequestInput::Compact).await?,
     ))

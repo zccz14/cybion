@@ -55,6 +55,23 @@ async fn verify(
     Ok(Some(verification))
 }
 
+pub(super) async fn save(
+    state: &AppState,
+    user: &User,
+    settings: &IntegrationSettings,
+) -> Result<(), ApiError> {
+    let saved = settings.clone();
+    user_db(state, user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,openai_base_url,updated_at)
+             VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,
+             openai_consumer_secret=excluded.openai_consumer_secret,openai_base_url=excluded.openai_base_url,updated_at=excluded.updated_at",
+            params![saved.openai_consumer_id,saved.openai_consumer_secret,saved.openai_base_url,now()],
+        )?;
+        Ok(())
+    }).await
+}
+
 async fn save_grant(
     state: &AppState,
     user: &User,
@@ -71,7 +88,7 @@ async fn save_grant(
     settings.openai_base_url = OPENAI_BASE_URL.to_owned();
     // RECOVERY: LB shows a new secret only once. Persist it before another
     // network call (including Linkit) can fail; a later refresh can verify it.
-    save_integration_settings(state, user, settings).await
+    save(state, user, settings).await
 }
 
 async fn repair_existing(
@@ -141,7 +158,7 @@ pub(super) async fn reconcile(
         }
     }
     settings.openai_base_url = OPENAI_BASE_URL.to_owned();
-    save_integration_settings(state, user, settings).await
+    save(state, user, settings).await
 }
 
 pub(super) async fn verify_ready(

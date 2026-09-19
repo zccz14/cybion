@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 mod admin_users;
 mod history;
+mod linkit_notifications;
 mod openai_integration;
 mod recovery;
 mod thread_controls;
@@ -67,7 +68,7 @@ const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 13;
+const USER_SCHEMA_VERSION: i64 = 14;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -541,6 +542,18 @@ fn app(state: AppState) -> Router {
             get(integrations).put(update_integrations),
         )
         .route("/api/integrations/refresh", post(refresh_integrations))
+        .route(
+            "/api/integrations/linkit",
+            get(linkit_notifications::read).delete(linkit_notifications::disable),
+        )
+        .route(
+            "/api/integrations/linkit/refresh",
+            post(linkit_notifications::configure),
+        )
+        .route(
+            "/api/integrations/linkit/test",
+            post(linkit_notifications::test),
+        )
         .route(
             "/api/worker-pairings/{code}",
             get(worker_onboarding::read)
@@ -1089,7 +1102,8 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                  DROP TABLE IF EXISTS history_records;
                  DROP TABLE IF EXISTS threads;
                  DROP TABLE IF EXISTS thread_defaults;
-                 DROP TABLE IF EXISTS integration_settings;",
+                 DROP TABLE IF EXISTS integration_settings;
+                 DROP TABLE IF EXISTS notification_settings;",
             )
             .map_err(ApiError::internal)?;
     }
@@ -1128,6 +1142,17 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
+    transaction.execute_batch(linkit_notifications::SCHEMA)?;
+    if version < 14 {
+        // COMPATIBILITY: the Cybion schema upgrader preserves notification setup for pre-14 databases
+        // with stored Bot credentials. Remove when the supported schema floor
+        // reaches 14 and all user databases have been audited; retain the test.
+        transaction.execute_batch(
+            "INSERT INTO notification_settings(id,enabled)
+             VALUES(1,COALESCE((SELECT linkit_bot_id<>'' AND linkit_bot_token<>'' AND linkit_username<>'' FROM integration_settings WHERE id=1),0))
+             ON CONFLICT(id) DO NOTHING;",
+        )?;
+    }
     for (name, definition) in [
         ("user_agent", "TEXT NOT NULL DEFAULT ''"),
         ("originator", "TEXT NOT NULL DEFAULT ''"),
@@ -1423,9 +1448,6 @@ struct IntegrationStatusView {
     openai_base_url: String,
     user_agent: String,
     originator: String,
-    linkit_configured: bool,
-    linkit_bot_id: Option<String>,
-    linkit_username: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1663,24 +1685,6 @@ struct IntegrationSettings {
 struct OpenAiConsumerGrant {
     id: String,
     secret: String,
-}
-
-#[derive(Deserialize)]
-struct LinkitMyInfo {
-    id: String,
-    #[serde(default)]
-    profile: Option<LinkitProfile>,
-}
-
-#[derive(Deserialize)]
-struct LinkitProfile {
-    username: String,
-}
-
-#[derive(Deserialize)]
-struct LinkitBotGrant {
-    id: String,
-    token: String,
 }
 
 fn now() -> i64 {
@@ -2058,11 +2062,6 @@ fn integration_status_view(
         openai_base_url: settings.openai_base_url.clone(),
         user_agent: headers.user_agent.clone(),
         originator: headers.originator.clone(),
-        linkit_configured: !settings.linkit_bot_token.is_empty()
-            && !settings.linkit_username.is_empty(),
-        linkit_bot_id: (!settings.linkit_bot_id.is_empty()).then(|| settings.linkit_bot_id.clone()),
-        linkit_username: (!settings.linkit_username.is_empty())
-            .then(|| settings.linkit_username.clone()),
     }
 }
 
@@ -2128,13 +2127,12 @@ async fn refresh_integrations(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<IntegrationStatusView>, ApiError> {
-    let _guard = lock_integrations(&state, &identity.user).await;
+    let _guard = lock_integrations(&state, format!("openai:{}", identity.user.id)).await;
     let mut settings = user_db(&state, &identity.user, true, |connection| {
         integration_settings(connection)
     })
     .await?;
     openai_integration::reconcile(&state, &identity.user, &identity.bearer, &mut settings).await?;
-    ensure_linkit_integration(&state, &identity.user, &identity.bearer, &mut settings).await?;
     openai_integration::verify_ready(&state, &identity.bearer, &settings).await?;
     let headers = global_request_headers(&state).await?;
     Ok(Json(integration_status_view(&settings, &headers)))
@@ -2586,7 +2584,7 @@ async fn start_thread(
     let message = input_text(input.input)?;
     let model = model_id(input.model)?;
     let reasoning_effort = reasoning_effort(input.reasoning_effort)?;
-    ensure_integrations(&state, &identity.user, &identity.bearer).await?;
+    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
     let thread = create_thread_for(
         &state,
         &identity.user,
@@ -2773,7 +2771,7 @@ async fn thread_input(
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
     let input = input_text(input.input)?;
-    ensure_integrations(&state, &identity.user, &identity.bearer).await?;
+    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
@@ -2811,7 +2809,7 @@ async fn create_api_key(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Json(input): Json<CreateApiKeyInput>,
 ) -> Result<Json<CreatedApiKey>, ApiError> {
-    ensure_integrations(&state, &identity.user, &identity.bearer).await?;
+    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
     let label = label(&input.label, "label", 80)?;
     let raw_secret = Uuid::new_v4().simple().to_string();
     let key = ApiKeyView {
@@ -3248,15 +3246,13 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
     Ok(settings)
 }
 
-fn integrations_ready(settings: &IntegrationSettings) -> bool {
+fn openai_integration_ready(settings: &IntegrationSettings) -> bool {
     !settings.openai_consumer_id.is_empty()
         && !settings.openai_consumer_secret.is_empty()
         && !settings.openai_base_url.is_empty()
-        && !settings.linkit_bot_id.is_empty()
-        && !settings.linkit_bot_token.is_empty()
-        && !settings.linkit_username.is_empty()
 }
 
+#[cfg(test)]
 async fn save_integration_settings(
     state: &AppState,
     user: &User,
@@ -3281,74 +3277,23 @@ async fn save_integration_settings(
     .await
 }
 
-async fn linkit_username(state: &AppState, bearer: &str) -> Result<String, ApiError> {
-    let profile = state
-        .client
-        .get(format!("{}/api/me", state.linkit_api_url))
-        .bearer_auth(bearer)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<LinkitMyInfo>()
-        .await?;
-    let _linkit_user_id = profile.id;
-    profile
-        .profile
-        .map(|profile| profile.username.trim().to_owned())
-        .filter(|username| !username.is_empty())
-        .ok_or_else(|| ApiError::conflict("set a Linkit username before using Cybion"))
-}
-
-async fn create_linkit_bot(state: &AppState, bearer: &str) -> Result<LinkitBotGrant, ApiError> {
-    state
-        .client
-        .post(format!("{}/api/bots", state.linkit_api_url))
-        .bearer_auth(bearer)
-        .json(&json!({"name": INTEGRATION_NAME}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<LinkitBotGrant>()
-        .await
-        .map_err(Into::into)
-}
-
-async fn lock_integrations(state: &AppState, user: &User) -> tokio::sync::OwnedMutexGuard<()> {
+async fn lock_integrations(state: &AppState, key: String) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = {
         let mut locks = state.integration_locks.lock().await;
         locks
-            .entry(user.id.clone())
+            .entry(key)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
     lock.lock_owned().await
 }
 
-async fn ensure_linkit_integration(
-    state: &AppState,
-    user: &User,
-    bearer: &str,
-    settings: &mut IntegrationSettings,
-) -> Result<(), ApiError> {
-    if settings.linkit_bot_id.is_empty()
-        || settings.linkit_bot_token.is_empty()
-        || settings.linkit_username.is_empty()
-    {
-        settings.linkit_username = linkit_username(state, bearer).await?;
-        let grant = create_linkit_bot(state, bearer).await?;
-        settings.linkit_bot_id = grant.id;
-        settings.linkit_bot_token = grant.token;
-        save_integration_settings(state, user, settings).await?;
-    }
-    Ok(())
-}
-
-async fn ensure_integrations(
+async fn ensure_openai_integration(
     state: &AppState,
     user: &User,
     bearer: &str,
 ) -> Result<IntegrationSettings, ApiError> {
-    let _guard = lock_integrations(state, user).await;
+    let _guard = lock_integrations(state, format!("openai:{}", user.id)).await;
     let mut settings = user_db(state, user, true, |connection| {
         integration_settings(connection)
     })
@@ -3357,15 +3302,14 @@ async fn ensure_integrations(
         openai_integration::reconcile(state, user, bearer, &mut settings).await?;
         openai_integration::verify_ready(state, bearer, &settings).await?;
     }
-    ensure_linkit_integration(state, user, bearer, &mut settings).await?;
     if settings.openai_base_url.is_empty() {
         settings.openai_base_url = OPENAI_BASE_URL.to_owned();
     }
-    save_integration_settings(state, user, &settings).await?;
+    openai_integration::save(state, user, &settings).await?;
     Ok(settings)
 }
 
-async fn required_integrations(
+async fn required_openai_integration(
     state: &AppState,
     user: &User,
 ) -> Result<IntegrationSettings, ApiError> {
@@ -3373,9 +3317,9 @@ async fn required_integrations(
         integration_settings(connection)
     })
     .await?;
-    integrations_ready(&settings)
+    openai_integration_ready(&settings)
         .then_some(settings)
-        .ok_or_else(|| ApiError::conflict("open this user once before using its external API"))
+        .ok_or_else(|| ApiError::conflict("configure OpenAI-LB before using this external API"))
 }
 
 fn request_key(user: &User, thread_id: &str) -> String {
@@ -3460,7 +3404,7 @@ async fn process_request(
         }
         Ok((thread, _)) => Err((
             thread,
-            Box::new(ApiError::conflict("user integrations are not ready")),
+            Box::new(ApiError::conflict("OpenAI-LB integration is not ready")),
         )),
         Err(error) => Err((
             ThreadView {
@@ -3492,11 +3436,11 @@ async fn process_request(
     }
 
     match result {
-        Ok((thread, integrations, output)) => {
+        Ok((thread, _, output)) => {
             match finalize_request_success(&state, &user, &thread_id, record_idx).await {
                 Ok(true) if operation == RequestOperation::Inference => {
                     let thread = maybe_name_thread(&state, &user, &thread, record_idx).await;
-                    notify_thread(&state, &integrations, &thread, true, &output).await;
+                    linkit_notifications::notify(&state, &user, &thread, true, &output).await;
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -3509,8 +3453,9 @@ async fn process_request(
                 let current =
                     finalize_request_failure(&state, &user, &thread, record_idx, &error.message)
                         .await;
-                if current && let Ok(integrations) = required_integrations(&state, &user).await {
-                    notify_thread(&state, &integrations, &thread, false, &error.message).await;
+                if current {
+                    linkit_notifications::notify(&state, &user, &thread, false, &error.message)
+                        .await;
                 }
             }
         }
@@ -4019,46 +3964,6 @@ fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSummary]) -> V
 #[allow(dead_code)]
 fn worker_developer_prefix(workers: &[WorkerSummary]) -> Value {
     developer_prefix(&[], workers)
-}
-
-async fn notify_thread(
-    state: &AppState,
-    integrations: &IntegrationSettings,
-    thread: &ThreadView,
-    completed: bool,
-    detail: &str,
-) {
-    if integrations.linkit_bot_token.is_empty() || integrations.linkit_username.is_empty() {
-        return;
-    }
-    let title = if completed {
-        format!("Cybion completed · {}", thread.title)
-    } else {
-        format!("Cybion failed · {}", thread.title)
-    };
-    let body = truncate(
-        &format!(
-            "{title}\n\n{detail}\n\nhttps://cybion.ntnl.io/#/threads/{}",
-            thread.id
-        ),
-        3_000,
-    );
-    let response = state
-        .client
-        .post(format!("{}/bot/v1/messages", state.linkit_api_url))
-        .bearer_auth(&integrations.linkit_bot_token)
-        .json(&json!({"recipient_username": integrations.linkit_username, "body": body}))
-        .send()
-        .await;
-    match response {
-        Ok(response) if response.status().is_success() => {}
-        Ok(response) => tracing::warn!(
-            thread_id = %thread.id,
-            status = %response.status(),
-            "Linkit notification failed"
-        ),
-        Err(error) => tracing::warn!(thread_id = %thread.id, %error, "Linkit notification failed"),
-    }
 }
 
 fn truncate(value: &str, limit: usize) -> String {
@@ -6131,7 +6036,7 @@ async fn external_thread_input(
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
     let input = input_text(input.input)?;
-    required_integrations(&state, &identity.user).await?;
+    required_openai_integration(&state, &identity.user).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
