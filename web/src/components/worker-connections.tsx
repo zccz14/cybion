@@ -28,6 +28,7 @@ const copy = {
     approve: "2. 确认授权", code: "设备配对码", lookup: "查看设备", codeHint: "输入目标设备终端显示的 12 位配对码，或使用 Worker 自动打开的网页。不要批准其他人发送的配对码。",
     confirm: "确认连接这台设备", cancel: "拒绝配对", name: "设备名称", verify: "核对设备信息和配对码一致后再授权。以下设备信息由 Worker 自报，并非身份认证证明。",
     expires: "有效期至", expired: "配对已过期。请在目标设备重新运行 Worker，获取新配对码。", cancelled: "已拒绝这次配对。需要连接时，请重新运行 Worker。",
+    deviceMissing: "设备列表中尚未找到这台设备。请刷新列表；如果已移除设备，请在目标设备重新配对。",
     approved: "已授权，等待设备连接", waitingHint: "尚未收到这台设备的连接。请保持目标设备上的 Worker 运行；不要重复创建配对。",
     check: "3. 检查并开始使用", checkButton: "运行连接检查", checking: "正在验证任务下发、命令执行和结果回传…", timedOut: "检查超时。可能是 Worker 未运行或任务通道不可用；请运行 doctor 并查看日志，然后重试。",
     ready: "命令执行已验证，可开始使用", notReady: "尚未通过执行检查", start: "开始使用这台设备", checkHint: "检查只运行固定的 echo 测试，不读取你的文件，不点击或输入桌面内容。",
@@ -56,6 +57,7 @@ const copy = {
     approve: "2. Confirm authorization", code: "Device pairing code", lookup: "Review device", codeHint: "Enter the 12-character code printed on the target device, or use the page opened by Worker. Do not approve codes sent by others.",
     confirm: "Confirm connection to this device", cancel: "Reject pairing", name: "Device name", verify: "Check that the device and code match before authorizing. Device details are self-reported, not proof of identity.",
     expires: "Expires at", expired: "Pairing expired. Run Worker on the target device again to get a new code.", cancelled: "Pairing rejected. Run Worker again when you want to connect.",
+    deviceMissing: "Device not found in the list. Refresh the list; if it was removed, re-pair on the target device.",
     approved: "Authorized; waiting for device", waitingHint: "No connection received from this device yet. Keep Worker running on the target device; do not create another pairing.",
     check: "3. Check and start using", checkButton: "Run connection check", checking: "Checking task delivery, command execution and result upload…", timedOut: "Check timed out. Worker may not be running or the task channel may be unavailable. Run doctor and inspect logs, then retry.",
     ready: "Command execution verified; ready to use", notReady: "Execution not yet verified", start: "Start using this device", checkHint: "Runs only a fixed echo test. Does not read your files or click/type on your desktop.",
@@ -159,7 +161,7 @@ export function WorkerConnections({ language, request, sessionId }: { language: 
           <p className="text-xs text-muted-foreground">{t.remaining}</p>
         </div>}
       </CardContent></Card>
-      {pairing.data?.status === "approved" && <Card><CardHeader><CardTitle>{t.check}</CardTitle></CardHeader><CardContent>{pairedDevice ? <ConnectionCheck automatic device={pairedDevice} language={language} request={request} sessionId={sessionId} /> : <p className="text-sm">{t.waitingHint}</p>}{pairedDevice?.last_seen_at == null && <p className="mt-3 text-sm text-muted-foreground">{t.waitingHint}</p>}</CardContent></Card>}
+      {pairing.data?.status === "approved" && <Card><CardHeader><CardTitle>{t.check}</CardTitle></CardHeader><CardContent>{pairedDevice ? <ConnectionCheck automatic device={pairedDevice} language={language} request={request} sessionId={sessionId} /> : <div className="space-y-3"><p className="text-sm">{t.deviceMissing}</p><Button variant="outline" onClick={() => void workers.refetch()}>{t.retry}</Button></div>}{pairedDevice && pairedDevice.last_seen_at == null && <p className="mt-3 text-sm text-muted-foreground">{t.waitingHint}</p>}</CardContent></Card>}
       <details className="rounded-xl border p-4"><summary className="cursor-pointer text-sm font-medium">{t.help}</summary><div className="mt-4 space-y-3"><p className="text-sm">{t.helpBody}</p><CopyBlock language={language} text={`${prefix} status\n${prefix} doctor\n${prefix} config-path`} /><p className="text-xs text-muted-foreground">{t.logs}</p><p className="text-xs leading-6 text-muted-foreground">{t.restore}</p></div></details>
       <ManualPairing language={language} request={request} />
       {workers.data && workers.data.length > 0 && <Button className="self-start" variant="ghost" onClick={() => { setShow(false); setParams({}) }}>{t.close}</Button>}

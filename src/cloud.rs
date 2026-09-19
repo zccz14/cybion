@@ -532,7 +532,8 @@ fn app(state: AppState) -> Router {
             "/api/worker-pairings/{code}",
             get(worker_onboarding::read)
                 .post(worker_onboarding::approve)
-                .delete(worker_onboarding::cancel),
+                .delete(worker_onboarding::cancel)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
         )
         .route(
             "/api/workers/{id}/check",
@@ -542,7 +543,9 @@ fn app(state: AppState) -> Router {
         .route("/api/api-keys/{id}", delete(delete_api_key))
         .route(
             "/api/workers",
-            get(list_workers).post(create_worker_pairing),
+            get(list_workers)
+                .post(create_worker_pairing)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
         )
         .route(
             "/api/workers/{id}",
@@ -582,8 +585,16 @@ fn app(state: AppState) -> Router {
         .route_layer(from_fn_with_state(state.clone(), traffic::worker_auth));
 
     Router::new()
-        .route("/worker/v1/pairings", post(worker_onboarding::start))
-        .route("/worker/v1/pairings/{id}", get(worker_onboarding::poll))
+        .route(
+            "/worker/v1/pairings",
+            post(worker_onboarding::start)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
+        )
+        .route(
+            "/worker/v1/pairings/{id}",
+            get(worker_onboarding::poll)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
+        )
         .route("/api/worker-release", get(worker_onboarding::release))
         .route("/health", get(health))
         .route("/api/config", get(public_config))

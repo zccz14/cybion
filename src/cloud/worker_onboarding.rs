@@ -3,6 +3,14 @@
 use super::*;
 
 const TTL: i64 = 600;
+
+pub(super) async fn no_store(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
 pub(super) const CHECK_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS worker_checks (
  id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
