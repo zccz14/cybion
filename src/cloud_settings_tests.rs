@@ -100,6 +100,52 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         .await
         .unwrap();
     assert_eq!(loaded, defaults);
+    let integrations_url = format!("{base}/api/integrations");
+    let integrations: Value = client
+        .get(&integrations_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(integrations["user_agent"], "");
+    assert_eq!(integrations["originator"], "");
+    let custom_headers = json!({"user_agent":"My-Cybion/1.0","originator":"my-client"});
+    let saved_integrations: Value = client
+        .put(&integrations_url)
+        .bearer_auth(&token)
+        .json(&custom_headers)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        saved_integrations["user_agent"],
+        custom_headers["user_agent"]
+    );
+    assert_eq!(
+        saved_integrations["originator"],
+        custom_headers["originator"]
+    );
+    assert_eq!(
+        client
+            .put(&integrations_url)
+            .bearer_auth(&token)
+            .json(&json!({"user_agent":"bad\nvalue"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     assert_eq!(
         client
             .put(&settings_url)

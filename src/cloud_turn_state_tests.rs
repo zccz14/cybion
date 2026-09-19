@@ -56,6 +56,8 @@ async fn upstream(
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
+            user_agent: String::new(),
+            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
@@ -319,7 +321,7 @@ async fn codex_turn_state_schema_upgrade_preserves_existing_threads_and_history(
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        10
+        USER_SCHEMA_VERSION
     );
     let history: String = connection
         .query_row(

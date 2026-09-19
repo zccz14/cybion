@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path as AxumPath, Query, Request, State},
-    http::{HeaderMap, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
     middleware::{Next, from_fn_with_state},
     response::{
         IntoResponse, Response,
@@ -63,7 +63,7 @@ const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 10;
+const USER_SCHEMA_VERSION: i64 = 11;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -403,7 +403,10 @@ fn app(state: AppState) -> Router {
             "/api/experimental-features",
             get(experimental_features).put(update_experimental_features),
         )
-        .route("/api/integrations", get(integrations))
+        .route(
+            "/api/integrations",
+            get(integrations).put(update_integrations),
+        )
         .route("/api/integrations/refresh", post(refresh_integrations))
         .route("/api/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api/api-keys/{id}", delete(delete_api_key))
@@ -828,6 +831,8 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   openai_consumer_id TEXT NOT NULL DEFAULT '',
   openai_consumer_secret TEXT NOT NULL DEFAULT '',
   openai_base_url TEXT NOT NULL DEFAULT 'https://openai.ntnl.io/v1',
+  user_agent TEXT NOT NULL DEFAULT '',
+  originator TEXT NOT NULL DEFAULT '',
   linkit_bot_id TEXT NOT NULL DEFAULT '',
   linkit_bot_token TEXT NOT NULL DEFAULT '',
   linkit_username TEXT NOT NULL DEFAULT '',
@@ -952,6 +957,24 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
+    for (name, definition) in [
+        ("user_agent", "TEXT NOT NULL DEFAULT ''"),
+        ("originator", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            transaction
+                .execute(
+                    &format!("ALTER TABLE integration_settings ADD COLUMN {name} {definition}"),
+                    [],
+                )
+                .map_err(ApiError::internal)?;
+        }
+    }
     let has_responses_call_id: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('worker_calls') WHERE name='responses_call_id')",
@@ -1204,6 +1227,8 @@ struct IntegrationStatusView {
     openai_configured: bool,
     openai_consumer_id: Option<String>,
     openai_base_url: String,
+    user_agent: String,
+    originator: String,
     linkit_configured: bool,
     linkit_bot_id: Option<String>,
     linkit_username: Option<String>,
@@ -1222,6 +1247,13 @@ struct UpdateExperimentalFeaturesInput {
     thread_id_header: Option<bool>,
     session_id_header: Option<bool>,
     codex_turn_state_header: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateIntegrationHeadersInput {
+    user_agent: Option<String>,
+    originator: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1420,6 +1452,8 @@ struct IntegrationSettings {
     openai_consumer_id: String,
     openai_consumer_secret: String,
     openai_base_url: String,
+    user_agent: String,
+    originator: String,
     linkit_bot_id: String,
     linkit_bot_token: String,
     linkit_username: String,
@@ -1792,6 +1826,8 @@ fn integration_status_view(settings: &IntegrationSettings) -> IntegrationStatusV
         openai_consumer_id: (!settings.openai_consumer_id.is_empty())
             .then(|| settings.openai_consumer_id.clone()),
         openai_base_url: settings.openai_base_url.clone(),
+        user_agent: settings.user_agent.clone(),
+        originator: settings.originator.clone(),
         linkit_configured: !settings.linkit_bot_token.is_empty()
             && !settings.linkit_username.is_empty(),
         linkit_bot_id: (!settings.linkit_bot_id.is_empty()).then(|| settings.linkit_bot_id.clone()),
@@ -1808,6 +1844,40 @@ async fn integrations(
         integration_settings(connection)
     })
     .await?;
+    Ok(Json(integration_status_view(&settings)))
+}
+
+fn request_header_setting(value: String, field: &str) -> Result<String, ApiError> {
+    let value = value.trim().to_owned();
+    if value.chars().count() > 512 || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(format!(
+            "{field} must contain at most 512 visible characters"
+        )));
+    }
+    if !value.is_empty() {
+        HeaderValue::from_str(&value).map_err(|_| {
+            ApiError::bad_request(format!("{field} must be a valid HTTP header value"))
+        })?;
+    }
+    Ok(value)
+}
+
+async fn update_integrations(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<UpdateIntegrationHeadersInput>,
+) -> Result<Json<IntegrationStatusView>, ApiError> {
+    let mut settings = user_db(&state, &identity.user, true, |connection| {
+        integration_settings(connection)
+    })
+    .await?;
+    if let Some(value) = input.user_agent {
+        settings.user_agent = request_header_setting(value, "user_agent")?;
+    }
+    if let Some(value) = input.originator {
+        settings.originator = request_header_setting(value, "originator")?;
+    }
+    save_integration_settings(&state, &identity.user, &settings).await?;
     Ok(Json(integration_status_view(&settings)))
 }
 
@@ -2888,16 +2958,18 @@ fn hash_secret(value: &str) -> String {
 fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, ApiError> {
     let settings = connection
         .query_row(
-            "SELECT openai_consumer_id,openai_consumer_secret,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
+            "SELECT openai_consumer_id,openai_consumer_secret,openai_base_url,user_agent,originator,linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
             [],
             |row| {
                 Ok(IntegrationSettings {
                     openai_consumer_id: row.get(0)?,
                     openai_consumer_secret: row.get(1)?,
                     openai_base_url: row.get(2)?,
-                    linkit_bot_id: row.get(3)?,
-                    linkit_bot_token: row.get(4)?,
-                    linkit_username: row.get(5)?,
+                    user_agent: row.get(3)?,
+                    originator: row.get(4)?,
+                    linkit_bot_id: row.get(5)?,
+                    linkit_bot_token: row.get(6)?,
+                    linkit_username: row.get(7)?,
                 })
             },
         )
@@ -2906,6 +2978,8 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
             openai_consumer_id: String::new(),
             openai_consumer_secret: String::new(),
             openai_base_url: OPENAI_BASE_URL.to_owned(),
+            user_agent: String::new(),
+            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
@@ -2929,11 +3003,13 @@ async fn save_integration_settings(
     let saved = settings.clone();
     user_db(state, user, true, move |connection| {
         connection.execute(
-            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username,updated_at) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,openai_consumer_secret=excluded.openai_consumer_secret,openai_base_url=excluded.openai_base_url,linkit_bot_id=excluded.linkit_bot_id,linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
+            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,openai_base_url,user_agent,originator,linkit_bot_id,linkit_bot_token,linkit_username,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,openai_consumer_secret=excluded.openai_consumer_secret,openai_base_url=excluded.openai_base_url,user_agent=excluded.user_agent,originator=excluded.originator,linkit_bot_id=excluded.linkit_bot_id,linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
             params![
                 saved.openai_consumer_id,
                 saved.openai_consumer_secret,
                 saved.openai_base_url,
+                saved.user_agent,
+                saved.originator,
                 saved.linkit_bot_id,
                 saved.linkit_bot_token,
                 saved.linkit_username,
@@ -4598,6 +4674,12 @@ async fn send_responses_request(
         .bearer_auth(&integrations.openai_consumer_secret)
         .header("Accept", "text/event-stream")
         .json(&payload);
+    if !integrations.user_agent.is_empty() {
+        request = request.header(header::USER_AGENT, &integrations.user_agent);
+    }
+    if !integrations.originator.is_empty() {
+        request = request.header("originator", &integrations.originator);
+    }
     if let Some((spec, _)) = audit.as_ref() {
         for (key, header) in [
             (EXPERIMENTAL_THREAD_ID_HEADER_KEY, THREAD_ID_HEADER),
@@ -6736,7 +6818,7 @@ mod tests {
         let (sent, received) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_json_request(&mut socket).await;
+            let request = read_http_request(&mut socket).await;
             sent.send(request).unwrap();
             let body = json!({
                 "id":"response-1",
@@ -6752,6 +6834,8 @@ mod tests {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
+            user_agent: "My-Cybion/1.0".to_owned(),
+            originator: "my-client".to_owned(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
@@ -6777,8 +6861,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response_text(&result.value).as_deref(), Some("ok"));
-        let request = received.await.unwrap();
+        let (headers, request) = received.await.unwrap();
         server.await.unwrap();
+        assert!(
+            headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("user-agent: My-Cybion/1.0"))
+        );
+        assert!(
+            headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("originator: my-client"))
+        );
         assert_eq!(request["store"], false);
         assert_eq!(request["input"][0]["role"], "developer");
         assert!(
@@ -6866,6 +6960,8 @@ mod tests {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
+            user_agent: String::new(),
+            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
@@ -6975,6 +7071,8 @@ mod tests {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
+            user_agent: String::new(),
+            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
