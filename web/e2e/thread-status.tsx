@@ -4,6 +4,7 @@ import { HashRouter } from "react-router-dom"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import type { ThreadDisplayStatus } from "../src/lib/thread-status"
+import { emptyThreadUsage } from "../src/lib/thread-usage"
 import "../src/styles.css"
 
 const statuses: ThreadDisplayStatus[] = ["running", "completed", "failed", "stopped", "ready", "compacting"]
@@ -23,7 +24,7 @@ function Fixture() {
       <aside className="w-full rounded-xl border bg-sidebar/40 p-3 lg:w-64 lg:shrink-0">
         <h2 className="px-3 pb-3 text-xs font-medium text-muted-foreground">{language === "zh" ? "线程" : "Threads"}</h2>
         <nav aria-label="Threads" className="flex flex-col gap-1">
-          {statuses.map((status, index) => <ThreadLink key={status} thread={{ id: status, title: titles[index], display_status: status === "running" ? runningStatus : status }} language={language} />)}
+          {statuses.map((status, index) => <ThreadLink key={status} thread={{ id: status, title: titles[index], display_status: status === "running" ? runningStatus : status, usage: emptyThreadUsage }} language={language} />)}
         </nav>
       </aside>
       <section className="min-w-0 flex-1 rounded-xl border bg-card p-5">

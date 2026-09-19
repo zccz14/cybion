@@ -2,6 +2,8 @@ import { CheckIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIc
 import { NavLink } from "react-router-dom"
 import { threadStatusText, type ThreadDisplayStatus } from "@/lib/thread-status"
 import { cn } from "@/lib/utils"
+import type { ThreadUsage } from "@/lib/thread-usage"
+import { ThreadUsageSummary, ThreadUsageDetails } from "@/components/thread-usage"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 type StatusProps = { status: ThreadDisplayStatus; language: "en" | "zh" }
@@ -28,7 +30,7 @@ export function ThreadStatusBadge({ status, language }: StatusProps) {
   </span>
 }
 
-export function ThreadLink({ thread, language }: { thread: { id: string; title: string; display_status: ThreadDisplayStatus }; language: StatusProps["language"] }) {
+export function ThreadLink({ thread, language }: { thread: { id: string; title: string; display_status: ThreadDisplayStatus; usage: ThreadUsage }; language: StatusProps["language"] }) {
   const status = thread.display_status
   const { label, hint } = threadStatusText(status, language)
   return <Tooltip>
@@ -38,12 +40,14 @@ export function ThreadLink({ thread, language }: { thread: { id: string; title: 
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate font-medium">{thread.title}</span>
           <span className={cn("text-xs", presentation[status].color)}>{label}</span>
+          <ThreadUsageSummary usage={thread.usage} language={language} />
         </span>
       </NavLink>
     </TooltipTrigger>
     <TooltipContent side="right" className="max-w-72 flex-col items-start motion-reduce:animate-none">
       <span className="max-w-full break-words font-medium">{thread.title}</span>
       <span>{hint}</span>
+      <div className="mt-2 w-full border-t border-current/20 pt-2"><ThreadUsageDetails usage={thread.usage} language={language} /></div>
     </TooltipContent>
   </Tooltip>
 }
