@@ -557,6 +557,8 @@ const copy = {
     integrationDescription: "External integrations connected to your workspace.",
     integration: "Integrations",
     refreshIntegrations: "Provision or refresh integrations",
+    refreshIntegrationsHelp: "Verify the OpenAI-LB Consumer and token. Refresh recreates a missing Consumer, re-enables a disabled one, and replaces invalid credentials. Retry or continue a failed Thread afterwards.",
+    integrationsVerified: "OpenAI-LB Consumer and token verified.",
     refreshing: "Refreshing…",
     openai: "OpenAI-LB",
     linkit: "Linkit",
@@ -829,6 +831,8 @@ const copy = {
     integrationDescription: "连接到当前工作区的外部服务。",
     integration: "集成",
     refreshIntegrations: "开通或刷新集成",
+    refreshIntegrationsHelp: "校验 OpenAI-LB 消费者与 Token。刷新会重建已删除的消费者、重新启用被禁用的消费者，并替换失效凭据。完成后请重试或继续失败的 Thread。",
+    integrationsVerified: "OpenAI-LB 消费者与 Token 已校验。",
     refreshing: "刷新中…",
     openai: "OpenAI-LB",
     linkit: "Linkit",
@@ -2135,7 +2139,7 @@ function ConfigurationPage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolea
       {integrations.error && <div className="sm:col-span-2"><RequestError error={integrations.error} onRetry={() => void integrations.refetch()} /></div>}
       {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><IntegrationRow label={t("linkit")} configured={integrations.data.linkit_configured} detail={integrations.data.linkit_username ? `@${integrations.data.linkit_username}` : t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
       {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
-      <div className="sm:col-span-2"><Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>{refresh.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{refresh.isPending ? t("refreshing") : t("refreshIntegrations")}</Button>{refresh.error && <p className="mt-2 text-sm text-destructive">{errorMessage(refresh.error)}</p>}</div>
+      <div className="sm:col-span-2"><p className="mb-3 text-xs text-muted-foreground">{t("refreshIntegrationsHelp")}</p><Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>{refresh.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{refresh.isPending ? t("refreshing") : t("refreshIntegrations")}</Button>{refresh.error && <p className="mt-2 text-sm text-destructive">{errorMessage(refresh.error)}</p>}{refresh.isSuccess && <p role="status" className="mt-2 text-sm text-muted-foreground">{t("integrationsVerified")}</p>}</div>
     </CardContent></Card>
     {isAdmin && <Card><CardHeader><CardTitle>{t("requestHeaders")}</CardTitle><CardDescription>{t("requestHeadersDescription")}</CardDescription></CardHeader><CardContent>
       <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (headersChanged && !saveHeaders.isPending) saveHeaders.mutate(headers) }}>

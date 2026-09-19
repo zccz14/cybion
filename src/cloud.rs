@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 mod admin_users;
 mod history;
+mod openai_integration;
 mod recovery;
 mod thread_controls;
 mod traffic;
@@ -87,6 +88,8 @@ struct AppState {
     data_dir: Arc<PathBuf>,
     admin_db_path: Arc<PathBuf>,
     client: reqwest::Client,
+    openai_consumers_url: String,
+    linkit_api_url: String,
     auth: Arc<OnceCell<AuthMiniLayer>>,
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     worker_pairing_lock: Arc<Mutex<()>>,
@@ -284,6 +287,8 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(600))
             .build()?,
+        openai_consumers_url: OPENAI_CONSUMERS_URL.to_owned(),
+        linkit_api_url: LINKIT_API_URL.to_owned(),
         auth: Arc::new(OnceCell::new()),
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
         worker_pairing_lock: Arc::new(Mutex::new(())),
@@ -2045,7 +2050,9 @@ fn integration_status_view(
     headers: &GlobalRequestHeaders,
 ) -> IntegrationStatusView {
     IntegrationStatusView {
-        openai_configured: !settings.openai_consumer_secret.is_empty(),
+        openai_configured: !settings.openai_consumer_id.is_empty()
+            && !settings.openai_consumer_secret.is_empty()
+            && !settings.openai_base_url.is_empty(),
         openai_consumer_id: (!settings.openai_consumer_id.is_empty())
             .then(|| settings.openai_consumer_id.clone()),
         openai_base_url: settings.openai_base_url.clone(),
@@ -2121,7 +2128,14 @@ async fn refresh_integrations(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<IntegrationStatusView>, ApiError> {
-    let settings = ensure_integrations(&state, &identity.user, &identity.bearer).await?;
+    let _guard = lock_integrations(&state, &identity.user).await;
+    let mut settings = user_db(&state, &identity.user, true, |connection| {
+        integration_settings(connection)
+    })
+    .await?;
+    openai_integration::reconcile(&state, &identity.user, &identity.bearer, &mut settings).await?;
+    ensure_linkit_integration(&state, &identity.user, &identity.bearer, &mut settings).await?;
+    openai_integration::verify_ready(&state, &identity.bearer, &settings).await?;
     let headers = global_request_headers(&state).await?;
     Ok(Json(integration_status_view(&settings, &headers)))
 }
@@ -3235,7 +3249,8 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
 }
 
 fn integrations_ready(settings: &IntegrationSettings) -> bool {
-    !settings.openai_consumer_secret.is_empty()
+    !settings.openai_consumer_id.is_empty()
+        && !settings.openai_consumer_secret.is_empty()
         && !settings.openai_base_url.is_empty()
         && !settings.linkit_bot_id.is_empty()
         && !settings.linkit_bot_token.is_empty()
@@ -3266,27 +3281,10 @@ async fn save_integration_settings(
     .await
 }
 
-async fn create_openai_consumer(
-    state: &AppState,
-    bearer: &str,
-) -> Result<OpenAiConsumerGrant, ApiError> {
-    state
-        .client
-        .post(OPENAI_CONSUMERS_URL)
-        .bearer_auth(bearer)
-        .json(&json!({"name": INTEGRATION_NAME, "request_archive": true}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<OpenAiConsumerGrant>()
-        .await
-        .map_err(Into::into)
-}
-
 async fn linkit_username(state: &AppState, bearer: &str) -> Result<String, ApiError> {
     let profile = state
         .client
-        .get(format!("{LINKIT_API_URL}/api/me"))
+        .get(format!("{}/api/me", state.linkit_api_url))
         .bearer_auth(bearer)
         .send()
         .await?
@@ -3304,7 +3302,7 @@ async fn linkit_username(state: &AppState, bearer: &str) -> Result<String, ApiEr
 async fn create_linkit_bot(state: &AppState, bearer: &str) -> Result<LinkitBotGrant, ApiError> {
     state
         .client
-        .post(format!("{LINKIT_API_URL}/api/bots"))
+        .post(format!("{}/api/bots", state.linkit_api_url))
         .bearer_auth(bearer)
         .json(&json!({"name": INTEGRATION_NAME}))
         .send()
@@ -3315,11 +3313,7 @@ async fn create_linkit_bot(state: &AppState, bearer: &str) -> Result<LinkitBotGr
         .map_err(Into::into)
 }
 
-async fn ensure_integrations(
-    state: &AppState,
-    user: &User,
-    bearer: &str,
-) -> Result<IntegrationSettings, ApiError> {
+async fn lock_integrations(state: &AppState, user: &User) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = {
         let mut locks = state.integration_locks.lock().await;
         locks
@@ -3327,18 +3321,15 @@ async fn ensure_integrations(
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
-    let _guard = lock.lock().await;
-    let mut settings = user_db(state, user, true, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
-    if settings.openai_consumer_id.is_empty() || settings.openai_consumer_secret.is_empty() {
-        let grant = create_openai_consumer(state, bearer).await?;
-        settings.openai_consumer_id = grant.id;
-        settings.openai_consumer_secret = grant.secret;
-        settings.openai_base_url = OPENAI_BASE_URL.to_owned();
-        save_integration_settings(state, user, &settings).await?;
-    }
+    lock.lock_owned().await
+}
+
+async fn ensure_linkit_integration(
+    state: &AppState,
+    user: &User,
+    bearer: &str,
+    settings: &mut IntegrationSettings,
+) -> Result<(), ApiError> {
     if settings.linkit_bot_id.is_empty()
         || settings.linkit_bot_token.is_empty()
         || settings.linkit_username.is_empty()
@@ -3347,8 +3338,26 @@ async fn ensure_integrations(
         let grant = create_linkit_bot(state, bearer).await?;
         settings.linkit_bot_id = grant.id;
         settings.linkit_bot_token = grant.token;
-        save_integration_settings(state, user, &settings).await?;
+        save_integration_settings(state, user, settings).await?;
     }
+    Ok(())
+}
+
+async fn ensure_integrations(
+    state: &AppState,
+    user: &User,
+    bearer: &str,
+) -> Result<IntegrationSettings, ApiError> {
+    let _guard = lock_integrations(state, user).await;
+    let mut settings = user_db(state, user, true, |connection| {
+        integration_settings(connection)
+    })
+    .await?;
+    if settings.openai_consumer_id.is_empty() || settings.openai_consumer_secret.is_empty() {
+        openai_integration::reconcile(state, user, bearer, &mut settings).await?;
+        openai_integration::verify_ready(state, bearer, &settings).await?;
+    }
+    ensure_linkit_integration(state, user, bearer, &mut settings).await?;
     if settings.openai_base_url.is_empty() {
         settings.openai_base_url = OPENAI_BASE_URL.to_owned();
     }
@@ -4036,7 +4045,7 @@ async fn notify_thread(
     );
     let response = state
         .client
-        .post(format!("{LINKIT_API_URL}/bot/v1/messages"))
+        .post(format!("{}/bot/v1/messages", state.linkit_api_url))
         .bearer_auth(&integrations.linkit_bot_token)
         .json(&json!({"recipient_username": integrations.linkit_username, "body": body}))
         .send()
@@ -5028,10 +5037,13 @@ async fn send_responses_request(
                 return Err(error);
             }
         };
-        let message = format!(
+        let mut message = format!(
             "upstream Responses request failed with HTTP {status}: {}",
             upstream_error_detail(&body)
         );
+        if status == StatusCode::UNAUTHORIZED {
+            message.push_str(". Open Configuration and refresh the OpenAI-LB integration, then retry or continue this Thread.");
+        }
         let error = if status == StatusCode::PAYLOAD_TOO_LARGE || context_overflow_response(&body) {
             ApiError::context_overflow(message)
         } else if (status.is_server_error() || matches!(status.as_u16(), 408 | 429))
@@ -6324,6 +6336,8 @@ mod tests {
                 data_dir: Arc::new(data_dir),
                 admin_db_path: Arc::new(admin_db_path.clone()),
                 client: reqwest::Client::new(),
+                openai_consumers_url: OPENAI_CONSUMERS_URL.to_owned(),
+                linkit_api_url: LINKIT_API_URL.to_owned(),
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
                 worker_pairing_lock: Arc::new(Mutex::new(())),
