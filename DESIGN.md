@@ -119,3 +119,18 @@ separate from execution status.
 
 Dark status colors stay amber `#FCD34D`, green `#6EE7B7`, and red `#FCA5A5`.
 Color remains supplementary to the icon and visible label.
+
+## Thread usage and input drafts
+
+Every Thread row shows cumulative reported Tokens and input-weighted cache rate
+in secondary text, alongside its existing title and status. The conversation
+header exposes exact totals and an expandable input/output/cache breakdown.
+Unknown cache data is `—`, distinct from a measured `0%`; incomplete Token reports
+are labeled. See [accounting and persistence](docs/thread-usage-and-drafts.md).
+
+Composer text is independent for every account, Thread, and the new-thread page.
+Restore it from this browser on navigation/reload. Only server-acknowledged input
+clears the matching submitted draft; newer edits and other drafts remain intact.
+Explain local persistence visibly and warn if browser storage cannot save it.
+Existing drafts take precedence over automatic prefills. Draft persistence does
+not imply cross-device synchronization or automatic submission.

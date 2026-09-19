@@ -57,6 +57,8 @@ import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/li
 import { formattedTime } from "@/lib/time"
 import type { HistoryRecord } from "@/lib/thread-history"
 import { handleChatInputKeyDown } from "@/lib/chat-input"
+import { useComposerDraft } from "@/hooks/use-composer-draft"
+import { ComposerDraftNotice } from "@/components/composer-draft-notice"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
 import "./styles.css"
@@ -74,6 +76,8 @@ import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
 import { ThreadHistory } from "@/components/thread-history"
 import { ThreadLink, ThreadStatusBadge } from "@/components/thread-status"
+import { ThreadUsagePanel } from "@/components/thread-usage"
+import type { ThreadUsage } from "@/lib/thread-usage"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import {
   Dialog,
@@ -144,6 +148,7 @@ type Thread = ThreadDefaults & {
   title: string
   status: ThreadStatus
   display_status: ThreadDisplayStatus
+  usage: ThreadUsage
   created_at: number
   updated_at: number
 }
@@ -965,7 +970,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
     staleTime: 60_000,
   })
   const threads = useQuery({
-    queryKey: ["threads"],
+    queryKey: ["threads", sdk.session.getState().sessionId],
     queryFn: () => api<Thread[]>(sdk, "/api/threads"),
     refetchInterval: 2000,
   })
@@ -995,13 +1000,15 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
         retryLabel={labels.tryAgain}
         reloadLabel={labels.reload}
       />}>
-        <WorkspaceShell
+        {currentUser.isPending ? <LoadingScreen /> : currentUser.error ? <Page title="Cybion" description=""><RequestError error={currentUser.error} onRetry={() => void currentUser.refetch()} /></Page> : <WorkspaceShell
+          key={currentUser.data.user_id}
           sdk={sdk}
-          isAdmin={currentUser.data?.is_admin === true}
+          userId={currentUser.data.user_id}
+          isAdmin={currentUser.data.is_admin}
           threads={threads.data ?? []}
           threadsLoading={threads.isLoading}
           threadsError={threads.error}
-        />
+        />}
       </ErrorBoundary>
     </UiContext.Provider>
   </LinkitProvider>
@@ -1009,12 +1016,14 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
 
 function WorkspaceShell({
   sdk,
+  userId,
   isAdmin,
   threads,
   threadsLoading,
   threadsError,
 }: {
   sdk: AuthMiniApi
+  userId: string
   isAdmin: boolean
   threads: Thread[]
   threadsLoading: boolean
@@ -1101,9 +1110,9 @@ function WorkspaceShell({
           />}
         >
           <Routes>
-            <Route path="/threads" element={<NewThreadPage sdk={sdk} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
-            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
-            <Route path="/threads/:threadId" element={<ThreadConversation sdk={sdk} threads={threads} onCreate={() => navigate("/threads")} />} />
+            <Route path="/threads" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
+            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
+            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} onCreate={() => navigate("/threads")} />} />
             <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
@@ -1143,21 +1152,27 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   return t("threads")
 }
 
-function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
+function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
   const { t, language } = useUi()
   const navigate = useNavigate()
   const client = useQueryClient()
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   const location = useLocation()
-  const [input, setInput] = useState(() => typeof location.state?.initialInput === "string" ? location.state.initialInput : "")
+  const composer = useComposerDraft(userId, null)
+  const { input, setInput, seed, clearSubmitted } = composer
+  useEffect(() => {
+    if (typeof location.state?.initialInput !== "string") return
+    const { initialInput, ...state } = location.state
+    seed(initialInput)
+    navigate({ pathname: location.pathname, search: location.search, hash: location.hash }, { replace: true, state })
+  }, [location, navigate, seed])
   const value = draft ?? defaults.data
   const start = useMutation({
-    mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify(payload) }),
-    onSuccess: (request) => {
-      setInput("")
+    mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify({ ...payload, input: payload.input.trim() }) }),
+    onSuccess: (_request, payload) => {
+      clearSubmitted(payload.input)
       void client.invalidateQueries({ queryKey: ["threads"] })
-      navigate(`/threads/${request.thread_id}`)
     },
   })
   const edit = (next: ThreadDefaults) => {
@@ -1167,7 +1182,7 @@ function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: Au
   const submit = () => {
     const message = input.trim()
     if (!value || !message || start.isPending) return
-    start.mutate({ ...value, input: message })
+    start.mutate({ ...value, input }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1223,36 +1238,36 @@ function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: Au
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} aria-describedby="new-thread-input-shortcut" disabled={!value || start.isPending} /></Field><div className="flex items-center justify-between gap-3"><span id="new-thread-input-shortcut" className="text-xs text-muted-foreground">{t("startThreadShortcut")}</span><Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} aria-describedby="new-thread-input-shortcut" disabled={!value || start.isPending} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center justify-between gap-3"><span id="new-thread-input-shortcut" className="text-xs text-muted-foreground">{t("startThreadShortcut")}</span><Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
       </form>
     </section>
   </main>
 }
 
-function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; threads: Thread[]; onCreate: () => void }) {
+function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; onCreate: () => void }) {
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
   const navigate = useNavigate()
   const client = useQueryClient()
   const thread = useQuery({
-    queryKey: ["thread", threadId],
+    queryKey: ["thread", threadId, userId],
     queryFn: () => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`),
     refetchInterval: 1500,
     enabled: Boolean(threadId),
   })
   const workers = useQuery({
-    queryKey: ["workers"],
+    queryKey: ["workers", userId],
     queryFn: () => api<Worker[]>(sdk, "/api/workers"),
     refetchInterval: 5000,
   })
   const history = useQuery({
-    queryKey: ["history", threadId],
+    queryKey: ["history", threadId, userId],
     queryFn: () => api<HistoryRecord[]>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history`),
     refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
     enabled: Boolean(threadId),
   })
   const liveResponse = useQuery({
-    queryKey: ["thread-response", threadId, thread.data?.status],
+    queryKey: ["thread-response", threadId, thread.data?.status, userId],
     queryFn: () => api<ThreadResponseView | null>(sdk, `/api/threads/${encodeURIComponent(threadId)}/response`),
     refetchInterval: thread.data?.status === "running" ? 750 : false,
     enabled: Boolean(threadId),
@@ -1261,7 +1276,8 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
     ...history.data ?? [],
     ...pendingResponseRecords(liveResponse.data, history.data ?? [], threadId),
   ], [history.data, liveResponse.data, threadId])
-  const [input, setInput] = useState("")
+  const composer = useComposerDraft(userId, threadId)
+  const { input, setInput, clearSubmitted } = composer
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -1272,10 +1288,10 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
   const submit = useMutation({
     mutationFn: (value: string) => api<RequestAck>(sdk, `/api/threads/${encodeURIComponent(threadId)}/inputs`, {
       method: "POST",
-      body: JSON.stringify({ input: value }),
+      body: JSON.stringify({ input: value.trim() }),
     }),
-    onSuccess: () => {
-      setInput("")
+    onSuccess: (_request, submitted) => {
+      clearSubmitted(submitted)
       void client.invalidateQueries({ queryKey: ["history", threadId] })
       void client.invalidateQueries({ queryKey: ["thread", threadId] })
       void client.invalidateQueries({ queryKey: ["threads"] })
@@ -1314,6 +1330,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
     mutationFn: () => api<unknown>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" }),
     onSuccess: () => {
       setDeleteOpen(false)
+      composer.clear()
       void client.invalidateQueries({ queryKey: ["threads"] })
       navigate("/threads")
     },
@@ -1344,7 +1361,8 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
         {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
-      {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input.trim())} /></div>}
+      <ThreadUsagePanel usage={current.usage} language={language} />
+      {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input)} /></div>}
       {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
       <MessageScrollerProvider autoScroll defaultScrollPosition="end">
         <MessageScroller className="min-h-0 flex-1">
@@ -1361,8 +1379,8 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
           <MessageScrollerButton behavior="auto" />
         </MessageScroller>
       </MessageScrollerProvider>
-      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(value) }}>
-        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} aria-describedby="thread-input-shortcut" disabled={busy} /></Field>
+      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(input) }}>
+        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} aria-describedby="thread-input-shortcut" disabled={busy} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">
               {running

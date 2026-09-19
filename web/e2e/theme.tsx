@@ -16,6 +16,7 @@ import { Message, MessageContent, MessageFooter, MessageGroup } from "../src/com
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
 import type { ThreadDisplayStatus } from "../src/lib/thread-status"
+import { emptyThreadUsage } from "../src/lib/thread-usage"
 import "../src/styles.css"
 import "linkit-react-components/styles.css"
 
@@ -37,7 +38,7 @@ function ThemeFixture() {
       </header>
       <main className="flex min-w-0 flex-1 flex-col lg:flex-row">
         <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-r lg:border-b-0" data-testid="thread-sidebar">
-          <nav className="flex flex-col gap-1" aria-label="Threads">{statuses.map((status) => <ThreadLink key={status} thread={{ id: status, title: `Thread · ${status}`, display_status: status }} language="zh" />)}</nav>
+          <nav className="flex flex-col gap-1" aria-label="Threads">{statuses.map((status) => <ThreadLink key={status} thread={{ id: status, title: `Thread · ${status}`, display_status: status, usage: emptyThreadUsage }} language="zh" />)}</nav>
         </aside>
         <section className="flex min-w-0 flex-1 flex-col gap-5 p-4 sm:p-6">
           <div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto font-semibold">重新设计暗黑模式配色</h2><ThreadStatusBadge status="running" language="zh" /></div>
