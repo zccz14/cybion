@@ -294,6 +294,92 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    let mut other_claims = claims.clone();
+    other_claims["sub"] = json!("http-settings-other");
+    other_claims["sid"] = json!("other-session");
+    let other_signing_input = format!(
+        "{}.{}",
+        base64url(br#"{"alg":"EdDSA","kid":"test"}"#),
+        base64url(other_claims.to_string().as_bytes())
+    );
+    let other_token = format!(
+        "{other_signing_input}.{}",
+        base64url(&key.sign(other_signing_input.as_bytes()).to_bytes())
+    );
+    for (url, body) in [
+        (
+            &integrations_url,
+            json!({"user_agent":"not-allowed","originator":"not-allowed"}),
+        ),
+        (
+            &experiments_url,
+            json!({"thread_id_header":false,"session_id_header":true,"codex_turn_state_header":true}),
+        ),
+    ] {
+        for method in [reqwest::Method::GET, reqwest::Method::PUT] {
+            assert_eq!(
+                client
+                    .request(method, url)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            client
+                .put(url)
+                .bearer_auth(&other_token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let unchanged_headers: Value = client
+        .get(&integrations_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for field in ["user_agent", "originator"] {
+        assert_eq!(unchanged_headers[field], custom_headers[field]);
+    }
+    let unchanged_features: Value = client
+        .get(&experiments_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        unchanged_features,
+        json!({"thread_id_header":true,"session_id_header":false,"codex_turn_state_header":false})
+    );
+    assert_eq!(
+        client
+            .put(&settings_url)
+            .bearer_auth(&other_token)
+            .json(&defaults)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
     server.abort();
     issuer_task.abort();
 }
