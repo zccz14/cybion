@@ -254,7 +254,7 @@ async fn history_appends_and_restart_recovery_use_only_core_columns() {
     );
     user_db(&state, &user, false, move |connection| {
         assert_core_history_schema(connection);
-        assert_eq!(load_thread(connection, &thread.id)?.status, "failed");
+        assert_eq!(load_thread(connection, &thread.id)?.status, "running");
         let context = compile_thread_context(connection, &thread.id, checkpoint)?;
         assert_eq!(
             context.items,

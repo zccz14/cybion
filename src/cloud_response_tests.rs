@@ -6,6 +6,7 @@ use tokio::io::AsyncWriteExt;
 async fn input_record(state: &AppState, user: &User, thread: &ThreadView) -> i64 {
     let id = thread.id.clone();
     user_db(state, user, false, move |connection| {
+        connection.execute("UPDATE threads SET status='running' WHERE id=?", [&id])?;
         Ok(insert_record(
             connection,
             &id,

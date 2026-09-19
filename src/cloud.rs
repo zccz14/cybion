@@ -13,7 +13,7 @@ use auth_mini_axum::{AuthMiniLayer, JwksCachePolicy};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, Request, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
     middleware::{Next, from_fn_with_state},
     response::{
@@ -34,10 +34,12 @@ use uuid::Uuid;
 
 mod admin_users;
 mod history;
+mod recovery;
 mod thread_controls;
 mod traffic;
 mod turn_state;
 mod worker_onboarding;
+mod worker_protocol;
 
 use thread_controls::{RequestOperation, latest_request_record_id, request_superseded};
 
@@ -57,7 +59,6 @@ const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the user's request. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
 const WORKER_ONLINE_SECONDS: i64 = 45;
-const WORKER_RESULT_TIMEOUT_SECONDS: usize = 15 * 60;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
 const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
@@ -65,7 +66,7 @@ const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 12;
+const USER_SCHEMA_VERSION: i64 = 13;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -129,6 +130,7 @@ enum ApiErrorKind {
     Ordinary,
     ContextOverflow,
     Cancelled,
+    Transient { retry_after_ms: Option<u64> },
 }
 
 impl ApiError {
@@ -188,6 +190,14 @@ impl ApiError {
         }
     }
 
+    fn transient(message: impl Into<String>, retry_after_ms: Option<u64>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+            kind: ApiErrorKind::Transient { retry_after_ms },
+        }
+    }
+
     fn cancelled() -> Self {
         Self {
             status: StatusCode::REQUEST_TIMEOUT,
@@ -228,7 +238,7 @@ impl From<rusqlite::Error> for ApiError {
 
 impl From<reqwest::Error> for ApiError {
     fn from(cause: reqwest::Error) -> Self {
-        Self::unavailable(format!("integration request failed: {cause}"))
+        Self::transient(format!("integration request failed: {cause}"), None)
     }
 }
 
@@ -237,6 +247,10 @@ impl From<reqwest::Error> for ApiError {
 struct Assets;
 
 pub async fn serve() -> Result<()> {
+    serve_at("0.0.0.0:1858".parse().expect("constant address is valid")).await
+}
+
+async fn serve_at(address: SocketAddr) -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("cannot install Rustls crypto provider"))?;
@@ -277,9 +291,9 @@ pub async fn serve() -> Result<()> {
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
         traffic,
     };
-    let address: SocketAddr = "0.0.0.0:1858".parse().expect("constant address is valid");
     tracing::info!(%address, "Cybion Cloud listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
+    tokio::spawn(recovery::supervise(state.clone()));
     axum::serve(listener, app(state)).await?;
     Ok(())
 }
@@ -470,15 +484,6 @@ fn recover_interrupted_requests(data_dir: &Path) -> Result<()> {
                  WHERE thread_id=? AND status='in_flight'",
                 params![content, finished_at, &thread_id],
             )?;
-            transaction.execute(
-                "UPDATE worker_calls SET status='failed',error=?,completed_at=?
-                 WHERE thread_id=? AND status IN ('queued','delivered')",
-                params![content, finished_at, &thread_id],
-            )?;
-            transaction.execute(
-                "UPDATE threads SET status='failed',updated_at=? WHERE id=?",
-                params![finished_at, &thread_id],
-            )?;
         }
         transaction.commit()?;
     }
@@ -554,6 +559,10 @@ fn app(state: AppState) -> Router {
             "/api/workers/{id}",
             get(read_worker).patch(update_worker).delete(delete_worker),
         )
+        .route(
+            "/api/workers/{id}/upgrade",
+            post(worker_protocol::request_upgrade),
+        )
         .route_layer(from_fn_with_state(state.clone(), browser_auth));
 
     let external_api = Router::new()
@@ -571,7 +580,7 @@ fn app(state: AppState) -> Router {
         )
         .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/events",
-            get(worker_events),
+            get(worker_protocol::events),
         )
         .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/heartbeat",
@@ -585,6 +594,11 @@ fn app(state: AppState) -> Router {
             "/worker/v1/users/{user_id}/workers/{worker_id}/calls/{call_id}/result",
             post(worker_result),
         )
+        .route(
+            "/worker/v1/users/{user_id}/workers/{worker_id}/upgrade",
+            post(worker_protocol::upgrade_result),
+        )
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .route_layer(from_fn_with_state(state.clone(), traffic::worker_auth));
 
     Router::new()
@@ -1127,6 +1141,27 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                 .map_err(ApiError::internal)?;
         }
     }
+    for (table, name, definition) in [
+        ("threads", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("threads", "next_retry_at", "INTEGER"),
+        ("workers", "boot_id", "TEXT"),
+        ("worker_calls", "worker_boot_id", "TEXT"),
+        ("workers", "upgrade_id", "TEXT"),
+        ("workers", "upgrade_version", "TEXT"),
+        ("workers", "upgrade_status", "TEXT"),
+        ("workers", "upgrade_error", "TEXT"),
+    ] {
+        let exists: bool = transaction.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?)"),
+            [name],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {name} {definition}"
+            ))?;
+        }
+    }
     transaction.execute_batch(worker_onboarding::CHECK_SCHEMA)?;
     let has_responses_call_id: bool = transaction
         .query_row(
@@ -1505,6 +1540,9 @@ struct UpdateWorkerInput {
 
 #[derive(Clone, Serialize)]
 struct WorkerView {
+    version: Option<String>,
+    can_upgrade: bool,
+    upgrade: Option<worker_protocol::UpgradeView>,
     id: String,
     label: String,
     created_at: i64,
@@ -1569,10 +1607,11 @@ struct WorkerPairing {
     access_token: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct WorkerCall {
     id: String,
     thread_id: String,
+    #[serde(rename = "input_record_idx")]
     input_record_id: Option<i64>,
     name: String,
     arguments: Value,
@@ -2810,7 +2849,7 @@ async fn list_workers(
 ) -> Result<Json<Vec<WorkerView>>, ApiError> {
     let workers = user_db(&state, &identity.user, true, |connection| {
         let mut statement = connection.prepare(
-            "SELECT id,label,created_at,last_seen_at,CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json FROM workers ORDER BY created_at DESC",
+            "SELECT id,label,created_at,last_seen_at,CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error FROM workers ORDER BY created_at DESC",
         )?;
         let rows = statement.query_map([now() - WORKER_ONLINE_SECONDS], |row| {
             let resource = row
@@ -2823,6 +2862,9 @@ async fn list_workers(
                 last_seen_at: row.get(3)?,
                 status: row.get(4)?,
                 resource,
+                version: row.get(6)?,
+                can_upgrade: row.get::<_,Option<String>>(7)?.is_some(),
+                upgrade: worker_protocol::upgrade_view(row)?,
             })
         })?;
         let mut workers = Vec::new();
@@ -3070,7 +3112,7 @@ async fn read_worker(
         connection
             .query_row(
                 "SELECT id,label,created_at,last_seen_at,
-                        CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json
+                        CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error
                  FROM workers WHERE id=?",
                 params![now() - WORKER_ONLINE_SECONDS, &id],
                 |row| {
@@ -3084,6 +3126,9 @@ async fn read_worker(
                         last_seen_at: row.get(3)?,
                         status: row.get(4)?,
                         resource,
+                        version: row.get(6)?,
+                        can_upgrade: row.get::<_,Option<String>>(7)?.is_some(),
+                        upgrade: worker_protocol::upgrade_view(row)?,
                     })
                 },
             )
@@ -3112,7 +3157,7 @@ async fn update_worker(
         connection
             .query_row(
                 "SELECT id,label,created_at,last_seen_at,
-                        CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json
+                        CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error
                  FROM workers WHERE id=?",
                 params![now() - WORKER_ONLINE_SECONDS, &id],
                 |row| {
@@ -3126,6 +3171,9 @@ async fn update_worker(
                         last_seen_at: row.get(3)?,
                         status: row.get(4)?,
                         resource,
+                        version: row.get(6)?,
+                        can_upgrade: row.get::<_,Option<String>>(7)?.is_some(),
+                        upgrade: worker_protocol::upgrade_view(row)?,
                     })
                 },
             )
@@ -3373,7 +3421,10 @@ async fn process_request(
     })
     .await;
     let result = match loaded {
-        Ok((thread, integrations)) if integrations_ready(&integrations) => {
+        Ok((thread, integrations))
+            if !integrations.openai_consumer_secret.is_empty()
+                && !integrations.openai_base_url.is_empty() =>
+        {
             if operation == RequestOperation::Compact {
                 thread_controls::compact_request(
                     &state,
@@ -3579,12 +3630,13 @@ async fn finalize_request_success(
             transaction.commit()?;
             return Ok(false);
         }
+        let previous = load_thread(&transaction, &thread_id)?.status;
         let changed = transaction.execute(
             "UPDATE threads SET status='idle',updated_at=? WHERE id=? AND status='running'",
             params![now(), &thread_id],
         )?;
         transaction.commit()?;
-        Ok(changed != 0)
+        Ok(changed != 0 || previous == "idle")
     })
     .await
 }
@@ -4014,7 +4066,6 @@ fn truncate(value: &str, limit: usize) -> String {
 struct ResponsesResult {
     value: Value,
     output_items: Vec<ResponseItem>,
-    output_record_ids: Vec<i64>,
     tool_calls: Vec<PendingToolCall>,
 }
 
@@ -4028,24 +4079,26 @@ async fn request_agent(
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(ThreadView, IntegrationSettings, String), (ThreadView, Box<ApiError>)> {
     let mut checkpoint_retries = 0;
-    let mut idx_tail = user_db(state, user, false, {
-        let thread_id = thread.id.clone();
-        move |connection| {
-            thread_controls::request_context_tail(connection, &thread_id, source_record_idx)
-        }
-    })
-    .await
-    .map_err(|error| (thread.clone(), Box::new(error)))?;
     loop {
         if *cancellation.borrow() {
             return Err((thread.clone(), Box::new(ApiError::cancelled())));
         }
+        recovery::wait_retry(state, user, &thread.id, source_record_idx, cancellation)
+            .await
+            .map_err(|e| (thread.clone(), Box::new(e)))?;
+        recovery::settle_tools(state, user, thread, source_record_idx, cancellation)
+            .await
+            .map_err(|e| (thread.clone(), Box::new(e)))?;
+        let current = read_thread_for(state, user, thread.id.clone())
+            .await
+            .map_err(|e| (thread.clone(), Box::new(e)))?;
+        let thread = &current;
         let context = user_db(state, user, false, {
-            let thread_id = thread.id.clone();
-            move |connection| compile_thread_context(connection, &thread_id, idx_tail)
+            let id = thread.id.clone();
+            move |c| recovery::current_context(c, &id, source_record_idx)
         })
         .await
-        .map_err(|error| (thread.clone(), Box::new(error)))?;
+        .map_err(|e| (thread.clone(), Box::new(e)))?;
         let workers = user_db(state, user, false, |connection| {
             registered_workers(connection)
         })
@@ -4081,7 +4134,7 @@ async fn request_agent(
                 if error.is_context_overflow() && checkpoint_retries < CHECKPOINT_RETRY_LIMIT =>
             {
                 checkpoint_retries += 1;
-                idx_tail = compact_thread_context(
+                compact_thread_context(
                     state,
                     user,
                     thread,
@@ -4094,13 +4147,20 @@ async fn request_agent(
                 .map_err(|error| (thread.clone(), Box::new(error)))?;
                 continue;
             }
-            Err(error) => return Err((thread.clone(), Box::new(error))),
+            Err(error) => {
+                if recovery::retry(state, user, &thread.id, source_record_idx, &error)
+                    .await
+                    .map_err(|e| (thread.clone(), Box::new(e)))?
+                {
+                    continue;
+                }
+                return Err((thread.clone(), Box::new(error)));
+            }
             Ok(response) => response,
         };
         let ResponsesResult {
             value: response,
             output_items,
-            output_record_ids: output_ids,
             tool_calls: calls,
         } = response;
         if response.get("output").and_then(Value::as_array).is_none() {
@@ -4115,8 +4175,10 @@ async fn request_agent(
         if *cancellation.borrow() {
             return Err((thread.clone(), Box::new(ApiError::cancelled())));
         }
-        if let Some(last_id) = output_ids.last().copied() {
-            idx_tail = last_id;
+        for call in &calls {
+            if let PendingToolCall::Answered(record_id) = call {
+                tracing::debug!(record_id, "Controller tool result committed");
+            }
         }
         if calls.is_empty() && response.get("end_turn").and_then(Value::as_bool) == Some(false) {
             continue;
@@ -4129,30 +4191,8 @@ async fn request_agent(
                 .collect::<String>();
             return Ok((thread.clone(), integrations.clone(), text));
         }
-        for call in calls {
-            if *cancellation.borrow() {
-                return Err((thread.clone(), Box::new(ApiError::cancelled())));
-            }
-            let record_id = match call {
-                PendingToolCall::Answered(id) => id,
-                PendingToolCall::Worker {
-                    id,
-                    call_id,
-                    output_type,
-                } => {
-                    let (result, output_id) = wait_worker_result(state, user, &id, cancellation)
-                        .await
-                        .map_err(|error| (thread.clone(), Box::new(error)))?;
-                    if let Some(id) = output_id {
-                        id
-                    } else {
-                        append_tool_output_item(state, user, thread, source_record_idx, &json!({"type": output_type, "call_id": call_id, "output": result.to_string()})).await
-                            .map_err(|error| (thread.clone(), Box::new(error)))?
-                    }
-                }
-            };
-            idx_tail = idx_tail.max(record_id);
-        }
+        // Tool state is durable; settlement at the top of the loop is also
+        // the recovery path after a Controller restart.
     }
 }
 
@@ -4194,6 +4234,16 @@ async fn append_response_output_items(
         };
         let mut ids = Vec::with_capacity(records.len());
         for payload in records {
+            if !superseded && let Some(call)=payload.get("call_id").and_then(Value::as_str) {
+                let existing:Option<(i64,String)>=transaction.query_row("SELECT id,payload FROM history_records WHERE thread_id=? AND id>? AND kind='response_output' AND json_extract(payload,'$.call_id')=? ORDER BY id LIMIT 1",params![thread_id,input_record_id,call],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                if let Some((id,previous))=existing {
+                    if serde_json::from_str::<Value>(&previous).map_err(ApiError::internal)? != payload {return Err(ApiError::unavailable("provider reused a tool call ID with different content"));}
+                    ids.push(id);continue;
+                }
+            }
+            if !superseded {
+                enqueue_output_call(&transaction, &thread_id, input_record_id, &payload)?;
+            }
             ids.push(persist_history_record(
                 &transaction,
                 HistoryRecordInsert {
@@ -4222,6 +4272,9 @@ async fn append_tool_output_item(
     let created_at = now();
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let call=payload.get("call_id").and_then(Value::as_str);
+        let existing:Option<i64>=transaction.query_row("SELECT output_record_id FROM worker_calls WHERE thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NOT NULL",params![thread_id,input_record_id,call],|r|r.get(0)).optional()?;
+        if let Some(id)=existing {return Ok(id);}
         let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
         let kind = if superseded {
             "activity"
@@ -4237,6 +4290,7 @@ async fn append_tool_output_item(
                 created_at,
             },
         )?;
+        transaction.execute("UPDATE worker_calls SET output_record_id=? WHERE thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NULL",params![id,thread_id,input_record_id,call])?;
         transaction.commit()?;
         Ok(id)
     })
@@ -4333,6 +4387,8 @@ async fn persist_thread_checkpoint(
                 created_at: now(),
             },
         )?;
+        let manual:bool=transaction.query_row("SELECT kind='activity' AND json_extract(payload,'$.action')='compact' FROM history_records WHERE id=?",[source_record_idx],|r|r.get::<_,Option<bool>>(0))?.unwrap_or(false);
+        if manual {transaction.execute("UPDATE threads SET status='idle',retry_count=0,next_retry_at=NULL,updated_at=? WHERE id=? AND status='running'",params![now(),&thread_id])?;}
         transaction.commit()?;
         Ok(id)
     })
@@ -4947,6 +5003,7 @@ async fn send_responses_request(
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     if !status.is_success() {
+        let retry_after_ms = recovery::retry_after(response.headers());
         let body = match read_response_body(response, &mut cancellation).await {
             Ok(body) => body,
             Err(error) => {
@@ -4977,6 +5034,11 @@ async fn send_responses_request(
         );
         let error = if status == StatusCode::PAYLOAD_TOO_LARGE || context_overflow_response(&body) {
             ApiError::context_overflow(message)
+        } else if (status.is_server_error() || matches!(status.as_u16(), 408 | 429))
+            && !body.contains("insufficient_quota")
+            && !body.contains("usage_not_included")
+        {
+            ApiError::transient(message, retry_after_ms)
         } else {
             ApiError::unavailable(message)
         };
@@ -5141,6 +5203,20 @@ fn stream_api_error(error: ResponsesStreamError) -> ApiError {
     match error {
         ResponsesStreamError::Cancelled => ApiError::cancelled(),
         ResponsesStreamError::ContextOverflow(message) => ApiError::context_overflow(message),
+        ResponsesStreamError::RateLimitExceeded {
+            message,
+            retry_after_ms,
+        }
+        | ResponsesStreamError::Retryable {
+            message,
+            retry_after_ms,
+        } => ApiError::transient(message, retry_after_ms),
+        error @ (ResponsesStreamError::Timeout
+        | ResponsesStreamError::Closed
+        | ResponsesStreamError::Sse(_)
+        | ResponsesStreamError::ServerOverloaded(_)) => {
+            ApiError::transient(format!("upstream Responses stream: {error}"), None)
+        }
         error => ApiError::unavailable(format!("upstream Responses stream: {error}")),
     }
 }
@@ -5152,9 +5228,32 @@ async fn save_response_state(
     response: &ResponseState,
 ) -> Result<(), ApiError> {
     let snapshot = serde_json::to_string(response).map_err(ApiError::internal)?;
-    user_db(state, &spec.user, false, move |connection| {
-        connection.execute("INSERT INTO response_states(audit_id,snapshot) VALUES(?,?) ON CONFLICT(audit_id) DO UPDATE SET snapshot=excluded.snapshot", params![audit_id, snapshot])?;
-        Ok(())
+    let value = response.value();
+    let valid = response.completed
+        && response.error.is_none()
+        && !context_overflow_value(&value)
+        && value.get("error").is_none_or(|v| v.is_null());
+    let has_calls = response.output.iter().any(|out| {
+        matches!(
+            &out.item,
+            ResponseItem::FunctionCall(_) | ResponseItem::CustomToolCall(_)
+        ) || matches!(&out.item,ResponseItem::ToolSearchCall(call) if call.execution=="client")
+    });
+    let finished =
+        valid && spec.request_kind == "inference" && !has_calls && response.end_turn != Some(false);
+    let spec = spec.clone();
+    let (input_tokens, output_tokens, cached_tokens) = response_usage(&value);
+    user_db(state, &spec.user.clone(), false, move |connection| {
+        let tx=connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("INSERT INTO response_states(audit_id,snapshot) VALUES(?,?) ON CONFLICT(audit_id) DO UPDATE SET snapshot=excluded.snapshot", params![audit_id, snapshot])?;
+        if valid {
+            tx.execute("UPDATE reasoning_audits SET status='completed',finished_at=?,input_tokens=?,output_tokens=?,cached_tokens=? WHERE id=? AND status='in_flight'",params![now(),input_tokens,output_tokens,cached_tokens,audit_id])?;
+            if let Some(input)=spec.input_record_id && !request_superseded(&tx,&spec.thread_id,input)? {
+                tx.execute("UPDATE threads SET retry_count=0,next_retry_at=NULL WHERE id=?",[&spec.thread_id])?;
+                if finished {tx.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=? AND status='running'",params![now(),spec.thread_id])?;}
+            }
+        }
+        tx.commit()?;Ok(())
     }).await
 }
 
@@ -5241,57 +5340,23 @@ async fn consume_response_events(
                     .map(|item| item.item.clone())
                     .collect(),
                 tool_calls: std::mem::take(&mut tool_calls),
-                output_record_ids: response
-                    .output
-                    .iter()
-                    .filter_map(|item| item.record_id)
-                    .collect(),
+
             });
         }
     }
     }.await;
-    if let Err(error) = &mut result {
-        let dispatched = tool_calls
+    if let Err(error) = &mut result
+        && tool_calls
             .iter()
-            .any(|call| matches!(call, PendingToolCall::Worker { .. }));
-        if dispatched && error.is_context_overflow() {
-            // A tool may already have run. Do not automatically repeat a request
-            // with side effects after the provider changes its terminal status.
-            error.kind = ApiErrorKind::Ordinary;
-        }
-        if let Some(spec) = audit {
-            abort_response_tools(state, &spec.user, &tool_calls, &error.message).await;
-        }
+            .any(|call| matches!(call, PendingToolCall::Worker { .. }))
+        && error.is_context_overflow()
+    {
+        // Recovery settles committed calls before making another model request.
+        error.kind = ApiErrorKind::Transient {
+            retry_after_ms: None,
+        };
     }
     result
-}
-
-async fn abort_response_tools(
-    state: &AppState,
-    user: &User,
-    calls: &[PendingToolCall],
-    reason: &str,
-) {
-    let ids = calls
-        .iter()
-        .filter_map(|call| match call {
-            PendingToolCall::Worker { id, .. } => Some(id.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if ids.is_empty() {
-        return;
-    }
-    let reason = reason.to_owned();
-    let result = user_db(state, user, false, move |connection| {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for id in ids { transaction.execute("UPDATE worker_calls SET status='failed',error=?,completed_at=? WHERE id=? AND status IN ('queued','delivered')", params![reason, now(), id])?; }
-        transaction.commit()?;
-        Ok(())
-    }).await;
-    if let Err(error) = result {
-        tracing::warn!(error = %error.message, "could not stop Worker calls after response failure");
-    }
 }
 
 async fn send_with_cancellation(
@@ -5772,66 +5837,118 @@ async fn enqueue_worker_call(
     name: String,
     arguments: Value,
 ) -> Result<String, ApiError> {
-    let call_id = Uuid::new_v4().to_string();
-    let arguments_json = serde_json::to_string(&arguments).map_err(ApiError::internal)?;
-    let worker_id = record_id(worker_id)?;
+    let worker_id = worker_id.to_owned();
     let thread_id = thread_id.to_owned();
-    let call_id_for_db = call_id.clone();
-    user_db(state, user, false, move |connection| {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
-        if superseded { return Err(ApiError::cancelled()); }
-        let snapshot = transaction
-            .query_row(
-                "SELECT label,hostname,version,resource_json,status,last_seen_at
-                 FROM workers WHERE id=?",
-                [&worker_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| ApiError::not_found("selected Worker not found"))?;
-        if snapshot.4 != "online"
-            || snapshot
-                .5
-                .is_none_or(|last_seen| last_seen < now() - WORKER_ONLINE_SECONDS)
-        {
-            return Err(ApiError::conflict("selected Worker is offline"));
-        }
-        transaction.execute(
-            "INSERT INTO worker_calls(
-                id,responses_call_id,responses_output_type,worker_id,thread_id,input_record_id,name,arguments_json,status,
-                created_at,worker_label,worker_hostname,worker_version,worker_resource_json
-             ) VALUES(?,?,?,?,?,?,?,?, 'queued', ?,?,?,?,?)",
-            params![
-                &call_id_for_db,
-                responses_call_id,
-                responses_output_type,
-                &worker_id,
-                &thread_id,
-                input_record_id,
-                name,
-                arguments_json,
-                now(),
-                snapshot.0,
-                snapshot.1,
-                snapshot.2,
-                snapshot.3,
-            ],
+    user_db(state, user, false, move |c| {
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = enqueue_worker_call_tx(
+            &tx,
+            &worker_id,
+            &thread_id,
+            input_record_id,
+            &responses_call_id,
+            &responses_output_type,
+            &name,
+            &arguments,
         )?;
-        transaction.commit()?;
-        Ok(())
+        tx.commit()?;
+        Ok(id)
     })
-    .await?;
-    Ok(call_id)
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_worker_call_tx(
+    c: &Connection,
+    worker_id: &str,
+    thread_id: &str,
+    input_record_id: i64,
+    responses_call_id: &str,
+    responses_output_type: &str,
+    name: &str,
+    arguments: &Value,
+) -> Result<String, ApiError> {
+    if request_superseded(c, thread_id, input_record_id)? {
+        return Err(ApiError::cancelled());
+    }
+    let arguments_json = serde_json::to_string(arguments).map_err(ApiError::internal)?;
+    let existing:Option<(String,String,String,String)>=c.query_row("SELECT id,worker_id,name,arguments_json FROM worker_calls WHERE thread_id=? AND input_record_id=? AND responses_call_id=? LIMIT 1",params![thread_id,input_record_id,responses_call_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    if let Some((id, previous_worker, previous_name, previous_args)) = existing {
+        if previous_worker != worker_id || previous_name != name || previous_args != arguments_json
+        {
+            return Err(ApiError::bad_request(
+                "repeated tool call ID has different arguments",
+            ));
+        }
+        return Ok(id);
+    }
+    let worker_id = record_id(worker_id)?;
+    let snapshot=c.query_row("SELECT label,hostname,version,resource_json,status,last_seen_at FROM workers WHERE id=?",[&worker_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<i64>>(5)?))).optional()?.ok_or_else(||ApiError::not_found("selected Worker not found"))?;
+    if snapshot.4 != "online"
+        || snapshot
+            .5
+            .is_none_or(|seen| seen < now() - WORKER_ONLINE_SECONDS)
+    {
+        return Err(ApiError::conflict("selected Worker is offline"));
+    }
+    let id = Uuid::new_v4().to_string();
+    c.execute("INSERT INTO worker_calls(id,responses_call_id,responses_output_type,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,worker_label,worker_hostname,worker_version,worker_resource_json) VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",params![id,responses_call_id,responses_output_type,worker_id,thread_id,input_record_id,name,arguments_json,now(),snapshot.0,snapshot.1,snapshot.2,snapshot.3])?;
+    Ok(id)
+}
+
+fn enqueue_output_call(
+    c: &Connection,
+    thread: &str,
+    input: i64,
+    item: &Value,
+) -> Result<(), ApiError> {
+    let Some(kind) = item.get("type").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if !matches!(kind, "function_call" | "custom_tool_call") {
+        return Ok(());
+    }
+    let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+    if !matches!(name, "bash" | "browser_control" | "computer_use") {
+        return Ok(());
+    }
+    let raw = item
+        .get(if kind == "function_call" {
+            "arguments"
+        } else {
+            "input"
+        })
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Ok((worker, args)) =
+        prepare_worker_arguments(name, item.get("namespace").and_then(Value::as_str), raw)
+    else {
+        return Ok(());
+    };
+    let call = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match enqueue_worker_call_tx(
+        c,
+        &worker,
+        thread,
+        input,
+        call,
+        if kind == "function_call" {
+            "function_call_output"
+        } else {
+            "custom_tool_call_output"
+        },
+        name,
+        &args,
+    ) {
+        Ok(_) => Ok(()),
+        // Invalid/offline calls are answered through the normal tool handler;
+        // only storage failures must roll back the model-output transaction.
+        Err(e) if e.status.is_client_error() && !e.is_cancelled() => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 async fn wait_worker_result(
@@ -5841,7 +5958,7 @@ async fn wait_worker_result(
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(Value, Option<i64>), ApiError> {
     let call_id = call_id.to_owned();
-    for _ in 0..WORKER_RESULT_TIMEOUT_SECONDS {
+    loop {
         if *cancellation.borrow() {
             cancel_worker_call(state, user, &call_id).await;
             return Err(ApiError::cancelled());
@@ -5896,7 +6013,6 @@ async fn wait_worker_result(
             }
         }
     }
-    Err(ApiError::unavailable("Worker tool call timed out"))
 }
 
 async fn cancel_worker_call(state: &AppState, user: &User, call_id: &str) {
@@ -6035,86 +6151,30 @@ async fn worker_identity(
     Ok(user)
 }
 
+#[cfg(test)]
 fn claim_worker_call(
     connection: &mut Connection,
     worker_id: &str,
 ) -> Result<Option<WorkerCall>, ApiError> {
-    if let Some(check) = worker_onboarding::claim_check(connection, worker_id)? {
-        return Ok(Some(check));
-    }
-    let transaction = connection.transaction()?;
-    let call: Option<(String, String, Option<i64>, String, String)> = transaction
-        .query_row(
-            "SELECT id,thread_id,input_record_id,name,arguments_json FROM worker_calls WHERE worker_id=? AND status='queued' ORDER BY created_at,id LIMIT 1",
-            [worker_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        )
-        .optional()?;
-    let Some((id, thread_id, input_record_id, name, arguments_json)) = call else {
-        transaction.commit()?;
-        return Ok(None);
-    };
-    transaction.execute(
-        "UPDATE worker_calls SET status='delivered',started_at=? WHERE id=? AND status='queued'",
-        params![now(), &id],
-    )?;
-    transaction.commit()?;
-    let arguments = serde_json::from_str(&arguments_json)
-        .map_err(|_| ApiError::internal("stored Worker arguments are invalid"))?;
-    Ok(Some(WorkerCall {
-        id,
-        thread_id,
-        input_record_id,
-        name,
-        arguments,
-    }))
-}
-
-async fn worker_events(
-    State(state): State<AppState>,
-    AxumPath((_user_id, worker_id)): AxumPath<(String, String)>,
-    axum::Extension(user): axum::Extension<User>,
-) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let worker_id = record_id(&worker_id)?;
-    let event_state = state.clone();
-    let stream = async_stream::stream! {
-        loop {
-            let worker_id = worker_id.clone();
-            match user_db(&event_state, &user, false, move |connection| claim_worker_call(connection, &worker_id)).await {
-                Ok(Some(call)) => {
-                    let payload = json!({
-                        "id": call.id,
-                        "thread_id": call.thread_id,
-                        "input_record_idx": call.input_record_id,
-                        "name": call.name,
-                        "arguments": call.arguments,
-                    });
-                    yield Ok(Event::default().event("tool_call").data(payload.to_string()));
-                }
-                Ok(None) => yield Ok(Event::default().event("heartbeat").data("{}")),
-                Err(error) => {
-                    tracing::warn!(error = %error.message, "Worker event stream ended");
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    };
-    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
+    worker_protocol::claim(connection, worker_id, None)
 }
 
 async fn worker_heartbeat(
     State(state): State<AppState>,
+    headers: HeaderMap,
     AxumPath((_user_id, worker_id)): AxumPath<(String, String)>,
     axum::Extension(user): axum::Extension<User>,
     Json(input): Json<WorkerHeartbeat>,
 ) -> Result<Json<Value>, ApiError> {
     let worker_id = record_id(&worker_id)?;
+    let boot = worker_protocol::boot_header(&headers)?;
     user_db(&state, &user, false, move |connection| {
+        if !worker_protocol::liveness_report_is_current(connection, &worker_id, boot.as_deref())? {return Ok(());}
         connection.execute(
             "UPDATE workers SET status='online',last_seen_at=?,hostname=?,version=? WHERE id=?",
-            params![now(), input.hostname, input.version, worker_id],
+            params![now(), input.hostname, input.version, &worker_id],
         )?;
+        connection.execute("UPDATE workers SET upgrade_status='completed',upgrade_error=NULL WHERE id=? AND upgrade_version IS NOT NULL AND ltrim(upgrade_version,'v')=ltrim(version,'v')", [&worker_id])?;
         Ok(())
     })
     .await?;
@@ -6123,13 +6183,18 @@ async fn worker_heartbeat(
 
 async fn worker_resources(
     State(state): State<AppState>,
+    headers: HeaderMap,
     AxumPath((_user_id, worker_id)): AxumPath<(String, String)>,
     axum::Extension(user): axum::Extension<User>,
     Json(resource): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let worker_id = record_id(&worker_id)?;
+    let boot = worker_protocol::boot_header(&headers)?;
     let resource = serde_json::to_string(&resource).map_err(ApiError::internal)?;
     user_db(&state, &user, false, move |connection| {
+        if !worker_protocol::liveness_report_is_current(connection, &worker_id, boot.as_deref())? {
+            return Ok(());
+        }
         connection.execute(
             "UPDATE workers SET status='online',last_seen_at=?,resource_json=? WHERE id=?",
             params![now(), resource, worker_id],
@@ -6168,6 +6233,13 @@ async fn worker_result(
             return Err(ApiError::not_found("Worker call not found"));
         };
         if existing_output_id.is_some() {
+            let saved:Option<String>=transaction.query_row("SELECT result_json FROM worker_calls WHERE id=?",[&call_id],|r|r.get(0))?;
+            if let Some(saved)=saved {
+                if saved!=result_json {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
+            } else {
+                persist_history_record(&transaction,HistoryRecordInsert{thread_id:&thread_id,kind:"activity",payload:&json!({"type":"late_worker_result","call_id":responses_call_id,"result":input.result}),created_at:now()})?;
+                transaction.execute("UPDATE worker_calls SET result_json=? WHERE id=?",params![result_json,call_id])?;
+            }
             transaction.commit()?;
             return Ok(());
         }

@@ -10,12 +10,13 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { formattedTime } from "@/lib/time"
-import { checkReady, deviceStatus, downloadUrl, installCommand, normalizeCode, runCommand, validCode, type Check, type Device, type Pairing, type Release } from "@/lib/worker-onboarding"
+import { checkReady, upgradeAvailable, deviceStatus, downloadUrl, installCommand, normalizeCode, runCommand, validCode, type Check, type Device, type Pairing, type Release } from "@/lib/worker-onboarding"
 
 type Language = "zh" | "en"
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 const copy = {
   zh: {
+    workerVersion: "运行版本", versionUnknown: "等待版本上报", upgrade: "升级 Worker", upgradeConfirm: "升级将等待正在执行的任务与结果回传结束，校验官方发布包后重启 Worker，保留现有配置。确认升级此设备？", upgradePending: "正在等待任务结束或安装升级…", upgradeCompleted: "已确认目标版本上线", upgradeFailed: "升级失败，当前版本保留", manualUpgrade: "0.1.x 需要先手动安装 0.2.0，之后可在此远程升级。",
     title: "连接设备", description: "让 Cybion 在你的电脑或服务器上执行任务。从安装到验证，一步步完成连接。",
     add: "连接新设备", devices: "我的设备", empty: "还没有连接的设备。", local: "当前电脑", remote: "另一台电脑或服务器",
     target: "1. 安装并启动", targetHint: "选择目标设备的系统和处理器。浏览器无法可靠识别目标设备架构，请确认后下载。",
@@ -45,6 +46,7 @@ const copy = {
     legacyCreate: "生成手动配置", configDownload: "下载 worker.toml", configSaved: "保存到目标设备配置目录后运行 Worker。页面关闭或刷新后无法重新显示凭证；丢失时移除该设备并重新配对。",
   },
   en: {
+    workerVersion: "Running version", versionUnknown: "Waiting for version report", upgrade: "Upgrade Worker", upgradeConfirm: "Wait for running tasks and result uploads, verify the official release, then restart Worker with its existing configuration. Upgrade this device?", upgradePending: "Waiting for tasks to finish or installing…", upgradeCompleted: "Target version confirmed online", upgradeFailed: "Upgrade failed; current version retained", manualUpgrade: "Install 0.2.0 manually once on a 0.1.x Worker; subsequent upgrades can be requested here.",
     title: "Connect a device", description: "Run Cybion tasks on your computer or server. Follow installation, authorization and verification in one place.",
     add: "Connect a new device", devices: "My devices", empty: "No devices connected yet.", local: "This computer", remote: "Another computer or server",
     target: "1. Install and start", targetHint: "Choose the target device's OS and processor. A browser cannot reliably detect its architecture; verify before downloading.",
@@ -133,6 +135,7 @@ export function WorkerConnections({ language, request, sessionId }: { language: 
   const cancel = useMutation({ mutationFn: () => request(`/api/worker-pairings/${routeCode}`, { method: "DELETE" }), onSuccess: () => { void pairing.refetch() } })
   const rename = useMutation({ mutationFn: ({ id, label }: { id: string; label: string }) => request(`/api/workers/${id}`, { method: "PATCH", body: JSON.stringify({ label }) }), onSuccess: () => { setEditing(null); void client.invalidateQueries({ queryKey: ["workers"] }) } })
   const remove = useMutation({ mutationFn: (id: string) => request(`/api/workers/${id}`, { method: "DELETE" }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers"] }) } })
+  const upgrade = useMutation({ mutationFn: (id: string) => request(`/api/workers/${id}/upgrade`, { method: "POST" }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers"] }) } })
   const pairedDevice = workers.data?.find((device) => device.id === pairing.data?.worker_id)
   const wizard = show || workers.data?.length === 0
   const currentStep = pairing.data?.status === "approved" ? 3 : routeCode ? 2 : 1
@@ -167,9 +170,9 @@ export function WorkerConnections({ language, request, sessionId }: { language: 
       {workers.data && workers.data.length > 0 && <Button className="self-start" variant="ghost" onClick={() => { setShow(false); setParams({}) }}>{t.close}</Button>}
     </>}
     <Card><CardHeader><CardTitle>{t.devices}</CardTitle></CardHeader><CardContent className="space-y-3">
-      <ErrorNotice error={rename.error || remove.error} />
+      <ErrorNotice error={rename.error || remove.error || upgrade.error} />
       {workers.isLoading && <Spinner />}{workers.data?.length === 0 && <p className="text-sm text-muted-foreground">{t.empty}</p>}
-      {workers.data?.map((device) => <div key={device.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-center gap-3"><MonitorIcon className="size-4" /><div className="min-w-0 flex-1">{editing === device.id ? <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (editName.trim()) rename.mutate({ id: device.id, label: editName.trim() }) }}><Input aria-label={t.name} value={editName} maxLength={80} onChange={(e) => setEditName(e.target.value)} /><Button size="sm" disabled={rename.isPending || !editName.trim()}>{t.save}</Button></form> : <p className="font-medium">{device.label}</p>}<p className="mt-1 text-xs text-muted-foreground">{device.last_seen_at ? t.lastSeen : t.created}: {formattedTime(language, device.last_seen_at ?? device.created_at)}</p></div><Badge variant="outline">{t[deviceStatus(device)]}</Badge><Button size="sm" variant="ghost" onClick={() => setExpanded(expanded === device.id ? null : device.id)}>{t.checkButton}</Button><Button size="sm" variant="ghost" onClick={() => { setEditing(device.id); setEditName(device.label) }}>{t.rename}</Button><Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => { if (window.confirm(t.removeConfirm)) remove.mutate(device.id) }}>{t.remove}</Button></div>{expanded === device.id && <div className="mt-4 border-t pt-4"><ConnectionCheck device={device} language={language} request={request} sessionId={sessionId} /><p className="mt-4 text-xs text-muted-foreground">{t.logs}</p></div>}</div>)}
+      {workers.data?.map((device) => <div key={device.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-center gap-3"><MonitorIcon className="size-4" /><div className="min-w-0 flex-1">{editing === device.id ? <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (editName.trim()) rename.mutate({ id: device.id, label: editName.trim() }) }}><Input aria-label={t.name} value={editName} maxLength={80} onChange={(e) => setEditName(e.target.value)} /><Button size="sm" disabled={rename.isPending || !editName.trim()}>{t.save}</Button></form> : <p className="font-medium">{device.label}</p>}<p className="mt-1 text-xs text-muted-foreground">{device.last_seen_at ? t.lastSeen : t.created}: {formattedTime(language, device.last_seen_at ?? device.created_at)}</p></div><Badge variant="outline">{t[deviceStatus(device)]}</Badge><Badge variant="outline">{t.workerVersion}: {device.version ?? t.versionUnknown}</Badge><Button size="sm" variant="outline" disabled={upgrade.isPending || !upgradeAvailable(device, release.data)} onClick={() => { if (window.confirm(t.upgradeConfirm)) upgrade.mutate(device.id) }}>{t.upgrade}{release.data ? ` → ${release.data.version}` : ""}</Button><Button size="sm" variant="ghost" onClick={() => setExpanded(expanded === device.id ? null : device.id)}>{t.checkButton}</Button><Button size="sm" variant="ghost" onClick={() => { setEditing(device.id); setEditName(device.label) }}>{t.rename}</Button><Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => { if (window.confirm(t.removeConfirm)) remove.mutate(device.id) }}>{t.remove}</Button></div>{!device.can_upgrade && <p className="mt-2 text-xs text-muted-foreground">{t.manualUpgrade}</p>}{device.upgrade && <p role="status" className="mt-2 text-sm">{device.upgrade.status === "completed" ? t.upgradeCompleted : device.upgrade.status === "failed" ? t.upgradeFailed : t.upgradePending} {device.upgrade.error}</p>}{expanded === device.id && <div className="mt-4 border-t pt-4"><ConnectionCheck device={device} language={language} request={request} sessionId={sessionId} /><p className="mt-4 text-xs text-muted-foreground">{t.logs}</p></div>}</div>)}
     </CardContent></Card>
   </main>
 }

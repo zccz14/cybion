@@ -40,3 +40,15 @@ test("late approval updates only the code actually approved, not the currently o
   const source = readFileSync(new URL("../src/components/worker-connections.tsx", import.meta.url), "utf8")
   assert.match(source, /client\.setQueryData\(\["worker-pairing", sessionId, value\.user_code\], value\)/)
 })
+
+test("remote upgrade requires capability, a newer recommendation, an online device and no pending upgrade", async () => {
+  const { upgradeAvailable } = await import("../src/lib/worker-onboarding.ts")
+  const device = { id: "device", label: "Device", created_at: 0, status: "online" as const, version: "0.2.0", can_upgrade: true }
+  const release = { version: "v0.2.1", release_url: "", platforms: [] }
+  assert.equal(upgradeAvailable(device, release), true)
+  assert.equal(upgradeAvailable({ ...device, can_upgrade: false }, release), false)
+  assert.equal(upgradeAvailable({ ...device, status: "offline" }, release), false)
+  assert.equal(upgradeAvailable(device, { ...release, version: "v0.2.0" }), false)
+  assert.equal(upgradeAvailable(device, { ...release, version: "v0.1.99" }), false)
+  assert.equal(upgradeAvailable({ ...device, upgrade: { version: "v0.2.1", status: "installing", error: null } }, release), false)
+})

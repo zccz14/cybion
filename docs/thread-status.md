@@ -34,8 +34,12 @@ finished or the user's real-world objective has been achieved.
 ## Authoritative state
 
 The controller returns `display_status` with each Thread view (create, list,
-read, update, and cancel). Execution control still uses the existing `status`
-field: `idle`, `running`, or `failed`.
+read, update, and cancel). Execution control uses the persisted Thread `status`: `idle`, `running`, or
+`failed`. `running` means that the Controller should keep advancing the Thread,
+including tool waits and retry backoff; it is not merely an in-memory task flag.
+Controller startup and periodic supervision resume running Threads without a
+new user input. Existing input/control record IDs fence stale responses; there
+is no separate execution entity. See [recovery](thread-recovery.md).
 
 Both fields have a purpose: `status` governs execution controls; `display_status`
 explains the current execution or its outcome. No new stored state, schema
