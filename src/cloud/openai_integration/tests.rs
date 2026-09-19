@@ -225,7 +225,7 @@ async fn rotated_token_401_is_repaired_and_healthy_refresh_does_not_rotate_again
     assert_eq!(remote.created, 0);
     let requests = remote.calls.len();
     drop(remote);
-    ensure_integrations(&f.state, &f.user, "owner-auth-fixture")
+    ensure_openai_integration(&f.state, &f.user, "owner-auth-fixture")
         .await
         .unwrap();
     assert_eq!(f.remote.lock().await.calls.len(), requests);
@@ -253,7 +253,7 @@ async fn missing_local_token_rotates_existing_consumer_instead_of_creating_dupli
         .await
         .unwrap();
     let (initial, refreshed) = tokio::join!(
-        ensure_integrations(&f.state, &f.user, "owner-auth-fixture"),
+        ensure_openai_integration(&f.state, &f.user, "owner-auth-fixture"),
         refresh(&f)
     );
     initial.unwrap();
@@ -279,7 +279,7 @@ async fn missing_local_id_provisions_and_is_not_reported_as_configured_beforehan
         )
         .openai_configured
     );
-    assert!(!integrations_ready(&settings));
+    assert!(!openai_integration_ready(&settings));
     save_integration_settings(&f.state, &f.user, &settings)
         .await
         .unwrap();
@@ -349,26 +349,34 @@ async fn unreachable_lb_cannot_report_refresh_success() {
 }
 
 #[tokio::test]
-async fn new_credentials_survive_linkit_failure_and_are_reused_on_retry() {
+async fn openai_refresh_and_inference_readiness_do_not_depend_on_linkit() {
     for remote_consumer in [None, Some(consumer())] {
         let f = fixture(remote_consumer).await;
         let mut settings = stored(&f);
+        settings.linkit_bot_id.clear();
+        settings.linkit_bot_token.clear();
         settings.linkit_username.clear();
         save_integration_settings(&f.state, &f.user, &settings)
             .await
             .unwrap();
-        assert!(refresh(&f).await.is_err());
+        assert!(refresh(&f).await.unwrap().0.openai_configured);
         assert_synchronized(&f).await;
-        let secret = stored(&f).openai_consumer_secret;
-        let mut settings = stored(&f);
-        settings.linkit_username = "owner".into();
-        save_integration_settings(&f.state, &f.user, &settings)
+        let ready = required_openai_integration(&f.state, &f.user)
             .await
             .unwrap();
-        assert!(refresh(&f).await.unwrap().0.openai_configured);
-        assert_eq!(stored(&f).openai_consumer_secret, secret);
+        assert!(openai_integration_ready(&ready));
+        assert!(ready.linkit_bot_token.is_empty());
+        ensure_openai_integration(&f.state, &f.user, "owner-auth-fixture")
+            .await
+            .unwrap();
         let remote = f.remote.lock().await;
         assert_eq!(remote.created + remote.rotated, 1);
+        assert!(
+            remote
+                .calls
+                .iter()
+                .all(|call| !call.ends_with("/api/me") && !call.contains("/api/bots"))
+        );
     }
 }
 
@@ -477,4 +485,16 @@ async fn refresh_preserves_an_existing_consumers_archive_preference() {
             usize::from(disabled)
         );
     }
+}
+
+#[tokio::test]
+async fn openai_refresh_does_not_wait_for_linkit_configuration_lock() {
+    let f = fixture(Some(consumer())).await;
+    let _notification_guard = lock_integrations(&f.state, format!("linkit:{}", f.user.id)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), refresh(&f))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.0.openai_configured);
+    assert_synchronized(&f).await;
 }

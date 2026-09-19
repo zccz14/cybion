@@ -40,23 +40,40 @@ the first authenticated browser session initializes that key atomically.
   protocol records in index order. A fresh request therefore reconstructs its
   context from SQLite rather than an in-memory conversation or an upstream
   response chain.
-- On first use, Cybion provisions a user-owned OpenAI-LB Consumer and Linkit
-  Bot. Completion and failure notices are sent to the user's private Linkit
-  conversation.
-- **Configuration → Provision or refresh integrations** verifies the saved
+- On first model use, Cybion provisions a user-owned OpenAI-LB Consumer.
+  Linkit task notifications are optional and configured separately. They do not
+  gate model inference, external API requests, API-key creation or LB repair.
+- **Configuration → Provision or refresh OpenAI-LB** verifies the saved
   OpenAI-LB Consumer ID and full token through the owner's LB API. Missing or
   deleted Consumers are recreated, disabled Consumers are re-enabled, and
   stale or missing tokens are rotated and saved immediately. Healthy tokens
   are reused, and existing request-archive preferences are preserved. A final
   verification must succeed before refresh reports success;
   LB errors are not treated as missing Consumers. Refreshes and initial
-  provisioning share a per-user lock. This requires OpenAI-LB's
+  provisioning share a per-user LB lock. Linkit has a separate lock and only
+  updates its own credential columns, so its setup cannot block or overwrite LB
+  credential reconciliation. This requires OpenAI-LB's
   `POST /api/consumers/{id}/verify` endpoint to be deployed first.
 - Ordinary Thread operations reuse configured credentials. A later LB-side
   rotation or deletion can still invalidate them; an HTTP 401 instructs the
   owner to refresh integrations and then retry or continue the failed Thread.
   Configuration's “Configured” label means credentials are stored, not that
   they have been continuously checked against LB.
+- **Configuration → Linkit task notifications** lets the owner enable/repair,
+  pause, and test notifications. Bot credentials are checked using Linkit's
+  current user APIs; stale Bot tokens can be rotated without replacing a healthy
+  Bot. Notifications use `POST /api/conversations/direct/{username}` followed by
+  `POST /api/conversations/{id}/messages`. The stable recipient UUID is verified
+  before sending Thread content. The removed `/bot/v1/messages` route is not used.
+- Delivery results persist per user, including the last error and successful
+  conversation/message receipt. Delivery failure does not change the Thread
+  outcome. Sends have a 15-second per-request timeout and are not blindly retried
+  because message creation is not idempotent. A receipt means stored in Linkit,
+  not device push or human read confirmation. Successful inference and terminal
+  failures notify; cancelled/superseded requests and successful compaction do not.
+- New users start with notifications off. Schema 14 preserves notification
+  intent for existing users with saved Bot credentials. Pausing retains those
+  credentials and the remote Bot; a manual test does not turn notifications on.
 - A paired Worker performs Bash, Browser Control, and Computer Use on the
   user's device. It keeps no model credential or SQLite database.
 

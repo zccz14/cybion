@@ -68,6 +68,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { WorkerConnections } from "@/components/worker-connections"
 import { AdminUsers } from "@/components/admin-users"
+import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
@@ -235,9 +236,6 @@ type IntegrationStatus = {
   openai_configured: boolean
   openai_consumer_id: string | null
   openai_base_url: string
-  linkit_configured: boolean
-  linkit_bot_id: string | null
-  linkit_username: string | null
 }
 type SystemResources = {
   generated_at: number
@@ -540,9 +538,9 @@ const copy = {
     savingDefaults: "Saving…",
     defaultsSaved: "Defaults saved",
     saveDefaultsError: "Could not save thread defaults",
-    integrationDescription: "External integrations connected to your workspace.",
+    integrationDescription: "The OpenAI-LB Consumer used for model inference. Notification settings are independent.",
     integration: "Integrations",
-    refreshIntegrations: "Provision or refresh integrations",
+    refreshIntegrations: "Provision or refresh OpenAI-LB",
     refreshIntegrationsHelp: "Verify the OpenAI-LB Consumer and token. Refresh recreates a missing Consumer, re-enables a disabled one, and replaces invalid credentials. Retry or continue a failed Thread afterwards.",
     integrationsVerified: "OpenAI-LB Consumer and token verified.",
     refreshing: "Refreshing…",
@@ -796,9 +794,9 @@ const copy = {
     savingDefaults: "保存中…",
     defaultsSaved: "默认设置已保存",
     saveDefaultsError: "无法保存线程默认设置",
-    integrationDescription: "连接到当前工作区的外部服务。",
+    integrationDescription: "用于模型推理的 OpenAI-LB 消费者。通知配置与此独立。",
     integration: "集成",
-    refreshIntegrations: "开通或刷新集成",
+    refreshIntegrations: "开通或刷新 OpenAI-LB",
     refreshIntegrationsHelp: "校验 OpenAI-LB 消费者与 Token。刷新会重建已删除的消费者、重新启用被禁用的消费者，并替换失效凭据。完成后请重试或继续失败的 Thread。",
     integrationsVerified: "OpenAI-LB 消费者与 Token 已校验。",
     refreshing: "刷新中…",
@@ -2061,7 +2059,7 @@ function SystemConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
 }
 
 function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
-  const { t } = useUi()
+  const { t, language } = useUi()
   const { session } = useAuthMini()
   const client = useQueryClient()
   const integrations = useQuery({ queryKey: ["integrations"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations") })
@@ -2070,10 +2068,11 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
     <Card><CardHeader><CardTitle>{t("integration")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2">
       {integrations.error && <div className="sm:col-span-2"><RequestError error={integrations.error} onRetry={() => void integrations.refetch()} /></div>}
-      {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><IntegrationRow label={t("linkit")} configured={integrations.data.linkit_configured} detail={integrations.data.linkit_username ? `@${integrations.data.linkit_username}` : t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
+      {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
       {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
       <div className="sm:col-span-2"><p className="mb-3 text-xs text-muted-foreground">{t("refreshIntegrationsHelp")}</p><Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>{refresh.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{refresh.isPending ? t("refreshing") : t("refreshIntegrations")}</Button>{refresh.error && <p className="mt-2 text-sm text-destructive">{errorMessage(refresh.error)}</p>}{refresh.isSuccess && <p role="status" className="mt-2 text-sm text-muted-foreground">{t("integrationsVerified")}</p>}</div>
     </CardContent></Card>
+    <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
     <Card><CardHeader><CardTitle>{t("workers")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/workers">{t("workers")}</Link></Button></CardContent></Card>
   </Page>
