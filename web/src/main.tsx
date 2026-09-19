@@ -55,6 +55,7 @@ import remarkGfm from "remark-gfm"
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
+import type { HistoryRecord } from "@/lib/thread-history"
 import { handleChatInputKeyDown } from "@/lib/chat-input"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
@@ -69,6 +70,7 @@ import { WorkerConnections } from "@/components/worker-connections"
 import { AdminUsers } from "@/components/admin-users"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
+import { ThreadHistory } from "@/components/thread-history"
 import { ThreadLink, ThreadStatusBadge } from "@/components/thread-status"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import {
@@ -142,13 +144,6 @@ type Thread = ThreadDefaults & {
   display_status: ThreadDisplayStatus
   created_at: number
   updated_at: number
-}
-type HistoryRecord = {
-  id: number
-  thread_id: string
-  kind: "input" | "response_output" | "tool_output" | "checkpoint" | "activity"
-  payload: unknown
-  created_at: number
 }
 type RequestAck = {
   thread_id: string
@@ -1299,6 +1294,10 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
     refetchInterval: thread.data?.status === "running" ? 750 : false,
     enabled: Boolean(threadId),
   })
+  const records = useMemo(() => [
+    ...history.data ?? [],
+    ...pendingResponseRecords(liveResponse.data, history.data ?? [], threadId),
+  ], [history.data, liveResponse.data, threadId])
   const [input, setInput] = useState("")
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
@@ -1390,9 +1389,8 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
             <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
               {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-              {history.data?.map((record) => <MessageScrollerItem key={record.id}><HistoryMessage language={language} record={record} workers={workers.data} /></MessageScrollerItem>)}
+              <ThreadHistory records={records} language={language} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} />} />
               {!history.isLoading && !history.error && history.data?.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
-              {pendingResponseRecords(liveResponse.data, history.data ?? [], threadId).map((record) => <MessageScrollerItem key={`live-${liveResponse.data?.audit_id}-${record.id}`}><HistoryMessage language={language} record={record} workers={workers.data} /></MessageScrollerItem>)}
               {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
             </MessageScrollerContent>

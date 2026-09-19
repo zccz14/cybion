@@ -38,6 +38,31 @@ JSON. The conversation renders inputs, messages, reasoning summaries, tool
 results, and runtime activity directly from `kind` and `payload`. Thread naming
 reads the input text from its payload.
 
+## Conversation process groups
+
+The conversation derives its display from the combined durable history and
+pending response items. Inputs, assistant `response_output` items of type
+`message`, and every `activity` record stay outside process groups and end the
+preceding group. All other consecutive records form a `ThreadProcessGroup`,
+including a single record. Expanding the group renders the original records in
+their original order, with their existing payload inspection controls.
+
+Each group starts collapsed and shows its record count and the difference
+between its maximum and minimum `created_at` values (Unix seconds). Chinese
+labels use `运行了 hh 小时 mm 分钟 ss 秒`; English labels use
+`Ran for 01h 02m 03s`, for example. Hours do not wrap after 24. A singleton or
+same-timestamp group reports zero. Standalone messages and the current clock
+do not contribute to the duration. Pending items retain the existing response
+preview timestamp (`started_at`) until durable timestamps become available.
+
+Grouping and disclosure state exist only in the browser. They do not change
+stored rows, API payloads, or model context. Stable group keys keep disclosures
+open across polling, appends and the preview-to-durable handoff when the
+Responses item ID is available. Switching threads or reloading starts with
+collapsed groups.
+
+## Storage schema
+
 Schema 9 contains exactly `id`, `thread_id`, `kind`, `payload`, and `created_at`.
 All runtime appends use one writer accepting the latter four fields; SQLite
 assigns `id`. Display text and roles are derived from the protocol payload.
