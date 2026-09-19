@@ -630,3 +630,62 @@ async fn real_worker_fixture() {
         .unwrap();
     axum::serve(listener, app(state)).await.unwrap();
 }
+
+#[tokio::test]
+async fn revocation_cancels_a_partially_provisioned_reservation_before_retry() {
+    let (_root, state) = test_state();
+    let owner = identity(&state, "alice");
+    let started = begin(&state).await;
+    let code = started["user_code"].as_str().unwrap().to_owned();
+    let paired = approve(
+        State(state.clone()),
+        axum::Extension(owner.clone()),
+        AxumPath(code.clone()),
+        Json(ApproveInput {
+            label: "partial".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    // Model a crash between tenant insertion and the final approval update.
+    let id = paired.id.clone();
+    pairing_db(&state, move |c| {
+        c.execute(
+            "UPDATE device_pairings SET status='approving' WHERE id=?",
+            [id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    delete_worker(
+        State(state.clone()),
+        axum::Extension(owner.clone()),
+        AxumPath(paired.worker_id.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        approve(
+            State(state.clone()),
+            axum::Extension(owner),
+            AxumPath(code),
+            Json(ApproveInput {
+                label: "must not resurrect".into()
+            })
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        worker_identity(
+            &state,
+            &headers("device-token"),
+            "alice".into(),
+            paired.worker_id
+        )
+        .await
+        .is_err()
+    );
+}

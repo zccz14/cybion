@@ -36,3 +36,7 @@ test("the guide is bilingual, requires explicit consent, and does not persist cr
   assert.match(source, /target === "remote"/)
   assert.match(source, /automatic && device.status === "online"/)
 })
+test("late approval updates only the code actually approved, not the currently open guide", () => {
+  const source = readFileSync(new URL("../src/components/worker-connections.tsx", import.meta.url), "utf8")
+  assert.match(source, /client\.setQueryData\(\["worker-pairing", sessionId, value\.user_code\], value\)/)
+})

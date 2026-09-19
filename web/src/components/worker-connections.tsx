@@ -24,7 +24,7 @@ const copy = {
     macHint: "Mac：在“关于本机”中查看芯片。Apple M 系列选择 Apple Silicon，Intel 选择 Intel。", windowsHint: "Windows：解压 ZIP 后在文件夹中打开 PowerShell。",
     startup: "执行以下命令。首次运行会打开授权网页；没有浏览器时，在任意设备打开终端显示的地址。", remoteCommand: "下载、校验并启动（在空目录中运行）",
     security: "连接后，Cybion 可在目标设备的运行账户权限范围内执行命令，并使用可用的浏览器和桌面操作能力。不是每条命令都会再次弹窗确认。",
-    background: "后台运行不等于开机自启。此版本不自动安装系统服务；重启后需再次启动 Worker。已有配置会继续使用，不会覆盖或自动创建新设备。",
+    background: "后台运行不等于开机自启。此版本不自动安装系统服务；重启后需再次启动 Worker。已有配置会继续使用，不会覆盖或自动创建新设备。升级 v0.1.3 或更早版本时，请先停止旧 Worker 进程；旧版没有进程锁。",
     approve: "2. 确认授权", code: "设备配对码", lookup: "查看设备", codeHint: "输入目标设备终端显示的 12 位配对码，或使用 Worker 自动打开的网页。不要批准其他人发送的配对码。",
     confirm: "确认连接这台设备", cancel: "拒绝配对", name: "设备名称", verify: "核对设备信息和配对码一致后再授权。以下设备信息由 Worker 自报，并非身份认证证明。",
     expires: "有效期至", expired: "配对已过期。请在目标设备重新运行 Worker，获取新配对码。", cancelled: "已拒绝这次配对。需要连接时，请重新运行 Worker。",
@@ -53,7 +53,7 @@ const copy = {
     macHint: "Mac: check About This Mac. Apple M-series uses Apple Silicon; Intel uses Intel.", windowsHint: "Windows: extract the ZIP and open PowerShell in the extracted folder.",
     startup: "Run this command. First launch opens browser authorization; on a headless device, open the printed address on any device.", remoteCommand: "Download, verify and start (run in an empty directory)",
     security: "Once connected, Cybion can execute commands with the Worker's OS account permissions and use available browser and desktop controls. This is not a per-command approval prompt.",
-    background: "Background mode is not automatic startup. This version does not install a system service; restart the Worker after reboot. Existing configuration is reused, never overwritten or silently paired again.",
+    background: "Background mode is not automatic startup. This version does not install a system service; restart the Worker after reboot. Existing configuration is reused, never overwritten or silently paired again. Before upgrading v0.1.3 or earlier, stop the old Worker process; older versions do not have a process lock.",
     approve: "2. Confirm authorization", code: "Device pairing code", lookup: "Review device", codeHint: "Enter the 12-character code printed on the target device, or use the page opened by Worker. Do not approve codes sent by others.",
     confirm: "Confirm connection to this device", cancel: "Reject pairing", name: "Device name", verify: "Check that the device and code match before authorizing. Device details are self-reported, not proof of identity.",
     expires: "Expires at", expired: "Pairing expired. Run Worker on the target device again to get a new code.", cancelled: "Pairing rejected. Run Worker again when you want to connect.",
@@ -125,11 +125,11 @@ export function WorkerConnections({ language, request, sessionId }: { language: 
   const [expanded, setExpanded] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   const [editName, setEditName] = useState("")
-  const workers = useQuery({ queryKey: ["workers"], queryFn: () => request<Device[]>("/api/workers"), refetchInterval: 3000 })
+  const workers = useQuery({ queryKey: ["workers", sessionId], queryFn: () => request<Device[]>("/api/workers"), refetchInterval: 3000 })
   const release = useQuery({ queryKey: ["worker-release"], queryFn: () => request<Release>("/api/worker-release"), staleTime: 60000 })
   const pairing = useQuery({ queryKey: ["worker-pairing", sessionId, routeCode], queryFn: () => request<Pairing>(`/api/worker-pairings/${routeCode}`), enabled: validCode(routeCode), retry: false, refetchInterval: (q) => q.state.data && ["pending", "approving"].includes(q.state.data.status) ? 5000 : false })
   useEffect(() => { setInputCode(routeCode); setConfirmed(false); setName(""); if (routeCode) setShow(true) }, [routeCode])
-  const approval = useMutation({ mutationFn: () => request<Pairing>(`/api/worker-pairings/${routeCode}`, { method: "POST", body: JSON.stringify({ label: name.trim() || pairing.data?.hostname }) }), onSuccess: (value) => { client.setQueryData(["worker-pairing", sessionId, routeCode], value); void client.invalidateQueries({ queryKey: ["workers"] }) } })
+  const approval = useMutation({ mutationFn: () => request<Pairing>(`/api/worker-pairings/${routeCode}`, { method: "POST", body: JSON.stringify({ label: name.trim() || pairing.data?.hostname }) }), onSuccess: (value) => { client.setQueryData(["worker-pairing", sessionId, value.user_code], value); void client.invalidateQueries({ queryKey: ["workers"] }) } })
   const cancel = useMutation({ mutationFn: () => request(`/api/worker-pairings/${routeCode}`, { method: "DELETE" }), onSuccess: () => { void pairing.refetch() } })
   const rename = useMutation({ mutationFn: ({ id, label }: { id: string; label: string }) => request(`/api/workers/${id}`, { method: "PATCH", body: JSON.stringify({ label }) }), onSuccess: () => { setEditing(null); void client.invalidateQueries({ queryKey: ["workers"] }) } })
   const remove = useMutation({ mutationFn: (id: string) => request(`/api/workers/${id}`, { method: "DELETE" }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers"] }) } })

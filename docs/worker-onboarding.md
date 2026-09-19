@@ -39,6 +39,9 @@ is prefilled with the exact Worker ID and still requires the user's Send action.
 Provisioning crosses two SQLite databases. The durable `approving` reservation
 is committed first, followed by idempotent tenant insertion and final approval.
 A transient failure resumes under the same owner; it never switches accounts.
+This single-controller deployment serializes approval with revocation. Removal
+cancels the durable pairing reservation before deleting the tenant record, so
+neither an in-flight retry nor recovery after a restart can resurrect the device.
 An abandoned, partially provisioned request may leave a never-connected record,
 which is visible and removable. There is no claim of cross-database atomicity.
 
@@ -57,7 +60,8 @@ which is visible and removable. There is no claim of cross-database atomicity.
   can be ready for shell work without desktop capability. No automatic desktop
   input or screen capture occurs during diagnosis.
 - Checking old Workers returns an explicit v0.1.4 upgrade requirement. Existing
-  execution remains unchanged. Deleted Workers' open event streams terminate.
+  execution remains unchanged. Stop pre-v0.1.4 processes before starting the new
+  binary: old releases do not participate in the per-config process lock. Deleted Workers' open event streams terminate.
 
 ## Scope and complexity review
 
