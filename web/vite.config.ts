@@ -5,7 +5,10 @@ import path from 'node:path';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  optimizeDeps: { entries: ['index.html', 'e2e/*.html'] },
+  optimizeDeps: {
+    entries: ['index.html', 'e2e/*.html'],
+    include: ['@shadcn/react/message-scroller'],
+  },
   resolve: { alias: { '@': path.resolve(__dirname, './src') } },
   build: {
     outDir: 'dist',
