@@ -28,6 +28,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cross
+      - run: python3 scripts/check-worker-release.py
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - run: cross build --release --locked --target x86_64-unknown-linux-gnu
@@ -75,3 +76,5 @@ jobs:
         env:
           EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
         run: bash .github/scripts/send-deploy.sh "$EC2_INSTANCE_ID" "$GITHUB_REF_NAME"
+      - name: Verify public onboarding endpoints
+        run: python3 scripts/smoke-worker-onboarding.py https://cybion.ntnl.io

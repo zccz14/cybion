@@ -37,6 +37,7 @@ mod history;
 mod thread_controls;
 mod traffic;
 mod turn_state;
+mod worker_onboarding;
 
 use thread_controls::{RequestOperation, latest_request_record_id, request_superseded};
 
@@ -63,7 +64,7 @@ const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 11;
+const USER_SCHEMA_VERSION: i64 = 12;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -527,11 +528,24 @@ fn app(state: AppState) -> Router {
             get(integrations).put(update_integrations),
         )
         .route("/api/integrations/refresh", post(refresh_integrations))
+        .route(
+            "/api/worker-pairings/{code}",
+            get(worker_onboarding::read)
+                .post(worker_onboarding::approve)
+                .delete(worker_onboarding::cancel)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
+        )
+        .route(
+            "/api/workers/{id}/check",
+            get(worker_onboarding::check_read).post(worker_onboarding::check_start),
+        )
         .route("/api/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api/api-keys/{id}", delete(delete_api_key))
         .route(
             "/api/workers",
-            get(list_workers).post(create_worker_pairing),
+            get(list_workers)
+                .post(create_worker_pairing)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
         )
         .route(
             "/api/workers/{id}",
@@ -548,6 +562,10 @@ fn app(state: AppState) -> Router {
         .route_layer(from_fn_with_state(state.clone(), api_key_auth));
 
     let worker_api = Router::new()
+        .route(
+            "/worker/v1/users/{user_id}/workers/{worker_id}/checks/{id}/result",
+            post(worker_onboarding::check_result),
+        )
         .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/events",
             get(worker_events),
@@ -567,6 +585,17 @@ fn app(state: AppState) -> Router {
         .route_layer(from_fn_with_state(state.clone(), traffic::worker_auth));
 
     Router::new()
+        .route(
+            "/worker/v1/pairings",
+            post(worker_onboarding::start)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
+        )
+        .route(
+            "/worker/v1/pairings/{id}",
+            get(worker_onboarding::poll)
+                .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
+        )
+        .route("/api/worker-release", get(worker_onboarding::release))
         .route("/health", get(health))
         .route("/api/config", get(public_config))
         .merge(browser_api)
@@ -1028,7 +1057,8 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // There is no supported migration from the discarded pre-release user databases.
         transaction
             .execute_batch(
-                "DROP TABLE IF EXISTS thread_turn_states;
+                "DROP TABLE IF EXISTS worker_checks;
+                 DROP TABLE IF EXISTS thread_turn_states;
                  DROP TABLE IF EXISTS response_states;
                  DROP TABLE IF EXISTS worker_calls;
                  DROP TABLE IF EXISTS workers;
@@ -1094,6 +1124,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                 .map_err(ApiError::internal)?;
         }
     }
+    transaction.execute_batch(worker_onboarding::CHECK_SCHEMA)?;
     let has_responses_call_id: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('worker_calls') WHERE name='responses_call_id')",
@@ -5975,6 +6006,9 @@ fn claim_worker_call(
     connection: &mut Connection,
     worker_id: &str,
 ) -> Result<Option<WorkerCall>, ApiError> {
+    if let Some(check) = worker_onboarding::claim_check(connection, worker_id)? {
+        return Ok(Some(check));
+    }
     let transaction = connection.transaction()?;
     let call: Option<(String, String, Option<i64>, String, String)> = transaction
         .query_row(

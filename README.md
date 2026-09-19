@@ -71,26 +71,24 @@ with server-side filters, sorting, pagination, and full raw-field inspection.
 
 ## Cybion Worker
 
-The standalone Worker is published from
-[`zccz14/cybion-worker`](https://github.com/zccz14/cybion-worker) for macOS,
-Linux, and Windows. Create a pairing in the Cybion UI and save the returned
-configuration as `~/.cybion/worker.toml`:
-
-```toml
-controller_url = "https://cybion.ntnl.io"
-user_id = "..."
-machine_id = "..."
-access_token = "..."
-```
-
-Run it with:
+The standalone Worker is published from `zccz14/cybion-worker` for macOS,
+Linux and Windows. Open **Workers → Connect a device**, select the target
+platform, then download, extract and start Worker:
 
 ```sh
-cybion-worker run --background
+./cybion-worker run --background
 ```
 
-The Worker reports liveness and resources, receives calls over SSE, and posts
-results over HTTPS.
+On Windows PowerShell use `.\cybion-worker.exe run --background`. With no config,
+Worker opens browser authorization and prints a short-lived pairing code for
+headless devices. Match the device/code and explicitly authorize in Cybion;
+configuration is written on the device automatically. The guide verifies task
+delivery, fixed command execution and result upload before reporting readiness.
+Existing configuration is reused. Background mode does not install automatic
+startup. `status`, `doctor` and the guide provide diagnostics and recovery.
+
+See [Worker onboarding](docs/worker-onboarding.md) for the protocol, security,
+capability limits, manual configuration and release/test procedures.
 
 ## Development and release
 

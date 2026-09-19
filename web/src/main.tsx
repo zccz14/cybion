@@ -65,6 +65,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
+import { WorkerConnections } from "@/components/worker-connections"
 import { AdminUsers } from "@/components/admin-users"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
@@ -167,12 +168,6 @@ type Worker = {
   last_seen_at?: number | null
   status: "online" | "offline"
   resource?: Record<string, unknown> | null
-}
-type WorkerPairing = {
-  controller_url: string
-  user_id: string
-  machine_id: string
-  access_token: string
 }
 type ReasoningAudit = {
   id: number
@@ -328,21 +323,6 @@ type WorkerCallAuditPage = {
   page_size: number
 }
 
-const CYBION_WORKER_RELEASE = {
-  version: "v0.1.2",
-  url: "https://github.com/zccz14/cybion-worker/releases/tag/v0.1.2",
-  downloads: [
-    { label: "macOS · Apple Silicon", asset: "cybion-worker-macos-aarch64.tar.gz" },
-    { label: "macOS · Intel", asset: "cybion-worker-macos-x86_64.tar.gz" },
-    { label: "Linux · x86_64", asset: "cybion-worker-linux-x86_64.tar.gz" },
-    { label: "Linux · ARM64", asset: "cybion-worker-linux-aarch64.tar.gz" },
-    { label: "Windows · x86_64", asset: "cybion-worker-windows-x86_64.tar.gz" },
-  ],
-} as const
-
-function cybionWorkerDownloadUrl(asset: string) {
-  return `https://github.com/zccz14/cybion-worker/releases/download/${CYBION_WORKER_RELEASE.version}/${asset}`
-}
 
 const copy = {
   en: {
@@ -923,7 +903,12 @@ function errorMessage(error: unknown) {
 }
 
 function callbackUrl() {
-  return `${location.origin}${location.pathname}#/auth/callback`
+  // Preserve only a validated, non-secret pairing code across hosted sign-in.
+  const route = new URLSearchParams(location.hash.split("?")[1] ?? "")
+  const code = route.get("code")
+  const target = location.hash.startsWith("#/workers") && code && /^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/.test(code)
+    ? `#/workers?code=${code}` : "#/auth/callback"
+  return `${location.origin}${location.pathname}${target}`
 }
 
 function formatBytes(value: number) {
@@ -1211,7 +1196,8 @@ function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: Au
   const client = useQueryClient()
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
-  const [input, setInput] = useState("")
+  const location = useLocation()
+  const [input, setInput] = useState(() => typeof location.state?.initialInput === "string" ? location.state.initialInput : "")
   const value = draft ?? defaults.data
   const start = useMutation({
     mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify(payload) }),
@@ -2208,61 +2194,8 @@ function ApiKeysPage({ sdk }: { sdk: AuthMiniApi }) {
 }
 
 function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
-  const { t, language } = useUi()
-  const client = useQueryClient()
-  const [label, setLabel] = useState("")
-  const [pairing, setPairing] = useState<WorkerPairing | null>(null)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [editingLabel, setEditingLabel] = useState("")
-  const workers = useQuery({ queryKey: ["workers"], queryFn: () => api<Worker[]>(sdk, "/api/workers"), refetchInterval: 5000 })
-  const pair = useMutation({ mutationFn: (value: string) => api<WorkerPairing>(sdk, "/api/workers", { method: "POST", body: JSON.stringify({ label: value }) }), onSuccess: (value) => { setPairing(value); setLabel(""); void client.invalidateQueries({ queryKey: ["workers"] }) } })
-  const rename = useMutation({ mutationFn: ({ id, value }: { id: string; value: string }) => api<Worker>(sdk, `/api/workers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ label: value }) }), onSuccess: () => { setEditingId(null); setEditingLabel(""); void client.invalidateQueries({ queryKey: ["workers"] }) } })
-  const remove = useMutation({ mutationFn: (id: string) => api<unknown>(sdk, `/api/workers/${encodeURIComponent(id)}`, { method: "DELETE" }), onSuccess: () => void client.invalidateQueries({ queryKey: ["workers"] }) })
-  return <Page title={t("workers")} description={t("workersDescription")}>
-    <Card>
-      <CardHeader><CardTitle>{t("pair")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader>
-      <CardContent>
-        <form className="flex flex-col gap-3 sm:flex-row" onSubmit={(event) => { event.preventDefault(); if (label.trim()) pair.mutate(label.trim()) }}>
-          <Input aria-label={t("workerName")} value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t("workerName")} />
-          <Button disabled={!label.trim() || pair.isPending}>{pair.isPending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t("pair")}</Button>
-        </form>
-        {pairing && <Alert className="mt-4"><NetworkIcon /><AlertTitle>{t("copyConfig")}</AlertTitle><AlertDescription><SecretValue value={workerToml(pairing)} /></AlertDescription></Alert>}
-        {pair.error && <p className="mt-3 text-sm text-destructive">{errorMessage(pair.error)}</p>}
-      </CardContent>
-    </Card>
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div><CardTitle>{t("workerDownloads")}</CardTitle><CardDescription>{t("workerDownloadsDescription")}</CardDescription></div>
-          <Badge variant="outline">{CYBION_WORKER_RELEASE.version}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {CYBION_WORKER_RELEASE.downloads.map((download) => <Button asChild className="justify-between" variant="outline" key={download.asset}>
-            <a href={cybionWorkerDownloadUrl(download.asset)} target="_blank" rel="noreferrer"><span className="flex items-center gap-2"><DownloadIcon />{download.label}</span><ExternalLinkIcon /></a>
-          </Button>)}
-        </div>
-        <a className="mt-4 inline-flex items-center gap-1 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" href={CYBION_WORKER_RELEASE.url} target="_blank" rel="noreferrer">{t("workerReleaseNotes")}<ExternalLinkIcon className="size-3.5" /></a>
-      </CardContent>
-    </Card>
-    <Card>
-      <CardHeader><CardTitle>{t("workers")}</CardTitle></CardHeader>
-      <CardContent>
-        {workers.error && <RequestError error={workers.error} onRetry={() => void workers.refetch()} />}
-        {workers.isLoading && <Skeleton className="h-8" />}
-        {workers.data && workers.data.length === 0 && <p className="text-sm text-muted-foreground">{t("noWorkers")}</p>}
-        {workers.data?.map((worker) => <div className="flex flex-wrap items-center gap-3 border-b py-3 last:border-0" key={worker.id}>
-          <StatusDot status={worker.status === "online" ? "running" : "idle"} />
-          {editingId === worker.id ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); const value = editingLabel.trim(); if (value) rename.mutate({ id: worker.id, value }) }}>
-            <Input aria-label={t("workerName")} value={editingLabel} onChange={(event) => setEditingLabel(event.target.value)} autoFocus />
-            <Button size="sm" disabled={!editingLabel.trim() || rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("saveWorker")}</Button>
-          </form> : <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{worker.label}</p><p className="text-xs text-muted-foreground">{formattedTime(language, worker.last_seen_at ?? worker.created_at)}</p></div>}
-          {editingId !== worker.id && <><Badge variant={worker.status === "online" ? "secondary" : "outline"}>{worker.status === "online" ? t("online") : t("offline")}</Badge><Button size="sm" variant="ghost" aria-label={t("editWorker")} onClick={() => { setEditingId(worker.id); setEditingLabel(worker.label) }}><PencilIcon data-icon="inline-start" />{t("editWorker")}</Button><Button size="icon-sm" variant="ghost" aria-label={t("remove")} disabled={remove.isPending} onClick={() => remove.mutate(worker.id)}><Trash2Icon /></Button></>}
-        </div>)}
-      </CardContent>
-    </Card>
-  </Page>
+  const { language } = useUi()
+  return <WorkerConnections key={sdk.session.getState().sessionId} language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />
 }
 
 function ToolsPage() {
@@ -2275,10 +2208,6 @@ function ToolsPage() {
     { label: t("toolImageGeneration"), detail: "image_generation", provider: t("toolOpenAi") },
   ]
   return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.detail}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.label}</p><code className="text-xs text-muted-foreground">{tool.detail}</code></div><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
-}
-
-function workerToml(pairing: WorkerPairing) {
-  return `controller_url = "${pairing.controller_url}"\nuser_id = "${pairing.user_id}"\nmachine_id = "${pairing.machine_id}"\naccess_token = "${pairing.access_token}"\n`
 }
 
 function SecretValue({ value }: { value: string }) {
