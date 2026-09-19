@@ -21,6 +21,54 @@ pub(super) fn base64url(bytes: &[u8]) -> String {
     encoded
 }
 
+#[test]
+fn existing_user_request_headers_migrate_to_global_admin_settings() {
+    let root = tempfile::tempdir().unwrap();
+    prepare_data_dir(root.path()).unwrap();
+    let admin_db = root.path().join("default.sqlite3");
+    prepare_admin_db(&admin_db).unwrap();
+    let user_db = root.path().join("users/root.sqlite3");
+    let connection = Connection::open(&user_db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE integration_settings (
+                id INTEGER PRIMARY KEY,
+                openai_consumer_id TEXT NOT NULL,
+                openai_consumer_secret TEXT NOT NULL,
+                openai_base_url TEXT NOT NULL,
+                user_agent TEXT NOT NULL,
+                originator TEXT NOT NULL,
+                linkit_bot_id TEXT NOT NULL,
+                linkit_bot_token TEXT NOT NULL,
+                linkit_username TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO integration_settings VALUES(1,'','','','Migrated-UA/1.0','migrated-client','','','',1);",
+        )
+        .unwrap();
+    connection.close().unwrap();
+    set_admin_meta_string_sync(&admin_db, "root_user_id", "root").unwrap();
+    migrate_global_request_headers(&admin_db, root.path()).unwrap();
+    assert_eq!(
+        admin_meta_string_sync(&admin_db, GLOBAL_USER_AGENT_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("Migrated-UA/1.0")
+    );
+    assert_eq!(
+        admin_meta_string_sync(&admin_db, GLOBAL_ORIGINATOR_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("migrated-client")
+    );
+    assert_eq!(
+        admin_meta_string_sync(&admin_db, GLOBAL_REQUEST_HEADERS_MIGRATED_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+}
+
 #[tokio::test]
 async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     let (_root, state) = test_state();
@@ -281,6 +329,24 @@ async fn experimental_features_can_only_be_changed_by_the_administrator() {
     assert!(!features.thread_id_header);
     assert!(!features.session_id_header);
     assert!(!features.codex_turn_state_header);
+}
+
+#[tokio::test]
+async fn global_request_headers_can_only_be_changed_by_the_administrator() {
+    let (_root, state) = test_state();
+    assert!(admin_user_sync(&state.admin_db_path, "root", true).unwrap());
+    let user = user_for_subject(&state, "other-user").unwrap();
+    let error = update_integrations(
+        State(state),
+        browser_identity_for(&user),
+        Json(UpdateIntegrationHeadersInput {
+            user_agent: Some("not-allowed".to_owned()),
+            originator: Some("not-allowed".to_owned()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

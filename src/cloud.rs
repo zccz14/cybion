@@ -71,6 +71,9 @@ const EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY: &str = "experimental_codex_turn_
 const THREAD_ID_HEADER: &str = "thread-id";
 const SESSION_ID_HEADER: &str = "session-id";
 const CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
+const GLOBAL_REQUEST_HEADERS_MIGRATED_KEY: &str = "global_request_headers_migrated";
+const GLOBAL_USER_AGENT_KEY: &str = "openai_user_agent";
+const GLOBAL_ORIGINATOR_KEY: &str = "openai_originator";
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -246,6 +249,7 @@ pub async fn serve() -> Result<()> {
     prepare_data_dir(&data_dir)?;
     let admin_db_path = data_dir.join("default.sqlite3");
     prepare_admin_db(&admin_db_path)?;
+    migrate_global_request_headers(&admin_db_path, &data_dir)?;
     recover_interrupted_requests(&data_dir)?;
     let run_dir = data_dir.join("run");
     fs::create_dir_all(&run_dir)?;
@@ -307,6 +311,121 @@ fn prepare_admin_db(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    Ok(())
+}
+
+fn admin_meta_string_sync(path: &Path, key: &str) -> Result<Option<String>, ApiError> {
+    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    let value = connection
+        .query_row("SELECT value FROM app_meta WHERE key=?", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(ApiError::internal)?;
+    Ok(value)
+}
+
+#[derive(Default)]
+struct GlobalRequestHeaders {
+    user_agent: String,
+    originator: String,
+}
+
+async fn global_request_headers(state: &AppState) -> Result<GlobalRequestHeaders, ApiError> {
+    let path = state.admin_db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        Ok(GlobalRequestHeaders {
+            user_agent: admin_meta_string_sync(&path, GLOBAL_USER_AGENT_KEY)?.unwrap_or_default(),
+            originator: admin_meta_string_sync(&path, GLOBAL_ORIGINATOR_KEY)?.unwrap_or_default(),
+        })
+    })
+    .await
+    .map_err(ApiError::internal)?
+}
+
+fn set_admin_meta_string_sync(path: &Path, key: &str, value: &str) -> Result<(), ApiError> {
+    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    connection
+        .execute(
+            "INSERT INTO app_meta(key,value) VALUES(?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )
+        .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+fn migrate_global_request_headers(admin_db_path: &Path, data_dir: &Path) -> Result<()> {
+    if admin_meta_string_sync(admin_db_path, GLOBAL_REQUEST_HEADERS_MIGRATED_KEY)
+        .map_err(|error| anyhow::anyhow!(error.message))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let root_user_id = admin_meta_string_sync(admin_db_path, "root_user_id")
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let users_dir = data_dir.join("users");
+    let mut paths = fs::read_dir(&users_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("sqlite3"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    if let Some(root_user_id) = root_user_id {
+        let root_path = users_dir.join(format!("{root_user_id}.sqlite3"));
+        paths.sort_by_key(|path| if path == &root_path { 0 } else { 1 });
+    }
+    let mut user_agent = None;
+    let mut originator = None;
+    for path in paths {
+        let connection = Connection::open(path)?;
+        let has_headers: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name IN ('user_agent','originator'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_headers {
+            continue;
+        }
+        let values = connection
+            .query_row(
+                "SELECT COALESCE(user_agent,''),COALESCE(originator,'') FROM integration_settings WHERE id=1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((candidate_user_agent, candidate_originator)) = values else {
+            continue;
+        };
+        if user_agent.is_none() && !candidate_user_agent.trim().is_empty() {
+            user_agent = Some(candidate_user_agent);
+        }
+        if originator.is_none() && !candidate_originator.trim().is_empty() {
+            originator = Some(candidate_originator);
+        }
+        if user_agent.is_some() && originator.is_some() {
+            break;
+        }
+    }
+    set_admin_meta_string_sync(
+        admin_db_path,
+        GLOBAL_USER_AGENT_KEY,
+        user_agent.as_deref().unwrap_or_default(),
+    )
+    .map_err(|error| anyhow::anyhow!(error.message))?;
+    set_admin_meta_string_sync(
+        admin_db_path,
+        GLOBAL_ORIGINATOR_KEY,
+        originator.as_deref().unwrap_or_default(),
+    )
+    .map_err(|error| anyhow::anyhow!(error.message))?;
+    set_admin_meta_string_sync(admin_db_path, GLOBAL_REQUEST_HEADERS_MIGRATED_KEY, "1")
+        .map_err(|error| anyhow::anyhow!(error.message))?;
     Ok(())
 }
 
@@ -1222,7 +1341,7 @@ struct WorkerCallAuditPage {
     page_size: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct IntegrationStatusView {
     openai_configured: bool,
     openai_consumer_id: Option<String>,
@@ -1452,8 +1571,6 @@ struct IntegrationSettings {
     openai_consumer_id: String,
     openai_consumer_secret: String,
     openai_base_url: String,
-    user_agent: String,
-    originator: String,
     linkit_bot_id: String,
     linkit_bot_token: String,
     linkit_username: String,
@@ -1820,14 +1937,17 @@ async fn update_experimental_features(
     experimental_features(State(state)).await
 }
 
-fn integration_status_view(settings: &IntegrationSettings) -> IntegrationStatusView {
+fn integration_status_view(
+    settings: &IntegrationSettings,
+    headers: &GlobalRequestHeaders,
+) -> IntegrationStatusView {
     IntegrationStatusView {
         openai_configured: !settings.openai_consumer_secret.is_empty(),
         openai_consumer_id: (!settings.openai_consumer_id.is_empty())
             .then(|| settings.openai_consumer_id.clone()),
         openai_base_url: settings.openai_base_url.clone(),
-        user_agent: settings.user_agent.clone(),
-        originator: settings.originator.clone(),
+        user_agent: headers.user_agent.clone(),
+        originator: headers.originator.clone(),
         linkit_configured: !settings.linkit_bot_token.is_empty()
             && !settings.linkit_username.is_empty(),
         linkit_bot_id: (!settings.linkit_bot_id.is_empty()).then(|| settings.linkit_bot_id.clone()),
@@ -1844,7 +1964,8 @@ async fn integrations(
         integration_settings(connection)
     })
     .await?;
-    Ok(Json(integration_status_view(&settings)))
+    let headers = global_request_headers(&state).await?;
+    Ok(Json(integration_status_view(&settings, &headers)))
 }
 
 fn request_header_setting(value: String, field: &str) -> Result<String, ApiError> {
@@ -1867,18 +1988,30 @@ async fn update_integrations(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Json(input): Json<UpdateIntegrationHeadersInput>,
 ) -> Result<Json<IntegrationStatusView>, ApiError> {
-    let mut settings = user_db(&state, &identity.user, true, |connection| {
-        integration_settings(connection)
+    if !is_admin(&state, &identity.user.id, false).await? {
+        return Err(ApiError::forbidden("administrator access is required"));
+    }
+    let user_agent = input
+        .user_agent
+        .map(|value| request_header_setting(value, "user_agent"))
+        .transpose()?;
+    let originator = input
+        .originator
+        .map(|value| request_header_setting(value, "originator"))
+        .transpose()?;
+    let path = state.admin_db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(value) = user_agent {
+            set_admin_meta_string_sync(&path, GLOBAL_USER_AGENT_KEY, &value)?;
+        }
+        if let Some(value) = originator {
+            set_admin_meta_string_sync(&path, GLOBAL_ORIGINATOR_KEY, &value)?;
+        }
+        Ok::<_, ApiError>(())
     })
-    .await?;
-    if let Some(value) = input.user_agent {
-        settings.user_agent = request_header_setting(value, "user_agent")?;
-    }
-    if let Some(value) = input.originator {
-        settings.originator = request_header_setting(value, "originator")?;
-    }
-    save_integration_settings(&state, &identity.user, &settings).await?;
-    Ok(Json(integration_status_view(&settings)))
+    .await
+    .map_err(ApiError::internal)??;
+    integrations(State(state), axum::Extension(identity)).await
 }
 
 async fn refresh_integrations(
@@ -1886,7 +2019,8 @@ async fn refresh_integrations(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<IntegrationStatusView>, ApiError> {
     let settings = ensure_integrations(&state, &identity.user, &identity.bearer).await?;
-    Ok(Json(integration_status_view(&settings)))
+    let headers = global_request_headers(&state).await?;
+    Ok(Json(integration_status_view(&settings, &headers)))
 }
 
 async fn system_resources(
@@ -2958,18 +3092,16 @@ fn hash_secret(value: &str) -> String {
 fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, ApiError> {
     let settings = connection
         .query_row(
-            "SELECT openai_consumer_id,openai_consumer_secret,openai_base_url,user_agent,originator,linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
+            "SELECT openai_consumer_id,openai_consumer_secret,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
             [],
             |row| {
                 Ok(IntegrationSettings {
                     openai_consumer_id: row.get(0)?,
                     openai_consumer_secret: row.get(1)?,
                     openai_base_url: row.get(2)?,
-                    user_agent: row.get(3)?,
-                    originator: row.get(4)?,
-                    linkit_bot_id: row.get(5)?,
-                    linkit_bot_token: row.get(6)?,
-                    linkit_username: row.get(7)?,
+                    linkit_bot_id: row.get(3)?,
+                    linkit_bot_token: row.get(4)?,
+                    linkit_username: row.get(5)?,
                 })
             },
         )
@@ -2978,8 +3110,6 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
             openai_consumer_id: String::new(),
             openai_consumer_secret: String::new(),
             openai_base_url: OPENAI_BASE_URL.to_owned(),
-            user_agent: String::new(),
-            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
@@ -3003,13 +3133,11 @@ async fn save_integration_settings(
     let saved = settings.clone();
     user_db(state, user, true, move |connection| {
         connection.execute(
-            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,openai_base_url,user_agent,originator,linkit_bot_id,linkit_bot_token,linkit_username,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,openai_consumer_secret=excluded.openai_consumer_secret,openai_base_url=excluded.openai_base_url,user_agent=excluded.user_agent,originator=excluded.originator,linkit_bot_id=excluded.linkit_bot_id,linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
+            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username,updated_at) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,openai_consumer_secret=excluded.openai_consumer_secret,openai_base_url=excluded.openai_base_url,linkit_bot_id=excluded.linkit_bot_id,linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
             params![
                 saved.openai_consumer_id,
                 saved.openai_consumer_secret,
                 saved.openai_base_url,
-                saved.user_agent,
-                saved.originator,
                 saved.linkit_bot_id,
                 saved.linkit_bot_token,
                 saved.linkit_username,
@@ -4674,11 +4802,12 @@ async fn send_responses_request(
         .bearer_auth(&integrations.openai_consumer_secret)
         .header("Accept", "text/event-stream")
         .json(&payload);
-    if !integrations.user_agent.is_empty() {
-        request = request.header(header::USER_AGENT, &integrations.user_agent);
+    let headers = global_request_headers(state).await?;
+    if !headers.user_agent.is_empty() {
+        request = request.header(header::USER_AGENT, &headers.user_agent);
     }
-    if !integrations.originator.is_empty() {
-        request = request.header("originator", &integrations.originator);
+    if !headers.originator.is_empty() {
+        request = request.header("originator", &headers.originator);
     }
     if let Some((spec, _)) = audit.as_ref() {
         for (key, header) in [
@@ -6815,6 +6944,10 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        set_admin_meta_string_sync(&state.admin_db_path, GLOBAL_USER_AGENT_KEY, "My-Cybion/1.0")
+            .unwrap();
+        set_admin_meta_string_sync(&state.admin_db_path, GLOBAL_ORIGINATOR_KEY, "my-client")
+            .unwrap();
         let (sent, received) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -6834,8 +6967,6 @@ mod tests {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
-            user_agent: "My-Cybion/1.0".to_owned(),
-            originator: "my-client".to_owned(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
@@ -6960,8 +7091,6 @@ mod tests {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
-            user_agent: String::new(),
-            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
@@ -7071,8 +7200,6 @@ mod tests {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
             openai_base_url: format!("http://{address}"),
-            user_agent: String::new(),
-            originator: String::new(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
