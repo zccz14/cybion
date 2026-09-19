@@ -52,7 +52,7 @@ import {
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
-import { generatedImageSource, pendingResponseRecords, threadControlAction, latestThreadAction, type ThreadResponseView } from "@/lib/thread-response"
+import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
 import { handleChatInputKeyDown } from "@/lib/chat-input"
@@ -69,6 +69,8 @@ import { WorkerConnections } from "@/components/worker-connections"
 import { AdminUsers } from "@/components/admin-users"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
+import { ThreadLink, ThreadStatusBadge } from "@/components/thread-status"
+import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import {
   Dialog,
   DialogContent,
@@ -137,6 +139,7 @@ type Thread = ThreadDefaults & {
   id: string
   title: string
   status: ThreadStatus
+  display_status: ThreadDisplayStatus
   created_at: number
   updated_at: number
 }
@@ -347,14 +350,10 @@ const copy = {
     continueThreadHint: "Continue from saved history without sending a new prompt",
     compactThread: "Compact",
     compactThreadHint: "Compress context into a checkpoint and keep the original records",
-    compacting: "Creating checkpoint…",
     threadStopped: "Reasoning stopped. Saved records were kept.",
     threadContinued: "Continued without a new prompt.",
     threadCompactionRequested: "Checkpoint compaction requested.",
     input: "Give this thread its next instruction…",
-    running: "Running",
-    idle: "Idle",
-    failed: "Failed",
     queued: "Queued",
     rename: "Rename",
     delete: "Delete",
@@ -623,14 +622,10 @@ const copy = {
     continueThreadHint: "从已有记录继续，不发送新的提示词",
     compactThread: "压缩",
     compactThreadHint: "将上下文压缩为 checkpoint，保留原始记录",
-    compacting: "正在生成 checkpoint…",
     threadStopped: "推理已停止，已保存的记录保留。",
     threadContinued: "已直接继续推理，未发送新提示词。",
     threadCompactionRequested: "已请求压缩上下文，生成 checkpoint。",
     input: "为这个线程追加下一条指令…",
-    running: "运行中",
-    idle: "空闲",
-    failed: "失败",
     queued: "排队中",
     rename: "重命名",
     delete: "删除",
@@ -1191,7 +1186,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
 }
 
 function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
-  const { t } = useUi()
+  const { t, language } = useUi()
   const navigate = useNavigate()
   const client = useQueryClient()
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
@@ -1225,7 +1220,7 @@ function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: Au
       <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-9rem)]" aria-label={t("threads")}>
         {threadsLoading && <div className="flex flex-col gap-2 px-2 py-1"><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>}
         {!threadsLoading && threads.length === 0 && <p className="px-3 py-2 text-sm text-muted-foreground">{t("emptyTitle")}</p>}
-        {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} />)}
+        {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
         {Boolean(threadsError) && <p className="px-3 py-2 text-xs text-destructive">{errorMessage(threadsError)}</p>}
       </nav>
     </aside>
@@ -1274,23 +1269,6 @@ function NewThreadPage({ sdk, threads, threadsLoading, threadsError }: { sdk: Au
       </form>
     </section>
   </main>
-}
-
-function ThreadLink({ thread }: { thread: Thread }) {
-  const { t } = useUi()
-  return <Link to={`/threads/${thread.id}`} className="flex min-w-0 items-center gap-2 rounded-md px-3 py-2.5 text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-    <StatusDot status={thread.status} />
-    <span className="min-w-0 flex-1 truncate">{thread.title}</span>
-    <span className="sr-only">{statusLabel(thread.status, t)}</span>
-  </Link>
-}
-
-function StatusDot({ status }: { status: ThreadStatus }) {
-  return <span aria-hidden="true" className={status === "running" ? "size-2 shrink-0 rounded-full bg-primary" : status === "failed" ? "size-2 shrink-0 rounded-full bg-destructive" : "size-2 shrink-0 rounded-full bg-muted-foreground/45"} />
-}
-
-function statusLabel(status: ThreadStatus, t: (key: CopyKey) => string) {
-  return status === "running" ? t("running") : status === "failed" ? t("failed") : t("idle")
 }
 
 function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; threads: Thread[]; onCreate: () => void }) {
@@ -1382,7 +1360,6 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
   if (thread.isError || !thread.data) return <Page title={t("chat")} description=""><RequestError error={thread.error} /></Page>
   const current = thread.data
   const running = current.status === "running"
-  const compacting = running && latestThreadAction(history.data ?? []) === "compact"
   const busy = submit.isPending || control.isPending
   const hasHistory = history.data?.some((record) => record.kind !== "activity") ?? false
   return <main className="flex h-full flex-col lg:flex-row">
@@ -1392,7 +1369,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
         <Button size="icon-sm" variant="ghost" aria-label={t("newThread")} onClick={onCreate}><PlusIcon /></Button>
       </div>
       <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-9rem)]" aria-label={t("threads")}>
-        {threads.map((item) => <ThreadLink key={item.id} thread={item} />)}
+        {threads.map((item) => <ThreadLink key={item.id} thread={item.id === current.id ? current : item} language={language} />)}
       </nav>
     </aside>
     <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
@@ -1401,7 +1378,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
           <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} />
           <Button size="sm" disabled={rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
         </form> : <div className="min-w-0 flex-1"><h1 className="truncate text-base font-semibold">{current.title}</h1><p className="truncate text-xs text-muted-foreground">{current.model}</p></div>}
-        <Badge variant={current.status === "failed" ? "destructive" : current.status === "running" ? "secondary" : "outline"}>{compacting ? t("compacting") : statusLabel(current.status, t)}</Badge>
+        <ThreadStatusBadge status={current.display_status} language={language} />
         {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
@@ -1417,7 +1394,7 @@ function ThreadConversation({ sdk, threads, onCreate }: { sdk: AuthMiniApi; thre
               {!history.isLoading && !history.error && history.data?.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {pendingResponseRecords(liveResponse.data, history.data ?? [], threadId).map((record) => <MessageScrollerItem key={`live-${liveResponse.data?.audit_id}-${record.id}`}><HistoryMessage language={language} record={record} workers={workers.data} /></MessageScrollerItem>)}
               {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
-              {running && <MessageScrollerItem><div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{compacting ? t("compacting") : t("running")}</div></MessageScrollerItem>}
+              {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton behavior="auto" />

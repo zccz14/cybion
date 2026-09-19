@@ -171,6 +171,7 @@ async fn browser_controls_accept_empty_posts_and_enforce_authentication_and_owne
             .await
             .unwrap();
         assert_eq!(cancelled["status"], "idle");
+        assert_eq!(cancelled["display_status"], "stopped");
         wait_finished(&state, &user, &thread).await;
     }
     assert_eq!(
@@ -653,4 +654,143 @@ async fn cancel_marks_all_outstanding_worker_calls_and_keeps_late_results_as_act
     let history = history_for(&state, &user, thread.id).await.unwrap();
     assert_eq!(history.last().unwrap().kind, "activity");
     assert_eq!(history.last().unwrap().payload["call_id"], "delivered");
+}
+
+async fn assert_display_status(state: &AppState, user: &User, thread: &ThreadView, expected: &str) {
+    let detail = read_thread_for(state, user, thread.id.clone())
+        .await
+        .unwrap();
+    let list = list_threads_for(state, user).await.unwrap();
+    let listed = list.iter().find(|item| item.id == thread.id).unwrap();
+    assert_eq!(detail.display_status, expected);
+    assert_eq!(listed.display_status, expected);
+    assert_eq!(listed.status, detail.status);
+}
+
+#[tokio::test]
+async fn display_status_distinguishes_ready_success_stop_failure_and_compaction() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "display-status-owner").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    assert_eq!(thread.display_status, "ready");
+    assert_display_status(&state, &user, &thread, "ready").await;
+
+    let first = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt("first".to_owned()),
+    )
+    .await;
+    assert_display_status(&state, &user, &thread, "running").await;
+    finalize_request_success(&state, &user, &thread.id, first)
+        .await
+        .unwrap();
+    assert_display_status(&state, &user, &thread, "completed").await;
+
+    let next = record(&state, &user, &thread, RequestInput::Continue).await;
+    assert_display_status(&state, &user, &thread, "running").await;
+    let cancelled = cancel_for(&state, &user, thread.id.clone()).await.unwrap();
+    assert_eq!(cancelled.status, "idle");
+    assert_eq!(cancelled.display_status, "stopped");
+    assert_display_status(&state, &user, &thread, "stopped").await;
+    assert!(
+        !finalize_request_success(&state, &user, &thread.id, next)
+            .await
+            .unwrap()
+    );
+    assert!(!finalize_request_failure(&state, &user, &thread, next, "late failure").await);
+    assert_display_status(&state, &user, &thread, "stopped").await;
+
+    let compact = record(&state, &user, &thread, RequestInput::Compact).await;
+    assert_display_status(&state, &user, &thread, "compacting").await;
+    assert!(
+        finalize_request_success(&state, &user, &thread.id, compact)
+            .await
+            .unwrap()
+    );
+    assert_display_status(&state, &user, &thread, "completed").await;
+    // Renaming changes updated_at but is not an execution boundary.
+    let id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "UPDATE threads SET title='Renamed',updated_at=updated_at+10 WHERE id=?",
+            [id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_display_status(&state, &user, &thread, "completed").await;
+
+    let failed = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt("fail".to_owned()),
+    )
+    .await;
+    assert!(finalize_request_failure(&state, &user, &thread, failed, "upstream error").await);
+    assert_display_status(&state, &user, &thread, "failed").await;
+    let retry = record(&state, &user, &thread, RequestInput::Continue).await;
+    assert_display_status(&state, &user, &thread, "running").await;
+    finalize_request_success(&state, &user, &thread.id, retry)
+        .await
+        .unwrap();
+    assert_display_status(&state, &user, &thread, "completed").await;
+}
+
+#[tokio::test]
+async fn display_status_ignores_audits_and_late_output_and_is_scoped_to_the_thread() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "status-noise-owner").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let untouched = create_test_thread(&state, &user).await;
+    let initial = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt("first".to_owned()),
+    )
+    .await;
+    finalize_request_success(&state, &user, &thread.id, initial)
+        .await
+        .unwrap();
+    let compact = record(&state, &user, &thread, RequestInput::Compact).await;
+    // A newer user input supersedes the compact request, even before an audit exists.
+    let prompt = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt("new prompt".to_owned()),
+    )
+    .await;
+    assert!(
+        !finalize_request_success(&state, &user, &thread.id, compact)
+            .await
+            .unwrap()
+    );
+    let id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(connection, &id, "response_output", json!({"type":"message","content":"partial response"}));
+        insert_record(connection, &id, "tool_output", json!({"type":"function_call_output","output":"done"}));
+        insert_record(connection, &id, "activity", json!({"role":"system","content":"Request failed: stale","record_idx":compact}));
+        connection.execute("INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at) VALUES(?,'title','test-model','completed',0)", [&id])?;
+        Ok(())
+    }).await.unwrap();
+    assert_display_status(&state, &user, &thread, "running").await;
+    finalize_request_success(&state, &user, &thread.id, prompt)
+        .await
+        .unwrap();
+    let id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        // Raw activity payloads are valid stored history, not request boundaries.
+        connection.execute("INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES(?,'activity','not JSON',0)", [id])?;
+        Ok(())
+    }).await.unwrap();
+    assert_display_status(&state, &user, &thread, "completed").await;
+    assert_display_status(&state, &user, &untouched, "ready").await;
+    let other = user_for_subject(&state, "status-noise-other").unwrap();
+    assert!(list_threads_for(&state, &other).await.unwrap().is_empty());
+    assert!(read_thread_for(&state, &other, thread.id).await.is_err());
 }

@@ -1184,6 +1184,7 @@ struct ThreadView {
     reasoning_effort: String,
     service_tier_fast: bool,
     status: String,
+    display_status: String,
     created_at: i64,
     updated_at: i64,
 }
@@ -1647,6 +1648,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         status: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        display_status: row.get(8)?,
     })
 }
 
@@ -1824,10 +1826,33 @@ fn input_text(value: String) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+// INVARIANT: idle is written only on creation, successful finalization, or cancel.
+// The latest input/control boundary distinguishes those outcomes; later tool output,
+// title-generation audits, and superseded-request activity cannot change the result.
+const THREAD_VIEW_SELECT: &str = r#"
+SELECT t.id,t.title,t.model,t.reasoning_effort,t.service_tier_fast,t.status,t.created_at,t.updated_at,
+       CASE
+         WHEN t.status='failed' THEN 'failed'
+         WHEN t.status='running' THEN
+           CASE WHEN boundary.kind='activity' AND json_extract(boundary.payload,'$.action')='compact'
+                THEN 'compacting' ELSE 'running' END
+         WHEN boundary.id IS NULL THEN 'ready'
+         WHEN boundary.kind='activity' AND json_extract(boundary.payload,'$.action')='cancel' THEN 'stopped'
+         ELSE 'completed'
+       END AS display_status
+FROM threads t
+LEFT JOIN history_records boundary ON boundary.id=(
+  SELECT id FROM history_records WHERE thread_id=t.id
+    AND (kind='input' OR (kind='activity' AND
+      CASE WHEN json_valid(payload) THEN json_extract(payload,'$.type') END='thread_control'))
+  ORDER BY id DESC LIMIT 1
+)
+"#;
+
 fn load_thread(connection: &Connection, id: &str) -> Result<ThreadView, ApiError> {
     connection
         .query_row(
-            "SELECT id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at FROM threads WHERE id=?",
+            &format!("{THREAD_VIEW_SELECT} WHERE t.id=?"),
             [id],
             thread_from_row,
         )
@@ -1854,6 +1879,7 @@ async fn create_thread_for(
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
             status: "idle".to_owned(),
+            display_status: "ready".to_owned(),
             created_at: now(),
             updated_at: now(),
         };
@@ -1878,9 +1904,9 @@ async fn create_thread_for(
 
 async fn list_threads_for(state: &AppState, user: &User) -> Result<Vec<ThreadView>, ApiError> {
     user_db(state, user, true, |connection| {
-        let mut statement = connection.prepare(
-            "SELECT id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at FROM threads ORDER BY updated_at DESC,id DESC",
-        )?;
+        let mut statement = connection.prepare(&format!(
+            "{THREAD_VIEW_SELECT} ORDER BY t.updated_at DESC,t.id DESC"
+        ))?;
         let rows = statement.query_map([], thread_from_row)?;
         let mut threads = Vec::new();
         for row in rows {
@@ -3376,6 +3402,7 @@ async fn process_request(
                 reasoning_effort: "medium".to_owned(),
                 service_tier_fast: false,
                 status: "failed".to_owned(),
+                display_status: "failed".to_owned(),
                 created_at: now(),
                 updated_at: now(),
             },
