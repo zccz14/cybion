@@ -35,10 +35,53 @@ The checkpoint is included as the first item when one exists. Records from
 other threads are never eligible, even when their numeric IDs fall inside the
 same range. A missing, foreign, or non-protocol `idx_tail` is an error.
 
-Each Responses request prepends its current developer policy and Worker
-availability to this compiled array. The policy is request metadata; the
+Each Responses request prepends its current developer policy, top-level Context
+metadata, and registered Worker identities to this compiled array. The policy is request metadata; the
 durable conversation remains the record range above. The compiler uses `kind`
 to select protocol records; `activity` stays outside the model context.
+
+## Stable registry prefix
+
+Inference and compaction use the same registered Worker list, ordered by label
+and ID. The prefix contains only each Worker's ID and label. Online state,
+heartbeat timestamps, and resource reports do not change the prefix. Inference
+keeps Worker tool definitions available whenever the user has registered Workers,
+even if all of them are offline. Execution checks availability and returns an
+offline tool error before queueing a call. Adding, removing, or renaming a Worker
+can change the prefix.
+
+System-authored prompts and tool descriptions use neutral Context, Worker, and
+conversation terminology. User-authored metadata, content, and conversation
+history are preserved as supplied.
+
+## Progressive Context discovery
+
+The initial prefix lists only top-level Context metadata, ordered by name and ID.
+`read_context` and `GET /api/contexts/{id}` return the current node's existing
+`id`, `name`, `description`, `content`, and `parent_id` fields, plus `children`:
+
+```json
+{
+  "id": "parent-context-id",
+  "name": "Development",
+  "description": "Development guidance",
+  "content": "Full content of this node",
+  "parent_id": null,
+  "children": [
+    {
+      "context_id": "child-context-id",
+      "name": "Coding",
+      "description": "Coding and testing guidance"
+    }
+  ]
+}
+```
+
+Children contain only direct-child metadata (`context_id`, `name`, `description`),
+ordered by name and ID. A leaf always returns `children: []`. The current node and
+its child metadata are read in one transaction from the requesting user's database.
+The model can pass a child's `context_id` to `read_context` to discover the next
+level. Child content and deeper descendants are disclosed only when read.
 
 ## Replay cleanup
 

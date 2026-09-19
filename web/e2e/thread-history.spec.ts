@@ -4,7 +4,7 @@ const groupSelector = '[data-slot="thread-process-group"]'
 
 test("only consecutive process items collapse; input, Activity and assistant replies stay visible", async ({ page }) => {
   const errors: string[] = []
-  page.on("pageerror", (error) => errors.push(error.message))
+  page.on("pageerror", (error) => errors.push(error.stack ?? error.message))
   await page.goto("/e2e/thread-history.html")
   const groups = page.locator(groupSelector)
   await expect(groups).toHaveCount(3)
