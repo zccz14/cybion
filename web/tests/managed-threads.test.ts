@@ -71,7 +71,7 @@ test("the Worker page uses the controller release manifest and guided connection
 })
 
 test("the hosted shell keeps the outer navigation and Linkit account surface", () => {
-  for (const group of ["navWork", "navAudit", "navSystem", "navConfiguration"]) {
+  for (const group of ["navWork", "navAudit", "navAdministration", "navConfiguration"]) {
     assert.match(source, new RegExp(`${group}:`))
   }
   for (const route of ["/reasoning-audit", "/history", "/system", "/configuration"]) {

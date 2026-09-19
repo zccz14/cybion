@@ -68,6 +68,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { WorkerConnections } from "@/components/worker-connections"
 import { AdminUsers } from "@/components/admin-users"
+import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
 import { ThreadHistory } from "@/components/thread-history"
@@ -234,16 +235,9 @@ type IntegrationStatus = {
   openai_configured: boolean
   openai_consumer_id: string | null
   openai_base_url: string
-  user_agent: string
-  originator: string
   linkit_configured: boolean
   linkit_bot_id: string | null
   linkit_username: string | null
-}
-type ExperimentalFeatures = {
-  thread_id_header: boolean
-  session_id_header: boolean
-  codex_turn_state_header: boolean
 }
 type SystemResources = {
   generated_at: number
@@ -424,7 +418,6 @@ const copy = {
     contextExpand: "Expand context",
     navAudit: "Audit",
     inferenceStats: "Inference statistics",
-    navSystem: "System",
     navAdministration: "Administration",
     users: "Users",
     usersDescription: "All Cybion users, inference usage, stored records and traffic. Updates every 5 seconds.",
@@ -534,17 +527,10 @@ const copy = {
     sampled: "Sampled",
     sampleInterval: "Sample interval",
     unavailable: "Unavailable",
-    configuration: "Configuration",
-    configurationDescription: "Thread defaults, integrations, and workspace access.",
-    experimentalFeatures: "Experimental features",
-    experimentalFeaturesDescription: "Global controls for experimental request behavior.",
-    threadIdHeader: "Send Thread ID header",
-    threadIdHeaderDescription: "Add thread-id: <UUID> to upstream Responses requests for every thread and API client.",
-    sessionIdHeader: "Send Session ID header",
-    sessionIdHeaderDescription: "Add session-id: <Thread ID> to upstream Responses requests for every thread and API client. Disabled by default and independent of the Thread ID header switch.",
-    codexTurnStateHeader: "Return x-codex-turn-state header",
-    codexTurnStateHeaderDescription: "Save the latest x-codex-turn-state response header per thread and send it with subsequent requests. Disabled by default.",
-    saveExperimentalError: "Could not save experimental feature settings",
+    configuration: "Personal settings",
+    configurationDescription: "Your new-thread defaults, integrations, and workspace access.",
+    systemConfiguration: "System configuration",
+    systemConfigurationDescription: "Administrator-only global settings for all users' upstream requests.",
     threadDefaults: "New thread defaults",
     threadDefaultsDescription: "Applied when you create a thread. You can adjust these settings within each thread.",
     reasoningEffort: "Reasoning effort",
@@ -565,16 +551,6 @@ const copy = {
     configured: "Configured",
     notConfigured: "Not configured",
     baseUrl: "Base URL",
-    requestHeaders: "Request headers",
-    requestHeadersDescription: "Administrator-only global headers sent with every upstream Responses request.",
-    userAgent: "User-Agent",
-    userAgentDescription: "Leave blank to use Cybion's default User-Agent.",
-    originator: "Originator",
-    originatorDescription: "Optional originator value sent to the upstream service.",
-    saveRequestHeaders: "Save request headers",
-    savingRequestHeaders: "Saving…",
-    requestHeadersSaved: "Request headers saved",
-    saveRequestHeadersError: "Could not save request headers",
     username: "Username",
     tools: "Tools",
     toolsDescription: "Capabilities available to Cybion threads.",
@@ -698,7 +674,6 @@ const copy = {
     contextExpand: "展开上下文",
     navAudit: "审计",
     inferenceStats: "推理统计",
-    navSystem: "系统",
     navAdministration: "管理员",
     users: "用户",
     usersDescription: "所有 Cybion 用户的推理用量、数据记录与网络流量，每 5 秒刷新。",
@@ -808,17 +783,10 @@ const copy = {
     sampled: "采样时间",
     sampleInterval: "采样间隔",
     unavailable: "不可用",
-    configuration: "配置",
-    configurationDescription: "线程默认设置、外部集成和工作区访问入口。",
-    experimentalFeatures: "实验性功能",
-    experimentalFeaturesDescription: "控制所有请求的实验性行为。",
-    threadIdHeader: "发送 Thread ID 请求头",
-    threadIdHeaderDescription: "向所有线程和 API 客户端的上游 Responses 请求添加 thread-id: <UUID>。",
-    sessionIdHeader: "发送 Session ID 请求头",
-    sessionIdHeaderDescription: "向所有线程和 API 客户端的上游 Responses 请求添加 session-id: <Thread ID>。默认关闭，独立于 Thread ID 请求头开关。",
-    codexTurnStateHeader: "回传 x-codex-turn-state 请求头",
-    codexTurnStateHeaderDescription: "为每个 Thread 缓存最新的 x-codex-turn-state 响应头，并在后续请求中回传。默认关闭。",
-    saveExperimentalError: "无法保存实验性功能设置",
+    configuration: "个人配置",
+    configurationDescription: "当前账号的线程默认设置、外部集成和工作区访问入口。",
+    systemConfiguration: "系统配置",
+    systemConfigurationDescription: "仅管理员可修改，影响所有用户的上游请求。",
     threadDefaults: "新线程默认设置",
     threadDefaultsDescription: "创建新线程时自动应用，也可以在每个线程中单独调整。",
     reasoningEffort: "推理强度",
@@ -839,16 +807,6 @@ const copy = {
     configured: "已配置",
     notConfigured: "未配置",
     baseUrl: "基础地址",
-    requestHeaders: "请求头",
-    requestHeadersDescription: "管理员专用的全局请求头，会发送到所有上游 Responses 请求。",
-    userAgent: "User-Agent",
-    userAgentDescription: "留空则使用 Cybion 默认 User-Agent。",
-    originator: "Originator",
-    originatorDescription: "发送给上游服务的可选 originator 值。",
-    saveRequestHeaders: "保存请求头",
-    savingRequestHeaders: "保存中…",
-    requestHeadersSaved: "请求头已保存",
-    saveRequestHeadersError: "无法保存请求头",
     username: "用户名",
     tools: "工具",
     toolsDescription: "Cybion 线程可使用的能力。",
@@ -1004,8 +962,8 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const [dark, setDark] = useState(() => localStorage.getItem("cybion.theme") === "dark" || (!localStorage.getItem("cybion.theme") && matchMedia("(prefers-color-scheme: dark)").matches))
   const labels = copy[language]
   const currentUser = useQuery({
-    queryKey: ["me"],
-    queryFn: () => api<CurrentUser>(sdk, "/api/me"),
+    queryKey: ["me", sdk.session.getState().sessionId],
+    queryFn: ({ signal }) => api<CurrentUser>(sdk, "/api/me", { signal }),
     staleTime: 60_000,
   })
   const threads = useQuery({
@@ -1071,6 +1029,7 @@ function WorkspaceShell({
   const workNav = [
     { to: "/threads", label: t("threads"), icon: TerminalSquareIcon },
     { to: "/contexts", label: t("contexts"), icon: NetworkIcon },
+    { to: "/workers", label: t("workers"), icon: NetworkIcon },
   ]
   const auditNav = [
     { to: "/insights", label: t("inferenceStats"), icon: ActivityIcon },
@@ -1078,11 +1037,12 @@ function WorkspaceShell({
     { to: "/worker-audit", label: t("workerAudit"), icon: WrenchIcon },
     { to: "/history", label: t("history"), icon: DatabaseIcon },
   ]
-  const systemNav = [
-    { to: "/workers", label: t("workers"), icon: NetworkIcon },
-  ]
   const administrationNav = isAdmin
-    ? [{ to: "/admin/users", label: t("users"), icon: UsersIcon }, { to: "/system", label: t("systemResources"), icon: ActivityIcon }]
+    ? [
+      { to: "/admin/users", label: t("users"), icon: UsersIcon },
+      { to: "/system", label: t("systemResources"), icon: ActivityIcon },
+      { to: "/admin/configuration", label: t("systemConfiguration"), icon: Settings2Icon },
+    ]
     : []
   const configurationNav = [
     { to: "/configuration", label: t("configuration"), icon: Settings2Icon },
@@ -1092,7 +1052,6 @@ function WorkspaceShell({
   const nav: WorkspaceNavGroup[] = [
     { id: "work", label: t("navWork"), items: workNav },
     { id: "audit", label: t("navAudit"), items: auditNav },
-    { id: "system", label: t("navSystem"), items: systemNav },
     ...(administrationNav.length > 0 ? [{ id: "administration", label: t("navAdministration"), items: administrationNav }] : []),
     { id: "configuration", label: t("navConfiguration"), items: configurationNav },
   ]
@@ -1157,8 +1116,9 @@ function WorkspaceShell({
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/workers" element={<WorkersPage sdk={sdk} />} />
-            <Route path="/configuration" element={<ConfigurationPage sdk={sdk} isAdmin={isAdmin} />} />
-            <Route path="/settings" element={<ConfigurationPage sdk={sdk} isAdmin={isAdmin} />} />
+            <Route path="/admin/configuration" element={<SystemConfigurationPage sdk={sdk} />} />
+            <Route path="/configuration" element={<ConfigurationPage sdk={sdk} />} />
+            <Route path="/settings" element={<ConfigurationPage sdk={sdk} />} />
             <Route path="/api" element={<ApiKeysPage sdk={sdk} />} />
             <Route path="/tools" element={<ToolsPage />} />
             <Route path="*" element={<Navigate to="/threads" replace />} />
@@ -1176,6 +1136,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/history")) return t("history")
   if (pathname.startsWith("/admin/users")) return t("users")
+  if (pathname.startsWith("/admin/configuration")) return t("systemConfiguration")
   if (pathname.startsWith("/admin/resources") || pathname.startsWith("/system") || pathname.startsWith("/resources")) return t("systemTitle")
   if (pathname.startsWith("/workers")) return t("workers")
   if (pathname.startsWith("/configuration") || pathname.startsWith("/settings")) return t("configuration")
@@ -2091,66 +2052,28 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   </Card>
 }
 
-function ExperimentalFeaturesCard({ sdk }: { sdk: AuthMiniApi }) {
-  const { t } = useUi()
-  const client = useQueryClient()
-  const queryKey = ["experimental-features"]
-  const features = useQuery({ queryKey, queryFn: ({ signal }) => api<ExperimentalFeatures>(sdk, "/api/experimental-features", { signal }) })
-  const save = useMutation({
-    mutationFn: (value: Partial<ExperimentalFeatures>) => api<ExperimentalFeatures>(sdk, "/api/experimental-features", { method: "PUT", body: JSON.stringify(value) }),
-    onSuccess: (value) => client.setQueryData(queryKey, value),
-  })
-  return <Card><CardHeader><CardTitle>{t("experimentalFeatures")}</CardTitle><CardDescription>{t("experimentalFeaturesDescription")}</CardDescription></CardHeader><CardContent>
-    {features.error && <RequestError error={features.error} onRetry={() => void features.refetch()} />}
-    {features.isLoading && <Skeleton className="h-36 max-w-xl" />}
-    {features.data && <FieldGroup className="max-w-xl"><Field orientation="horizontal" data-disabled={save.isPending}>
-      <FieldContent><FieldLabel htmlFor="experimental-thread-id-header">{t("threadIdHeader")}</FieldLabel><FieldDescription id="experimental-thread-id-header-description">{t("threadIdHeaderDescription")}</FieldDescription></FieldContent>
-      <Switch id="experimental-thread-id-header" aria-describedby="experimental-thread-id-header-description" checked={features.data.thread_id_header} disabled={save.isPending} onCheckedChange={(thread_id_header) => save.mutate({ thread_id_header })} />
-    </Field><Field orientation="horizontal" data-disabled={save.isPending}>
-      <FieldContent><FieldLabel htmlFor="experimental-session-id-header">{t("sessionIdHeader")}</FieldLabel><FieldDescription id="experimental-session-id-header-description">{t("sessionIdHeaderDescription")}</FieldDescription></FieldContent>
-      <Switch id="experimental-session-id-header" aria-describedby="experimental-session-id-header-description" checked={features.data.session_id_header} disabled={save.isPending} onCheckedChange={(session_id_header) => save.mutate({ session_id_header })} />
-    </Field><Field orientation="horizontal" data-disabled={save.isPending}>
-      <FieldContent><FieldLabel htmlFor="experimental-codex-turn-state-header">{t("codexTurnStateHeader")}</FieldLabel><FieldDescription id="experimental-codex-turn-state-header-description">{t("codexTurnStateHeaderDescription")}</FieldDescription></FieldContent>
-      <Switch id="experimental-codex-turn-state-header" aria-describedby="experimental-codex-turn-state-header-description" checked={features.data.codex_turn_state_header} disabled={save.isPending} onCheckedChange={(codex_turn_state_header) => save.mutate({ codex_turn_state_header })} />
-    </Field></FieldGroup>}
-    {save.error && <Alert className="mt-4" variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveExperimentalError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
-  </CardContent></Card>
+function SystemConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t, language } = useUi()
+  const sessionId = sdk.session.getState().sessionId
+  return <Page title={t("systemConfiguration")} description={t("systemConfigurationDescription")}>
+    <SystemConfiguration key={sessionId} language={language} sessionId={sessionId} request={(path, init) => api(sdk, path, init)} />
+  </Page>
 }
 
-function ConfigurationPage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolean }) {
+function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
   const { session } = useAuthMini()
   const client = useQueryClient()
-  const [headers, setHeaders] = useState({ user_agent: "", originator: "" })
   const integrations = useQuery({ queryKey: ["integrations"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations") })
   const refresh = useMutation({ mutationFn: () => api<IntegrationStatus>(sdk, "/api/integrations/refresh", { method: "POST" }), onSuccess: (value) => client.setQueryData(["integrations"], value) })
-  const saveHeaders = useMutation({
-    mutationFn: (value: typeof headers) => api<IntegrationStatus>(sdk, "/api/integrations", { method: "PUT", body: JSON.stringify(value) }),
-    onSuccess: (value) => { setHeaders({ user_agent: value.user_agent, originator: value.originator }); client.setQueryData(["integrations"], value) },
-  })
-  useEffect(() => {
-    if (integrations.data) setHeaders({ user_agent: integrations.data.user_agent, originator: integrations.data.originator })
-  }, [integrations.data])
-  const headersChanged = integrations.data && (headers.user_agent !== integrations.data.user_agent || headers.originator !== integrations.data.originator)
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
-    {isAdmin && <ExperimentalFeaturesCard sdk={sdk} />}
     <Card><CardHeader><CardTitle>{t("integration")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2">
       {integrations.error && <div className="sm:col-span-2"><RequestError error={integrations.error} onRetry={() => void integrations.refetch()} /></div>}
       {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><IntegrationRow label={t("linkit")} configured={integrations.data.linkit_configured} detail={integrations.data.linkit_username ? `@${integrations.data.linkit_username}` : t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
       {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
       <div className="sm:col-span-2"><p className="mb-3 text-xs text-muted-foreground">{t("refreshIntegrationsHelp")}</p><Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>{refresh.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{refresh.isPending ? t("refreshing") : t("refreshIntegrations")}</Button>{refresh.error && <p className="mt-2 text-sm text-destructive">{errorMessage(refresh.error)}</p>}{refresh.isSuccess && <p role="status" className="mt-2 text-sm text-muted-foreground">{t("integrationsVerified")}</p>}</div>
     </CardContent></Card>
-    {isAdmin && <Card><CardHeader><CardTitle>{t("requestHeaders")}</CardTitle><CardDescription>{t("requestHeadersDescription")}</CardDescription></CardHeader><CardContent>
-      <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (headersChanged && !saveHeaders.isPending) saveHeaders.mutate(headers) }}>
-        <FieldGroup>
-          <Field data-disabled={saveHeaders.isPending}><FieldLabel htmlFor="integration-user-agent">{t("userAgent")}</FieldLabel><Input id="integration-user-agent" value={headers.user_agent} disabled={saveHeaders.isPending} onChange={(event) => setHeaders({ ...headers, user_agent: event.target.value })} /><FieldDescription>{t("userAgentDescription")}</FieldDescription></Field>
-          <Field data-disabled={saveHeaders.isPending}><FieldLabel htmlFor="integration-originator">{t("originator")}</FieldLabel><Input id="integration-originator" value={headers.originator} disabled={saveHeaders.isPending} onChange={(event) => setHeaders({ ...headers, originator: event.target.value })} /><FieldDescription>{t("originatorDescription")}</FieldDescription></Field>
-        </FieldGroup>
-        {saveHeaders.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveRequestHeadersError")}</AlertTitle><AlertDescription>{errorMessage(saveHeaders.error)}</AlertDescription></Alert>}
-        <div className="flex flex-wrap items-center gap-3"><Button disabled={!headersChanged || saveHeaders.isPending}>{saveHeaders.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{saveHeaders.isPending ? t("savingRequestHeaders") : t("saveRequestHeaders")}</Button><p role="status" className="text-sm text-muted-foreground">{saveHeaders.isSuccess && t("requestHeadersSaved")}</p></div>
-      </form>
-    </CardContent></Card>}
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
     <Card><CardHeader><CardTitle>{t("workers")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/workers">{t("workers")}</Link></Button></CardContent></Card>
   </Page>

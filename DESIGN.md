@@ -88,6 +88,27 @@ Desktop uses a narrow persistent navigation rail, a contextual top bar, and a
 single dense primary work area. On smaller screens navigation collapses before
 conversation controls do. Machine identity is always visible near the action.
 
+### Navigation and configuration ownership
+
+- **Work** contains Threads, Contexts, and Workers. Device management belongs to
+  the user's work, alongside conversations and context.
+- **Audit** contains inference statistics, reasoning requests, Worker calls,
+  and history records.
+- **Administration**, visible only to administrators, contains Users, System
+  resources, and **System configuration** (`#/admin/configuration`).
+- **Configuration** contains **Personal settings** (`#/configuration`), API keys,
+  and Tools. Personal settings contains new-thread defaults, the current user's
+  integrations, and their API/Worker shortcuts. This scope is the same for
+  administrators and ordinary users.
+
+System configuration owns the global experimental request switches (`thread-id`,
+`session-id`, `x-codex-turn-state`) and global `User-Agent` / `originator` headers.
+The page explains that these affect all users' upstream requests. It checks the
+current session's administrator identity before mounting or fetching the editors;
+loading, failed access checks, and non-administrator access are distinct states.
+The backend continues to enforce administrator authorization on every global
+setting write. Existing settings endpoints and persisted values stay unchanged.
+
 ## Thread execution status
 
 Use the shared [Thread status vocabulary](docs/thread-status.md): amber segmented
