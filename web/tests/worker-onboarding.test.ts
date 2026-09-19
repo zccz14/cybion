@@ -1,0 +1,38 @@
+import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import test from "node:test"
+import { normalizeCode, validCode, deviceStatus, checkReady, downloadUrl, installCommand, type Device, type Check, type Release } from "../src/lib/worker-onboarding.ts"
+const release: Release = JSON.parse(readFileSync(new URL("../../worker-release.json", import.meta.url), "utf8"))
+test("release manifest drives all five platform downloads and checksum commands", () => {
+  assert.equal(release.platforms.length, 5)
+  for (const p of release.platforms) {
+    assert.ok(downloadUrl(release, p.id).includes(release.version))
+    assert.match(installCommand(release, p.id), /sha256|SHA256/)
+    if (p.id.startsWith("windows")) assert.ok(downloadUrl(release,p.id).endsWith(".zip"))
+    else assert.match(installCommand(release,p.id), /&&\ntar/)
+  }
+  assert.throws(() => downloadUrl(release, "unknown"))
+})
+test("normalize pairing codes without accepting partial or non-hex values", () => {
+  assert.equal(normalizeCode("abcd 1234-ef56"), "ABCD-1234-EF56")
+  assert.ok(validCode("abcd1234ef56")); assert.ok(!validCode("1234")); assert.ok(!validCode("ZZZZ-1234-EF56"))
+})
+test("first connection and completed round trip are distinct from heartbeat online", () => {
+  const device: Device = { id: "target", label: "Mac", created_at: 1, status: "offline" }
+  assert.equal(deviceStatus(device), "waiting")
+  device.last_seen_at = 2; assert.equal(deviceStatus(device), "offline")
+  device.status = "online"; assert.equal(checkReady(null, device), false)
+  const check: Check = { id: "test", worker_id: "other", status: "completed", created_at: 1, completed_at: 2, result: { shell: { status: "ready", detail: "shell_ok" } } }
+  assert.equal(checkReady(check, device), false)
+  check.worker_id = device.id; assert.equal(checkReady(check, device), true)
+  check.status = "timed_out"; assert.equal(checkReady(check, device), false)
+})
+test("the guide is bilingual, requires explicit consent, and does not persist credentials", () => {
+  const source = readFileSync(new URL("../src/components/worker-connections.tsx", import.meta.url), "utf8")
+  assert.match(source, /checked=\{confirmed\}/)
+  assert.match(source, /disabled=\{!confirmed/)
+  assert.match(source, /await navigator.clipboard.writeText/)
+  assert.doesNotMatch(source, /(?:localStorage|sessionStorage)\.setItem/)
+  assert.match(source, /target === "remote"/)
+  assert.match(source, /automatic && device.status === "online"/)
+})

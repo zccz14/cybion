@@ -21,6 +21,8 @@ jobs:
           components: rustfmt, clippy
       - run: npm --prefix web ci
       - run: npm --prefix web run check
+      - run: npx --prefix web playwright install --with-deps chromium
+      - run: npm --prefix web run test:e2e
       - run: npm --prefix web run build
       - run: python3 scripts/check-responses-parity.py
       - run: bash -n .github/scripts/send-deploy.sh deploy/deploy-release.sh

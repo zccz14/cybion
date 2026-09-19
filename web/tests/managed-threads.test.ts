@@ -60,25 +60,14 @@ test("history renders reasoning summaries and exposes OpenAI native tools", () =
 test("the management surfaces expose integration keys and SQLite-free Worker pairing", () => {
   assert.match(source, /\/api\/api-keys/)
   assert.match(source, /\/api\/workers/)
-  assert.match(source, /function workerToml/)
-  for (const key of ["controller_url", "user_id", "machine_id", "access_token"]) {
-    assert.match(source, new RegExp(`${key} =`))
-  }
+  const connections = readFileSync(new URL("../src/components/worker-connections.tsx", import.meta.url), "utf8")
+  for (const key of ["controller_url", "user_id", "machine_id", "access_token"]) assert.ok(connections.includes(key))
   assert.doesNotMatch(source, /tenant_id|\/turn|run_id|turn_index/)
 })
 
-test("the Worker page exposes every asset from the current standalone release", () => {
-  assert.match(source, /version: "v0\.1\.2"/)
-  assert.match(source, /releases\/tag\/v0\.1\.2/)
-  for (const asset of [
-    "cybion-worker-macos-aarch64.tar.gz",
-    "cybion-worker-macos-x86_64.tar.gz",
-    "cybion-worker-linux-x86_64.tar.gz",
-    "cybion-worker-linux-aarch64.tar.gz",
-    "cybion-worker-windows-x86_64.tar.gz",
-  ]) {
-    assert.match(source, new RegExp(asset.replaceAll(".", "\\.")))
-  }
+test("the Worker page uses the controller release manifest and guided connections", () => {
+  assert.match(source, /WorkerConnections/)
+  assert.doesNotMatch(source, /CYBION_WORKER_RELEASE/)
 })
 
 test("the hosted shell keeps the outer navigation and Linkit account surface", () => {

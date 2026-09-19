@@ -1,0 +1,11 @@
+{
+  "version": "v0.1.4",
+  "release_url": "https://github.com/zccz14/cybion-worker/releases/tag/v0.1.4",
+  "platforms": [
+    {"id":"macos-aarch64","label":"macOS · Apple Silicon"},
+    {"id":"macos-x86_64","label":"macOS · Intel"},
+    {"id":"linux-x86_64","label":"Linux · x86_64"},
+    {"id":"linux-aarch64","label":"Linux · ARM64"},
+    {"id":"windows-x86_64","label":"Windows · x86_64"}
+  ]
+}
