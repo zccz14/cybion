@@ -55,6 +55,7 @@ const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the user's request. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
 const WORKER_ONLINE_SECONDS: i64 = 45;
 const WORKER_RESULT_TIMEOUT_SECONDS: usize = 15 * 60;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
@@ -1523,9 +1524,16 @@ struct ContextView {
 
 #[derive(Clone, Debug, Serialize)]
 struct ContextSummary {
-    id: String,
+    context_id: String,
     name: String,
     description: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ContextReadView {
+    #[serde(flatten)]
+    context: ContextView,
+    children: Vec<ContextSummary>,
 }
 
 #[derive(Deserialize)]
@@ -1571,12 +1579,9 @@ struct WorkerCall {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct WorkerSnapshot {
+struct WorkerSummary {
     id: String,
     label: String,
-    status: String,
-    last_seen_at: Option<i64>,
-    resource: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -2926,7 +2931,7 @@ async fn read_context_api(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ContextView>, ApiError> {
+) -> Result<Json<ContextReadView>, ApiError> {
     let context = read_context_for(&state, &identity.user, id).await?;
     Ok(Json(context))
 }
@@ -2935,20 +2940,23 @@ async fn read_context_for(
     state: &AppState,
     user: &User,
     id: String,
-) -> Result<ContextView, ApiError> {
+) -> Result<ContextReadView, ApiError> {
     let id = context_id(&id)?;
     user_db(state, user, true, move |connection| {
-        connection
+        let transaction = connection.transaction()?;
+        let context = transaction
             .query_row(
                 "SELECT id,name,description,content,parent_id FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?
+            .ok_or_else(|| ApiError::not_found("context not found"))?;
+        let children = context_summaries(&transaction, Some(&id))?;
+        transaction.commit()?;
+        Ok(ContextReadView { context, children })
     })
-    .await?
-    .ok_or_else(|| ApiError::not_found("context not found"))
+    .await
 }
 
 async fn update_context(
@@ -3485,7 +3493,7 @@ async fn maybe_name_thread(
     let prompt = json!([
         {
             "role": "developer",
-            "content": "You name Cybion threads. Return only a concise title of 2-8 words that describes the user's request. Do not use quotes, Markdown, a period, or a generic title like Untitled thread."
+            "content": THREAD_TITLE_PROMPT
         },
         {"role": "user", "content": input}
     ]);
@@ -3879,34 +3887,28 @@ fn replayable_context_items(items: &[Value]) -> Vec<Value> {
     }).cloned().collect()
 }
 
-fn available_workers(connection: &Connection) -> Result<Vec<WorkerSnapshot>, ApiError> {
-    let mut statement = connection.prepare(
-        "SELECT id,label,last_seen_at,resource_json
-         FROM workers WHERE status='online' AND last_seen_at>=? ORDER BY label,id",
-    )?;
-    let rows = statement.query_map([now() - WORKER_ONLINE_SECONDS], |row| {
-        let resource = row
-            .get::<_, Option<String>>(3)?
-            .and_then(|value| serde_json::from_str(&value).ok());
-        Ok(WorkerSnapshot {
+fn registered_workers(connection: &Connection) -> Result<Vec<WorkerSummary>, ApiError> {
+    let mut statement = connection.prepare("SELECT id,label FROM workers ORDER BY label,id")?;
+    let rows = statement.query_map([], |row| {
+        Ok(WorkerSummary {
             id: row.get(0)?,
             label: row.get(1)?,
-            status: "online".to_owned(),
-            last_seen_at: row.get(2)?,
-            resource,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
-fn available_contexts(connection: &Connection) -> Result<Vec<ContextSummary>, ApiError> {
+fn context_summaries(
+    connection: &Connection,
+    parent_id: Option<&str>,
+) -> Result<Vec<ContextSummary>, ApiError> {
     let mut statement = connection.prepare(
-        "SELECT id,name,description FROM contexts WHERE parent_id IS NULL ORDER BY name,id",
+        "SELECT id,name,description FROM contexts WHERE parent_id IS ? ORDER BY name,id",
     )?;
-    let rows = statement.query_map([], |row| {
+    let rows = statement.query_map([parent_id], |row| {
         Ok(ContextSummary {
-            id: row.get(0)?,
+            context_id: row.get(0)?,
             name: row.get(1)?,
             description: row.get(2)?,
         })
@@ -3915,7 +3917,7 @@ fn available_contexts(connection: &Connection) -> Result<Vec<ContextSummary>, Ap
         .map_err(Into::into)
 }
 
-fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSnapshot]) -> Value {
+fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSummary]) -> Value {
     let context_section = if contexts.is_empty() {
         None
     } else {
@@ -3924,13 +3926,13 @@ fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSnapshot]) -> 
             .map(|context| {
                 format!(
                     "- context_id: {} ({}) — {}",
-                    context.id, context.name, context.description
+                    context.context_id, context.name, context.description
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
         Some(format!(
-            "Cybion Contexts (top-level; content is intentionally omitted from this initial context):\n{list}"
+            "Contexts (top-level; content is intentionally omitted from this initial context):\n{list}\n\nUse read_context to read a context and discover its direct children. Use context_id values from this list or from children returned by read_context to explore further levels as needed."
         ))
     };
     let list = workers
@@ -3939,7 +3941,7 @@ fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSnapshot]) -> 
         .collect::<Vec<_>>()
         .join("\n");
     let worker_section = format!(
-        "Cybion Workers:\n{}\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.",
+        "Workers:\n{}\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.\nWorkers listed above are registered devices, not necessarily online. Availability is checked when a tool is called.",
         list
     );
     let content = context_section
@@ -3954,7 +3956,7 @@ fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSnapshot]) -> 
 }
 
 #[allow(dead_code)]
-fn worker_developer_prefix(workers: &[WorkerSnapshot]) -> Value {
+fn worker_developer_prefix(workers: &[WorkerSummary]) -> Value {
     developer_prefix(&[], workers)
 }
 
@@ -4045,12 +4047,12 @@ async fn request_agent(
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let workers = user_db(state, user, false, |connection| {
-            available_workers(connection)
+            registered_workers(connection)
         })
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let contexts = user_db(state, user, false, |connection| {
-            available_contexts(connection)
+            context_summaries(connection, None)
         })
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
@@ -4259,11 +4261,11 @@ async fn compact_thread_context(
         ));
     }
     let workers = user_db(state, user, false, |connection| {
-        available_workers(connection)
+        registered_workers(connection)
     })
     .await?;
     let contexts = user_db(state, user, false, |connection| {
-        available_contexts(connection)
+        context_summaries(connection, None)
     })
     .await?;
     let summary = compact_protocol_context(
@@ -5555,20 +5557,20 @@ fn worker_tools() -> Value {
         {
             "type":"function",
             "name":"bash",
-            "description":"Run a shell command on the user's selected Cybion Worker.",
-            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact available Worker ID."},"command":{"type":"string"}},"required":["worker_id","command"],"additionalProperties":false}
+            "description":"Run a shell command on the user's selected Worker.",
+            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact Worker ID from the Workers list."},"command":{"type":"string"}},"required":["worker_id","command"],"additionalProperties":false}
         },
         {
             "type":"function",
             "name":"browser_control",
-            "description":"Control an isolated browser on the user's Cybion Worker.",
-            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact available Worker ID."},"action":{"type":"string"},"url":{"type":"string"},"selector":{"type":"string"},"text":{"type":"string"}},"required":["worker_id","action"],"additionalProperties":false}
+            "description":"Control an isolated browser on the user's selected Worker.",
+            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact Worker ID from the Workers list."},"action":{"type":"string"},"url":{"type":"string"},"selector":{"type":"string"},"text":{"type":"string"}},"required":["worker_id","action"],"additionalProperties":false}
         },
         {
             "type":"function",
             "name":"computer_use",
-            "description":"Perform a user-device computer action through the Cybion Worker.",
-            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact available Worker ID."},"action":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"text":{"type":"string"}},"required":["worker_id","action"],"additionalProperties":false}
+            "description":"Perform a user-device computer action through the selected Worker.",
+            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact Worker ID from the Workers list."},"action":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"text":{"type":"string"}},"required":["worker_id","action"],"additionalProperties":false}
         }
     ])
 }
@@ -5585,13 +5587,13 @@ fn context_tools() -> Value {
         {
             "type":"function",
             "name":"read_context",
-            "description":"Read the full content of a Cybion context directly from the controller.",
+            "description":"Read the full content of a context and its direct children metadata (context_id, name, description) from the controller.",
             "parameters":{
                 "type":"object",
                 "properties":{
                     "context_id":{
                         "type":"string",
-                        "description":"Exact context ID from the top-level context list."
+                        "description":"Exact context ID from the top-level Contexts list or children returned by a previous read_context call."
                     }
                 },
                 "required":["context_id"],
@@ -6630,7 +6632,7 @@ mod tests {
                 ],
             )
             .unwrap();
-        let contexts = available_contexts(&connection).unwrap();
+        let contexts = context_summaries(&connection, None).unwrap();
         let prefix = developer_prefix(&contexts, &[]);
         let content = prefix["content"].as_str().unwrap();
         assert!(content.contains(&parent));
@@ -6639,6 +6641,103 @@ mod tests {
         assert!(!content.contains(&child));
         assert!(!content.contains("top-secret parent content"));
         assert!(!content.contains("worker_id = 'worker'"));
+    }
+
+    #[test]
+    fn registered_workers_keep_prefix_and_tools_stable_across_runtime_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let connection = open_user(&root.path().join("workers.sqlite3"), true).unwrap();
+        for (id, name, status, last_seen) in [
+            ("worker-z", "Zulu", "online", Some(now())),
+            ("worker-b", "Alpha", "offline", Some(now())),
+            (
+                "worker-a",
+                "Alpha",
+                "online",
+                Some(now() - WORKER_ONLINE_SECONDS - 100),
+            ),
+            ("worker-c", "Unseen", "offline", None),
+            ("worker-d", "Unseen", "online", None),
+        ] {
+            connection.execute(
+                "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at,resource_json) VALUES(?,?,?,1,?,?,?)",
+                params![id, name, id, status, last_seen, r#"{"logical_cpus":8}"#],
+            ).unwrap();
+        }
+        let workers = registered_workers(&connection).unwrap();
+        assert_eq!(
+            workers
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            ["worker-a", "worker-b", "worker-c", "worker-d", "worker-z"]
+        );
+        let before = responses_payload_with_prefix(
+            "test-model",
+            None,
+            false,
+            json!([]),
+            !workers.is_empty(),
+            true,
+            None,
+            Some(developer_prefix(&[], &workers)),
+        );
+        assert_eq!(before["tools"].as_array().unwrap().len(), 6);
+        connection.execute(
+            "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
+        ).unwrap();
+        let workers = registered_workers(&connection).unwrap();
+        let after = responses_payload_with_prefix(
+            "test-model",
+            None,
+            false,
+            json!([]),
+            !workers.is_empty(),
+            true,
+            None,
+            Some(developer_prefix(&[], &workers)),
+        );
+        assert_eq!(
+            serde_json::to_vec(&before).unwrap(),
+            serde_json::to_vec(&after).unwrap()
+        );
+        connection.execute("DELETE FROM workers", []).unwrap();
+        assert!(registered_workers(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn system_authored_prompts_and_tool_definitions_are_product_neutral() {
+        let contexts = [ContextSummary {
+            context_id: "context".to_owned(),
+            name: "Skills".to_owned(),
+            description: "Reusable skills".to_owned(),
+        }];
+        let workers = [WorkerSummary {
+            id: "worker".to_owned(),
+            label: "Laptop".to_owned(),
+        }];
+        for text in [
+            THREAD_TITLE_PROMPT.to_owned(),
+            developer_prefix(&contexts, &workers).to_string(),
+            developer_prefix(&[], &[]).to_string(),
+            responses_tools(true, true).to_string(),
+            checkpoint_developer_prompt_with_metadata(&[]),
+        ] {
+            assert!(!text.to_lowercase().contains("cybion"), "{text}");
+        }
+        let tools = context_tools();
+        assert!(
+            tools[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("direct children")
+        );
+        assert!(
+            tools[0]["parameters"]["properties"]["context_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("children returned by a previous read_context call")
+        );
     }
 
     #[test]
@@ -6968,16 +7067,13 @@ mod tests {
 
     #[test]
     fn worker_developer_prefix_uses_markdown_ids_and_names_only() {
-        let prefix = worker_developer_prefix(&[WorkerSnapshot {
+        let prefix = worker_developer_prefix(&[WorkerSummary {
             id: "4b9aa3ae-f5a3-483b-975a-3fdcd148d680".to_owned(),
             label: "MBA".to_owned(),
-            status: "online".to_owned(),
-            last_seen_at: Some(1_789_259_826),
-            resource: Some(json!({"logical_cpus": 8})),
         }]);
         assert_eq!(
             prefix["content"].as_str().unwrap(),
-            "Cybion Workers:\n- worker_id: 4b9aa3ae-f5a3-483b-975a-3fdcd148d680 (MBA)\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly."
+            "Workers:\n- worker_id: 4b9aa3ae-f5a3-483b-975a-3fdcd148d680 (MBA)\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.\nWorkers listed above are registered devices, not necessarily online. Availability is checked when a tool is called."
         );
     }
 
@@ -7084,13 +7180,13 @@ mod tests {
                 {
                     "type":"function",
                     "name":"read_context",
-                    "description":"Read the full content of a Cybion context directly from the controller.",
+                    "description":"Read the full content of a context and its direct children metadata (context_id, name, description) from the controller.",
                     "parameters":{
                         "type":"object",
                         "properties":{
                             "context_id":{
                                 "type":"string",
-                                "description":"Exact context ID from the top-level context list."
+                                "description":"Exact context ID from the top-level Contexts list or children returned by a previous read_context call."
                             }
                         },
                         "required":["context_id"],

@@ -287,54 +287,131 @@ async fn invalid_custom_tools_are_answered_with_the_matching_output_type() {
     );
 }
 
-#[tokio::test]
-async fn read_context_is_answered_by_the_controller_without_a_worker_call() {
-    let (_root, state) = test_state();
-    let user = user_for_subject(&state, "read-context-user").unwrap();
-    let thread = create_test_thread(&state, &user).await;
-    let input = input_record(&state, &user, &thread).await;
-    let context_id = "00000000-0000-4000-8000-000000000099";
-    user_db(&state, &user, false, move |connection| {
-        connection.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
-            params![
-                context_id,
-                "Worker skill",
-                "How to invoke the worker skill",
-                r#"worker_id = "worker-1"; path = "/skill""#,
-                Option::<String>::None,
-            ],
-        )?;
-        Ok(())
-    })
-    .await
-    .unwrap();
+async fn read_context_tool_output(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input: i64,
+    context_id: &str,
+) -> Value {
+    let call_id = format!("read-{context_id}");
     let tool = ResponseItem::from_value(json!({
         "type":"function_call",
-        "id":"fc-read-context",
-        "call_id":"read-context-call",
+        "id":format!("fc-{context_id}"),
+        "call_id":call_id,
         "name":"read_context",
         "arguments":json!({"context_id":context_id}).to_string()
     }))
     .unwrap();
-
     assert!(matches!(
-        start_response_tool(&state, &user, &thread, input, &tool)
+        start_response_tool(state, user, thread, input, &tool)
             .await
             .unwrap(),
         Some(PendingToolCall::Answered(_))
     ));
-    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let history = history_for(state, user, thread.id.clone()).await.unwrap();
     let output = history.last().unwrap();
     assert_eq!(output.kind, "tool_output");
     assert_eq!(output.payload["type"], "function_call_output");
-    assert_eq!(output.payload["call_id"], "read-context-call");
-    let content: Value = serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap();
-    assert_eq!(content["id"], context_id);
+    assert_eq!(output.payload["call_id"], call_id);
+    serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn read_context_discovers_direct_children_and_reads_further_levels_without_workers() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "read-context-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let parent = "00000000-0000-4000-8000-000000000099";
+    let child_z = "00000000-0000-4000-8000-000000000100";
+    let child_a = "00000000-0000-4000-8000-000000000101";
+    let child_b = "00000000-0000-4000-8000-000000000102";
+    let grandchild = "00000000-0000-4000-8000-000000000103";
+    let unrelated = "00000000-0000-4000-8000-000000000104";
+    user_db(&state, &user, false, move |connection| {
+        for (id, name, content, parent_id) in [
+            (
+                parent,
+                "Root",
+                "Cybion user-authored content is preserved",
+                None,
+            ),
+            (child_z, "Zulu", "child Z content", Some(parent)),
+            (child_b, "Alpha", "child B content", Some(parent)),
+            (child_a, "Alpha", "child A content", Some(parent)),
+            (
+                grandchild,
+                "Grandchild",
+                "grandchild content",
+                Some(child_a),
+            ),
+            (unrelated, "Unrelated", "unrelated content", None),
+        ] {
+            connection.execute(
+                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+                params![id, name, format!("Metadata for {name}"), content, parent_id],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let content = read_context_tool_output(&state, &user, &thread, input, parent).await;
     assert_eq!(
-        content["content"],
-        r#"worker_id = "worker-1"; path = "/skill""#
+        content,
+        json!({
+            "id":parent,
+            "name":"Root",
+            "description":"Metadata for Root",
+            "content":"Cybion user-authored content is preserved",
+            "parent_id":null,
+            "children":[
+                {"context_id":child_a,"name":"Alpha","description":"Metadata for Alpha"},
+                {"context_id":child_b,"name":"Alpha","description":"Metadata for Alpha"},
+                {"context_id":child_z,"name":"Zulu","description":"Metadata for Zulu"}
+            ]
+        })
     );
+    let Json(api_content) = read_context_api(
+        State(state.clone()),
+        axum::Extension(BrowserIdentity {
+            user: user.clone(),
+            bearer: String::new(),
+        }),
+        AxumPath(parent.to_owned()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(serde_json::to_value(api_content).unwrap(), content);
+    let child = read_context_tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        content["children"][0]["context_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(child["id"], child_a);
+    assert_eq!(child["parent_id"], parent);
+    assert_eq!(child["content"], "child A content");
+    assert_eq!(
+        child["children"],
+        json!([
+            {"context_id":grandchild,"name":"Grandchild","description":"Metadata for Grandchild"}
+        ])
+    );
+    let leaf = read_context_tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        child["children"][0]["context_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(leaf["id"], grandchild);
+    assert_eq!(leaf["content"], "grandchild content");
+    assert_eq!(leaf["children"], json!([]));
     let worker_calls: i64 = user_db(&state, &user, false, |connection| {
         connection
             .query_row("SELECT COUNT(*) FROM worker_calls", [], |row| row.get(0))
@@ -343,6 +420,166 @@ async fn read_context_is_answered_by_the_controller_without_a_worker_call() {
     .await
     .unwrap();
     assert_eq!(worker_calls, 0);
+}
+
+#[tokio::test]
+async fn read_context_cannot_disclose_another_users_nodes() {
+    let (_root, state) = test_state();
+    let owner = user_for_subject(&state, "context-owner").unwrap();
+    let other = user_for_subject(&state, "context-other").unwrap();
+    let thread = create_test_thread(&state, &other).await;
+    let input = input_record(&state, &other, &thread).await;
+    let foreign = "00000000-0000-4000-8000-000000000099";
+    user_db(&state, &owner, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Private','Private description','Private content')",
+            [foreign],
+        )?;
+        Ok(())
+    }).await.unwrap();
+    for id in [foreign, "00000000-0000-4000-8000-000000000098"] {
+        let output = read_context_tool_output(&state, &other, &thread, input, id).await;
+        assert_eq!(output, json!({"error":"context not found"}));
+    }
+    let output = read_context_tool_output(&state, &other, &thread, input, "invalid-id").await;
+    assert!(output["error"].is_string());
+    assert!(output.get("children").is_none());
+}
+
+#[tokio::test]
+async fn offline_worker_calls_are_answered_without_queueing_execution() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "offline-worker-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let workers = [
+        (
+            "00000000-0000-4000-8000-000000000091",
+            "offline",
+            Some(now()),
+        ),
+        (
+            "00000000-0000-4000-8000-000000000092",
+            "online",
+            Some(now() - WORKER_ONLINE_SECONDS - 100),
+        ),
+        ("00000000-0000-4000-8000-000000000093", "offline", None),
+    ];
+    user_db(&state, &user, false, move |connection| {
+        for (id, status, last_seen) in workers {
+            connection.execute(
+                "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at) VALUES(?,'fixture',?,1,?,?)",
+                params![id, id, status, last_seen],
+            )?;
+        }
+        Ok(())
+    }).await.unwrap();
+    for (id, _, _) in workers {
+        let tool = ResponseItem::from_value(json!({
+            "type":"function_call", "id":format!("fc-{id}"), "call_id":id, "name":"bash",
+            "arguments":json!({"worker_id":id,"command":"echo must-not-run"}).to_string()
+        }))
+        .unwrap();
+        assert!(matches!(
+            start_response_tool(&state, &user, &thread, input, &tool)
+                .await
+                .unwrap(),
+            Some(PendingToolCall::Answered(_))
+        ));
+        let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+        let output = history.last().unwrap();
+        assert_eq!(output.payload["call_id"], id);
+        assert_eq!(
+            serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+            json!({"error":"selected Worker is offline"})
+        );
+    }
+    let count: i64 = user_db(&state, &user, false, |connection| {
+        connection
+            .query_row("SELECT COUNT(*) FROM worker_calls", [], |row| row.get(0))
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn inference_keeps_prefix_and_tools_when_the_last_online_worker_disconnects() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "worker-prefix-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let worker_id = "00000000-0000-4000-8000-000000000001";
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at) VALUES(?,'Laptop',?,1,'online',?)",
+            params![worker_id, worker_id, now()],
+        )?;
+        Ok(())
+    }).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_state = state.clone();
+    let server_user = user.clone();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(read_json_request(&mut socket).await);
+            user_db(&server_state, &server_user, false, |connection| {
+                connection.execute(
+                    "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='{}'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let body = json!({
+                "id":format!("r{index}"), "end_turn":index == 1,
+                "output":[{"type":"message","id":format!("m{index}"),"role":"assistant","content":[{"type":"output_text","text":"done"}]}]
+            }).to_string();
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let integrations = IntegrationSettings {
+        openai_consumer_id: "fixture".to_owned(),
+        openai_consumer_secret: "fixture".to_owned(),
+        openai_base_url: format!("http://{address}"),
+        linkit_bot_id: String::new(),
+        linkit_bot_token: String::new(),
+        linkit_username: String::new(),
+    };
+    let (_tx, mut rx) = watch::channel(false);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &integrations, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0]["input"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(worker_id)
+    );
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 6);
+    for key in ["tools", "tool_choice"] {
+        assert_eq!(
+            serde_json::to_vec(&requests[0][key]).unwrap(),
+            serde_json::to_vec(&requests[1][key]).unwrap()
+        );
+    }
+    assert_eq!(
+        serde_json::to_vec(&requests[0]["input"][0]).unwrap(),
+        serde_json::to_vec(&requests[1]["input"][0]).unwrap()
+    );
 }
 
 #[tokio::test]

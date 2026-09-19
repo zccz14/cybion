@@ -371,6 +371,16 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "compact-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
+    let offline_worker = "00000000-0000-4000-8000-000000000099";
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at) VALUES(?,'Offline laptop',?,1)",
+            params![offline_worker, offline_worker],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     let first = record(
         &state,
         &user,
@@ -406,6 +416,20 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
     .unwrap();
     wait_finished(&state, &user, &thread).await;
     let request = server.await.unwrap();
+    assert!(
+        request["input"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(offline_worker)
+    );
+    assert!(
+        !request["input"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("cybion")
+    );
+    assert!(request.get("tools").is_none());
     assert_eq!(request["tool_choice"], "none");
     assert!(!request.to_string().contains("thread_control"));
     let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
