@@ -5,7 +5,6 @@ struct ConsumerVerification {
     id: String,
     credential_matches: bool,
     is_disabled: bool,
-    request_archive: bool,
 }
 
 fn request(
@@ -86,9 +85,9 @@ async fn repair_existing(
         "{}/{}",
         state.openai_consumers_url, settings.openai_consumer_id
     );
-    if verification.is_disabled || !verification.request_archive {
+    if verification.is_disabled {
         request(state, bearer, reqwest::Method::PATCH, &url)
-            .json(&json!({"is_disabled":false,"request_archive":true}))
+            .json(&json!({"is_disabled":false}))
             .send()
             .await?
             .error_for_status()?;
@@ -151,9 +150,7 @@ pub(super) async fn verify_ready(
     settings: &IntegrationSettings,
 ) -> Result<(), ApiError> {
     let verification = verify(state, bearer, settings).await?;
-    if !verification.is_some_and(|consumer| {
-        consumer.credential_matches && !consumer.is_disabled && consumer.request_archive
-    }) {
+    if !verification.is_some_and(|consumer| consumer.credential_matches && !consumer.is_disabled) {
         return Err(ApiError::unavailable(
             "OpenAI-LB Consumer changed during refresh; refresh integrations again before retrying the Thread",
         ));

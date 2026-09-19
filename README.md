@@ -47,7 +47,8 @@ the first authenticated browser session initializes that key atomically.
   OpenAI-LB Consumer ID and full token through the owner's LB API. Missing or
   deleted Consumers are recreated, disabled Consumers are re-enabled, and
   stale or missing tokens are rotated and saved immediately. Healthy tokens
-  are reused. A final verification must succeed before refresh reports success;
+  are reused, and existing request-archive preferences are preserved. A final
+  verification must succeed before refresh reports success;
   LB errors are not treated as missing Consumers. Refreshes and initial
   provisioning share a per-user lock. This requires OpenAI-LB's
   `POST /api/consumers/{id}/verify` endpoint to be deployed first.

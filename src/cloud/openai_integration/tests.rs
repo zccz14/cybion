@@ -105,11 +105,10 @@ async fn mock_lb(State(remote): State<Arc<Mutex<MockLb>>>, request: Request) -> 
             Json(json!({"id":id,"secret":secret})).into_response()
         }
         (reqwest::Method::PATCH, "") => {
-            assert_eq!(body, json!({"is_disabled":false,"request_archive":true}));
+            assert_eq!(body, json!({"is_disabled":false}));
             let consumer = remote.consumer.as_mut().unwrap();
             consumer.disabled = false;
-            consumer.archive = true;
-            Json(json!({"id":id,"is_disabled":false,"request_archive":true})).into_response()
+            Json(json!({"id":id,"is_disabled":false,"request_archive":consumer.archive})).into_response()
         }
         _ => panic!("unexpected mock request {path}"),
     }
@@ -206,7 +205,6 @@ async fn assert_synchronized(f: &Fixture) {
     assert_eq!(saved.openai_consumer_secret, consumer.secret);
     assert_eq!(saved.openai_base_url, OPENAI_BASE_URL);
     assert!(!consumer.disabled);
-    assert!(consumer.archive);
 }
 
 #[tokio::test]
@@ -307,6 +305,7 @@ async fn explicit_refresh_reenables_consumer_and_preserves_a_matching_token() {
         let remote = f.remote.lock().await;
         assert_eq!(remote.rotated, usize::from(secret != "sk-current-fixture"));
         assert_eq!(remote.created, 0);
+        assert!(!remote.consumer.as_ref().unwrap().archive);
         assert!(
             remote
                 .calls
@@ -389,10 +388,6 @@ async fn final_verification_must_confirm_the_same_active_consumer_and_full_token
             StatusCode::OK,
             json!({"id":"different-consumer","credential_matches":true,"is_disabled":false,"request_archive":true}),
         ),
-        (
-            StatusCode::OK,
-            json!({"id":"owned-consumer","credential_matches":true,"is_disabled":false,"request_archive":false}),
-        ),
         (StatusCode::OK, json!({"unexpected":"schema"})),
     ] {
         let f = fixture(Some(consumer())).await;
@@ -454,4 +449,32 @@ async fn local_persistence_failure_does_not_report_success_and_next_refresh_can_
         .unwrap();
     assert!(refresh(&f).await.unwrap().0.openai_configured);
     assert_synchronized(&f).await;
+}
+
+#[tokio::test]
+async fn refresh_preserves_an_existing_consumers_archive_preference() {
+    for disabled in [false, true] {
+        let mut current = consumer();
+        current.disabled = disabled;
+        current.archive = false;
+        let f = fixture(Some(current)).await;
+        let mut settings = stored(&f);
+        settings.openai_consumer_secret = "sk-current-fixture".into();
+        save_integration_settings(&f.state, &f.user, &settings)
+            .await
+            .unwrap();
+        assert!(refresh(&f).await.unwrap().0.openai_configured);
+        assert_synchronized(&f).await;
+        let remote = f.remote.lock().await;
+        assert!(!remote.consumer.as_ref().unwrap().archive);
+        assert_eq!(remote.rotated, 0);
+        assert_eq!(
+            remote
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("PATCH "))
+                .count(),
+            usize::from(disabled)
+        );
+    }
 }
