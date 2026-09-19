@@ -18,7 +18,8 @@ not terminal-black theatre.
 - Danger: `oklch(0.54 0.2 27)`
 
 Use Inter/system UI, 12--28px type steps, 10px controls, and 14px panels. Motion
-is limited to 180ms state transitions and is removed for reduced-motion users.
+is limited to 180ms state transitions and the active-execution loader; both are
+removed for reduced-motion users.
 
 ## Themes and language
 
@@ -32,3 +33,11 @@ languages and use the same compact product layout.
 Desktop uses a narrow persistent navigation rail, a contextual top bar, and a
 single dense primary work area. On smaller screens navigation collapses before
 conversation controls do. Machine identity is always visible near the action.
+
+## Thread execution status
+
+Use the shared [Thread status vocabulary](docs/thread-status.md): amber segmented
+loader for running, amber inward arrows for compaction, green check for completed,
+red warning triangle for failed, muted square for stopped, and muted dashed message
+square for ready. Every list row shows a status label. Selection is neutral and
+separate from execution status.

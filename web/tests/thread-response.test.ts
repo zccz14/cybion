@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { pendingResponseRecords, latestThreadAction, threadControlAction, type ThreadResponseView } from "../src/lib/thread-response.ts"
+import { pendingResponseRecords, threadControlAction, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 test("streamed reasoning and messages become history rows without duplicating committed output", () => {
   const view: ThreadResponseView = {
@@ -26,16 +26,11 @@ test("streamed reasoning and messages become history rows without duplicating co
   assert.deepEqual(pendingResponseRecords(view, [], "thread"), [], "cancelled previews must not display unsaved partial output")
 })
 
-test("compaction status follows request boundaries and ignores late activity", () => {
-  const input = { kind: "input", payload: { role: "user", content: "hello" } }
+test("thread control records are recognized without treating input as controls", () => {
   const compact = { kind: "activity", payload: { type: "thread_control", action: "compact" } }
-  const cancel = { kind: "activity", payload: { type: "thread_control", action: "cancel" } }
-  const resume = { kind: "activity", payload: { type: "thread_control", action: "continue" } }
-  const late = { kind: "activity", payload: { role: "assistant", content: "late" } }
-  assert.equal(latestThreadAction([input, compact, late]), "compact")
-  assert.equal(latestThreadAction([input, compact, cancel, late]), "cancel")
-  assert.equal(latestThreadAction([input, compact, cancel, resume, late]), "continue")
-  assert.equal(latestThreadAction([input, compact, input, late]), null)
+  assert.equal(threadControlAction(compact), "compact")
+  assert.equal(threadControlAction({ ...compact, payload: { type: "thread_control", action: "cancel" } }), "cancel")
+  assert.equal(threadControlAction({ ...compact, payload: { type: "thread_control", action: "continue" } }), "continue")
   assert.equal(threadControlAction({ ...compact, kind: "input" }), null)
   assert.equal(threadControlAction({ kind: "activity", payload: null }), null)
 })

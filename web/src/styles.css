@@ -26,6 +26,9 @@
   --border: oklch(0.88 0.014 265);
   --input: oklch(0.88 0.014 265);
   --ring: oklch(0.56 0.15 274);
+  --thread-active: #92400e;
+  --thread-success: #047857;
+  --thread-failure: #b91c1c;
   --radius: 0.625rem;
   --sidebar: oklch(0.965 0.01 265);
   --sidebar-foreground: oklch(0.23 0.026 265);
@@ -38,6 +41,9 @@
 }
 
 .dark {
+  --thread-active: #fcd34d;
+  --thread-success: #6ee7b7;
+  --thread-failure: #fca5a5;
   --background: oklch(0.18 0.025 265);
   --foreground: oklch(0.94 0.012 265);
   --card: oklch(0.225 0.03 265);
@@ -69,6 +75,9 @@
 @theme inline {
   --font-sans: 'Geist Variable', sans-serif;
   --font-heading: var(--font-sans);
+  --color-thread-active: var(--thread-active);
+  --color-thread-success: var(--thread-success);
+  --color-thread-failure: var(--thread-failure);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);

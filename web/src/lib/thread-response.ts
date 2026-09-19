@@ -48,13 +48,3 @@ export function threadControlAction(record: ThreadActionRecord): ThreadAction | 
   const action = payload.action
   return action === "cancel" || action === "continue" || action === "compact" ? action : null
 }
-
-export function latestThreadAction(history: ThreadActionRecord[]): ThreadAction | null {
-  for (let index = history.length - 1; index >= 0; index--) {
-    const record = history[index]
-    if (record.kind === "input") return null
-    const action = threadControlAction(record)
-    if (action) return action
-  }
-  return null
-}
