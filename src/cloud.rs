@@ -87,6 +87,7 @@ struct AppState {
     client: reqwest::Client,
     auth: Arc<OnceCell<AuthMiniLayer>>,
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    worker_pairing_lock: Arc<Mutex<()>>,
     active_requests: Arc<Mutex<HashMap<String, ActiveRequest>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     traffic: Arc<traffic::Monitor>,
@@ -270,6 +271,7 @@ pub async fn serve() -> Result<()> {
             .build()?,
         auth: Arc::new(OnceCell::new()),
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
+        worker_pairing_lock: Arc::new(Mutex::new(())),
         active_requests: Arc::new(Mutex::new(HashMap::new())),
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
         traffic,
@@ -3105,6 +3107,8 @@ async fn delete_worker(
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = record_id(&id)?;
+    let _provisioning = state.worker_pairing_lock.lock().await;
+    worker_onboarding::revoke_pairing(&state, &identity.user.id, &id).await?;
     user_db(&state, &identity.user, true, move |connection| {
         let changed = connection.execute("DELETE FROM workers WHERE id=?", [id])?;
         if changed == 0 {
@@ -6221,6 +6225,7 @@ mod tests {
                 client: reqwest::Client::new(),
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
+                worker_pairing_lock: Arc::new(Mutex::new(())),
                 active_requests: Arc::new(Mutex::new(HashMap::new())),
                 traffic: Arc::new(traffic::Monitor::open(&admin_db_path).unwrap()),
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),

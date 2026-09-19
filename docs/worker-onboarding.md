@@ -39,6 +39,9 @@ is prefilled with the exact Worker ID and still requires the user's Send action.
 Provisioning crosses two SQLite databases. The durable `approving` reservation
 is committed first, followed by idempotent tenant insertion and final approval.
 A transient failure resumes under the same owner; it never switches accounts.
+This single-controller deployment serializes approval with revocation. Removal
+cancels the durable pairing reservation before deleting the tenant record, so
+neither an in-flight retry nor recovery after a restart can resurrect the device.
 An abandoned, partially provisioned request may leave a never-connected record,
 which is visible and removable. There is no claim of cross-database atomicity.
 

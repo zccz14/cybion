@@ -221,6 +221,9 @@ pub(super) async fn approve(
     AxumPath(value): AxumPath<String>,
     Json(input): Json<ApproveInput>,
 ) -> Result<Json<PairingView>, ApiError> {
+    // One controller serves these tenant databases. Serialize provisioning with
+    // revocation so an in-flight retry cannot recreate a removed Worker.
+    let _provisioning = state.worker_pairing_lock.lock().await;
     let code = code(&value)?;
     let label = label(&input.label, "label", 80)?;
     let owner = identity.user.id.clone();
@@ -274,7 +277,12 @@ pub(super) async fn approve(
         })
         .await?;
     }
-    read(State(state), axum::Extension(identity), AxumPath(code)).await
+    read(
+        State(state.clone()),
+        axum::Extension(identity),
+        AxumPath(code),
+    )
+    .await
 }
 
 pub(super) async fn cancel(
@@ -289,6 +297,23 @@ pub(super) async fn cancel(
         if changed == 0 { return Err(ApiError::conflict("Pairing is no longer pending; remove the device to revoke an approved connection")); }
         Ok(StatusCode::NO_CONTENT)
     }).await
+}
+
+pub(super) async fn revoke_pairing(
+    state: &AppState,
+    owner: &str,
+    worker: &str,
+) -> Result<(), ApiError> {
+    let owner = owner.to_owned();
+    let worker = worker.to_owned();
+    pairing_db(state, move |connection| {
+        connection.execute(
+            "UPDATE device_pairings SET status='cancelled' WHERE owner_id=? AND worker_id=?",
+            params![owner, worker],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 pub(super) async fn release() -> Json<Value> {
