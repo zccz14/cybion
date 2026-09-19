@@ -104,3 +104,8 @@ Background mode is labeled honestly as distinct from reboot persistence.
 The public smoke identifies itself as `cybion-release-smoke/1.0`; default Python
 user agents are rejected by the production edge. A local HTTP regression fixture
 requires this explicit identity on every request. No edge security rule is relaxed.
+
+The release-asset gate uses the workflow’s read-only GitHub token in CI, avoiding
+the shared runner’s low anonymous API quota. Local checks may use `GH_TOKEN`;
+it is sent only to the fixed GitHub API host and is never logged. This is a CI-only
+change and does not change the deployed application binary.
