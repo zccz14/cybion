@@ -241,6 +241,8 @@ type IntegrationStatus = {
   openai_configured: boolean
   openai_consumer_id: string | null
   openai_base_url: string
+  user_agent: string
+  originator: string
   linkit_configured: boolean
   linkit_bot_id: string | null
   linkit_username: string | null
@@ -587,6 +589,16 @@ const copy = {
     configured: "Configured",
     notConfigured: "Not configured",
     baseUrl: "Base URL",
+    requestHeaders: "Request headers",
+    requestHeadersDescription: "Customize the User-Agent and originator headers sent with your upstream Responses requests.",
+    userAgent: "User-Agent",
+    userAgentDescription: "Leave blank to use Cybion's default User-Agent.",
+    originator: "Originator",
+    originatorDescription: "Optional originator value sent to the upstream service.",
+    saveRequestHeaders: "Save request headers",
+    savingRequestHeaders: "Saving…",
+    requestHeadersSaved: "Request headers saved",
+    saveRequestHeadersError: "Could not save request headers",
     username: "Username",
     tools: "Tools",
     toolsDescription: "Capabilities available to Cybion threads.",
@@ -853,6 +865,16 @@ const copy = {
     configured: "已配置",
     notConfigured: "未配置",
     baseUrl: "基础地址",
+    requestHeaders: "请求头",
+    requestHeadersDescription: "自定义上游 Responses 请求使用的 User-Agent 和 originator 请求头。",
+    userAgent: "User-Agent",
+    userAgentDescription: "留空则使用 Cybion 默认 User-Agent。",
+    originator: "Originator",
+    originatorDescription: "发送给上游服务的可选 originator 值。",
+    saveRequestHeaders: "保存请求头",
+    savingRequestHeaders: "保存中…",
+    requestHeadersSaved: "请求头已保存",
+    saveRequestHeadersError: "无法保存请求头",
     username: "用户名",
     tools: "工具",
     toolsDescription: "Cybion 线程可使用的能力。",
@@ -2134,8 +2156,17 @@ function ConfigurationPage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolea
   const { t } = useUi()
   const { session } = useAuthMini()
   const client = useQueryClient()
+  const [headers, setHeaders] = useState({ user_agent: "", originator: "" })
   const integrations = useQuery({ queryKey: ["integrations"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations") })
   const refresh = useMutation({ mutationFn: () => api<IntegrationStatus>(sdk, "/api/integrations/refresh", { method: "POST" }), onSuccess: (value) => client.setQueryData(["integrations"], value) })
+  const saveHeaders = useMutation({
+    mutationFn: (value: typeof headers) => api<IntegrationStatus>(sdk, "/api/integrations", { method: "PUT", body: JSON.stringify(value) }),
+    onSuccess: (value) => { setHeaders({ user_agent: value.user_agent, originator: value.originator }); client.setQueryData(["integrations"], value) },
+  })
+  useEffect(() => {
+    if (integrations.data) setHeaders({ user_agent: integrations.data.user_agent, originator: integrations.data.originator })
+  }, [integrations.data])
+  const headersChanged = integrations.data && (headers.user_agent !== integrations.data.user_agent || headers.originator !== integrations.data.originator)
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
     {isAdmin && <ExperimentalFeaturesCard sdk={sdk} />}
@@ -2144,6 +2175,16 @@ function ConfigurationPage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolea
       {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><IntegrationRow label={t("linkit")} configured={integrations.data.linkit_configured} detail={integrations.data.linkit_username ? `@${integrations.data.linkit_username}` : t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
       {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
       <div className="sm:col-span-2"><Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>{refresh.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{refresh.isPending ? t("refreshing") : t("refreshIntegrations")}</Button>{refresh.error && <p className="mt-2 text-sm text-destructive">{errorMessage(refresh.error)}</p>}</div>
+    </CardContent></Card>
+    <Card><CardHeader><CardTitle>{t("requestHeaders")}</CardTitle><CardDescription>{t("requestHeadersDescription")}</CardDescription></CardHeader><CardContent>
+      <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (headersChanged && !saveHeaders.isPending) saveHeaders.mutate(headers) }}>
+        <FieldGroup>
+          <Field data-disabled={saveHeaders.isPending}><FieldLabel htmlFor="integration-user-agent">{t("userAgent")}</FieldLabel><Input id="integration-user-agent" value={headers.user_agent} disabled={saveHeaders.isPending} onChange={(event) => setHeaders({ ...headers, user_agent: event.target.value })} /><FieldDescription>{t("userAgentDescription")}</FieldDescription></Field>
+          <Field data-disabled={saveHeaders.isPending}><FieldLabel htmlFor="integration-originator">{t("originator")}</FieldLabel><Input id="integration-originator" value={headers.originator} disabled={saveHeaders.isPending} onChange={(event) => setHeaders({ ...headers, originator: event.target.value })} /><FieldDescription>{t("originatorDescription")}</FieldDescription></Field>
+        </FieldGroup>
+        {saveHeaders.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveRequestHeadersError")}</AlertTitle><AlertDescription>{errorMessage(saveHeaders.error)}</AlertDescription></Alert>}
+        <div className="flex flex-wrap items-center gap-3"><Button disabled={!headersChanged || saveHeaders.isPending}>{saveHeaders.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{saveHeaders.isPending ? t("savingRequestHeaders") : t("saveRequestHeaders")}</Button><p role="status" className="text-sm text-muted-foreground">{saveHeaders.isSuccess && t("requestHeadersSaved")}</p></div>
+      </form>
     </CardContent></Card>
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
     <Card><CardHeader><CardTitle>{t("workers")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/workers">{t("workers")}</Link></Button></CardContent></Card>
