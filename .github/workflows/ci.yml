@@ -25,6 +25,7 @@ jobs:
       - run: npm --prefix web run test:e2e
       - run: npm --prefix web run build
       - run: python3 scripts/check-responses-parity.py
+      - run: python3 scripts/test-smoke-worker-onboarding.py
       - run: bash -n .github/scripts/send-deploy.sh deploy/deploy-release.sh
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings

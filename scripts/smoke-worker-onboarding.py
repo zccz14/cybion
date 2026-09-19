@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 base = sys.argv[1] if len(sys.argv) > 1 else "https://cybion.ntnl.io"
 def request(path, *, data=None, token=None, expected=200):
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "User-Agent": "cybion-release-smoke/1.0"}
     if token:
         headers["Authorization"] = "Bearer " + token
     req = Request(base + path, data=None if data is None else json.dumps(data).encode(), headers=headers)

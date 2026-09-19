@@ -96,7 +96,11 @@ Background mode is labeled honestly as distinct from reboot persistence.
 - `scripts/test-worker-roundtrip.py /path/to/cybion-worker` runs the real Worker
   against an authenticated disposable controller fixture; checks background
   startup, diagnostic round trip, duplicate process rejection and revocation exit.
-- Publish Worker v0.1.4 before Controller v0.3.54. Controller release checks all
+- Publish Worker v0.1.4 before Controller v0.3.55. Controller release checks all
   recommended Worker assets/checksums before publishing, then runs public
   onboarding smoke after deployment. That smoke never approves a device and
   leaves one short-lived request to expire.
+
+The public smoke identifies itself as `cybion-release-smoke/1.0`; default Python
+user agents are rejected by the production edge. A local HTTP regression fixture
+requires this explicit identity on every request. No edge security rule is relaxed.
