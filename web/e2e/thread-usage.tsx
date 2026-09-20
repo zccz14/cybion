@@ -9,9 +9,9 @@ import "../src/styles.css"
 
 function Fixture() {
   const [language, setLanguage] = useState<"en" | "zh">("zh")
-  const [usage, setUsage] = useState<ThreadUsage>({ input_tokens: 1000000, output_tokens: 234567, total_tokens: 1234567, cached_tokens: 750000, cache_hit_rate: 0.75, unreported_requests: 0 })
+  const [usage, setUsage] = useState<ThreadUsage>({ input_tokens: 1000000, output_tokens: 234567, total_tokens: 1234567, cached_tokens: 750000, cache_hit_rate: 0.75 })
   return <main className="p-4">
-    <header className="mb-4 flex flex-wrap gap-3"><button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button><button onClick={() => setUsage({ ...usage, total_tokens: usage.total_tokens + 1000, input_tokens: usage.input_tokens + 1000, cache_hit_rate: usage.cached_tokens / (usage.input_tokens + 1000) })}>Poll update</button><button onClick={() => setUsage({ ...usage, cache_hit_rate: null, unreported_requests: 2 })}>Unreported</button></header>
+    <header className="mb-4 flex flex-wrap gap-3"><button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button><button onClick={() => setUsage({ ...usage, total_tokens: usage.total_tokens + 1000, input_tokens: usage.input_tokens + 1000, cache_hit_rate: usage.cached_tokens / (usage.input_tokens + 1000) })}>Poll update</button><button onClick={() => setUsage({ ...usage, cache_hit_rate: null })}>No cache data</button></header>
     <div className="flex flex-col gap-4 lg:flex-row">
       <nav aria-label="Threads" className="w-full rounded-lg border bg-sidebar/40 p-3 lg:w-64 lg:shrink-0">
         <ThreadLink thread={{ id: "measured", title: "长线程 · 累计用量", display_status: "running", usage }} language={language} />

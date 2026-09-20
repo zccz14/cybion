@@ -28,8 +28,16 @@ async fn empty_threads_return_zero_usage_and_no_cache_rate_everywhere() {
     assert_eq!(read.usage, created.usage);
     assert_eq!(list[0].usage, created.usage);
     let json = serde_json::to_value(read).unwrap();
-    assert_eq!(json["usage"]["total_tokens"], 0);
-    assert!(json["usage"]["cache_hit_rate"].is_null());
+    assert_eq!(
+        json["usage"],
+        serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cache_hit_rate": null,
+        })
+    );
 }
 
 #[tokio::test]
@@ -88,7 +96,6 @@ async fn thread_usage_adds_all_reported_requests_and_weights_cache_by_input() {
     );
     assert_eq!(usage.cached_tokens, 1085);
     assert_eq!(usage.cache_hit_rate, Some(1085.0 / 1390.0));
-    assert_eq!(usage.unreported_requests, 2);
     let list = list_threads_for(&state, &user).await.unwrap();
     assert_eq!(
         list.iter().find(|item| item.id == thread.id).unwrap().usage,
@@ -117,9 +124,9 @@ async fn thread_usage_adds_all_reported_requests_and_weights_cache_by_input() {
 }
 
 #[tokio::test]
-async fn unknown_cache_is_not_zero_and_partial_token_reports_are_explicit() {
+async fn thread_usage_sums_token_fields_and_keeps_cache_rates_nullable() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "usage-partial").unwrap();
+    let user = user_for_subject(&state, "usage-nullable").unwrap();
     for (values, expected) in [
         (
             (Some(100), Some(50), None),
@@ -129,7 +136,6 @@ async fn unknown_cache_is_not_zero_and_partial_token_reports_are_explicit() {
                 total_tokens: 150,
                 cached_tokens: 0,
                 cache_hit_rate: None,
-                unreported_requests: 0,
             },
         ),
         (
@@ -140,7 +146,6 @@ async fn unknown_cache_is_not_zero_and_partial_token_reports_are_explicit() {
                 total_tokens: 50,
                 cached_tokens: 0,
                 cache_hit_rate: None,
-                unreported_requests: 0,
             },
         ),
         (
@@ -151,7 +156,6 @@ async fn unknown_cache_is_not_zero_and_partial_token_reports_are_explicit() {
                 total_tokens: 100,
                 cached_tokens: 50,
                 cache_hit_rate: Some(0.5),
-                unreported_requests: 1,
             },
         ),
         (
@@ -162,17 +166,20 @@ async fn unknown_cache_is_not_zero_and_partial_token_reports_are_explicit() {
                 total_tokens: 10,
                 cached_tokens: 5,
                 cache_hit_rate: None,
-                unreported_requests: 1,
             },
         ),
-        (
-            (None, None, None),
-            ThreadUsage {
-                unreported_requests: 1,
-                ..ThreadUsage::default()
-            },
-        ),
+        ((None, None, None), ThreadUsage::default()),
         ((Some(0), Some(0), Some(0)), ThreadUsage::default()),
+        (
+            (Some(100), Some(50), Some(0)),
+            ThreadUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                cached_tokens: 0,
+                cache_hit_rate: Some(0.0),
+            },
+        ),
     ] {
         let thread = create_test_thread(&state, &user).await;
         let id = thread.id.clone();
@@ -242,9 +249,8 @@ async fn audit_updates_do_not_double_count_and_renames_or_thread_status_do_not_r
         read_thread_for(&state, &user, thread.id.clone())
             .await
             .unwrap()
-            .usage
-            .unreported_requests,
-        1
+            .usage,
+        ThreadUsage::default()
     );
     for _ in 0..2 {
         user_db(&state,&user,false,move |connection| {
@@ -281,7 +287,6 @@ async fn audit_updates_do_not_double_count_and_renames_or_thread_status_do_not_r
         .await
         .unwrap();
     assert_eq!(loaded.usage.total_tokens, 4000000042);
-    assert_eq!(loaded.usage.unreported_requests, 0);
     assert_eq!(loaded.display_status, "failed");
     let id = thread.id;
     user_db(&state, &user, false, move |connection| {

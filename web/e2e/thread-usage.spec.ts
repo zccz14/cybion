@@ -12,6 +12,8 @@ test("each row shows compact lifetime usage and the header exposes exact totals 
   await measured.focus()
   await expect(page.getByRole("tooltip")).toContainText("1,234,567")
   await expect(page.getByRole("tooltip")).toContainText("750,000")
+  await expect(page.getByRole("tooltip").locator("dt")).toHaveCount(5)
+  await expect(page.getByRole("tooltip").locator("p")).toHaveCount(1)
   await page.keyboard.press("Escape")
   const panel = page.locator('[data-slot="thread-usage-panel"]')
   await expect(panel.locator("summary")).toContainText("累计 Token 1,234,567")
@@ -23,10 +25,17 @@ test("each row shows compact lifetime usage and the header exposes exact totals 
   await expect(panel).toHaveAttribute("open", "")
   await expect(panel.locator("summary")).toContainText("1,235,567")
   await expect(measured).toContainText("缓存 74.9%")
-  await page.getByRole("button", { name: "Unreported", exact: true }).click()
-  await expect(measured).toContainText("缓存 —")
-  await expect(measured).toContainText("用量不完整")
-  await expect(panel).toContainText("用量未完整回报的请求: 2")
+  await page.getByRole("button", { name: "No cache data", exact: true }).click()
+  for (const language of ["zh", "en"]) {
+    if (language === "en") await page.getByRole("button", { name: "Language", exact: true }).click()
+    await expect(measured).toContainText(language === "en" ? "Cache —" : "缓存 —")
+    await expect(measured.locator('[data-slot="thread-usage-summary"] > span')).toHaveCount(2)
+    await expect(panel.locator("summary > span")).toHaveCount(2)
+    await expect(panel.locator("summary")).toContainText("1,235,567")
+    await expect(panel.locator("dt")).toHaveCount(5)
+    await expect(panel.locator("dd")).toHaveText(["1,235,567", "1,001,000", "234,567", "750,000", "—"])
+    await expect(panel.locator("p")).toHaveCount(1)
+  }
 })
 
 test("usage stays visible in narrow light/dark layouts and both languages", async ({ page }) => {

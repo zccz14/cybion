@@ -4,12 +4,11 @@ export type ThreadUsage = {
   total_tokens: number
   cached_tokens: number
   cache_hit_rate: number | null
-  unreported_requests: number
 }
 
 export const emptyThreadUsage: ThreadUsage = {
   input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0,
-  cache_hit_rate: null, unreported_requests: 0,
+  cache_hit_rate: null,
 }
 
 export function compactTokenCount(tokens: number) {
