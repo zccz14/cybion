@@ -1263,7 +1263,6 @@ struct ThreadUsage {
     total_tokens: i64,
     cached_tokens: i64,
     cache_hit_rate: Option<f64>,
-    unreported_requests: i64,
 }
 
 #[derive(Clone, Serialize)]
@@ -1706,7 +1705,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let input_tokens: i64 = row.get(9)?;
     let output_tokens: i64 = row.get(10)?;
     let cached_tokens: i64 = row.get(11)?;
-    let missing_cache_requests: i64 = row.get(13)?;
+    let missing_cache_requests: i64 = row.get(12)?;
     Ok(ThreadView {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -1724,7 +1723,6 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
             cached_tokens,
             cache_hit_rate: (input_tokens > 0 && missing_cache_requests == 0)
                 .then(|| cached_tokens as f64 / input_tokens as f64),
-            unreported_requests: row.get(12)?,
         },
     })
 }
@@ -1918,8 +1916,7 @@ SELECT t.id,t.title,t.model,t.reasoning_effort,t.service_tier_fast,t.status,t.cr
          ELSE 'completed'
        END AS display_status,
        COALESCE(usage.input_tokens,0),COALESCE(usage.output_tokens,0),
-       COALESCE(usage.cached_tokens,0),COALESCE(usage.unreported_requests,0),
-       COALESCE(usage.missing_cache_requests,0)
+       COALESCE(usage.cached_tokens,0),COALESCE(usage.missing_cache_requests,0)
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT id FROM history_records WHERE thread_id=t.id
@@ -1934,7 +1931,6 @@ LEFT JOIN history_records boundary ON boundary.id=(
 const THREAD_USAGE_SELECT: &str = r#"
 SELECT thread_id,SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_tokens,
        SUM(cached_tokens) AS cached_tokens,
-       SUM(input_tokens IS NULL OR output_tokens IS NULL) AS unreported_requests,
        SUM(CASE WHEN input_tokens > 0 AND cached_tokens IS NULL THEN 1
                 WHEN input_tokens IS NULL AND cached_tokens IS NOT NULL THEN 1
                 ELSE 0 END) AS missing_cache_requests

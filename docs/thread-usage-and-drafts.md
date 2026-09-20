@@ -15,7 +15,6 @@ Each Thread API view includes `usage`:
 | `total_tokens` | Input + output; cached input is not added again |
 | `cached_tokens` | Sum of reported cached input Tokens |
 | `cache_hit_rate` | Cached input / input, as a fraction from 0 to 1; `null` when unavailable |
-| `unreported_requests` | Number of audits with missing input or output usage |
 
 All request kinds and statuses are included: inference, compaction, title
 creation, retries, and failed/cancelled requests with reported usage. Request
@@ -23,17 +22,13 @@ status is not a substitute for whether Tokens were consumed. Each audit row is
 counted once; updating its streaming/final state does not add a second copy.
 This is reported usage, not a billing estimate or current context length.
 
-SQL sums known values. Missing values are not estimated. An audit with missing
-input/output raises the incomplete-usage indicator, including a running request
-that has not reported usage yet. The count can remain nonzero after a failed
-request if the upstream never reports its usage.
-
-Cache rate uses sums, not an average of request percentages. Fully unreported
-requests are outside the reported totals. A reported positive input count with
-missing cache details, or a cache count without its corresponding input count,
-makes the aggregate rate unavailable (`—`). A known zero cache count with positive
-input is `0%`; no input is `—`. The tooltip explains this distinction and the
-cumulative scope.
+SQL sums recorded values independently for each Token field and skips `NULL`
+values. Cache rate divides summed cached input by summed input, rather than
+averaging request percentages. A positive input count without cache data, or a
+cache count without its corresponding input count, makes the aggregate rate
+unavailable (`null` in the API, `—` in the UI). Zero cached Tokens with positive
+input gives `0%`; zero input gives `—`. The tooltip explains the cumulative scope
+and calculation.
 
 ## Presentation and refresh
 
@@ -56,6 +51,8 @@ thread filter **inside** that aggregate, using the existing
 `reasoning_audits_thread_started` index; they do not aggregate all other threads.
 Thread metadata, display status, and usage come from one SQLite statement.
 Database ownership remains the existing per-user database boundary.
+
+### v0.4.4 baseline
 
 A bounded in-memory SQLite probe on MacMini used 100 threads, three measured
 samples, three repetitions per query, and a 30-second VM deadline. Independent
@@ -105,13 +102,13 @@ its source draft identity.
 
 ## Validation and complexity
 
-Backend tests cover weighted sums, request kinds/statuses, partial reports, zero
+Backend tests cover weighted sums, request kinds/statuses, nullable fields, zero
 input, cross-thread/user isolation, repeated audit updates, large counts, rename,
 status changes, and deletion. Frontend/browser tests cover exact/compact usage,
 unknown versus 0%, narrow bilingual themes, draft ownership, refresh, failure,
 late acknowledgements, prefills, storage failure, and cross-tab updates.
 
-Necessary new paths are limited to missing usage / zero denominators, the
+Necessary paths are limited to nullable cache rates / zero denominators, the
 verified-owner loading/error boundary, and draft lifecycle rules (empty scope,
 conditional clearing, key-filtered notifications, storage-error recovery).
 Storage errors use a real in-memory fallback with a visible warning. There are

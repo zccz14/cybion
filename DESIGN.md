@@ -125,8 +125,8 @@ Color remains supplementary to the icon and visible label.
 Every Thread row shows cumulative reported Tokens and input-weighted cache rate
 in secondary text, alongside its existing title and status. The conversation
 header exposes exact totals and an expandable input/output/cache breakdown.
-Unknown cache data is `—`, distinct from a measured `0%`; incomplete Token reports
-are labeled. See [accounting and persistence](docs/thread-usage-and-drafts.md).
+Unknown cache data is `—`, distinct from a measured `0%`.
+See [accounting and persistence](docs/thread-usage-and-drafts.md).
 
 Composer text is independent for every account, Thread, and the new-thread page.
 Restore it from this browser on navigation/reload. Only server-acknowledged input
