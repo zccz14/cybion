@@ -1966,7 +1966,7 @@ async fn create_thread_for(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let defaults = load_thread_defaults(&transaction)?;
         let thread = ThreadView {
-            id: Uuid::new_v4().to_string(),
+            id: Uuid::now_v7().to_string(),
             title,
             model: model.unwrap_or(defaults.model),
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
@@ -6423,6 +6423,18 @@ mod tests {
         assert_eq!(user.id, "auth-user-123");
         assert!(user.path.ends_with("users/auth-user-123.sqlite3"));
         assert!(user_from_id(&state, "../escape".to_owned()).is_err());
+    }
+
+    #[tokio::test]
+    async fn thread_ids_are_time_ordered_uuids() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "thread-id-user").unwrap();
+        let first = create_test_thread(&state, &user).await;
+        let second = create_test_thread(&state, &user).await;
+        let first = Uuid::parse_str(&first.id).unwrap();
+        let second = Uuid::parse_str(&second.id).unwrap();
+        assert_eq!(first.get_version(), Some(uuid::Version::SortRand));
+        assert!(first < second);
     }
 
     #[tokio::test]

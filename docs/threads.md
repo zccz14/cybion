@@ -1,8 +1,9 @@
 # Thread model
 
 Every conversation is an independent thread owned by one Auth Mini user. A
-thread contains a UUID, title, model, status, timestamps, and an append-only
-history. Users and API clients can append input to any thread they own.
+thread is identified by a time-ordered UUID v7 and carries a title, model,
+status, timestamps, and an append-only history. Users and API clients can
+append input to any thread they own.
 
 ```text
 user database
