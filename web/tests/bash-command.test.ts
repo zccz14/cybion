@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { createServer } from "vite"
+import { createTestServer } from "./vite-server.ts"
 
 test("bash commands render Worker names, language, command text and raw details", async () => {
-  const server = await createServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
+  const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { BashCommand } = await server.ssrLoadModule("/src/components/bash-command.tsx")
     const call = { workerId: "worker-1", command: 'pwd\necho "<script>alert(1)</script>"' }
