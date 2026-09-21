@@ -2,10 +2,10 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { createServer } from "vite"
+import { createTestServer } from "./vite-server.ts"
 
 test("process groups are native closed disclosures with bilingual counts, elapsed time and original children", async () => {
-  const server = await createServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
+  const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { ThreadProcessGroup } = await server.ssrLoadModule("/src/components/thread-process-group.tsx")
     for (const language of ["zh", "en"]) {

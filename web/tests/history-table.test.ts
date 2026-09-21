@@ -4,11 +4,11 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { MemoryRouter } from "react-router-dom"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { createServer } from "vite"
+import { createTestServer } from "./vite-server.ts"
 import { formattedTime } from "../src/lib/time.ts"
 
 test("history table renders database fields and server pagination without transforming protocol payloads", async () => {
-  const server = await createServer({ server: { middlewareMode: true }, appType: "custom" })
+  const server = await createTestServer({ server: { middlewareMode: true }, appType: "custom" })
   const client = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   try {
     const { HistoryTable } = await server.ssrLoadModule("/src/components/history-table.tsx")
