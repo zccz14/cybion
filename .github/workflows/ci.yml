@@ -23,6 +23,12 @@ jobs:
       - run: npm --prefix web run check
       - run: npx --prefix web playwright install --with-deps chromium
       - run: npm --prefix web run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: web-e2e-results
+          path: web/test-results
+          if-no-files-found: ignore
       - run: npm --prefix web run build
       - run: python3 scripts/check-responses-parity.py
       - run: python3 scripts/test-smoke-worker-onboarding.py
