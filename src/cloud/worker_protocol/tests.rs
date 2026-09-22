@@ -183,7 +183,9 @@ async fn same_boot_replays_same_ids_new_boot_loses_only_delivered_calls() {
     })
     .await
     .unwrap();
-    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     let lost = history.iter().find(|r| r.kind == "tool_output").unwrap();
     assert_eq!(lost.payload["call_id"], "first");
     assert!(lost.payload["output"].as_str().unwrap().contains("unknown"));
@@ -201,7 +203,7 @@ async fn same_boot_replays_same_ids_new_boot_loses_only_delivered_calls() {
         .await
         .unwrap();
     }
-    let history = history_for(&state, &user, thread.id).await.unwrap();
+    let history = history_for(&state, &user, thread.id, 0).await.unwrap();
     assert_eq!(
         history.iter().filter(|r| r.kind == "tool_output").count(),
         1

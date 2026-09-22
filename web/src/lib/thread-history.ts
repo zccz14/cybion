@@ -25,6 +25,16 @@ export function threadHistoryRecordKey(record: HistoryRecord) {
   return `${record.thread_id}:record:${record.id}:${record.created_at}`
 }
 
+// INVARIANT: thread history is append-only, so incremental polling can ask the server for
+// records newer than the newest loaded one instead of reloading the whole thread.
+export async function pollThreadHistory(
+  previous: readonly HistoryRecord[] | undefined,
+  fetchAfter: (after: number) => Promise<HistoryRecord[]>,
+) {
+  const after = previous?.reduce((newest, record) => Math.max(newest, record.id), 0) ?? 0
+  return [...previous ?? [], ...await fetchAfter(after)]
+}
+
 export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHistoryEntry[] {
   const entries: ThreadHistoryEntry[] = []
   for (const record of records) {

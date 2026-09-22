@@ -107,7 +107,9 @@ async fn restart_resumes_only_running_threads_once_from_latest_committed_history
             .to_string()
             .contains("committed progress")
     );
-    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     assert_eq!(history.iter().filter(|r| r.kind == "input").count(), 1);
     assert_eq!(
         read_thread_for(&state, &user, thread.id.clone())
@@ -181,7 +183,7 @@ async fn restart_waits_for_original_tool_and_replays_its_result_without_creating
             .any(|v| v["type"] == "function_call_output" && v["call_id"] == "original-call")
     );
     assert_eq!(
-        history_for(&state, &user, thread.id)
+        history_for(&state, &user, thread.id, 0)
             .await
             .unwrap()
             .iter()
@@ -329,7 +331,7 @@ async fn tool_output_and_queue_creation_roll_back_together_on_storage_failure() 
             .await
             .is_err()
     );
-    let history = history_for(&state, &user, thread.id).await.unwrap();
+    let history = history_for(&state, &user, thread.id, 0).await.unwrap();
     assert_eq!(
         history
             .iter()
@@ -409,7 +411,7 @@ async fn repeated_committed_call_id_is_not_appended_or_enqueued_twice() {
     .await
     .unwrap();
     assert_eq!(
-        history_for(&state, &user, thread.id)
+        history_for(&state, &user, thread.id, 0)
             .await
             .unwrap()
             .iter()

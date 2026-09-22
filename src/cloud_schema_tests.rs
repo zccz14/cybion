@@ -231,7 +231,9 @@ async fn history_appends_and_restart_recovery_use_only_core_columns() {
     .await
     .unwrap();
     recover_interrupted_requests(&state.data_dir).unwrap();
-    let records = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let records = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     assert_eq!(records.len(), 7);
     assert_eq!(records[1].payload["encrypted_content"], "opaque");
     assert_eq!(records[1].payload["summary"][0]["text"], "Thought");
