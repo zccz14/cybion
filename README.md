@@ -44,8 +44,12 @@ the first authenticated browser session initializes that key atomically.
   and `api_key` for an OpenAI Responses-compatible provider. The key is stored
   in that user's SQLite database and is never returned to the browser. Cybion
   sends model requests to `{base_url}/responses`, preserving the existing
-  streaming, tool-call, context replay, and audit behavior. Existing
-  OpenAI-LB credentials remain readable for users who have not migrated.
+  streaming, tool-call, context replay, and audit behavior. The configured
+  endpoint owns the model catalog: Cybion reads `GET {base_url}/models` and the
+  Configuration page lists that catalog, while new and existing Thread model
+  pickers offer it. A Thread keeps its own model selectable even after the
+  catalog stops reporting it. Existing OpenAI-LB credentials remain readable for
+  users who have not migrated.
 - Linkit task notifications are optional and configured separately. They do not
   gate model inference, external API requests, or API-key creation.
 - **Configuration → Linkit task notifications** lets the owner enable/repair,
