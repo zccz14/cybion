@@ -14,3 +14,13 @@ test("personal configuration saves a Responses-compatible API without exposing t
   assert.match(source, /type="password" autoComplete="new-password"/)
   assert.doesNotMatch(source, /openai_consumer_secret/)
 })
+
+test("the configured endpoint owns the model catalog", () => {
+  assert.match(source, /"\/api\/integrations\/openai\/models"/)
+  assert.match(source, /modelOptions\(models\.data\?\.models \?\? \[\], value\.model\)/)
+  assert.match(source, /modelOptions\(models\.data\?\.models \?\? \[\], current\.model\)/)
+  assert.match(source, /void client\.invalidateQueries\(\{ queryKey: \["openai-models"\] \}\)/)
+  assert.match(source, /availableModels: "Available models"/)
+  assert.match(source, /availableModels: "可用模型"/)
+  assert.doesNotMatch(source, /THREAD_MODELS/)
+})
