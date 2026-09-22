@@ -36,6 +36,117 @@ async fn queued(
     .unwrap()
 }
 
+async fn receipt(
+    state: &AppState,
+    user: &User,
+    worker: &str,
+    call: &str,
+    boot: &str,
+) -> Result<Json<Value>, ApiError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(BOOT_HEADER, boot.parse().unwrap());
+    worker_call_received(
+        State(state.clone()),
+        headers,
+        AxumPath((user.id.clone(), worker.to_owned(), call.to_owned())),
+        axum::Extension(user.clone()),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn receipts_are_idempotent_bound_to_the_delivering_boot_and_suppress_replay() {
+    let (_root, state, user, thread, worker, input) = fixture().await;
+    let boot = Uuid::new_v4().to_string();
+    let call = queued(&state, &user, &thread, &worker, input, "receipt").await;
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let boot = boot.clone();
+        let call = call.clone();
+        move |c| {
+            assert!(register(c, &worker, Some(&boot), Some("0.2.0"))?.is_empty());
+            assert_eq!(claim(c, &worker, Some(&boot))?.unwrap().id, call);
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let _ = receipt(&state, &user, &worker, &call, &boot).await.unwrap();
+    let _ = receipt(&state, &user, &worker, &call, &boot).await.unwrap();
+    assert_eq!(
+        receipt(&state, &user, &worker, &call, &Uuid::new_v4().to_string())
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        receipt(&state, &user, &worker, &Uuid::new_v4().to_string(), &boot)
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::CONFLICT
+    );
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let boot = boot.clone();
+        move |c| {
+            let received: Option<i64> = c.query_row(
+                "SELECT received_at FROM worker_calls WHERE id=?",
+                [&call],
+                |r| r.get(0),
+            )?;
+            assert!(received.is_some());
+            assert!(register(c, &worker, Some(&boot), Some("0.2.0"))?.is_empty());
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn accepted_result_confirms_receipt_without_a_receipt_message() {
+    let (_root, state, user, thread, worker, input) = fixture().await;
+    let boot = Uuid::new_v4().to_string();
+    let call = queued(&state, &user, &thread, &worker, input, "result-only").await;
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let boot = boot.clone();
+        let call = call.clone();
+        move |c| {
+            register(c, &worker, Some(&boot), Some("0.2.0"))?;
+            assert_eq!(claim(c, &worker, Some(&boot))?.unwrap().id, call);
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let _ = worker_result(
+        State(state.clone()),
+        AxumPath((user.id.clone(), worker.clone(), call.clone())),
+        axum::Extension(user.clone()),
+        Json(WorkerResultInput {
+            result: json!({"stdout":"done"}),
+            failed: false,
+            error: None,
+        }),
+    )
+    .await
+    .unwrap();
+    user_db(&state, &user, false, move |c| {
+        let received: Option<i64> = c.query_row(
+            "SELECT received_at FROM worker_calls WHERE id=?",
+            [&call],
+            |r| r.get(0),
+        )?;
+        assert!(received.is_some());
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn same_boot_replays_same_ids_new_boot_loses_only_delivered_calls() {
     let (_root, state, user, thread, worker, input) = fixture().await;

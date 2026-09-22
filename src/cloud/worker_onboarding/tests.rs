@@ -298,6 +298,35 @@ async fn check_validates_dispatch_and_result_without_creating_a_model_thread() {
     .unwrap();
     assert_eq!(call.name, "diagnostics");
     assert_eq!(call.id, check.id);
+    let _ = check_received(
+        State(state.clone()),
+        axum::Extension(owner.user.clone()),
+        AxumPath((owner.user.id.clone(), worker.clone(), check.id.clone())),
+    )
+    .await
+    .unwrap();
+    let _ = check_received(
+        State(state.clone()),
+        axum::Extension(owner.user.clone()),
+        AxumPath((owner.user.id.clone(), worker.clone(), check.id.clone())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        check_received(
+            State(state.clone()),
+            axum::Extension(owner.user.clone()),
+            AxumPath((
+                owner.user.id.clone(),
+                worker.clone(),
+                Uuid::new_v4().to_string()
+            )),
+        )
+        .await
+        .unwrap_err()
+        .status,
+        StatusCode::CONFLICT
+    );
     let id = worker.clone();
     assert!(
         user_db(&state, &owner.user, false, move |c| claim_worker_call(
@@ -329,6 +358,7 @@ async fn check_validates_dispatch_and_result_without_creating_a_model_thread() {
     .0
     .unwrap();
     assert_eq!(done.status, "completed");
+    assert!(done.received_at.is_some());
     user_db(&state, &owner.user, false, move |c| {
         let count: i64 = c.query_row("SELECT count(*) FROM threads", [], |r| r.get(0))?;
         assert_eq!(count, 0);

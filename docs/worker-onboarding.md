@@ -26,6 +26,12 @@ is prefilled with the exact Worker ID and still requires the user's Send action.
   record; retries can only resume for the same owner. Approval is idempotent and
   never recreates a deleted, already-approved Worker. Metadata polling is
   intentionally replayable until expiry to recover lost network responses.
+- `POST …/calls/{call_id}/received` and `…/checks/{id}/received`: per-delivery
+  receipts. A 0.2.1+ Worker posts one receipt for every received tool call,
+  duplicated deliveries included, and retries it like a result upload. Receipts
+  are idempotent; a call receipt must match the boot ID the call was delivered
+  to. A same-process reconnect replays only calls without a receipt, so
+  acknowledged calls are not re-sent. An accepted result also records the receipt.
 - Codes expire after 10 minutes. Approval gives a fresh 10-minute claim window.
   Expired sessions are removed 24 hours after expiry. Request creation is capped
   globally at 120/min; polling at 6000/min and once per 2 seconds per request;
@@ -89,7 +95,8 @@ Background mode is labeled honestly as distinct from reboot persistence.
   authentication, expiry, cancellation, idempotency/revocation, rate limits and
   actual SSE/result routes.
 - Worker tests: no-clobber private configuration, exclusive process lock,
-  resumable device credentials near expiry, cancellation, safe capability checks.
+  resumable device credentials near expiry, cancellation, safe capability checks,
+  delivery receipts for duplicates and reconnects.
 - Frontend tests: manifest/commands, exact-device readiness, consent and no token
   persistence. Playwright covers approval, refresh, first-task handoff, mobile
   remote installation in both languages, expiry and timeout recovery.

@@ -602,6 +602,10 @@ fn app(state: AppState) -> Router {
             post(worker_onboarding::check_result),
         )
         .route(
+            "/worker/v1/users/{user_id}/workers/{worker_id}/checks/{id}/received",
+            post(worker_onboarding::check_received),
+        )
+        .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/events",
             get(worker_protocol::events),
         )
@@ -616,6 +620,10 @@ fn app(state: AppState) -> Router {
         .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/calls/{call_id}/result",
             post(worker_result),
+        )
+        .route(
+            "/worker/v1/users/{user_id}/workers/{worker_id}/calls/{call_id}/received",
+            post(worker_call_received),
         )
         .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/upgrade",
@@ -1183,6 +1191,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("threads", "next_retry_at", "INTEGER"),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
+        ("worker_calls", "received_at", "INTEGER"),
         ("workers", "upgrade_id", "TEXT"),
         ("workers", "upgrade_version", "TEXT"),
         ("workers", "upgrade_status", "TEXT"),
@@ -1200,6 +1209,19 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         }
     }
     transaction.execute_batch(worker_onboarding::CHECK_SCHEMA)?;
+    let has_check_receipts: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('worker_checks') WHERE name='received_at')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ApiError::internal)?;
+    if !has_check_receipts {
+        transaction.execute(
+            "ALTER TABLE worker_checks ADD COLUMN received_at INTEGER",
+            [],
+        )?;
+    }
     let has_responses_call_id: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('worker_calls') WHERE name='responses_call_id')",
@@ -1439,6 +1461,7 @@ struct WorkerCallAuditView {
     created_at: i64,
     started_at: Option<i64>,
     completed_at: Option<i64>,
+    received_at: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -2650,7 +2673,7 @@ async fn worker_call_audits(
             "SELECT c.id,c.worker_id,c.worker_label,c.worker_hostname,c.worker_version,
                     c.worker_resource_json,c.thread_id,COALESCE(t.title,''),c.input_record_id,
                     c.name,c.arguments_json,c.status,c.result_json,c.error,c.created_at,
-                    c.started_at,c.completed_at
+                    c.started_at,c.completed_at,c.received_at
              FROM worker_calls c LEFT JOIN threads t ON t.id=c.thread_id
              ORDER BY c.created_at DESC,c.id DESC",
         )?;
@@ -2681,6 +2704,7 @@ async fn worker_call_audits(
                 created_at: row.get(14)?,
                 started_at: row.get(15)?,
                 completed_at: row.get(16)?,
+                received_at: row.get(17)?,
             })
         })?;
         let mut items = Vec::new();
@@ -6336,17 +6360,17 @@ async fn worker_result(
         if accepted {
             transaction.execute(
                 "UPDATE worker_calls
-                 SET status=?,result_json=?,error=?,completed_at=?
+                 SET status=?,result_json=?,error=?,completed_at=?,received_at=COALESCE(received_at,?)
                  WHERE id=? AND worker_id=? AND status IN ('queued','delivered')",
-                params![status, result_json, error_text, now(), &call_id, &worker_id],
+                params![status, result_json, error_text, now(), now(), &call_id, &worker_id],
             )?;
         } else {
             // A superseded call can still finish on the device. Preserve that
             // result once, while keeping its terminal cancellation/failure state.
             transaction.execute(
-                "UPDATE worker_calls SET result_json=?,error=COALESCE(error,?)
+                "UPDATE worker_calls SET result_json=?,error=COALESCE(error,?),received_at=COALESCE(received_at,?)
                  WHERE id=? AND worker_id=? AND output_record_id IS NULL",
-                params![result_json, error_text, &call_id, &worker_id],
+                params![result_json, error_text, now(), &call_id, &worker_id],
             )?;
         }
         let superseded = if let Some(input_record_id) = input_record_id {
@@ -6369,6 +6393,32 @@ async fn worker_result(
             params![output_record_id, &call_id],
         )?;
         transaction.commit()?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn worker_call_received(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((_user_id, worker_id, call_id)): AxumPath<(String, String, String)>,
+    axum::Extension(user): axum::Extension<User>,
+) -> Result<Json<Value>, ApiError> {
+    let worker_id = record_id(&worker_id)?;
+    let call_id = record_id(&call_id)?;
+    let boot = worker_protocol::boot_header(&headers)?
+        .ok_or_else(|| ApiError::bad_request("Worker boot ID required"))?;
+    user_db(&state, &user, false, move |connection| {
+        let changed = connection.execute(
+            "UPDATE worker_calls SET received_at=COALESCE(received_at,?) WHERE id=? AND worker_id=? AND worker_boot_id=?",
+            params![now(), &call_id, &worker_id, &boot],
+        )?;
+        if changed == 0 {
+            return Err(ApiError::conflict(
+                "receipt does not match a call delivered to this Worker process",
+            ));
+        }
         Ok(())
     })
     .await?;
