@@ -1021,3 +1021,97 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
     .unwrap();
     assert_eq!(stored, "Context Title");
 }
+
+#[test]
+fn replayed_tool_calls_regroup_before_their_outputs_within_a_thinking_turn() {
+    let items = vec![
+        json!({"type":"reasoning","id":"rs-1","summary":[],"content":[{"type":"reasoning_text","text":"plan"}]}),
+        json!({"type":"message","id":"msg-1","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"reading"}]}),
+        json!({"type":"function_call","id":"fc-1","name":"browser_control","call_id":"call-a","arguments":"{\"action\":\"html\"}"}),
+        json!({"type":"function_call_output","call_id":"call-a","output":"{\"error\":\"unsupported browser action: html\"}"}),
+        json!({"type":"function_call","id":"fc-2","name":"bash","call_id":"call-b","arguments":"{\"command\":\"curl\"}"}),
+        json!({"type":"function_call_output","call_id":"call-b","output":"{\"stdout\":\"ok\"}"}),
+    ];
+    let replay = replayable_context_items(&items);
+    assert_eq!(replay[0]["type"], "reasoning");
+    assert_eq!(replay[1]["type"], "message");
+    assert_eq!(replay.len(), 6);
+    let position = |call_id: &str, output: bool| {
+        replay
+            .iter()
+            .position(|item| {
+                item["call_id"] == call_id
+                    && matches!(tool_pair(item), Some((_, item_output)) if item_output == output)
+            })
+            .unwrap()
+    };
+    assert!(position("call-a", false) < position("call-b", false));
+    assert!(
+        position("call-b", false) < position("call-a", true),
+        "a call must move before outputs that settled while its response streamed"
+    );
+    assert!(position("call-a", true) < position("call-b", true));
+}
+
+#[test]
+fn replayed_tool_items_stay_paired_with_outputs_after_the_call() {
+    let items = vec![
+        json!({"type":"reasoning","id":"rs-1","summary":[]}),
+        json!({"type":"function_call","id":"fc-1","name":"bash","call_id":"call-a","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-a","output":"{}"}),
+        json!({"type":"function_call","id":"fc-orphan","name":"bash","call_id":"call-b","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-c","output":"{}"}),
+        json!({"type":"function_call","id":"fc-dup-1","name":"bash","call_id":"call-d","arguments":"{}"}),
+        json!({"type":"function_call","id":"fc-dup-2","name":"bash","call_id":"call-d","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-d","output":"{}"}),
+    ];
+    let replay = replayable_context_items(&items);
+    for (index, item) in replay.iter().enumerate() {
+        let Some((_, false)) = tool_pair(item) else {
+            continue;
+        };
+        let id = item["call_id"].as_str().unwrap();
+        let outputs = replay
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| {
+                matches!(tool_pair(other), Some((_, true))) && other["call_id"] == id
+            })
+            .map(|(output_index, _)| output_index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outputs.len(),
+            1,
+            "each kept call must pair with exactly one output"
+        );
+        assert!(outputs[0] > index, "every output must stay after its call");
+    }
+    assert!(
+        !replay.iter().any(|item| matches!(
+            item["call_id"].as_str(),
+            Some("call-b" | "call-c" | "call-d")
+        )),
+        "orphaned and duplicated tool pairs must stay dropped"
+    );
+}
+
+#[test]
+fn replayed_tool_calls_without_reasoning_keep_stream_order() {
+    let items = vec![
+        json!({"role":"user","content":"hello"}),
+        json!({"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"working"}]}),
+        json!({"type":"function_call","id":"fc-1","name":"bash","call_id":"call-a","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-a","output":"{}"}),
+        json!({"type":"function_call","id":"fc-2","name":"bash","call_id":"call-b","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-b","output":"{}"}),
+    ];
+    let replay = replayable_context_items(&items);
+    let call_ids = replay
+        .iter()
+        .map(|item| item["call_id"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call_ids,
+        vec!["", "", "call-a", "call-a", "call-b", "call-b"]
+    );
+}

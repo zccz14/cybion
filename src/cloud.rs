@@ -4223,11 +4223,95 @@ fn replayable_context_items(items: &[Value]) -> Vec<Value> {
             counts.entry((kind, id)).or_default().push(index);
         }
     }
-    items.iter().filter(|item| {
-        let Some((kind, _)) = tool_pair(item) else { return true };
-        let Some(id) = item.get("call_id").and_then(Value::as_str) else { return false };
-        matches!((calls.get(&(kind, id)).map(Vec::as_slice), outputs.get(&(kind, id)).map(Vec::as_slice)), (Some([call]), Some([output])) if call < output)
-    }).cloned().collect()
+    let paired = items
+        .iter()
+        .filter(|item| {
+            let Some((kind, _)) = tool_pair(item) else {
+                return true;
+            };
+            let Some(id) = item.get("call_id").and_then(Value::as_str) else {
+                return false;
+            };
+            matches!(
+                (
+                    calls.get(&(kind, id)).map(Vec::as_slice),
+                    outputs.get(&(kind, id)).map(Vec::as_slice)
+                ),
+                (Some([call]), Some([output])) if call < output
+            )
+        })
+        .cloned()
+        .collect();
+    regroup_thinking_tool_calls(paired)
+}
+
+/// A tool result can settle while the upstream response that made the call is
+/// still streaming, so its output record can land between two sibling calls of
+/// one response. Thinking-mode providers require every call to stay in the
+/// reasoning turn that made it: within each turn, emit all calls before their
+/// outputs, and keep every output after its own call.
+fn regroup_thinking_tool_calls(items: Vec<Value>) -> Vec<Value> {
+    let mut regrouped = Vec::with_capacity(items.len());
+    let mut turn: Vec<Value> = Vec::new();
+    for item in items {
+        let starts_turn = is_reasoning_item(&item);
+        if !starts_turn && is_assistant_turn_item(&item) {
+            turn.push(item);
+            continue;
+        }
+        flush_thinking_turn(&mut regrouped, &mut turn);
+        if starts_turn {
+            turn.push(item);
+        } else {
+            regrouped.push(item);
+        }
+    }
+    flush_thinking_turn(&mut regrouped, &mut turn);
+    regrouped
+}
+
+fn flush_thinking_turn(regrouped: &mut Vec<Value>, turn: &mut Vec<Value>) {
+    let items = std::mem::take(turn);
+    if !items.first().is_some_and(is_reasoning_item) {
+        regrouped.extend(items);
+        return;
+    }
+    let Some(first_output) = items
+        .iter()
+        .position(|item| matches!(tool_pair(item), Some((_, true))))
+    else {
+        regrouped.extend(items);
+        return;
+    };
+    let (prefix, rest) = items.split_at(first_output);
+    regrouped.extend(prefix.iter().cloned());
+    regrouped.extend(rest.iter().filter(|item| is_tool_call_item(item)).cloned());
+    regrouped.extend(rest.iter().filter(|item| !is_tool_call_item(item)).cloned());
+}
+
+fn is_reasoning_item(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("reasoning")
+}
+
+fn is_tool_call_item(item: &Value) -> bool {
+    matches!(tool_pair(item), Some((_, false)))
+}
+
+fn is_assistant_turn_item(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some(
+            "function_call"
+            | "function_call_output"
+            | "custom_tool_call"
+            | "custom_tool_call_output"
+            | "tool_search_call"
+            | "tool_search_output"
+            | "web_search_call"
+            | "image_generation_call",
+        ) => true,
+        Some("message") => item.get("role").and_then(Value::as_str) == Some("assistant"),
+        _ => false,
+    }
 }
 
 fn registered_workers(connection: &Connection) -> Result<Vec<WorkerSummary>, ApiError> {
