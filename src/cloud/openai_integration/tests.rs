@@ -191,6 +191,8 @@ async fn inference(f: &Fixture) -> Result<ResponsesResult, ApiError> {
         json!([]),
         false,
         false,
+        false,
+        false,
         None,
         None,
         None,

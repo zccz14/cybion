@@ -27,10 +27,16 @@ the first authenticated browser session initializes that key atomically.
   persisted five-attempt budget; stopped/completed Threads stay stopped.
 - Threads are independent. A user can create, rename, inspect, and delete
   them from the web UI.
-- Configuration lets each user save the default model, reasoning effort, and
-  Fast mode for new threads. These defaults are stored in the user's database
-  and apply to both web and API creation. An explicit API `model` overrides the
-  default model; existing threads keep their own settings.
+- Configuration lets each user save the default model, reasoning effort,
+  Fast mode, and native tool switches for new threads. These defaults are
+  stored in the user's database and apply to both web and API creation. An
+  explicit API `model` overrides the default model; existing threads keep their
+  own settings.
+- Each Thread has user-managed **Web search** and **Image generation** switches
+  next to Fast mode. They decide whether the inference request to the
+  configured provider includes the `web_search` and `image_generation` native
+  tools. Threads keep their own switches after defaults change, and both
+  switches start on, matching the requests users already received.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record

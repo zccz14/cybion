@@ -57,6 +57,20 @@ test("history renders reasoning summaries and exposes OpenAI native tools", () =
   assert.match(source, /detail: "image_generation"/)
 })
 
+test("thread native tool switches sit next to Fast mode and default from personal settings", () => {
+  assert.match(source, /web_search: boolean/)
+  assert.match(source, /image_generation: boolean/)
+  assert.match(source, /web_search\?: boolean/)
+  assert.match(source, /image_generation\?: boolean/)
+  assert.match(source, /Fast \{current\.service_tier_fast \? "on" : "off"\}<\/Button><Button size="sm" variant=\{current\.web_search \? "default" : "outline"\}/)
+  assert.match(source, /settings\.mutate\(\{ web_search: !current\.web_search \}\)/)
+  assert.match(source, /settings\.mutate\(\{ image_generation: !current\.image_generation \}\)/)
+  assert.match(source, /id="new-thread-web-search"/)
+  assert.match(source, /id="default-thread-web-search"/)
+  assert.match(source, /value\.web_search !== defaults\.data\.web_search/)
+  assert.match(source, /value\.image_generation !== defaults\.data\.image_generation/)
+})
+
 test("the management surfaces expose integration keys and SQLite-free Worker pairing", () => {
   assert.match(source, /\/api\/api-keys/)
   assert.match(source, /\/api\/workers/)

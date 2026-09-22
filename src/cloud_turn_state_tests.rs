@@ -96,6 +96,8 @@ async fn send(
         false,
         json!([{"role":"user","content":"hello"}]),
         false,
+        false,
+        false,
         None,
         None,
         None,

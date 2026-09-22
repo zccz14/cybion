@@ -140,6 +140,8 @@ type ThreadDefaults = {
   model: string
   reasoning_effort: typeof REASONING_EFFORTS[number]
   service_tier_fast: boolean
+  web_search: boolean
+  image_generation: boolean
 }
 type ThreadStatus = "idle" | "running" | "failed"
 type Thread = ThreadDefaults & {
@@ -540,6 +542,8 @@ const copy = {
     reasoningEffort: "Reasoning effort",
     fastMode: "Fast mode",
     fastModeDescription: "Use priority processing for new threads.",
+    webSearchDescription: "Inject the web search tool into new thread requests.",
+    imageGenerationDescription: "Inject the image generation tool into new thread requests.",
     saveDefaults: "Save defaults",
     savingDefaults: "Saving…",
     defaultsSaved: "Defaults saved",
@@ -807,6 +811,8 @@ const copy = {
     reasoningEffort: "推理强度",
     fastMode: "Fast 模式",
     fastModeDescription: "新线程默认使用优先处理。",
+    webSearchDescription: "新线程的模型请求默认注入网页搜索工具。",
+    imageGenerationDescription: "新线程的模型请求默认注入图像生成工具。",
     saveDefaults: "保存默认设置",
     savingDefaults: "保存中…",
     defaultsSaved: "默认设置已保存",
@@ -1269,6 +1275,14 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
                 <FieldContent><FieldLabel htmlFor="new-thread-fast">{t("fastMode")}</FieldLabel><FieldDescription id="new-thread-fast-description">{t("fastModeDescription")}</FieldDescription></FieldContent>
                 <Switch id="new-thread-fast" aria-describedby="new-thread-fast-description" checked={value.service_tier_fast} disabled={start.isPending} onCheckedChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />
               </Field>
+              <Field orientation="horizontal" data-disabled={start.isPending}>
+                <FieldContent><FieldLabel htmlFor="new-thread-web-search">{t("toolWebSearch")}</FieldLabel><FieldDescription id="new-thread-web-search-description">{t("webSearchDescription")}</FieldDescription></FieldContent>
+                <Switch id="new-thread-web-search" aria-describedby="new-thread-web-search-description" checked={value.web_search} disabled={start.isPending} onCheckedChange={(web_search) => edit({ ...value, web_search })} />
+              </Field>
+              <Field orientation="horizontal" data-disabled={start.isPending}>
+                <FieldContent><FieldLabel htmlFor="new-thread-image-generation">{t("toolImageGeneration")}</FieldLabel><FieldDescription id="new-thread-image-generation-description">{t("imageGenerationDescription")}</FieldDescription></FieldContent>
+                <Switch id="new-thread-image-generation" aria-describedby="new-thread-image-generation-description" checked={value.image_generation} disabled={start.isPending} onCheckedChange={(image_generation) => edit({ ...value, image_generation })} />
+              </Field>
             </div>
           </section>}
           <div className="rounded-xl border border-dashed bg-muted/20 p-5 sm:p-6">
@@ -1367,7 +1381,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; web_search?: boolean; image_generation?: boolean }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -1402,7 +1416,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
           <Button size="sm" disabled={rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
         </form> : <div className="min-w-0 flex-1"><h1 className="truncate text-base font-semibold">{current.title}</h1><p className="truncate text-xs text-muted-foreground">{current.model}</p></div>}
         <ThreadStatusBadge status={current.display_status} language={language} />
-        {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{modelOptions(models.data?.models ?? [], current.model).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
+        {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{modelOptions(models.data?.models ?? [], current.model).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button size="sm" variant={current.web_search ? "default" : "outline"} onClick={() => settings.mutate({ web_search: !current.web_search })}>{t("toolWebSearch")} {current.web_search ? "on" : "off"}</Button><Button size="sm" variant={current.image_generation ? "default" : "outline"} onClick={() => settings.mutate({ image_generation: !current.image_generation })}>{t("toolImageGeneration")} {current.image_generation ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
       <ThreadUsagePanel usage={current.usage} language={language} />
@@ -2065,7 +2079,9 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const changed = value && defaults.data && (
     value.model !== defaults.data.model ||
     value.reasoning_effort !== defaults.data.reasoning_effort ||
-    value.service_tier_fast !== defaults.data.service_tier_fast
+    value.service_tier_fast !== defaults.data.service_tier_fast ||
+    value.web_search !== defaults.data.web_search ||
+    value.image_generation !== defaults.data.image_generation
   )
   function edit(next: ThreadDefaults) {
     setDraft(next)
@@ -2100,6 +2116,20 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
               <FieldDescription id="default-thread-fast-description">{t("fastModeDescription")}</FieldDescription>
             </FieldContent>
             <Switch id="default-thread-fast" aria-describedby="default-thread-fast-description" checked={value.service_tier_fast} disabled={save.isPending} onCheckedChange={(fast) => edit({ ...value, service_tier_fast: fast })} />
+          </Field>
+          <Field orientation="horizontal" data-disabled={save.isPending}>
+            <FieldContent>
+              <FieldLabel htmlFor="default-thread-web-search">{t("toolWebSearch")}</FieldLabel>
+              <FieldDescription id="default-thread-web-search-description">{t("webSearchDescription")}</FieldDescription>
+            </FieldContent>
+            <Switch id="default-thread-web-search" aria-describedby="default-thread-web-search-description" checked={value.web_search} disabled={save.isPending} onCheckedChange={(web_search) => edit({ ...value, web_search })} />
+          </Field>
+          <Field orientation="horizontal" data-disabled={save.isPending}>
+            <FieldContent>
+              <FieldLabel htmlFor="default-thread-image-generation">{t("toolImageGeneration")}</FieldLabel>
+              <FieldDescription id="default-thread-image-generation-description">{t("imageGenerationDescription")}</FieldDescription>
+            </FieldContent>
+            <Switch id="default-thread-image-generation" aria-describedby="default-thread-image-generation-description" checked={value.image_generation} disabled={save.isPending} onCheckedChange={(image_generation) => edit({ ...value, image_generation })} />
           </Field>
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}

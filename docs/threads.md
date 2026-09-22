@@ -2,8 +2,12 @@
 
 Every conversation is an independent thread owned by one Auth Mini user. A
 thread is identified by a time-ordered UUID v7 and carries a title, model,
-status, timestamps, and an append-only history. Users and API clients can
-append input to any thread they own.
+reasoning effort, Fast mode, **Web search** and **Image generation** switches,
+status, timestamps, and an append-only history. The switches decide whether
+inference requests include the provider-native `web_search` and
+`image_generation` tools. Users manage them per thread next to Fast mode, with
+new-thread defaults in Personal settings. Users and API clients can append
+input to any thread they own.
 
 ```text
 user database
