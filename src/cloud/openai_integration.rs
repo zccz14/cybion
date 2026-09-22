@@ -7,6 +7,16 @@ struct ConsumerVerification {
     is_disabled: bool,
 }
 
+#[derive(Deserialize)]
+struct ModelCatalog {
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
 fn request(
     state: &AppState,
     bearer: &str,
@@ -160,6 +170,27 @@ pub(super) async fn reconcile(
     }
     settings.openai_base_url = OPENAI_BASE_URL.to_owned();
     save(state, user, settings).await
+}
+
+pub(super) async fn list_models(
+    state: &AppState,
+    settings: &IntegrationSettings,
+) -> Result<Vec<String>, ApiError> {
+    let response = request(
+        state,
+        openai_api_key(settings),
+        reqwest::Method::GET,
+        &format!("{}/models", settings.openai_base_url.trim_end_matches('/')),
+    )
+    // INVARIANT: the hosted OpenAI-LB proxy rejects every /v1 request without a
+    // non-empty session-id header. Other providers ignore the header, so one
+    // request path serves both.
+    .header(SESSION_ID_HEADER, Uuid::new_v4().to_string())
+    .send()
+    .await?
+    .error_for_status()?;
+    let catalog = response.json::<ModelCatalog>().await?;
+    Ok(catalog.data.into_iter().map(|model| model.id).collect())
 }
 
 pub(super) async fn verify_ready(

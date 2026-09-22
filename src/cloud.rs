@@ -545,6 +545,7 @@ fn app(state: AppState) -> Router {
             "/api/integrations/openai",
             get(openai_api_config).put(update_openai_api_config),
         )
+        .route("/api/integrations/openai/models", get(openai_models))
         .route("/api/integrations/refresh", post(refresh_integrations))
         .route(
             "/api/integrations/linkit",
@@ -1472,6 +1473,11 @@ struct OpenAiApiConfigView {
     api_key_configured: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct OpenAiModelsView {
+    models: Vec<String>,
+}
+
 #[derive(Clone, Serialize)]
 struct ExperimentalFeaturesView {
     thread_id_header: bool,
@@ -1840,13 +1846,12 @@ fn optional_title(value: Option<String>) -> Result<String, ApiError> {
 }
 
 fn model_id(value: String) -> Result<String, ApiError> {
+    // ASSUMPTION: any catalog identifier a provider reports is a valid model
+    // name. Accepting every printable ASCII token lets custom endpoints use
+    // names such as `meta-llama/Llama-3.1-8B-Instruct`; a rejected name only
+    // fails this save, and the caller can pick another reported model.
     let value = value.trim();
-    if value.is_empty()
-        || value.len() > 128
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
-    {
+    if value.is_empty() || value.len() > 128 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
         return Err(ApiError::bad_request(
             "model must be a supported model identifier",
         ));
@@ -2157,6 +2162,19 @@ async fn openai_api_config(
     })
     .await?;
     Ok(Json(openai_api_config_view(&settings)))
+}
+
+async fn openai_models(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<OpenAiModelsView>, ApiError> {
+    let settings = user_db(&state, &identity.user, true, |connection| {
+        integration_settings(connection)
+    })
+    .await?;
+    let settings = require_openai_integration(settings)?;
+    let models = openai_integration::list_models(&state, &settings).await?;
+    Ok(Json(OpenAiModelsView { models }))
 }
 
 fn validate_openai_base_url(value: String) -> Result<String, ApiError> {
@@ -3460,11 +3478,15 @@ async fn required_openai_integration(
         integration_settings(connection)
     })
     .await?;
+    require_openai_integration(settings)
+}
+
+fn require_openai_integration(
+    settings: IntegrationSettings,
+) -> Result<IntegrationSettings, ApiError> {
     openai_integration_ready(&settings)
         .then_some(settings)
-        .ok_or_else(|| {
-            ApiError::conflict("configure an OpenAI Responses-compatible API before using this API")
-        })
+        .ok_or_else(|| ApiError::conflict("configure an OpenAI Responses-compatible API first"))
 }
 
 fn request_key(user: &User, thread_id: &str) -> String {

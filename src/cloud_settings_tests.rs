@@ -69,9 +69,9 @@ fn existing_user_request_headers_migrate_to_global_admin_settings() {
     );
 }
 
-#[tokio::test]
-async fn authenticated_http_settings_round_trip_drives_thread_creation() {
-    let (_root, state) = test_state();
+async fn install_test_issuer(
+    state: &AppState,
+) -> (String, SigningKey, tokio::task::JoinHandle<()>) {
     let key = SigningKey::from_bytes(&[42; 32]);
     let jwks = json!({"keys":[{
         "kid":"test","kty":"OKP","crv":"Ed25519","alg":"EdDSA","use":"sig",
@@ -91,8 +91,12 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         .await
         .unwrap();
     assert!(state.auth.set(layer).is_ok());
+    (issuer, key, issuer_task)
+}
+
+fn browser_token(issuer: &str, key: &SigningKey, subject: &str, session: &str) -> String {
     let claims = json!({
-        "sub":"http-settings-owner","sid":"test-session","iss":issuer,"aud":AUTH_AUDIENCE,
+        "sub":subject,"sid":session,"iss":issuer,"aud":AUTH_AUDIENCE,
         "amr":["webauthn"],"typ":"access","iat":now(),"exp":now()+60,
     });
     let signing_input = format!(
@@ -100,10 +104,17 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         base64url(br#"{"alg":"EdDSA","kid":"test"}"#),
         base64url(claims.to_string().as_bytes())
     );
-    let token = format!(
+    format!(
         "{signing_input}.{}",
         base64url(&key.sign(signing_input.as_bytes()).to_bytes())
-    );
+    )
+}
+
+#[tokio::test]
+async fn authenticated_http_settings_round_trip_drives_thread_creation() {
+    let (_root, state) = test_state();
+    let (issuer, key, issuer_task) = install_test_issuer(&state).await;
+    let token = browser_token(&issuer, &key, "http-settings-owner", "test-session");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     assert!(admin_user_sync(&state.admin_db_path, "http-settings-owner", true).unwrap());
@@ -294,18 +305,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let mut other_claims = claims.clone();
-    other_claims["sub"] = json!("http-settings-other");
-    other_claims["sid"] = json!("other-session");
-    let other_signing_input = format!(
-        "{}.{}",
-        base64url(br#"{"alg":"EdDSA","kid":"test"}"#),
-        base64url(other_claims.to_string().as_bytes())
-    );
-    let other_token = format!(
-        "{other_signing_input}.{}",
-        base64url(&key.sign(other_signing_input.as_bytes()).to_bytes())
-    );
+    let other_token = browser_token(&issuer, &key, "http-settings-other", "other-session");
     for (url, body) in [
         (
             &integrations_url,
@@ -389,6 +389,145 @@ fn browser_identity_for(user: &User) -> axum::Extension<BrowserIdentity> {
         user: user.clone(),
         bearer: String::new(),
     })
+}
+
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).await.unwrap();
+        assert_ne!(read, 0);
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            return String::from_utf8(bytes).unwrap();
+        }
+    }
+}
+
+async fn serve_model_catalog_once() -> (u16, tokio::task::JoinHandle<String>) {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let head = read_request_head(&mut socket).await;
+        let body = json!({"object":"list","data":[{"id":"gpt-5.6-terra"},{"id":"meta-llama/Llama-3.1-8B-Instruct"}]}).to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        head
+    });
+    (port, task)
+}
+
+#[tokio::test]
+async fn authenticated_http_models_route_serves_the_endpoint_catalog() {
+    let (_root, state) = test_state();
+    let (issuer, key, issuer_task) = install_test_issuer(&state).await;
+    let token = browser_token(&issuer, &key, "http-models-owner", "models-session");
+    let (catalog_port, catalog) = serve_model_catalog_once().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let _ = client
+        .put(format!("{base}/api/integrations/openai"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "base_url": format!("http://127.0.0.1:{catalog_port}/v1"),
+            "api_key": "sk-http-models",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let models: Value = client
+        .get(format!("{base}/api/integrations/openai/models"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        models,
+        json!({"models":["gpt-5.6-terra","meta-llama/Llama-3.1-8B-Instruct"]})
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/api/integrations/openai/models"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    catalog.await.unwrap();
+    server.abort();
+    issuer_task.abort();
+}
+
+#[tokio::test]
+async fn available_models_come_from_the_configured_endpoint_catalog() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "models-owner").unwrap();
+    let unconfigured = openai_models(State(state.clone()), browser_identity_for(&user))
+        .await
+        .unwrap_err();
+    assert_eq!(unconfigured.status, StatusCode::CONFLICT);
+
+    let (catalog_port, catalog) = serve_model_catalog_once().await;
+    let _ = update_openai_api_config(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(UpdateOpenAiApiConfigInput {
+            base_url: format!("http://127.0.0.1:{catalog_port}/v1"),
+            api_key: Some("sk-custom".to_owned()),
+        }),
+    )
+    .await
+    .unwrap();
+    let models = openai_models(State(state.clone()), browser_identity_for(&user))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(
+        models.models,
+        ["gpt-5.6-terra", "meta-llama/Llama-3.1-8B-Instruct"]
+    );
+    let head = catalog.await.unwrap().to_lowercase();
+    assert!(head.starts_with("get /v1/models http/1.1"));
+    assert!(head.contains("authorization: bearer sk-custom"));
+    assert!(head.contains("session-id: "));
+
+    let defaults = ThreadDefaults {
+        model: "meta-llama/Llama-3.1-8B-Instruct".to_owned(),
+        reasoning_effort: "high".to_owned(),
+        service_tier_fast: false,
+    };
+    assert_eq!(
+        update_thread_defaults(
+            State(state),
+            browser_identity_for(&user),
+            Json(defaults.clone())
+        )
+        .await
+        .unwrap()
+        .0,
+        defaults
+    );
 }
 
 #[tokio::test]
@@ -605,7 +744,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
     .unwrap();
     for (model, effort) in [
         ("", "high"),
-        ("bad/model", "high"),
+        ("bad model", "high"),
         ("gpt-6-astra", "invalid"),
     ] {
         let error = update_thread_defaults(
