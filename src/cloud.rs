@@ -6882,6 +6882,117 @@ mod tests {
         assert!(empty.is_empty());
     }
 
+    #[tokio::test]
+    async fn thread_history_over_http_returns_only_the_requested_thread() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "history-isolation-user").unwrap();
+        let first = create_test_thread(&state, &user).await;
+        let second = create_test_thread(&state, &user).await;
+        let (first_ids, second_ids) = user_db(&state, &user, false, {
+            let first_id = first.id.clone();
+            let second_id = second.id.clone();
+            move |connection| {
+                let mut first_ids = Vec::new();
+                let mut second_ids = Vec::new();
+                first_ids.push(insert_record(
+                    connection,
+                    &first_id,
+                    "input",
+                    json!({"role":"user","content":"first-1"}),
+                ));
+                second_ids.push(insert_record(
+                    connection,
+                    &second_id,
+                    "input",
+                    json!({"role":"user","content":"second-1"}),
+                ));
+                first_ids.push(insert_record(
+                    connection,
+                    &first_id,
+                    "activity",
+                    json!({"role":"system","content":"first-2"}),
+                ));
+                second_ids.push(insert_record(
+                    connection,
+                    &second_id,
+                    "activity",
+                    json!({"role":"system","content":"second-2"}),
+                ));
+                first_ids.push(insert_record(
+                    connection,
+                    &first_id,
+                    "activity",
+                    json!({"role":"system","content":"first-3"}),
+                ));
+                Ok((first_ids, second_ids))
+            }
+        })
+        .await
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/api/threads/{id}/history", get(thread_history))
+            .layer(axum::Extension(BrowserIdentity {
+                user: user.clone(),
+                bearer: String::new(),
+            }))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let history_url = |id: &str, after: Option<i64>| match after {
+            Some(after) => format!("http://{address}/api/threads/{id}/history?after={after}"),
+            None => format!("http://{address}/api/threads/{id}/history"),
+        };
+
+        let records: Vec<Value> = reqwest::get(history_url(&first.id, None))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            first_ids
+        );
+        assert!(records.iter().all(|r| r["thread_id"] == json!(first.id)));
+
+        let tail: Vec<Value> = reqwest::get(history_url(&first.id, Some(first_ids[0])))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![first_ids[1], first_ids[2]]
+        );
+        assert!(tail.iter().all(|r| r["thread_id"] == json!(first.id)));
+
+        let other: Vec<Value> = reqwest::get(history_url(&second.id, None))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            other
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            second_ids
+        );
+        assert!(other.iter().all(|r| r["thread_id"] == json!(second.id)));
+
+        server.abort();
+    }
+
     #[test]
     fn schema_discards_legacy_run_and_turn_columns() {
         let root = tempfile::tempdir().unwrap();
