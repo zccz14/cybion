@@ -111,11 +111,12 @@ Worker opens browser authorization and prints a short-lived pairing code for
 headless devices. Match the device/code and explicitly authorize in Cybion;
 configuration is written on the device automatically. The guide verifies task
 delivery, fixed command execution and result upload before reporting readiness.
-Existing configuration is reused. Worker 0.2.0 keeps call deduplication and
-result retries in memory across network reconnects; Worker restarts may lose
+Existing configuration is reused. Worker 0.2.x keeps call deduplication and
+result retries in memory across network reconnects, and 0.2.1 adds delivery
+receipts so acknowledged calls are not replayed; Worker restarts may lose
 state. The device page shows the reported version and lets the owner request
 a newer recommended official release after current work drains. A 0.1.x Worker
-needs a one-time manual installation of 0.2.0. Background mode does not install automatic
+needs a one-time manual installation of 0.2.x. Background mode does not install automatic
 startup. `status`, `doctor` and the guide provide diagnostics and recovery.
 
 See [Worker onboarding](docs/worker-onboarding.md) for the protocol, security,
