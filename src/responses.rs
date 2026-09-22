@@ -106,6 +106,7 @@ pub(crate) enum ResponsesStreamError {
     Sse(String),
     InvalidPayload(String),
     ContextOverflow(String),
+    OutputBudgetExhausted(String),
     QuotaExceeded(String),
     UsageNotIncluded(String),
     CyberPolicy(String),
@@ -135,6 +136,7 @@ impl Display for ResponsesStreamError {
             Self::Sse(s)
             | Self::InvalidPayload(s)
             | Self::ContextOverflow(s)
+            | Self::OutputBudgetExhausted(s)
             | Self::QuotaExceeded(s)
             | Self::UsageNotIncluded(s)
             | Self::CyberPolicy(s)
@@ -145,6 +147,17 @@ impl Display for ResponsesStreamError {
             | Self::RateLimitExceeded { message, .. }
             | Self::Retryable { message, .. } => f.write_str(message),
         }
+    }
+}
+
+/// Classify an `incomplete` terminal response: an exhausted output budget is a
+/// recoverable compaction reduction signal; every other reason stays protocol.
+fn incomplete_response_error(reason: &str) -> ResponsesStreamError {
+    let message = format!("Incomplete response returned, reason: {reason}");
+    if reason == "max_output_tokens" {
+        ResponsesStreamError::OutputBudgetExhausted(message)
+    } else {
+        ResponsesStreamError::Protocol(message)
     }
 }
 
@@ -488,9 +501,7 @@ impl EventDecoder {
                         .and_then(|r| r.pointer("/incomplete_details/reason"))
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    error = Some(ResponsesStreamError::Protocol(format!(
-                        "Incomplete response returned, reason: {reason}"
-                    )));
+                    error = Some(incomplete_response_error(reason));
                     None
                 }
                 WireEventType::FunctionCallArgumentsDelta => {
@@ -625,13 +636,12 @@ pub(crate) fn json_response_events(
         return Err(upstream_failure(&json!({"response": value})));
     }
     if value.get("status").and_then(Value::as_str) == Some("incomplete") {
-        return Err(ResponsesStreamError::Protocol(format!(
-            "Incomplete response returned, reason: {}",
+        return Err(incomplete_response_error(
             value
                 .pointer("/incomplete_details/reason")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        )));
+                .unwrap_or("unknown"),
+        ));
     }
     let mut events = Vec::new();
     if let Some(items) = value.get("output").and_then(Value::as_array) {

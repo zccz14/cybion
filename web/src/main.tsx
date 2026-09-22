@@ -80,7 +80,7 @@ import { ThreadHistory } from "@/components/thread-history"
 import { ThreadList } from "@/components/thread-list"
 import { ThreadSettingsPopover } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
-import { ThreadUsagePanel } from "@/components/thread-usage"
+import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import {
@@ -144,13 +144,16 @@ type ThreadDefaults = {
   model: string
   reasoning_effort: typeof REASONING_EFFORTS[number]
   service_tier_fast: boolean
+  context_budget_tokens: number
 }
 type ThreadStatus = "idle" | "running" | "failed"
-type Thread = ThreadDefaults & {
+type Thread = Omit<ThreadDefaults, "context_budget_tokens"> & {
   id: string
   title: string
   status: ThreadStatus
   display_status: ThreadDisplayStatus
+  context_budget_tokens: number | null
+  context_tokens: number | null
   usage: ThreadUsage
   created_at: number
   updated_at: number
@@ -160,7 +163,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = ThreadDefaults & { input: string }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens"> & { input: string }
 type ApiKey = {
   id: string
   label: string
@@ -550,6 +553,8 @@ const copy = {
     savingDefaults: "Saving…",
     defaultsSaved: "Defaults saved",
     saveDefaultsError: "Could not save thread defaults",
+    contextBudget: "Context budget",
+    contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
     integrationDescription: "Configure the Responses-compatible API used for model inference. Notification settings are independent.",
     integration: "Integrations",
     openai: "Responses-compatible API",
@@ -819,6 +824,8 @@ const copy = {
     savingDefaults: "保存中…",
     defaultsSaved: "默认设置已保存",
     saveDefaultsError: "无法保存线程默认设置",
+    contextBudget: "上下文预算",
+    contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为 checkpoint；0 表示关闭，内置默认 200000。",
     integrationDescription: "配置用于模型推理的 Responses-compatible API。通知配置与此独立。",
     integration: "集成",
     openai: "Responses-compatible API",
@@ -1244,7 +1251,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
   const submit = () => {
     const message = input.trim()
     if (!value || !message || start.isPending) return
-    start.mutate({ ...value, input }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
+    start.mutate({ model: value.model, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1300,6 +1307,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     queryFn: () => api<Worker[]>(sdk, "/api/workers"),
     refetchInterval: 5000,
   })
+  const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useOpenAiModels(sdk)
   const history = useQuery({
     queryKey: ["history", threadId, userId],
@@ -1377,7 +1385,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -1392,6 +1400,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   if (thread.isLoading) return <Page title={t("chat")} description=""><div className="flex flex-col gap-3"><Skeleton className="h-8 w-56" /><Skeleton className="h-20" /><Skeleton className="h-20" /></div></Page>
   if (thread.isError || !thread.data) return <Page title={t("chat")} description=""><RequestError error={thread.error} /></Page>
   const current = thread.data
+  const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
   const running = current.status === "running"
   const busy = submit.isPending || control.isPending
   const hasHistory = history.data?.some((record) => record.kind !== "activity") ?? false
@@ -1417,7 +1426,10 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
             <Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
             <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button>
           </div>
-          <ThreadStatusSummary status={current.display_status} language={language} />
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
+            <ThreadStatusSummary status={current.display_status} language={language} />
+            {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
+          </div>
         </div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
@@ -1449,7 +1461,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
                 : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
               <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
             </div>
-            <div className="flex items-center gap-3"><span id="thread-input-shortcut" className="hidden text-xs text-muted-foreground sm:inline">{t("sendShortcut")}</span><ThreadSettingsPopover model={current.model} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} models={modelOptions(models.data?.models ?? [], current.model)} language={language} onModelChange={(model) => settings.mutate({ model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} /><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
+            <div className="flex items-center gap-3"><span id="thread-input-shortcut" className="hidden text-xs text-muted-foreground sm:inline">{t("sendShortcut")}</span><ThreadSettingsPopover model={current.model} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} models={modelOptions(models.data?.models ?? [], current.model)} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} onModelChange={(model) => settings.mutate({ model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} /><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
           </div>
         </FieldGroup>
       </form>
@@ -2082,7 +2094,8 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const changed = value && defaults.data && (
     value.model !== defaults.data.model ||
     value.reasoning_effort !== defaults.data.reasoning_effort ||
-    value.service_tier_fast !== defaults.data.service_tier_fast
+    value.service_tier_fast !== defaults.data.service_tier_fast ||
+    value.context_budget_tokens !== defaults.data.context_budget_tokens
   )
   function edit(next: ThreadDefaults) {
     setDraft(next)
@@ -2117,6 +2130,11 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
               <FieldDescription id="default-thread-fast-description">{t("fastModeDescription")}</FieldDescription>
             </FieldContent>
             <Switch id="default-thread-fast" aria-describedby="default-thread-fast-description" checked={value.service_tier_fast} disabled={save.isPending} onCheckedChange={(fast) => edit({ ...value, service_tier_fast: fast })} />
+          </Field>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="default-thread-context-budget">{t("contextBudget")}</FieldLabel>
+            <Input id="default-thread-context-budget" type="number" min={0} max={10000000} step={1000} inputMode="numeric" disabled={save.isPending} value={String(value.context_budget_tokens)} onChange={(event) => { const parsed = Number(event.target.value); if (Number.isFinite(parsed)) edit({ ...value, context_budget_tokens: parsed }) }} />
+            <FieldDescription id="default-thread-context-budget-description">{t("contextBudgetDescription")}</FieldDescription>
           </Field>
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}

@@ -318,7 +318,11 @@ fn every_codex_failure_category_and_incomplete_reason_is_preserved() {
     assert_eq!(retry_after_ms("Try again in 25ms."), Some(25));
     let (_, error) = EventDecoder::default().decode(&json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}).to_string()).unwrap();
     assert!(
-        matches!(error, Some(ResponsesStreamError::Protocol(message)) if message.contains("max_output_tokens"))
+        matches!(error, Some(ResponsesStreamError::OutputBudgetExhausted(message)) if message.contains("max_output_tokens"))
+    );
+    let (_, error) = EventDecoder::default().decode(&json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}).to_string()).unwrap();
+    assert!(
+        matches!(error, Some(ResponsesStreamError::Protocol(message)) if message.contains("content_filter"))
     );
 }
 

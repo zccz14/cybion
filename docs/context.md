@@ -107,6 +107,13 @@ When the upstream context window is full, the controller compacts the exact
 appended only after a transaction verifies that the source tail is still the
 latest protocol record. The retry then starts at the new checkpoint record.
 
+A thread also compacts before inference when its estimated replayed context
+exceeds the effective context budget (`threads.context_budget_tokens`, falling
+back to the user's `thread_defaults.context_budget_tokens`, default 200,000
+tokens). The estimate combines the latest measured inference input with appended
+record bytes. `0` disables proactive compaction for that thread or user; the
+context-overflow path above still applies.
+
 ## Audit
 
 Every upstream request records its `thread_id`, `request_kind`, `idx_head`, and

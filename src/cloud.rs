@@ -69,11 +69,23 @@ const WORKER_ONLINE_SECONDS: i64 = 45;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
 const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
-const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 4_096;
+// The checkpoint summary must fit inside this cap; reasoning-first providers
+// charge their hidden reasoning tokens to the same output budget.
+const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 65_536;
+// Proactive compaction keeps the replayed context under this default token
+// budget. 0 disables it; per-user defaults and per-thread overrides tune it.
+const DEFAULT_CONTEXT_BUDGET_TOKENS: i64 = 200_000;
+const MAX_CONTEXT_BUDGET_TOKENS: i64 = 10_000_000;
+// A budget can stay exceeded when a summary cannot shrink the range, so the
+// proactive check is effort-bounded and the reactive overflow path remains.
+const PROACTIVE_COMPACTION_RETRY_LIMIT: usize = 2;
+// Record payload bytes per estimated token, used only for appended deltas and
+// for ranges without a measured anchor; conservative for CJK-heavy content.
+const CONTEXT_ESTIMATE_BYTES_PER_TOKEN: i64 = 4;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 14;
+const USER_SCHEMA_VERSION: i64 = 15;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -138,6 +150,7 @@ struct ApiError {
 enum ApiErrorKind {
     Ordinary,
     ContextOverflow,
+    OutputBudgetExhausted,
     Cancelled,
     Transient { retry_after_ms: Option<u64> },
 }
@@ -199,6 +212,16 @@ impl ApiError {
         }
     }
 
+    /// The upstream stopped generation at the output cap; a compaction summary
+    /// is truncated, so the reduction cascade may retry with less input.
+    fn output_budget_exhausted(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+            kind: ApiErrorKind::OutputBudgetExhausted,
+        }
+    }
+
     fn transient(message: impl Into<String>, retry_after_ms: Option<u64>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -226,6 +249,15 @@ impl ApiError {
 
     fn is_context_overflow(&self) -> bool {
         self.kind == ApiErrorKind::ContextOverflow
+    }
+
+    /// Compaction reductions retry when the range did not fit the window or
+    /// when the summary did not fit the output budget.
+    fn is_compaction_reducible(&self) -> bool {
+        matches!(
+            self.kind,
+            ApiErrorKind::ContextOverflow | ApiErrorKind::OutputBudgetExhausted
+        )
     }
 
     fn is_cancelled(&self) -> bool {
@@ -970,6 +1002,7 @@ CREATE TABLE IF NOT EXISTS threads (
   model TEXT NOT NULL,
   reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
+  context_budget_tokens INTEGER,
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -986,7 +1019,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   id INTEGER PRIMARY KEY CHECK(id=1),
   model TEXT NOT NULL,
   reasoning_effort TEXT NOT NULL CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
-  service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1))
+  service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1)),
+  context_budget_tokens INTEGER NOT NULL DEFAULT 200000
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1195,6 +1229,12 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     for (table, name, definition) in [
         ("threads", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
         ("threads", "next_retry_at", "INTEGER"),
+        ("threads", "context_budget_tokens", "INTEGER"),
+        (
+            "thread_defaults",
+            "context_budget_tokens",
+            "INTEGER NOT NULL DEFAULT 200000",
+        ),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
         ("worker_calls", "received_at", "INTEGER"),
@@ -1284,6 +1324,11 @@ struct ThreadView {
     model: String,
     reasoning_effort: String,
     service_tier_fast: bool,
+    /// Per-thread proactive compaction budget in tokens; `None` follows the
+    /// user default and `0` disables proactive compaction.
+    context_budget_tokens: Option<i64>,
+    /// Input tokens of the most recent inference request, for the context display.
+    context_tokens: Option<i64>,
     status: String,
     display_status: String,
     usage: ThreadUsage,
@@ -1565,6 +1610,12 @@ struct ThreadDefaults {
     model: String,
     reasoning_effort: String,
     service_tier_fast: bool,
+    #[serde(default = "default_context_budget_tokens")]
+    context_budget_tokens: i64,
+}
+
+fn default_context_budget_tokens() -> i64 {
+    DEFAULT_CONTEXT_BUDGET_TOKENS
 }
 
 impl Default for ThreadDefaults {
@@ -1573,6 +1624,7 @@ impl Default for ThreadDefaults {
             model: DEFAULT_MODEL.to_owned(),
             reasoning_effort: "medium".to_owned(),
             service_tier_fast: false,
+            context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
         }
     }
 }
@@ -1588,6 +1640,16 @@ struct UpdateThreadInput {
     reasoning_effort: Option<String>,
     #[serde(default)]
     service_tier_fast: Option<bool>,
+    // `null` clears the override back to the user default; a number sets it.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    context_budget_tokens: Option<Option<i64>>,
+}
+
+fn deserialize_double_option<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<i64>::deserialize(deserializer)?))
 }
 
 #[derive(Deserialize)]
@@ -1774,6 +1836,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         display_status: row.get(8)?,
+        context_budget_tokens: row.get(13)?,
+        context_tokens: row.get(14)?,
         usage: ThreadUsage {
             input_tokens,
             output_tokens,
@@ -1898,16 +1962,27 @@ fn reasoning_effort(value: String) -> Result<String, ApiError> {
     Ok(value)
 }
 
+fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
+    if !(0..=MAX_CONTEXT_BUDGET_TOKENS).contains(&value) {
+        return Err(ApiError::bad_request(
+            "context budget must be between 0 and 10000000 tokens",
+        ));
+    }
+    Ok(value)
+}
+
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,reasoning_effort,service_tier_fast FROM thread_defaults WHERE id=1",
+            "SELECT model,reasoning_effort,service_tier_fast,context_budget_tokens
+             FROM thread_defaults WHERE id=1",
             [],
             |row| {
                 Ok(ThreadDefaults {
                     model: row.get(0)?,
                     reasoning_effort: row.get(1)?,
                     service_tier_fast: row.get::<_, i64>(2)? != 0,
+                    context_budget_tokens: row.get(3)?,
                 })
             },
         )
@@ -1935,12 +2010,18 @@ async fn update_thread_defaults(
         model: model_id(input.model)?,
         reasoning_effort: reasoning_effort(input.reasoning_effort)?,
         service_tier_fast: input.service_tier_fast,
+        context_budget_tokens: context_budget_tokens(input.context_budget_tokens)?,
     };
     user_db(&state, &identity.user, true, move |connection| {
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast) VALUES(1,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast",
-            params![defaults.model, defaults.reasoning_effort, defaults.service_tier_fast],
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens) VALUES(1,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens",
+            params![
+                defaults.model,
+                defaults.reasoning_effort,
+                defaults.service_tier_fast,
+                defaults.context_budget_tokens
+            ],
         )?;
         Ok(defaults)
     })
@@ -1973,7 +2054,11 @@ SELECT t.id,t.title,t.model,t.reasoning_effort,t.service_tier_fast,t.status,t.cr
          ELSE 'completed'
        END AS display_status,
        COALESCE(usage.input_tokens,0),COALESCE(usage.output_tokens,0),
-       COALESCE(usage.cached_tokens,0),COALESCE(usage.missing_cache_requests,0)
+       COALESCE(usage.cached_tokens,0),COALESCE(usage.missing_cache_requests,0),
+       t.context_budget_tokens,
+       (SELECT ra.input_tokens FROM reasoning_audits ra
+         WHERE ra.thread_id=t.id AND ra.request_kind='inference' AND ra.input_tokens IS NOT NULL
+         ORDER BY ra.id DESC LIMIT 1)
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT id FROM history_records WHERE thread_id=t.id
@@ -2028,6 +2113,8 @@ async fn create_thread_for(
             model: model.unwrap_or(defaults.model),
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
+            context_budget_tokens: None,
+            context_tokens: None,
             status: "idle".to_owned(),
             display_status: "ready".to_owned(),
             usage: ThreadUsage::default(),
@@ -2806,18 +2893,32 @@ async fn update_thread(
         .transpose()?;
     let model = input.model.map(model_id).transpose()?;
     let reasoning_effort = input.reasoning_effort.map(reasoning_effort).transpose()?;
+    let context_budget = input
+        .context_budget_tokens
+        .map(|value| value.map(context_budget_tokens).transpose())
+        .transpose()?;
     if title.is_none()
         && model.is_none()
         && reasoning_effort.is_none()
         && input.service_tier_fast.is_none()
+        && input.context_budget_tokens.is_none()
     {
         return Err(ApiError::bad_request("thread update is empty"));
     }
     let updated_at = now();
     let thread = user_db(&state, &identity.user, true, move |connection| {
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),updated_at=? WHERE id=?",
-            params![title, model, reasoning_effort, input.service_tier_fast.map(|value| value as i64), updated_at, id],
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,updated_at=? WHERE id=?",
+            params![
+                title,
+                model,
+                reasoning_effort,
+                input.service_tier_fast.map(|value| value as i64),
+                context_budget.is_some(),
+                context_budget.flatten(),
+                updated_at,
+                id
+            ],
         )?;
         if changed == 0 {
             return Err(ApiError::not_found("thread not found"));
@@ -3680,6 +3781,8 @@ async fn process_request(
                 model: DEFAULT_MODEL.to_owned(),
                 reasoning_effort: "medium".to_owned(),
                 service_tier_fast: false,
+                context_budget_tokens: None,
+                context_tokens: None,
                 status: "failed".to_owned(),
                 display_status: "failed".to_owned(),
                 usage: ThreadUsage::default(),
@@ -4042,6 +4145,56 @@ fn validate_protocol_record(
     }
 }
 
+/// Estimate the next inference request's input tokens from recorded evidence:
+/// the latest measured inference input plus appended record bytes, or the whole
+/// compiled range's bytes when no measured anchor still applies. Bytes are
+/// priced at `CONTEXT_ESTIMATE_BYTES_PER_TOKEN` and rounded up.
+fn estimate_context_tokens(
+    connection: &Connection,
+    thread_id: &str,
+    idx_head: i64,
+    idx_tail: i64,
+) -> Result<i64, ApiError> {
+    let anchor: Option<(i64, i64)> = connection
+        .query_row(
+            "SELECT idx_tail,input_tokens FROM reasoning_audits
+             WHERE thread_id=? AND request_kind='inference'
+               AND input_tokens IS NOT NULL AND idx_tail IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+            [thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let latest_checkpoint: Option<i64> = connection.query_row(
+        "SELECT MAX(id) FROM history_records WHERE thread_id=? AND kind='checkpoint'",
+        [thread_id],
+        |row| row.get(0),
+    )?;
+    if let Some((anchor_tail, anchor_input)) = anchor
+        && anchor_tail <= idx_tail
+        && latest_checkpoint.is_none_or(|checkpoint| checkpoint <= anchor_tail)
+    {
+        let appended_bytes: i64 = connection.query_row(
+            "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
+             WHERE thread_id=? AND id>? AND id<=?
+               AND kind IN ('input','response_output','tool_output','checkpoint')",
+            params![thread_id, anchor_tail, idx_tail],
+            |row| row.get(0),
+        )?;
+        return Ok(anchor_input
+            + (appended_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1)
+                / CONTEXT_ESTIMATE_BYTES_PER_TOKEN);
+    }
+    let range_bytes: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
+         WHERE thread_id=? AND id>=? AND id<=?
+           AND kind IN ('input','response_output','tool_output','checkpoint')",
+        params![thread_id, idx_head, idx_tail],
+        |row| row.get(0),
+    )?;
+    Ok((range_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1) / CONTEXT_ESTIMATE_BYTES_PER_TOKEN)
+}
+
 fn context_idx_head(
     connection: &Connection,
     thread_id: &str,
@@ -4356,6 +4509,12 @@ async fn request_agent(
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(ThreadView, IntegrationSettings, String), (ThreadView, Box<ApiError>)> {
     let mut checkpoint_retries = 0;
+    let mut proactive_compactions = 0;
+    let defaults = user_db(state, user, false, |connection| {
+        load_thread_defaults(connection)
+    })
+    .await
+    .map_err(|error| (thread.clone(), Box::new(error)))?;
     loop {
         if *cancellation.borrow() {
             return Err((thread.clone(), Box::new(ApiError::cancelled())));
@@ -4376,6 +4535,35 @@ async fn request_agent(
         })
         .await
         .map_err(|e| (thread.clone(), Box::new(e)))?;
+        let budget = thread
+            .context_budget_tokens
+            .unwrap_or(defaults.context_budget_tokens);
+        if budget > 0 && proactive_compactions < PROACTIVE_COMPACTION_RETRY_LIMIT {
+            let estimate = user_db(state, user, false, {
+                let thread_id = thread.id.clone();
+                let (idx_head, idx_tail) = (context.idx_head, context.idx_tail);
+                move |connection| {
+                    estimate_context_tokens(connection, &thread_id, idx_head, idx_tail)
+                }
+            })
+            .await
+            .map_err(|e| (thread.clone(), Box::new(e)))?;
+            if estimate > budget {
+                proactive_compactions += 1;
+                compact_thread_context(
+                    state,
+                    user,
+                    thread,
+                    &context,
+                    integrations,
+                    source_record_idx,
+                    cancellation,
+                )
+                .await
+                .map_err(|e| (thread.clone(), Box::new(e)))?;
+                continue;
+            }
+        }
         let workers = user_db(state, user, false, |connection| {
             registered_workers(connection)
         })
@@ -4684,12 +4872,16 @@ fn compaction_input(
     raw_items: &[Value],
     metadata: &[ProtocolRecordMetadata],
 ) -> Vec<Value> {
-    let mut input = vec![json!({
-        "role":"developer",
-        "content":checkpoint_developer_prompt_with_metadata(metadata),
-    })];
+    // The instruction trails the replayed conversation so the summarization
+    // call reuses the provider's warm prefix cache and only the trailing
+    // instruction is new.
+    let mut input = Vec::new();
     input.extend(prefix.into_iter().cloned());
     input.extend(raw_items.iter().cloned());
+    input.push(json!({
+        "role":"user",
+        "content":checkpoint_developer_prompt_with_metadata(metadata),
+    }));
     input
 }
 
@@ -4737,7 +4929,7 @@ async fn compact_protocol_context(
         .await
         {
             Ok(summary) => return Ok(summary),
-            Err(error) if error.is_context_overflow() => {
+            Err(error) if error.is_compaction_reducible() => {
                 if raw_items.len() == 1 {
                     return compact_oversized_record(
                         state,
@@ -4784,10 +4976,10 @@ async fn compact_protocol_context(
                             raw_metadata = &raw_metadata[left_len..];
                             break;
                         }
-                        Err(error) if error.is_context_overflow() && left_len > 1 => {
+                        Err(error) if error.is_compaction_reducible() && left_len > 1 => {
                             left_len = left_len.div_ceil(2);
                         }
-                        Err(error) if error.is_context_overflow() => {
+                        Err(error) if error.is_compaction_reducible() => {
                             let summary = compact_oversized_record(
                                 state,
                                 user,
@@ -4874,9 +5066,12 @@ the concepts and terminology, authoritative resources and exact locations, causa
 timeline, active decisions and constraints, current objective, next step, unfinished work, and
 evidence routes. Keep raw history durable by citing its record IDs; do not retain credentials,
 tokens, passwords, cookies, API keys, or secrets. Preserve distinct causal events and only merge
-duplicate reports of the same event.
+duplicate reports of the same event. When the source already contains a prior `# Durable working
+context` checkpoint, consolidate it: carry still-true facts forward, drop stale ones, and merge
+newer information into one checkpoint instead of copying the old text verbatim.
 
-Use these headings in this exact order:
+Use terse bullets rather than prose paragraphs, and keep every heading in this exact order. Write
+`(none)` for an empty section; never drop a section.
 
 ## Concepts and terminology
 ## Resources and authoritative locations
@@ -4887,7 +5082,8 @@ Use these headings in this exact order:
 
 The final section must include a fenced JSON array whose entries contain `topic_key`, `status`,
 `message_range`, and `search_keywords`. Exact calendar times are allowed only when present in the
-source records; otherwise use record-order anchors marked as inferred."#
+source records; otherwise use record-order anchors marked as inferred. Do not mention this
+summarization request or that the context was compacted."#
 }
 
 fn checkpoint_developer_prompt_with_metadata(metadata: &[ProtocolRecordMetadata]) -> String {
@@ -5018,7 +5214,7 @@ async fn compact_oversized_record(
             .await
             {
                 Ok(summary) => return Ok(summary),
-                Err(error) if error.is_context_overflow() => {}
+                Err(error) if error.is_compaction_reducible() => {}
                 Err(error) => return Err(error),
             }
             if raw_fragments.len() == 1 {
@@ -5058,10 +5254,10 @@ async fn compact_oversized_record(
                         raw_metadata = &raw_metadata[left_len..];
                         break;
                     }
-                    Err(error) if error.is_context_overflow() && left_len > 1 => {
+                    Err(error) if error.is_compaction_reducible() && left_len > 1 => {
                         left_len = left_len.div_ceil(2);
                     }
-                    Err(error) if error.is_context_overflow() => {
+                    Err(error) if error.is_compaction_reducible() => {
                         if width == 1 {
                             return Err(ApiError::unavailable(
                                 "a one-byte fragment plus the checkpoint instruction exceeds the upstream context window",
@@ -5500,6 +5696,9 @@ fn stream_api_error(error: ResponsesStreamError) -> ApiError {
     match error {
         ResponsesStreamError::Cancelled => ApiError::cancelled(),
         ResponsesStreamError::ContextOverflow(message) => ApiError::context_overflow(message),
+        ResponsesStreamError::OutputBudgetExhausted(message) => {
+            ApiError::output_budget_exhausted(message)
+        }
         ResponsesStreamError::RateLimitExceeded {
             message,
             retry_after_ms,

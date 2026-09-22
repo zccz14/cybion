@@ -32,6 +32,28 @@ async fn reply(socket: &mut tokio::net::TcpStream, text: &str) {
     socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
 }
 
+async fn reply_incomplete(socket: &mut tokio::net::TcpStream, reason: &str) {
+    let body =
+        json!({"id":"response","status":"incomplete","incomplete_details":{"reason":reason}})
+            .to_string();
+    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+}
+
+async fn reply_completed(socket: &mut tokio::net::TcpStream, text: &str) {
+    let body = json!({"id":"response", "end_turn":true, "output":[{
+        "type":"message","id":"message","role":"assistant",
+        "content":[{"type":"output_text","text":text}]
+    }]})
+    .to_string();
+    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+}
+
+fn checkpoint_body(marker: &str) -> String {
+    format!(
+        "# Durable working context\n\n## Concepts and terminology\n- {marker}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record anchors\n\n## Active decisions and constraints\n- preserve history\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
+    )
+}
+
 async fn wait_finished(state: &AppState, user: &User, thread: &ThreadView) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while state
@@ -428,6 +450,22 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
     .unwrap();
     wait_finished(&state, &user, &thread).await;
     let request = server.await.unwrap();
+    assert_eq!(request["max_output_tokens"], 65_536);
+    let input_items = request["input"].as_array().unwrap();
+    let instruction = input_items.last().unwrap();
+    assert_eq!(instruction["role"], "user");
+    assert!(
+        instruction["content"]
+            .as_str()
+            .unwrap()
+            .contains("Checkpoint compaction")
+    );
+    assert!(
+        instruction["content"]
+            .as_str()
+            .unwrap()
+            .contains("Source record metadata")
+    );
     assert!(
         request["input"][0]["content"]
             .as_str()
@@ -831,4 +869,331 @@ async fn display_status_ignores_audits_and_late_output_and_is_scoped_to_the_thre
     let other = user_for_subject(&state, "status-noise-other").unwrap();
     assert!(list_threads_for(&state, &other).await.unwrap().is_empty());
     assert!(read_thread_for(&state, &other, thread.id).await.is_err());
+}
+
+#[tokio::test]
+async fn compaction_reduces_the_range_when_the_summary_exhausts_the_output_budget() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "compact-budget-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"first"}),
+            );
+            insert_record(
+                connection,
+                &thread_id,
+                "response_output",
+                json!({"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"second"}]}),
+            );
+            insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"third"}),
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
+        .await
+        .unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut socket).await;
+            if index == 0 {
+                reply_incomplete(&mut socket, "max_output_tokens").await;
+            } else {
+                reply(&mut socket, &checkpoint_body("budget reduction")).await;
+            }
+            requests.push(request);
+        }
+        requests
+    });
+    enqueue(
+        state.clone(),
+        user.clone(),
+        thread.id.clone(),
+        RequestInput::Compact,
+    )
+    .await
+    .unwrap();
+    wait_finished(&state, &user, &thread).await;
+    let requests = server.await.unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "output-budget exhaustion must reduce the range and retry"
+    );
+    let first = requests[0]["input"].as_array().unwrap().len();
+    let second = requests[1]["input"].as_array().unwrap().len();
+    assert!(
+        second < first,
+        "the retry must summarize a strictly smaller range: {first} -> {second}"
+    );
+    for request in &requests {
+        assert_eq!(request["max_output_tokens"], 65_536);
+    }
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(history.last().unwrap().kind, "checkpoint");
+    assert_eq!(
+        read_thread_for(&state, &user, thread.id.clone())
+            .await
+            .unwrap()
+            .status,
+        "idle"
+    );
+}
+
+#[tokio::test]
+async fn proactive_compaction_checkpoints_the_context_before_an_oversized_inference() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "proactive-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    user_db(&state, &user, false, |connection| {
+        connection.execute(
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens)
+             VALUES(1,'test-model','medium',0,1000)
+             ON CONFLICT(id) DO UPDATE SET context_budget_tokens=1000",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"x".repeat(8_000)}),
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
+        .await
+        .unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut socket).await;
+            if index == 0 {
+                reply(&mut socket, &checkpoint_body("proactive")).await;
+            } else {
+                reply_completed(&mut socket, "done").await;
+            }
+            requests.push(request);
+        }
+        requests
+    });
+    enqueue(
+        state.clone(),
+        user.clone(),
+        thread.id.clone(),
+        RequestInput::Prompt("please continue".to_owned()),
+    )
+    .await
+    .unwrap();
+    wait_finished(&state, &user, &thread).await;
+    let requests = server.await.unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the oversized context must be checkpointed before inference"
+    );
+    let instruction = requests[0]["input"].as_array().unwrap().last().unwrap();
+    assert!(
+        instruction["content"]
+            .as_str()
+            .unwrap()
+            .contains("Checkpoint compaction")
+    );
+    assert_eq!(requests[0]["max_output_tokens"], 65_536);
+    assert!(
+        requests[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("# Durable working context"))),
+        "inference must replay the fresh checkpoint"
+    );
+    assert!(requests[1].get("max_output_tokens").is_none());
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    assert!(
+        history.iter().any(|record| record.kind == "checkpoint"),
+        "the proactive checkpoint must be durable"
+    );
+    assert_eq!(
+        read_thread_for(&state, &user, thread.id.clone())
+            .await
+            .unwrap()
+            .status,
+        "idle"
+    );
+}
+
+#[tokio::test]
+async fn disabled_context_budget_skips_proactive_compaction() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "budget-off-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens)
+             VALUES(1,'test-model','medium',0,1000)
+             ON CONFLICT(id) DO UPDATE SET context_budget_tokens=1000",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE threads SET context_budget_tokens=0 WHERE id=?",
+            [&thread_id],
+        )?;
+        insert_record(
+            connection,
+            &thread_id,
+            "input",
+            json!({"role":"user","content":"x".repeat(8_000)}),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
+        .await
+        .unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_json_request(&mut socket).await;
+        reply_completed(&mut socket, "done").await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "a disabled budget must not issue a compaction request"
+        );
+        request
+    });
+    enqueue(
+        state.clone(),
+        user.clone(),
+        thread.id.clone(),
+        RequestInput::Prompt("please continue".to_owned()),
+    )
+    .await
+    .unwrap();
+    wait_finished(&state, &user, &thread).await;
+    let request = server.await.unwrap();
+    assert!(request.get("max_output_tokens").is_none());
+    assert!(request.to_string().contains("please continue"));
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    assert!(history.iter().all(|record| record.kind != "checkpoint"));
+}
+
+#[tokio::test]
+async fn context_estimate_prefers_the_measured_anchor_and_resets_after_a_checkpoint() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "estimate-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let (first, second, appended_bytes) = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            let first = insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"a".repeat(400)}),
+            );
+            connection.execute(
+                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,idx_head,idx_tail,input_tokens)
+                 VALUES(?,'inference','test-model','completed',0,?,?,250)",
+                params![thread_id, first, first],
+            )?;
+            let second = insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"b".repeat(400)}),
+            );
+            let appended_bytes: i64 = connection.query_row(
+                "SELECT length(payload) FROM history_records WHERE id=?",
+                [second],
+                |row| row.get(0),
+            )?;
+            Ok((first, second, appended_bytes))
+        }
+    })
+    .await
+    .unwrap();
+    let anchored = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| estimate_context_tokens(connection, &thread_id, first, second)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        anchored,
+        250 + (appended_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1)
+            / CONTEXT_ESTIMATE_BYTES_PER_TOKEN,
+        "a fresh measured anchor plus appended bytes prices the next request"
+    );
+    let (checkpoint, range_bytes) = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            let checkpoint = insert_record(
+                connection,
+                &thread_id,
+                "checkpoint",
+                json!({"role":"developer","content":"summary"}),
+            );
+            let range_bytes: i64 = connection.query_row(
+                "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
+                 WHERE thread_id=? AND id>=? AND id<=?
+                   AND kind IN ('input','response_output','tool_output','checkpoint')",
+                params![thread_id, first, checkpoint],
+                |row| row.get(0),
+            )?;
+            Ok((checkpoint, range_bytes))
+        }
+    })
+    .await
+    .unwrap();
+    let after_checkpoint = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| estimate_context_tokens(connection, &thread_id, first, checkpoint)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        after_checkpoint,
+        (range_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1) / CONTEXT_ESTIMATE_BYTES_PER_TOKEN,
+        "a checkpoint newer than the anchor forces a full-range estimate"
+    );
+    assert!(after_checkpoint < anchored);
 }

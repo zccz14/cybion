@@ -28,15 +28,14 @@ the first authenticated browser session initializes that key atomically.
 - Threads are independent. A user can create, rename, inspect, and delete
   them from the web UI.
 - Configuration lets each user save the default model, reasoning effort,
-  Fast mode, and native tool switches for new threads. These defaults are
+  Fast mode, and the context budget for new threads. These defaults are
   stored in the user's database and apply to both web and API creation. An
   explicit API `model` overrides the default model; existing threads keep their
-  own settings.
-- Each Thread has user-managed **Web search** and **Image generation** switches
-  next to Fast mode. They decide whether the inference request to the
-  configured provider includes the `web_search` and `image_generation` native
-  tools. Threads keep their own switches after defaults change, and both
-  switches start on, matching the requests users already received.
+  own settings. The context budget is the token threshold for proactive
+  compaction; each thread may override it, `0` disables it, and the built-in
+  default is 200,000. Threads without an override follow later default changes.
+- Thread turns always include the `web_search` and `image_generation` native
+  tools in the inference request to the configured provider.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record
@@ -46,6 +45,11 @@ the first authenticated browser session initializes that key atomically.
   protocol records in index order. A fresh request therefore reconstructs its
   context from SQLite rather than an in-memory conversation or an upstream
   response chain.
+- Threads keep a context budget: before inference, an estimated replayed
+  context above the effective budget is compacted into a fresh checkpoint, so
+  long threads never reach the upstream window before compacting. The
+  conversation header shows the latest inference context size against that
+  budget.
 - **Configuration → Responses-compatible API** lets each user save a `base_url`
   and `api_key` for an OpenAI Responses-compatible provider. The key is stored
   in that user's SQLite database and is never returned to the browser. Cybion
