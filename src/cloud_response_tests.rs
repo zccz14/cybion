@@ -594,6 +594,100 @@ async fn inference_keeps_prefix_and_tools_when_the_last_online_worker_disconnect
 }
 
 #[tokio::test]
+async fn inference_follows_thread_native_tool_switches() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "tool-switch-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let worker_id = "00000000-0000-4000-8000-000000000001";
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at) VALUES(?,'Laptop',?,1,'online',?)",
+            params![worker_id, worker_id, now()],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(read_json_request(&mut socket).await);
+            let body = json!({
+                "id":format!("r{index}"), "end_turn":true,
+                "output":[{"type":"message","id":format!("m{index}"),"role":"assistant","content":[{"type":"output_text","text":"done"}]}]
+            }).to_string();
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let integrations = IntegrationSettings {
+        openai_consumer_id: "fixture".to_owned(),
+        openai_consumer_secret: "fixture".to_owned(),
+        api_key: String::new(),
+        openai_base_url: format!("http://{address}"),
+        linkit_bot_id: String::new(),
+        linkit_bot_token: String::new(),
+        linkit_username: String::new(),
+    };
+    for (web_search, image_generation) in [(false, false), (true, false), (false, true)] {
+        let thread_id = thread.id.clone();
+        user_db(&state, &user, false, move |connection| {
+            connection.execute(
+                "UPDATE threads SET web_search=?,image_generation=? WHERE id=?",
+                params![web_search as i64, image_generation as i64, thread_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let input = input_record(&state, &user, &thread).await;
+        let (_tx, mut rx) = tokio::sync::watch::channel(false);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            request_agent(&state, &user, &thread, &integrations, input, &mut rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    let requests = server.await.unwrap();
+    let names = |request: &Value| {
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    let natives = |request: &Value| {
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["type"].as_str().map(str::to_owned))
+            .filter(|tool_type| matches!(tool_type.as_str(), "web_search" | "image_generation"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&requests[0]),
+        ["read_context", "bash", "browser_control", "computer_use"]
+    );
+    assert!(natives(&requests[0]).is_empty());
+    assert_eq!(names(&requests[1]), names(&requests[0]));
+    assert_eq!(natives(&requests[1]), ["web_search"]);
+    assert_eq!(names(&requests[2]), names(&requests[0]));
+    assert_eq!(natives(&requests[2]), ["image_generation"]);
+    for request in &requests {
+        assert_eq!(request["tool_choice"], "auto");
+    }
+}
+
+#[tokio::test]
 async fn failed_worker_result_is_returned_as_a_tool_result_for_continuation() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "failed-worker-user").unwrap();

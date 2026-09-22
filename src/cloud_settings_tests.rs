@@ -121,7 +121,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
     let client = reqwest::Client::new();
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","reasoning_effort":"max","service_tier_fast":true});
+    let defaults = json!({"model":"gpt-6-astra","reasoning_effort":"max","service_tier_fast":true,"web_search":false,"image_generation":false});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -228,9 +228,41 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         .json()
         .await
         .unwrap();
-    for field in ["model", "reasoning_effort", "service_tier_fast"] {
+    for field in [
+        "model",
+        "reasoning_effort",
+        "service_tier_fast",
+        "web_search",
+        "image_generation",
+    ] {
         assert_eq!(created[field], defaults[field]);
     }
+    let thread_url = format!("{base}/api/threads/{}", created["id"].as_str().unwrap());
+    let patched: Value = client
+        .patch(&thread_url)
+        .bearer_auth(&token)
+        .json(&json!({"web_search":true,"image_generation":true}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(patched["web_search"], true);
+    assert_eq!(patched["image_generation"], true);
+    assert_eq!(
+        client
+            .patch(&thread_url)
+            .bearer_auth(&token)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     let experiments_url = format!("{base}/api/experimental-features");
     let initial: Value = client
         .get(&experiments_url)
@@ -516,6 +548,8 @@ async fn available_models_come_from_the_configured_endpoint_catalog() {
         model: "meta-llama/Llama-3.1-8B-Instruct".to_owned(),
         reasoning_effort: "high".to_owned(),
         service_tier_fast: false,
+        web_search: false,
+        image_generation: false,
     };
     assert_eq!(
         update_thread_defaults(
@@ -642,6 +676,8 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         model: "gpt-6-astra".to_owned(),
         reasoning_effort: "max".to_owned(),
         service_tier_fast: true,
+        web_search: false,
+        image_generation: false,
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -677,6 +713,8 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     assert_eq!(new_thread.model, defaults.model);
     assert_eq!(new_thread.reasoning_effort, defaults.reasoning_effort);
     assert!(new_thread.service_tier_fast);
+    assert!(!new_thread.web_search);
+    assert!(!new_thread.image_generation);
     for model in [None, Some("gpt-5.6-sol")] {
         let thread = external_create_thread(
             State(state.clone()),
@@ -686,6 +724,8 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
                 model: model.map(str::to_owned),
                 reasoning_effort: None,
                 service_tier_fast: None,
+                web_search: None,
+                image_generation: None,
             }),
         )
         .await
@@ -694,11 +734,15 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         assert_eq!(thread.model, model.unwrap_or(&defaults.model));
         assert_eq!(thread.reasoning_effort, "max");
         assert!(thread.service_tier_fast);
+        assert!(!thread.web_search);
+        assert!(!thread.image_generation);
     }
     let old_thread = read_thread_for(&state, &user, old_thread.id).await.unwrap();
     assert_eq!(old_thread.model, initial.model);
     assert_eq!(old_thread.reasoning_effort, initial.reasoning_effort);
     assert!(!old_thread.service_tier_fast);
+    assert!(old_thread.web_search);
+    assert!(old_thread.image_generation);
 
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -713,9 +757,13 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     assert_eq!(next.model, initial.model);
     assert_eq!(next.reasoning_effort, initial.reasoning_effort);
     assert!(!next.service_tier_fast);
+    assert!(next.web_search);
+    assert!(next.image_generation);
     let existing = read_thread_for(&state, &user, new_thread.id).await.unwrap();
     assert_eq!(existing.model, defaults.model);
     assert!(existing.service_tier_fast);
+    assert!(!existing.web_search);
+    assert!(!existing.image_generation);
     let connection = open_user(&user.path, false).unwrap();
     assert_eq!(
         connection
@@ -734,6 +782,8 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         model: "gpt-6-astra".to_owned(),
         reasoning_effort: "high".to_owned(),
         service_tier_fast: true,
+        web_search: true,
+        image_generation: false,
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -754,6 +804,8 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 model: model.to_owned(),
                 reasoning_effort: effort.to_owned(),
                 service_tier_fast: false,
+                web_search: true,
+                image_generation: true,
             }),
         )
         .await
@@ -771,8 +823,55 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         json!({"model":"gpt-6-astra"}),
         json!({"model":"gpt-6-astra","reasoning_effort":"high","service_tier_fast":"false"}),
         json!({"model":"gpt-6-astra","reasoning_effort":"high","service_tier_fast":false,"user_id":"another-user"}),
+        json!({"model":"gpt-6-astra","reasoning_effort":"high","service_tier_fast":false,"web_search":true}),
     ] {
         assert!(serde_json::from_value::<ThreadDefaults>(input).is_err());
+    }
+}
+
+#[test]
+fn native_tool_switch_migration_keeps_existing_threads_and_preferences_injecting() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("existing.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT NOT NULL,
+                reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
+                service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
+                status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE thread_defaults (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                model TEXT NOT NULL,
+                reasoning_effort TEXT NOT NULL CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
+                service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1))
+             );
+             PRAGMA user_version=13;
+             INSERT INTO threads VALUES('existing-thread','Keep me','gpt-6-astra','high',1,'idle',1,2);
+             INSERT INTO thread_defaults VALUES(1,'gpt-6-astra','max',1);",
+        )
+        .unwrap();
+    connection.execute_batch(USER_SCHEMA).unwrap();
+    drop(connection);
+
+    for _ in 0..2 {
+        let connection = open_user(&path, false).unwrap();
+        let thread = load_thread(&connection, "existing-thread").unwrap();
+        assert!(thread.web_search);
+        assert!(thread.image_generation);
+        assert_eq!(
+            load_thread_defaults(&connection).unwrap(),
+            ThreadDefaults {
+                model: "gpt-6-astra".to_owned(),
+                reasoning_effort: "max".to_owned(),
+                service_tier_fast: true,
+                web_search: true,
+                image_generation: true,
+            }
+        );
     }
 }
 
@@ -814,6 +913,8 @@ fn max_reasoning_upgrade_preserves_existing_history_and_foreign_keys() {
         assert_eq!(thread.status, "running");
         assert_eq!(thread.reasoning_effort, "high");
         assert!(thread.service_tier_fast);
+        assert!(thread.web_search);
+        assert!(thread.image_generation);
         for table in [
             "threads",
             "history_records",

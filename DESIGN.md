@@ -134,3 +134,11 @@ clears the matching submitted draft; newer edits and other drafts remain intact.
 Explain local persistence visibly and warn if browser storage cannot save it.
 Existing drafts take precedence over automatic prefills. Draft persistence does
 not imply cross-device synchronization or automatic submission.
+
+## Thread native tool switches
+
+Every Thread header keeps **Web search** and **Image generation** switches next
+to Fast mode. They control whether the inference request to the configured
+provider includes the matching native tool. Personal settings carry the same
+switches as new-thread defaults; each Thread keeps its own switches when
+defaults change. Both start on, matching the requests users already received.
