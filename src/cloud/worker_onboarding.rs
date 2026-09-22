@@ -14,7 +14,7 @@ pub(super) async fn no_store(request: Request, next: Next) -> Response {
 pub(super) const CHECK_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS worker_checks (
  id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
- created_at INTEGER NOT NULL, delivered_at INTEGER, completed_at INTEGER, result_json TEXT
+ created_at INTEGER NOT NULL, delivered_at INTEGER, received_at INTEGER, completed_at INTEGER, result_json TEXT
 );
 CREATE INDEX IF NOT EXISTS worker_checks_worker ON worker_checks(worker_id,created_at DESC);
 ";
@@ -329,6 +329,7 @@ pub(super) struct CheckView {
     worker_id: String,
     status: String,
     created_at: i64,
+    received_at: Option<i64>,
     completed_at: Option<i64>,
     result: Option<Value>,
 }
@@ -342,14 +343,14 @@ fn latest_check(connection: &Connection, worker_id: &str) -> Result<Option<Check
     if !exists {
         return Err(ApiError::not_found("Worker not found"));
     }
-    Ok(connection.query_row("SELECT id,created_at,delivered_at,completed_at,result_json FROM worker_checks WHERE worker_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", [worker_id], |row| {
+    Ok(connection.query_row("SELECT id,created_at,delivered_at,received_at,completed_at,result_json FROM worker_checks WHERE worker_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", [worker_id], |row| {
         let created_at: i64 = row.get(1)?;
-        let completed_at: Option<i64> = row.get(3)?;
+        let completed_at: Option<i64> = row.get(4)?;
         let delivered: Option<i64> = row.get(2)?;
-        let result: Option<String> = row.get(4)?;
-        Ok(CheckView { id:row.get(0)?,worker_id:worker_id.to_owned(),created_at,completed_at,
+        let result: Option<String> = row.get(5)?;
+        Ok(CheckView { id:row.get(0)?,worker_id:worker_id.to_owned(),created_at,received_at:row.get(3)?,completed_at,
             status: if completed_at.is_some() {"completed"} else if created_at+30<=now() {"timed_out"} else if delivered.is_some() {"delivered"} else {"queued"}.into(),
-            result:result.map(|v| serde_json::from_str(&v)).transpose().map_err(|err| rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(err)))? })
+            result:result.map(|v| serde_json::from_str(&v)).transpose().map_err(|err| rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(err)))? })
     }).optional()?)
 }
 
@@ -447,8 +448,23 @@ pub(super) async fn check_result(
         return Err(ApiError::bad_request("diagnostic result too large"));
     }
     user_db(&state,&user,false,move |c| {
-        let changed = c.execute("UPDATE worker_checks SET completed_at=?,result_json=? WHERE id=? AND worker_id=? AND delivered_at IS NOT NULL AND completed_at IS NULL AND created_at>?",params![now(),serialized,id,worker_id,now()-30])?;
+        let changed = c.execute("UPDATE worker_checks SET completed_at=?,result_json=?,received_at=COALESCE(received_at,?) WHERE id=? AND worker_id=? AND delivered_at IS NOT NULL AND completed_at IS NULL AND created_at>?",params![now(),serialized,now(),id,worker_id,now()-30])?;
         if changed==0 {return Err(ApiError::conflict("diagnostic check expired, completed, or not delivered to this Worker"));}
+        Ok(())
+    }).await?;
+    Ok(Json(json!({"ok":true})))
+}
+
+pub(super) async fn check_received(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<User>,
+    AxumPath((_user_id, worker_id, id)): AxumPath<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let worker_id = record_id(&worker_id)?;
+    let id = record_id(&id)?;
+    user_db(&state,&user,false,move |c| {
+        let changed = c.execute("UPDATE worker_checks SET received_at=COALESCE(received_at,?) WHERE id=? AND worker_id=? AND delivered_at IS NOT NULL",params![now(),id,worker_id])?;
+        if changed==0 {return Err(ApiError::conflict("diagnostic receipt does not match a delivered check"));}
         Ok(())
     }).await?;
     Ok(Json(json!({"ok":true})))

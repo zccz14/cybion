@@ -129,7 +129,7 @@ fn register(
         tx.execute("UPDATE workers SET upgrade_status='completed',upgrade_error=NULL WHERE id=? AND ltrim(upgrade_version,'v')=ltrim(version,'v')",[worker])?;
     }
     let replay = {
-        let mut q=tx.prepare("SELECT id FROM worker_calls WHERE worker_id=? AND status='delivered' AND worker_boot_id=? ORDER BY created_at,id")?;
+        let mut q=tx.prepare("SELECT id FROM worker_calls WHERE worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL ORDER BY created_at,id")?;
         q.query_map(params![worker, boot], |r| r.get(0))?
             .collect::<rusqlite::Result<VecDeque<String>>>()?
     };
@@ -143,7 +143,7 @@ fn replay(
     boot: Option<&str>,
     id: &str,
 ) -> Result<Option<WorkerCall>, ApiError> {
-    Ok(c.query_row("SELECT id,thread_id,input_record_id,name,arguments_json FROM worker_calls WHERE id=? AND worker_id=? AND status='delivered' AND worker_boot_id=?",params![id,worker,boot],call_row).optional()?)
+    Ok(c.query_row("SELECT id,thread_id,input_record_id,name,arguments_json FROM worker_calls WHERE id=? AND worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL",params![id,worker,boot],call_row).optional()?)
 }
 fn call_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerCall> {
     let arguments: String = r.get(4)?;
