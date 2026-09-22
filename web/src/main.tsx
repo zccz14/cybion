@@ -55,7 +55,7 @@ import remarkGfm from "remark-gfm"
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
-import type { HistoryRecord } from "@/lib/thread-history"
+import { pollThreadHistory, type HistoryRecord } from "@/lib/thread-history"
 import { handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
@@ -1303,7 +1303,10 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   const models = useOpenAiModels(sdk)
   const history = useQuery({
     queryKey: ["history", threadId, userId],
-    queryFn: () => api<HistoryRecord[]>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history`),
+    queryFn: () => pollThreadHistory(
+      client.getQueryData<HistoryRecord[]>(["history", threadId, userId]),
+      (after) => api<HistoryRecord[]>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history?after=${after}`),
+    ),
     refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
     enabled: Boolean(threadId),
   })

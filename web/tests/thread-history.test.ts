@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, pollThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id): HistoryRecord {
@@ -147,4 +147,17 @@ test("persisted and pending process items join one group and the existing respon
     assert.equal(committed.records.length, 2)
     assert.equal(committed.finishedAt - committed.startedAt, 15)
   }
+})
+
+test("incremental polling fetches only records after the newest loaded one and appends them", async () => {
+  const requests: number[] = []
+  const fetchAfter = async (after: number) => {
+    requests.push(after)
+    return after === 0 ? [record(1, "input"), record(5, "activity")] : [record(after + 1, "tool_output")]
+  }
+  const initial = await pollThreadHistory(undefined, fetchAfter)
+  const appended = await pollThreadHistory(initial, fetchAfter)
+  assert.deepEqual(requests, [0, 5])
+  assert.deepEqual(appended.map((item) => item.id), [1, 5, 6])
+  assert.deepEqual(initial.map((item) => item.id), [1, 5])
 })
