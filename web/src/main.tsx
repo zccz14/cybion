@@ -135,7 +135,6 @@ import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
 type Language = "en" | "zh"
-const THREAD_MODELS = ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra"] as const
 const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const
 type ThreadDefaults = {
   model: string
@@ -240,6 +239,9 @@ type Insights = {
 type IntegrationStatus = {
   base_url: string
   api_key_configured: boolean
+}
+type OpenAiModels = {
+  models: string[]
 }
 type SystemResources = {
   generated_at: number
@@ -556,6 +558,10 @@ const copy = {
     apiConfigSaveError: "Could not save API configuration",
     apiConfigLoadError: "Could not load API configuration",
     apiKeyPlaceholder: "Enter a new API key to replace the current key",
+    availableModels: "Available models",
+    availableModelsDescription: "Model identifiers reported by GET /models on the configured base URL.",
+    refreshModels: "Refresh models",
+    noModels: "The endpoint reported no models.",
     linkit: "Linkit",
     configured: "Configured",
     notConfigured: "Not configured",
@@ -819,6 +825,10 @@ const copy = {
     apiConfigSaveError: "无法保存 API 配置",
     apiConfigLoadError: "无法加载 API 配置",
     apiKeyPlaceholder: "输入新的 API Key 以替换当前值",
+    availableModels: "可用模型",
+    availableModelsDescription: "由已配置基础地址的 GET /models 返回的模型标识。",
+    refreshModels: "刷新模型",
+    noModels: "端点没有返回任何模型。",
     linkit: "Linkit",
     configured: "已配置",
     notConfigured: "未配置",
@@ -919,6 +929,21 @@ async function api<T>(sdk: AuthMiniApi, path: string, init?: RequestInit): Promi
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+function useOpenAiModels(sdk: AuthMiniApi) {
+  return useQuery({
+    queryKey: ["openai-models"],
+    queryFn: ({ signal }) => api<OpenAiModels>(sdk, "/api/integrations/openai/models", { signal }),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  })
+}
+
+// The configured endpoint owns the model catalog, but a thread saved earlier
+// must stay selectable even after its model leaves the catalog.
+function modelOptions(models: string[], current: string) {
+  return models.includes(current) ? models : [current, ...models]
 }
 
 function App() {
@@ -1170,6 +1195,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
   const navigate = useNavigate()
   const client = useQueryClient()
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
+  const models = useOpenAiModels(sdk)
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   const location = useLocation()
   const composer = useComposerDraft(userId, null)
@@ -1228,8 +1254,9 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
                 <FieldLabel htmlFor="new-thread-model">{t("model")}</FieldLabel>
                 <Select value={value.model} disabled={start.isPending} onValueChange={(model) => edit({ ...value, model })}>
                   <SelectTrigger id="new-thread-model"><SelectValue /></SelectTrigger>
-                  <SelectContent><SelectGroup>{!THREAD_MODELS.some((model) => model === value.model) && <SelectItem value={value.model}>{value.model}</SelectItem>}{THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent>
+                  <SelectContent><SelectGroup>{modelOptions(models.data?.models ?? [], value.model).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent>
                 </Select>
+                {models.isError && <FieldDescription>{errorMessage(models.error)}</FieldDescription>}
               </Field>
               <Field data-disabled={start.isPending}>
                 <FieldLabel htmlFor="new-thread-reasoning">{t("reasoningEffort")}</FieldLabel>
@@ -1273,6 +1300,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     queryFn: () => api<Worker[]>(sdk, "/api/workers"),
     refetchInterval: 5000,
   })
+  const models = useOpenAiModels(sdk)
   const history = useQuery({
     queryKey: ["history", threadId, userId],
     queryFn: () => api<HistoryRecord[]>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history`),
@@ -1371,7 +1399,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
           <Button size="sm" disabled={rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
         </form> : <div className="min-w-0 flex-1"><h1 className="truncate text-base font-semibold">{current.title}</h1><p className="truncate text-xs text-muted-foreground">{current.model}</p></div>}
         <ThreadStatusBadge status={current.display_status} language={language} />
-        {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
+        {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{modelOptions(models.data?.models ?? [], current.model).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
       <ThreadUsagePanel usage={current.usage} language={language} />
@@ -2021,6 +2049,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const queryKey = ["thread-defaults", sdk.session.getState().sessionId]
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   const defaults = useQuery({ queryKey, queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
+  const models = useOpenAiModels(sdk)
   const save = useMutation({
     mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
     onMutate: () => client.cancelQueries({ queryKey }),
@@ -2051,8 +2080,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
             <Select value={value.model} disabled={save.isPending} onValueChange={(model) => edit({ ...value, model })}>
               <SelectTrigger id="default-thread-model"><SelectValue /></SelectTrigger>
               <SelectContent><SelectGroup>
-                {!THREAD_MODELS.some((model) => model === value.model) && <SelectItem value={value.model}>{value.model}</SelectItem>}
-                {THREAD_MODELS.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
+                {modelOptions(models.data?.models ?? [], value.model).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
               </SelectGroup></SelectContent>
             </Select>
           </Field>
@@ -2094,6 +2122,7 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   const { session } = useAuthMini()
   const client = useQueryClient()
   const integrations = useQuery({ queryKey: ["integrations", "openai"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations/openai") })
+  const models = useOpenAiModels(sdk)
   const [baseUrl, setBaseUrl] = useState("")
   const [apiKey, setApiKey] = useState("")
   useEffect(() => {
@@ -2104,7 +2133,11 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
       method: "PUT",
       body: JSON.stringify({ base_url: baseUrl, ...(apiKey.trim() ? { api_key: apiKey } : {}) }),
     }),
-    onSuccess: (value) => { setApiKey(""); client.setQueryData(["integrations", "openai"], value) },
+    onSuccess: (value) => {
+      setApiKey("")
+      client.setQueryData(["integrations", "openai"], value)
+      void client.invalidateQueries({ queryKey: ["openai-models"] })
+    },
   })
   const changed = integrations.data && (baseUrl.trim() !== integrations.data.base_url || Boolean(apiKey.trim()))
   return <Page title={t("configuration")} description={t("configurationDescription")}>
@@ -2129,6 +2162,17 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("apiConfigSaveError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
         <div className="flex flex-wrap items-center gap-3"><Button disabled={!changed || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingApiConfig") : t("saveApiConfig")}</Button><p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("apiConfigSaved")}</p></div>
       </form>}
+      <div className="sm:col-span-2 flex max-w-xl flex-col gap-3">
+        <div className="flex items-start justify-between gap-3">
+          <div><p className="text-sm font-medium">{t("availableModels")}</p><p className="mt-1 text-sm text-muted-foreground">{t("availableModelsDescription")}</p></div>
+          <Button type="button" size="sm" variant="outline" disabled={models.isFetching} onClick={() => void models.refetch()}>{models.isFetching ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{t("refreshModels")}</Button>
+        </div>
+        {models.isError && <p className="text-sm text-destructive">{errorMessage(models.error)}</p>}
+        {models.isFetching && !models.data && <Skeleton className="h-6 w-64" />}
+        {models.data && (models.data.models.length > 0
+          ? <div className="flex flex-wrap gap-1.5">{models.data.models.map((model) => <Badge key={model} variant="outline">{model}</Badge>)}</div>
+          : <p className="text-sm text-muted-foreground">{t("noModels")}</p>)}
+      </div>
     </CardContent></Card>
     <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
