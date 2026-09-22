@@ -351,6 +351,7 @@ const copy = {
     input: "Give this thread its next instruction…",
     queued: "Queued",
     rename: "Rename",
+    generateTitle: "Generate a title from the full conversation",
     delete: "Delete",
     deleteTitle: "Delete this thread?",
     deleteDescription: "Its history and Worker calls will be removed.",
@@ -620,6 +621,7 @@ const copy = {
     input: "为这个线程追加下一条指令…",
     queued: "排队中",
     rename: "重命名",
+    generateTitle: "引用全部上下文生成标题",
     delete: "删除",
     deleteTitle: "删除这个线程？",
     deleteDescription: "该线程的历史和 Worker 调用都会被删除。",
@@ -1380,6 +1382,16 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
       void client.invalidateQueries({ queryKey: ["threads"] })
     },
   })
+  const generateTitle = useMutation({
+    mutationFn: () => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}/title`, { method: "POST" }),
+    onSuccess: (thread: Thread) => {
+      setTitle(thread.title)
+      setEditing(false)
+      void client.invalidateQueries({ queryKey: ["thread", threadId] })
+      void client.invalidateQueries({ queryKey: ["threads"] })
+      void client.invalidateQueries({ queryKey: ["reasoning-audits"] })
+    },
+  })
   const settings = useMutation({
     mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; web_search?: boolean; image_generation?: boolean }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
@@ -1412,8 +1424,9 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
         {editing ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
-          <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} />
-          <Button size="sm" disabled={rename.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
+          <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
+          <Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
+          <Button size="sm" disabled={rename.isPending || generateTitle.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
         </form> : <div className="min-w-0 flex-1"><h1 className="truncate text-base font-semibold">{current.title}</h1><p className="truncate text-xs text-muted-foreground">{current.model}</p></div>}
         <ThreadStatusBadge status={current.display_status} language={language} />
         {!editing && <div className="flex flex-wrap items-center gap-2"><Select value={current.model} onValueChange={(value) => settings.mutate({ model: value })}><SelectTrigger size="sm" aria-label={t("model")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{modelOptions(models.data?.models ?? [], current.model).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={current.reasoning_effort} onValueChange={(value) => settings.mutate({ reasoning_effort: value as Thread["reasoning_effort"] })}><SelectTrigger size="sm" aria-label={t("reasoningEffort")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{REASONING_EFFORTS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectGroup></SelectContent></Select><Button size="sm" variant={current.service_tier_fast ? "default" : "outline"} onClick={() => settings.mutate({ service_tier_fast: !current.service_tier_fast })}>Fast {current.service_tier_fast ? "on" : "off"}</Button><Button size="sm" variant={current.web_search ? "default" : "outline"} onClick={() => settings.mutate({ web_search: !current.web_search })}>{t("toolWebSearch")} {current.web_search ? "on" : "off"}</Button><Button size="sm" variant={current.image_generation ? "default" : "outline"} onClick={() => settings.mutate({ image_generation: !current.image_generation })}>{t("toolImageGeneration")} {current.image_generation ? "on" : "off"}</Button><Button variant="ghost" size="sm" onClick={() => setEditing(true)}>{t("rename")}</Button></div>}
@@ -1422,6 +1435,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
       <ThreadUsagePanel usage={current.usage} language={language} />
       {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input)} /></div>}
       {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
+      {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
       <MessageScrollerProvider autoScroll defaultScrollPosition="end">
         <MessageScroller className="min-h-0 flex-1">
           <MessageScrollerViewport>

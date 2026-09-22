@@ -64,6 +64,7 @@ const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a 
 // Title requests must cover hidden reasoning tokens: reasoning-first models
 // report an incomplete response before emitting the title when the cap is small.
 const THREAD_TITLE_MAX_OUTPUT_TOKENS: usize = 1024;
+const THREAD_TITLE_CONTEXT_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the whole conversation. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
 const WORKER_ONLINE_SECONDS: i64 = 45;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
@@ -522,6 +523,7 @@ fn app(state: AppState) -> Router {
             post(thread_controls::continue_thread),
         )
         .route("/api/threads/{id}/compact", post(thread_controls::compact))
+        .route("/api/threads/{id}/title", post(generate_thread_title))
         .route("/api/insights", get(insights))
         .route("/api/history", get(history::list))
         .route("/api/history/{id}", get(history::read))
@@ -2882,6 +2884,72 @@ async fn update_thread(
     Ok(Json(thread))
 }
 
+async fn generate_thread_title_for(
+    state: &AppState,
+    user: &User,
+    bearer: &str,
+    id: String,
+) -> Result<ThreadView, ApiError> {
+    let thread = read_thread_for(state, user, id.clone()).await?;
+    let integrations = ensure_openai_integration(state, user, bearer).await?;
+    let context = user_db(state, user, false, {
+        let thread_id = id.clone();
+        move |connection| {
+            let tail = latest_protocol_record_id(connection, &thread_id)?;
+            compile_thread_context(connection, &thread_id, tail)
+        }
+    })
+    .await?;
+    let mut input = context.items.clone();
+    input.push(json!({"role": "developer", "content": THREAD_TITLE_CONTEXT_PROMPT}));
+    let response = responses_request_with_options(
+        state,
+        user,
+        &thread.id,
+        None,
+        "title_generation",
+        context.idx_head,
+        context.idx_tail,
+        &integrations,
+        &thread.model,
+        None,
+        thread.service_tier_fast,
+        Value::Array(input),
+        false,
+        false,
+        false,
+        Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
+        None,
+        None,
+    )
+    .await?;
+    let Some(title) =
+        generated_thread_title(response_text(&response.value).as_deref().unwrap_or(""))
+    else {
+        return Err(ApiError::unavailable("title generation returned no title"));
+    };
+    let thread_id = thread.id.clone();
+    user_db(state, user, true, move |connection| {
+        connection.execute(
+            "UPDATE threads SET title=?,updated_at=? WHERE id=?",
+            params![title, now(), thread_id],
+        )?;
+        load_thread(connection, &thread_id)
+    })
+    .await
+}
+
+async fn generate_thread_title(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ThreadView>, ApiError> {
+    let id = thread_id(&id)?;
+    Ok(Json(
+        generate_thread_title_for(&state, &identity.user, &identity.bearer, id).await?,
+    ))
+}
+
 async fn delete_thread(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
@@ -4000,7 +4068,6 @@ impl CompiledThreadContext {
     }
 }
 
-#[allow(dead_code)]
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     connection
         .query_row(
