@@ -145,6 +145,7 @@ async fn fixture(consumer: Option<Consumer>) -> Fixture {
     let settings = IntegrationSettings {
         openai_consumer_id: "owned-consumer".into(),
         openai_consumer_secret: "sk-stale-fixture".into(),
+        api_key: String::new(),
         openai_base_url: OPENAI_BASE_URL.into(),
         linkit_bot_id: "bot".into(),
         linkit_bot_token: "bot-token".into(),
@@ -212,7 +213,11 @@ async fn rotated_token_401_is_repaired_and_healthy_refresh_does_not_rotate_again
     let f = fixture(Some(consumer())).await;
     let error = inference(&f).await.err().unwrap();
     assert!(error.message.contains("HTTP 401"));
-    assert!(error.message.contains("refresh the OpenAI-LB integration"));
+    assert!(
+        error
+            .message
+            .contains("verify the Responses-compatible API key")
+    );
     assert_eq!(error.kind, ApiErrorKind::Ordinary);
     assert!(refresh(&f).await.unwrap().0.openai_configured);
     assert_synchronized(&f).await;
@@ -265,12 +270,14 @@ async fn missing_local_token_rotates_existing_consumer_instead_of_creating_dupli
 }
 
 #[tokio::test]
-async fn missing_local_id_provisions_and_is_not_reported_as_configured_beforehand() {
+async fn direct_api_key_without_consumer_id_is_ready_without_lb_calls() {
     let f = fixture(None).await;
     let mut settings = stored(&f);
     settings.openai_consumer_id.clear();
+    settings.openai_consumer_secret.clear();
+    settings.api_key = "sk-direct-fixture".into();
     assert!(
-        !integration_status_view(
+        integration_status_view(
             &settings,
             &GlobalRequestHeaders {
                 user_agent: String::new(),
@@ -279,13 +286,12 @@ async fn missing_local_id_provisions_and_is_not_reported_as_configured_beforehan
         )
         .openai_configured
     );
-    assert!(!openai_integration_ready(&settings));
+    assert!(openai_integration_ready(&settings));
     save_integration_settings(&f.state, &f.user, &settings)
         .await
         .unwrap();
     assert!(refresh(&f).await.unwrap().0.openai_configured);
-    assert_synchronized(&f).await;
-    assert_eq!(f.remote.lock().await.created, 1);
+    assert_eq!(f.remote.lock().await.created, 0);
 }
 
 #[tokio::test]

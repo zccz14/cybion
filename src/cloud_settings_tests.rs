@@ -392,6 +392,52 @@ fn browser_identity_for(user: &User) -> axum::Extension<BrowserIdentity> {
 }
 
 #[tokio::test]
+async fn user_openai_api_configuration_round_trips_without_exposing_the_key() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "api-config-owner").unwrap();
+    let initial = openai_api_config(State(state.clone()), browser_identity_for(&user))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(initial.base_url, OPENAI_BASE_URL);
+    assert!(!initial.api_key_configured);
+
+    let saved = update_openai_api_config(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(UpdateOpenAiApiConfigInput {
+            base_url: "http://127.0.0.1:4242/v1/".to_owned(),
+            api_key: Some("sk-user-configured".to_owned()),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(saved.base_url, "http://127.0.0.1:4242/v1");
+    assert!(saved.api_key_configured);
+    let stored = user_db(&state, &user, false, |connection| {
+        integration_settings(connection)
+    })
+    .await
+    .unwrap();
+    assert!(stored.openai_consumer_id.is_empty());
+    assert!(stored.openai_consumer_secret.is_empty());
+    assert_eq!(stored.api_key, "sk-user-configured");
+
+    let invalid = update_openai_api_config(
+        State(state),
+        browser_identity_for(&user),
+        Json(UpdateOpenAiApiConfigInput {
+            base_url: "ftp://provider.example/v1".to_owned(),
+            api_key: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn experimental_features_can_only_be_changed_by_the_administrator() {
     let (_root, state) = test_state();
     assert!(admin_user_sync(&state.admin_db_path, "root", true).unwrap());

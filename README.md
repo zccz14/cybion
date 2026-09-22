@@ -40,25 +40,14 @@ the first authenticated browser session initializes that key atomically.
   protocol records in index order. A fresh request therefore reconstructs its
   context from SQLite rather than an in-memory conversation or an upstream
   response chain.
-- On first model use, Cybion provisions a user-owned OpenAI-LB Consumer.
-  Linkit task notifications are optional and configured separately. They do not
-  gate model inference, external API requests, API-key creation or LB repair.
-- **Configuration → Provision or refresh OpenAI-LB** verifies the saved
-  OpenAI-LB Consumer ID and full token through the owner's LB API. Missing or
-  deleted Consumers are recreated, disabled Consumers are re-enabled, and
-  stale or missing tokens are rotated and saved immediately. Healthy tokens
-  are reused, and existing request-archive preferences are preserved. A final
-  verification must succeed before refresh reports success;
-  LB errors are not treated as missing Consumers. Refreshes and initial
-  provisioning share a per-user LB lock. Linkit has a separate lock and only
-  updates its own credential columns, so its setup cannot block or overwrite LB
-  credential reconciliation. This requires OpenAI-LB's
-  `POST /api/consumers/{id}/verify` endpoint to be deployed first.
-- Ordinary Thread operations reuse configured credentials. A later LB-side
-  rotation or deletion can still invalidate them; an HTTP 401 instructs the
-  owner to refresh integrations and then retry or continue the failed Thread.
-  Configuration's “Configured” label means credentials are stored, not that
-  they have been continuously checked against LB.
+- **Configuration → Responses-compatible API** lets each user save a `base_url`
+  and `api_key` for an OpenAI Responses-compatible provider. The key is stored
+  in that user's SQLite database and is never returned to the browser. Cybion
+  sends model requests to `{base_url}/responses`, preserving the existing
+  streaming, tool-call, context replay, and audit behavior. Existing
+  OpenAI-LB credentials remain readable for users who have not migrated.
+- Linkit task notifications are optional and configured separately. They do not
+  gate model inference, external API requests, or API-key creation.
 - **Configuration → Linkit task notifications** lets the owner enable/repair,
   pause, and test notifications. Bot credentials are checked using Linkit's
   current user APIs; stale Bot tokens can be rotated without replacing a healthy

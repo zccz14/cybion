@@ -63,10 +63,10 @@ pub(super) async fn save(
     let saved = settings.clone();
     user_db(state, user, true, move |connection| {
         connection.execute(
-            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,openai_base_url,updated_at)
-             VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,
-             openai_consumer_secret=excluded.openai_consumer_secret,openai_base_url=excluded.openai_base_url,updated_at=excluded.updated_at",
-            params![saved.openai_consumer_id,saved.openai_consumer_secret,saved.openai_base_url,now()],
+            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,api_key,openai_base_url,updated_at)
+             VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,
+             openai_consumer_secret=excluded.openai_consumer_secret,api_key=excluded.api_key,openai_base_url=excluded.openai_base_url,updated_at=excluded.updated_at",
+            params![saved.openai_consumer_id,saved.openai_consumer_secret,saved.api_key,saved.openai_base_url,now()],
         )?;
         Ok(())
     }).await
@@ -85,6 +85,7 @@ async fn save_grant(
     }
     settings.openai_consumer_id = grant.id;
     settings.openai_consumer_secret = grant.secret;
+    settings.api_key.clear();
     settings.openai_base_url = OPENAI_BASE_URL.to_owned();
     // RECOVERY: LB shows a new secret only once. Persist it before another
     // network call (including Linkit) can fail; a later refresh can verify it.

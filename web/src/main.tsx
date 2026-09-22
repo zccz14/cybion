@@ -238,9 +238,8 @@ type Insights = {
   dimensions: { thread_ids: string[]; models: string[]; request_kinds: string[] }
 }
 type IntegrationStatus = {
-  openai_configured: boolean
-  openai_consumer_id: string | null
-  openai_base_url: string
+  base_url: string
+  api_key_configured: boolean
 }
 type SystemResources = {
   generated_at: number
@@ -543,13 +542,20 @@ const copy = {
     savingDefaults: "Saving…",
     defaultsSaved: "Defaults saved",
     saveDefaultsError: "Could not save thread defaults",
-    integrationDescription: "The OpenAI-LB Consumer used for model inference. Notification settings are independent.",
+    integrationDescription: "Configure the Responses-compatible API used for model inference. Notification settings are independent.",
     integration: "Integrations",
-    refreshIntegrations: "Provision or refresh OpenAI-LB",
-    refreshIntegrationsHelp: "Verify the OpenAI-LB Consumer and token. Refresh recreates a missing Consumer, re-enables a disabled one, and replaces invalid credentials. Retry or continue a failed Thread afterwards.",
-    integrationsVerified: "OpenAI-LB Consumer and token verified.",
-    refreshing: "Refreshing…",
-    openai: "OpenAI-LB",
+    openai: "Responses-compatible API",
+    apiBaseUrl: "Base URL",
+    apiBaseUrlDescription: "Cybion sends model requests to this URL with /responses appended.",
+    apiKey: "API key",
+    apiKeyDescription: "Stored per user and never returned to the browser.",
+    apiKeyConfigured: "API key configured",
+    saveApiConfig: "Save API configuration",
+    savingApiConfig: "Saving…",
+    apiConfigSaved: "API configuration saved",
+    apiConfigSaveError: "Could not save API configuration",
+    apiConfigLoadError: "Could not load API configuration",
+    apiKeyPlaceholder: "Enter a new API key to replace the current key",
     linkit: "Linkit",
     configured: "Configured",
     notConfigured: "Not configured",
@@ -799,13 +805,20 @@ const copy = {
     savingDefaults: "保存中…",
     defaultsSaved: "默认设置已保存",
     saveDefaultsError: "无法保存线程默认设置",
-    integrationDescription: "用于模型推理的 OpenAI-LB 消费者。通知配置与此独立。",
+    integrationDescription: "配置用于模型推理的 Responses-compatible API。通知配置与此独立。",
     integration: "集成",
-    refreshIntegrations: "开通或刷新 OpenAI-LB",
-    refreshIntegrationsHelp: "校验 OpenAI-LB 消费者与 Token。刷新会重建已删除的消费者、重新启用被禁用的消费者，并替换失效凭据。完成后请重试或继续失败的 Thread。",
-    integrationsVerified: "OpenAI-LB 消费者与 Token 已校验。",
-    refreshing: "刷新中…",
-    openai: "OpenAI-LB",
+    openai: "Responses-compatible API",
+    apiBaseUrl: "基础地址",
+    apiBaseUrlDescription: "Cybion 会在这个地址后追加 /responses 发送模型请求。",
+    apiKey: "API Key",
+    apiKeyDescription: "按用户保存，永远不会返回到浏览器。",
+    apiKeyConfigured: "API Key 已配置",
+    saveApiConfig: "保存 API 配置",
+    savingApiConfig: "保存中…",
+    apiConfigSaved: "API 配置已保存",
+    apiConfigSaveError: "无法保存 API 配置",
+    apiConfigLoadError: "无法加载 API 配置",
+    apiKeyPlaceholder: "输入新的 API Key 以替换当前值",
     linkit: "Linkit",
     configured: "已配置",
     notConfigured: "未配置",
@@ -2080,15 +2093,42 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const { session } = useAuthMini()
   const client = useQueryClient()
-  const integrations = useQuery({ queryKey: ["integrations"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations") })
-  const refresh = useMutation({ mutationFn: () => api<IntegrationStatus>(sdk, "/api/integrations/refresh", { method: "POST" }), onSuccess: (value) => client.setQueryData(["integrations"], value) })
+  const integrations = useQuery({ queryKey: ["integrations", "openai"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations/openai") })
+  const [baseUrl, setBaseUrl] = useState("")
+  const [apiKey, setApiKey] = useState("")
+  useEffect(() => {
+    if (integrations.data) setBaseUrl(integrations.data.base_url)
+  }, [integrations.data?.base_url])
+  const save = useMutation({
+    mutationFn: () => api<IntegrationStatus>(sdk, "/api/integrations/openai", {
+      method: "PUT",
+      body: JSON.stringify({ base_url: baseUrl, ...(apiKey.trim() ? { api_key: apiKey } : {}) }),
+    }),
+    onSuccess: (value) => { setApiKey(""); client.setQueryData(["integrations", "openai"], value) },
+  })
+  const changed = integrations.data && (baseUrl.trim() !== integrations.data.base_url || Boolean(apiKey.trim()))
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
     <Card><CardHeader><CardTitle>{t("integration")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2">
       {integrations.error && <div className="sm:col-span-2"><RequestError error={integrations.error} onRetry={() => void integrations.refetch()} /></div>}
-      {integrations.data && <><IntegrationRow label={t("openai")} configured={integrations.data.openai_configured} detail={integrations.data.openai_consumer_id ?? t("notConfigured")} /><div className="sm:col-span-2"><p className="text-xs text-muted-foreground">{t("baseUrl")}</p><code className="mt-1 block break-all text-sm">{integrations.data.openai_base_url}</code></div></>}
+      {integrations.data && <div className="sm:col-span-2"><IntegrationRow label={t("openai")} configured={integrations.data.api_key_configured} detail={integrations.data.api_key_configured ? t("apiKeyConfigured") : t("notConfigured")} /></div>}
       {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
-      <div className="sm:col-span-2"><p className="mb-3 text-xs text-muted-foreground">{t("refreshIntegrationsHelp")}</p><Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>{refresh.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{refresh.isPending ? t("refreshing") : t("refreshIntegrations")}</Button>{refresh.error && <p className="mt-2 text-sm text-destructive">{errorMessage(refresh.error)}</p>}{refresh.isSuccess && <p role="status" className="mt-2 text-sm text-muted-foreground">{t("integrationsVerified")}</p>}</div>
+      {integrations.data && <form className="sm:col-span-2 flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (changed && !save.isPending) save.mutate() }}>
+        <FieldGroup>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="openai-base-url">{t("apiBaseUrl")}</FieldLabel>
+            <FieldDescription>{t("apiBaseUrlDescription")}</FieldDescription>
+            <Input id="openai-base-url" type="url" value={baseUrl} disabled={save.isPending} onChange={(event) => setBaseUrl(event.target.value)} />
+          </Field>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="openai-api-key">{t("apiKey")}</FieldLabel>
+            <FieldDescription>{t("apiKeyDescription")}</FieldDescription>
+            <Input id="openai-api-key" type="password" autoComplete="new-password" value={apiKey} placeholder={t("apiKeyPlaceholder")} disabled={save.isPending} onChange={(event) => setApiKey(event.target.value)} />
+          </Field>
+        </FieldGroup>
+        {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("apiConfigSaveError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
+        <div className="flex flex-wrap items-center gap-3"><Button disabled={!changed || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingApiConfig") : t("saveApiConfig")}</Button><p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("apiConfigSaved")}</p></div>
+      </form>}
     </CardContent></Card>
     <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>

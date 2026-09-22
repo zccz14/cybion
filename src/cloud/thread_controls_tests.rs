@@ -15,6 +15,7 @@ fn integrations(address: SocketAddr) -> IntegrationSettings {
     IntegrationSettings {
         openai_consumer_id: "fixture".to_owned(),
         openai_consumer_secret: "fixture".to_owned(),
+        api_key: String::new(),
         openai_base_url: format!("http://{address}"),
         linkit_bot_id: "fixture".to_owned(),
         linkit_bot_token: "fixture".to_owned(),

@@ -160,6 +160,7 @@ async fn fixture() -> Fixture {
     let settings = IntegrationSettings {
         openai_consumer_id: "consumer".into(),
         openai_consumer_secret: "sk-model-fixture".into(),
+        api_key: String::new(),
         openai_base_url: format!("{base}/v1"),
         linkit_bot_id: "bot-1".into(),
         linkit_bot_token: "sk-bot-token".into(),

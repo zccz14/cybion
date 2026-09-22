@@ -9,7 +9,7 @@ const personal = main.slice(main.indexOf("function ConfigurationPage("), main.in
 test("personal configuration contains only personal controls, even for administrators", () => {
   assert.match(personal, /function ConfigurationPage\(\{ sdk \}/)
   assert.doesNotMatch(personal, /isAdmin|ExperimentalFeatures|RequestHeaders|user_agent|originator|saveHeaders|SystemConfiguration/)
-  for (const feature of ["ThreadDefaultsCard", "IntegrationRow", "/api/integrations/refresh", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
+  for (const feature of ["ThreadDefaultsCard", "IntegrationRow", "/api/integrations/openai", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
   assert.match(main, /path="\/configuration" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
   assert.match(main, /path="\/settings" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
 })
