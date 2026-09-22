@@ -823,3 +823,103 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn thread_titles_use_the_latest_input_and_leave_reasoning_headroom() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "title-generation-user").unwrap();
+    let thread = create_thread_for(
+        &state,
+        &user,
+        CreateThreadInput {
+            title: None,
+            model: Some("test-model".to_owned()),
+            reasoning_effort: None,
+            service_tier_fast: None,
+            web_search: None,
+            image_generation: None,
+        },
+    )
+    .await
+    .unwrap();
+    let continue_idx = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role": "user", "content": "fix the flaky title generation"}),
+            );
+            Ok(insert_record(
+                connection,
+                &thread_id,
+                "activity",
+                json!({"type": "thread_control", "action": "continue"}),
+            ))
+        }
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_json_request(&mut socket).await;
+        let body = json!({"id":"r1","end_turn":true,"output":[{"id":"m1","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Flaky Thread Titles"}]}]}).to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        request
+    });
+    save_integration_settings(
+        &state,
+        &user,
+        &IntegrationSettings {
+            openai_consumer_id: "fixture".to_owned(),
+            openai_consumer_secret: "fixture".to_owned(),
+            api_key: String::new(),
+            openai_base_url: format!("http://{address}"),
+            linkit_bot_id: String::new(),
+            linkit_bot_token: String::new(),
+            linkit_username: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let named = maybe_name_thread(&state, &user, &thread, continue_idx).await;
+    assert_eq!(named.title, "Flaky Thread Titles");
+    let request = server.await.unwrap();
+    assert!(
+        request["max_output_tokens"].as_u64().unwrap() >= 512,
+        "title requests must leave room for reasoning before the title: {request}"
+    );
+    assert!(
+        request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["content"] == "fix the flaky title generation"),
+        "the title request must replay the latest user input: {request}"
+    );
+    let stored: String = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            Ok(connection.query_row(
+                "SELECT title FROM threads WHERE id=?",
+                [&thread_id],
+                |row| row.get(0),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(stored, "Flaky Thread Titles");
+}
