@@ -22,6 +22,14 @@ function ThreadStatusIcon({ status, className }: { status: ThreadDisplayStatus; 
   return <Icon aria-hidden="true" className={cn("size-4 shrink-0", color, motion, className)} />
 }
 
+export function ThreadStatusSummary({ status, language }: StatusProps) {
+  const { label, hint } = threadStatusText(status, language)
+  return <span data-thread-status={status} title={hint} className={cn("inline-flex w-fit items-center gap-1 text-xs", presentation[status].color)}>
+    <ThreadStatusIcon status={status} className="size-3.5" />
+    <span>{label}</span>
+  </span>
+}
+
 export function ThreadStatusBadge({ status, language }: StatusProps) {
   const { label, hint } = threadStatusText(status, language)
   return <span data-thread-status={status} title={hint} className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-current/15 bg-current/5 px-2 py-1 text-xs font-medium", presentation[status].color)}>

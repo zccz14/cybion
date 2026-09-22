@@ -970,8 +970,6 @@ CREATE TABLE IF NOT EXISTS threads (
   model TEXT NOT NULL,
   reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
-  web_search INTEGER NOT NULL DEFAULT 1 CHECK(web_search IN (0,1)),
-  image_generation INTEGER NOT NULL DEFAULT 1 CHECK(image_generation IN (0,1)),
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -988,9 +986,7 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   id INTEGER PRIMARY KEY CHECK(id=1),
   model TEXT NOT NULL,
   reasoning_effort TEXT NOT NULL CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
-  service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1)),
-  web_search INTEGER NOT NULL DEFAULT 1 CHECK(web_search IN (0,1)),
-  image_generation INTEGER NOT NULL DEFAULT 1 CHECK(image_generation IN (0,1))
+  service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1))
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1199,22 +1195,6 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     for (table, name, definition) in [
         ("threads", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
         ("threads", "next_retry_at", "INTEGER"),
-        // COMPATIBILITY: threads created before native tool switches always
-        // received web_search and image_generation; default them on so the
-        // upgrade keeps the existing request shape. Retire when no pre-switch
-        // database remains; verified by the schema upgrade regression tests.
-        ("threads", "web_search", "INTEGER NOT NULL DEFAULT 1"),
-        ("threads", "image_generation", "INTEGER NOT NULL DEFAULT 1"),
-        (
-            "thread_defaults",
-            "web_search",
-            "INTEGER NOT NULL DEFAULT 1",
-        ),
-        (
-            "thread_defaults",
-            "image_generation",
-            "INTEGER NOT NULL DEFAULT 1",
-        ),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
         ("worker_calls", "received_at", "INTEGER"),
@@ -1304,8 +1284,6 @@ struct ThreadView {
     model: String,
     reasoning_effort: String,
     service_tier_fast: bool,
-    web_search: bool,
-    image_generation: bool,
     status: String,
     display_status: String,
     usage: ThreadUsage,
@@ -1570,10 +1548,6 @@ struct CreateThreadInput {
     reasoning_effort: Option<String>,
     #[serde(default)]
     service_tier_fast: Option<bool>,
-    #[serde(default)]
-    web_search: Option<bool>,
-    #[serde(default)]
-    image_generation: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1582,10 +1556,6 @@ struct StartThreadInput {
     model: String,
     reasoning_effort: String,
     service_tier_fast: bool,
-    #[serde(default)]
-    web_search: Option<bool>,
-    #[serde(default)]
-    image_generation: Option<bool>,
     input: String,
 }
 
@@ -1595,8 +1565,6 @@ struct ThreadDefaults {
     model: String,
     reasoning_effort: String,
     service_tier_fast: bool,
-    web_search: bool,
-    image_generation: bool,
 }
 
 impl Default for ThreadDefaults {
@@ -1605,10 +1573,6 @@ impl Default for ThreadDefaults {
             model: DEFAULT_MODEL.to_owned(),
             reasoning_effort: "medium".to_owned(),
             service_tier_fast: false,
-            // Native tool switches default on to preserve the requests users
-            // already received before the switches existed.
-            web_search: true,
-            image_generation: true,
         }
     }
 }
@@ -1624,10 +1588,6 @@ struct UpdateThreadInput {
     reasoning_effort: Option<String>,
     #[serde(default)]
     service_tier_fast: Option<bool>,
-    #[serde(default)]
-    web_search: Option<bool>,
-    #[serde(default)]
-    image_generation: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1800,22 +1760,20 @@ fn now() -> i64 {
 }
 
 fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
-    let input_tokens: i64 = row.get(11)?;
-    let output_tokens: i64 = row.get(12)?;
-    let cached_tokens: i64 = row.get(13)?;
-    let missing_cache_requests: i64 = row.get(14)?;
+    let input_tokens: i64 = row.get(9)?;
+    let output_tokens: i64 = row.get(10)?;
+    let cached_tokens: i64 = row.get(11)?;
+    let missing_cache_requests: i64 = row.get(12)?;
     Ok(ThreadView {
         id: row.get(0)?,
         title: row.get(1)?,
         model: row.get(2)?,
         reasoning_effort: row.get(3)?,
         service_tier_fast: row.get::<_, i64>(4)? != 0,
-        web_search: row.get::<_, i64>(5)? != 0,
-        image_generation: row.get::<_, i64>(6)? != 0,
-        status: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-        display_status: row.get(10)?,
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        display_status: row.get(8)?,
         usage: ThreadUsage {
             input_tokens,
             output_tokens,
@@ -1943,15 +1901,13 @@ fn reasoning_effort(value: String) -> Result<String, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,reasoning_effort,service_tier_fast,web_search,image_generation FROM thread_defaults WHERE id=1",
+            "SELECT model,reasoning_effort,service_tier_fast FROM thread_defaults WHERE id=1",
             [],
             |row| {
                 Ok(ThreadDefaults {
                     model: row.get(0)?,
                     reasoning_effort: row.get(1)?,
                     service_tier_fast: row.get::<_, i64>(2)? != 0,
-                    web_search: row.get::<_, i64>(3)? != 0,
-                    image_generation: row.get::<_, i64>(4)? != 0,
                 })
             },
         )
@@ -1979,14 +1935,12 @@ async fn update_thread_defaults(
         model: model_id(input.model)?,
         reasoning_effort: reasoning_effort(input.reasoning_effort)?,
         service_tier_fast: input.service_tier_fast,
-        web_search: input.web_search,
-        image_generation: input.image_generation,
     };
     user_db(&state, &identity.user, true, move |connection| {
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,web_search,image_generation) VALUES(1,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,web_search=excluded.web_search,image_generation=excluded.image_generation",
-            params![defaults.model, defaults.reasoning_effort, defaults.service_tier_fast, defaults.web_search, defaults.image_generation],
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast) VALUES(1,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast",
+            params![defaults.model, defaults.reasoning_effort, defaults.service_tier_fast],
         )?;
         Ok(defaults)
     })
@@ -2008,7 +1962,7 @@ fn input_text(value: String) -> Result<String, ApiError> {
 // The latest input/control boundary distinguishes those outcomes; later tool output,
 // title-generation audits, and superseded-request activity cannot change the result.
 const THREAD_VIEW_SELECT: &str = r#"
-SELECT t.id,t.title,t.model,t.reasoning_effort,t.service_tier_fast,t.web_search,t.image_generation,t.status,t.created_at,t.updated_at,
+SELECT t.id,t.title,t.model,t.reasoning_effort,t.service_tier_fast,t.status,t.created_at,t.updated_at,
        CASE
          WHEN t.status='failed' THEN 'failed'
          WHEN t.status='running' THEN
@@ -2065,8 +2019,6 @@ async fn create_thread_for(
     let model = input.model.map(model_id).transpose()?;
     let reasoning_effort = input.reasoning_effort.map(reasoning_effort).transpose()?;
     let service_tier_fast = input.service_tier_fast;
-    let web_search = input.web_search;
-    let image_generation = input.image_generation;
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let defaults = load_thread_defaults(&transaction)?;
@@ -2076,8 +2028,6 @@ async fn create_thread_for(
             model: model.unwrap_or(defaults.model),
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
-            web_search: web_search.unwrap_or(defaults.web_search),
-            image_generation: image_generation.unwrap_or(defaults.image_generation),
             status: "idle".to_owned(),
             display_status: "ready".to_owned(),
             usage: ThreadUsage::default(),
@@ -2085,15 +2035,13 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,reasoning_effort,service_tier_fast,web_search,image_generation,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
                 thread.model,
                 thread.reasoning_effort,
                 thread.service_tier_fast as i64,
-                thread.web_search as i64,
-                thread.image_generation as i64,
                 thread.status,
                 thread.created_at,
                 thread.updated_at
@@ -2827,8 +2775,6 @@ async fn start_thread(
             model: Some(model),
             reasoning_effort: Some(reasoning_effort),
             service_tier_fast: Some(input.service_tier_fast),
-            web_search: input.web_search,
-            image_generation: input.image_generation,
         },
     )
     .await?;
@@ -2864,16 +2810,14 @@ async fn update_thread(
         && model.is_none()
         && reasoning_effort.is_none()
         && input.service_tier_fast.is_none()
-        && input.web_search.is_none()
-        && input.image_generation.is_none()
     {
         return Err(ApiError::bad_request("thread update is empty"));
     }
     let updated_at = now();
     let thread = user_db(&state, &identity.user, true, move |connection| {
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),web_search=COALESCE(?,web_search),image_generation=COALESCE(?,image_generation),updated_at=? WHERE id=?",
-            params![title, model, reasoning_effort, input.service_tier_fast.map(|value| value as i64), input.web_search.map(|value| value as i64), input.image_generation.map(|value| value as i64), updated_at, id],
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),updated_at=? WHERE id=?",
+            params![title, model, reasoning_effort, input.service_tier_fast.map(|value| value as i64), updated_at, id],
         )?;
         if changed == 0 {
             return Err(ApiError::not_found("thread not found"));
@@ -3736,8 +3680,6 @@ async fn process_request(
                 model: DEFAULT_MODEL.to_owned(),
                 reasoning_effort: "medium".to_owned(),
                 service_tier_fast: false,
-                web_search: true,
-                image_generation: true,
                 status: "failed".to_owned(),
                 display_status: "failed".to_owned(),
                 usage: ThreadUsage::default(),
@@ -4459,8 +4401,9 @@ async fn request_agent(
             thread.service_tier_fast,
             Value::Array(context.items.clone()),
             !workers.is_empty(),
-            thread.web_search,
-            thread.image_generation,
+            // Thread turns always inject the native web search and image tools.
+            true,
+            true,
             None,
             Some(prefix),
             Some(cancellation.clone()),
@@ -6806,8 +6749,6 @@ mod tests {
                 model: Some("test-model".to_owned()),
                 reasoning_effort: None,
                 service_tier_fast: None,
-                web_search: None,
-                image_generation: None,
             },
         )
         .await
@@ -6882,8 +6823,6 @@ mod tests {
                 model: Some("second-model".to_owned()),
                 reasoning_effort: None,
                 service_tier_fast: None,
-                web_search: None,
-                image_generation: None,
             },
         )
         .await

@@ -23,7 +23,8 @@ test("every execution state has distinct labels and explanatory copy in both lan
 test("both thread lists and conversation status use the same server-derived presentation", () => {
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   assert.equal(source.match(/<ThreadLink /g)?.length, 2)
-  assert.equal(source.match(/<ThreadStatusBadge status=\{current.display_status\}/g)?.length, 2)
+  assert.equal(source.match(/<ThreadStatusBadge status=\{current.display_status\}/g)?.length, 1)
+  assert.match(source, /<ThreadStatusSummary status=\{current.display_status\} language=\{language\} \/>/)
   assert.doesNotMatch(source, /StatusDot|statusLabel|latestThreadAction/)
   assert.match(source, /thread=\{item.id === current.id \? current : item\}/)
 })

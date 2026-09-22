@@ -58,18 +58,18 @@ test("history renders reasoning summaries and exposes OpenAI native tools", () =
   assert.match(source, /detail: "image_generation"/)
 })
 
-test("thread native tool switches sit next to Fast mode and default from personal settings", () => {
-  assert.match(source, /web_search: boolean/)
-  assert.match(source, /image_generation: boolean/)
-  assert.match(source, /web_search\?: boolean/)
-  assert.match(source, /image_generation\?: boolean/)
-  assert.match(source, /Fast \{current\.service_tier_fast \? "on" : "off"\}<\/Button><Button size="sm" variant=\{current\.web_search \? "default" : "outline"\}/)
-  assert.match(source, /settings\.mutate\(\{ web_search: !current\.web_search \}\)/)
-  assert.match(source, /settings\.mutate\(\{ image_generation: !current\.image_generation \}\)/)
-  assert.match(source, /id="new-thread-web-search"/)
-  assert.match(source, /id="default-thread-web-search"/)
-  assert.match(source, /value\.web_search !== defaults\.data\.web_search/)
-  assert.match(source, /value\.image_generation !== defaults\.data\.image_generation/)
+test("thread settings live in the composer popover while native tools are always injected", () => {
+  const popover = readFileSync(new URL("../src/components/thread-settings-popover.tsx", import.meta.url), "utf8")
+  assert.match(source, /import \{ ThreadSettingsPopover \} from "@\/components\/thread-settings-popover"/)
+  assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 2)
+  assert.match(popover, /REASONING_EFFORTS = \["low", "medium", "high", "xhigh", "max"\]/)
+  assert.match(popover, /ZapIcon/)
+  assert.match(popover, /<Switch aria-label=\{t\.fastMode\}/)
+  assert.equal(source.match(/web_search/g)?.length, 1)
+  assert.equal(source.match(/image_generation/g)?.length, 1)
+  assert.doesNotMatch(source, /id="new-thread-web-search"/)
+  assert.doesNotMatch(source, /id="default-thread-web-search"/)
+  assert.doesNotMatch(source, /settings\.mutate\(\{ web_search/)
 })
 
 test("the management surfaces expose integration keys and SQLite-free Worker pairing", () => {

@@ -594,7 +594,7 @@ async fn inference_keeps_prefix_and_tools_when_the_last_online_worker_disconnect
 }
 
 #[tokio::test]
-async fn inference_follows_thread_native_tool_switches() {
+async fn inference_always_injects_native_web_search_and_image_generation() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "tool-switch-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -612,7 +612,7 @@ async fn inference_follows_thread_native_tool_switches() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for index in 0..3 {
+        for index in 0..1 {
             let (mut socket, _) = listener.accept().await.unwrap();
             requests.push(read_json_request(&mut socket).await);
             let body = json!({
@@ -634,27 +634,15 @@ async fn inference_follows_thread_native_tool_switches() {
         linkit_bot_token: String::new(),
         linkit_username: String::new(),
     };
-    for (web_search, image_generation) in [(false, false), (true, false), (false, true)] {
-        let thread_id = thread.id.clone();
-        user_db(&state, &user, false, move |connection| {
-            connection.execute(
-                "UPDATE threads SET web_search=?,image_generation=? WHERE id=?",
-                params![web_search as i64, image_generation as i64, thread_id],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        let input = input_record(&state, &user, &thread).await;
-        let (_tx, mut rx) = tokio::sync::watch::channel(false);
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            request_agent(&state, &user, &thread, &integrations, input, &mut rx),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    }
+    let input = input_record(&state, &user, &thread).await;
+    let (_tx, mut rx) = tokio::sync::watch::channel(false);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &integrations, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let requests = server.await.unwrap();
     let names = |request: &Value| {
         request["tools"]
@@ -677,11 +665,7 @@ async fn inference_follows_thread_native_tool_switches() {
         names(&requests[0]),
         ["read_context", "bash", "browser_control", "computer_use"]
     );
-    assert!(natives(&requests[0]).is_empty());
-    assert_eq!(names(&requests[1]), names(&requests[0]));
-    assert_eq!(natives(&requests[1]), ["web_search"]);
-    assert_eq!(names(&requests[2]), names(&requests[0]));
-    assert_eq!(natives(&requests[2]), ["image_generation"]);
+    assert_eq!(natives(&requests[0]), ["web_search", "image_generation"]);
     for request in &requests {
         assert_eq!(request["tool_choice"], "auto");
     }
@@ -836,8 +820,6 @@ async fn thread_titles_use_the_latest_input_and_leave_reasoning_headroom() {
             model: Some("test-model".to_owned()),
             reasoning_effort: None,
             service_tier_fast: None,
-            web_search: None,
-            image_generation: None,
         },
     )
     .await
