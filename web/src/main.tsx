@@ -23,6 +23,7 @@ import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitMyInfo, LinkitProvider } from "linkit-react-components"
 import {
   ActivityIcon,
+  ArrowLeftIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -58,6 +59,7 @@ import { formattedTime } from "@/lib/time"
 import { pollThreadHistory, type HistoryRecord } from "@/lib/thread-history"
 import { handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
+import { useIsDesktopLayout } from "@/hooks/use-mobile"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
@@ -75,6 +77,7 @@ import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
 import { ThreadHistory } from "@/components/thread-history"
+import { ThreadList } from "@/components/thread-list"
 import { ThreadLink, ThreadStatusBadge } from "@/components/thread-status"
 import { ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
@@ -336,6 +339,7 @@ const copy = {
     emptyTitle: "No threads yet",
     emptyDescription: "Start a focused thread. Every thread has its own history and request state.",
     chat: "Thread",
+    backToThreads: "Back to thread list",
     send: "Send",
     sendShortcut: "Enter to send · Shift + Enter for a new line",
     startThreadShortcut: "Enter to start · Shift + Enter for a new line",
@@ -606,6 +610,7 @@ const copy = {
     emptyTitle: "还没有线程",
     emptyDescription: "创建一个聚焦的线程。每个线程都拥有独立的历史和请求状态。",
     chat: "线程",
+    backToThreads: "返回线程列表",
     send: "发送",
     sendShortcut: "Enter 发送 · Shift + Enter 换行",
     startThreadShortcut: "Enter 开始线程 · Shift + Enter 换行",
@@ -1156,7 +1161,7 @@ function WorkspaceShell({
           />}
         >
           <Routes>
-            <Route path="/threads" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
+            <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
             <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
             <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} onCreate={() => navigate("/threads")} />} />
             <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
@@ -1198,9 +1203,24 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   return t("threads")
 }
 
+function ThreadsHomePage({ sdk, userId, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
+  const desktop = useIsDesktopLayout()
+  if (desktop) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />
+  return <ThreadListPage threads={threads} threadsLoading={threadsLoading} />
+}
+
+function ThreadListPage({ threads, threadsLoading }: { threads: Thread[]; threadsLoading: boolean }) {
+  const { language } = useUi()
+  const navigate = useNavigate()
+  return <main className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
+    <ThreadList threads={threads} loading={threadsLoading} language={language} onCreate={() => navigate("/threads/new")} />
+  </main>
+}
+
 function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
   const { t, language } = useUi()
   const navigate = useNavigate()
+  const desktop = useIsDesktopLayout()
   const client = useQueryClient()
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useOpenAiModels(sdk)
@@ -1232,7 +1252,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
     start.mutate({ ...value, input }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
-    <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
+    {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <p className="text-xs font-medium text-muted-foreground">{t("threads")}</p>
         <Button size="icon-sm" variant="ghost" aria-label={t("newThread")} onClick={() => navigate("/threads")}><PlusIcon /></Button>
@@ -1243,7 +1263,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
         {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
         {Boolean(threadsError) && <p className="px-3 py-2 text-xs text-destructive">{errorMessage(threadsError)}</p>}
       </nav>
-    </aside>
+    </aside>}
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="shrink-0 border-b px-4 py-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
@@ -1304,6 +1324,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
   const navigate = useNavigate()
+  const desktop = useIsDesktopLayout()
   const client = useQueryClient()
   const thread = useQuery({
     queryKey: ["thread", threadId, userId],
@@ -1412,7 +1433,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   const busy = submit.isPending || control.isPending
   const hasHistory = history.data?.some((record) => record.kind !== "activity") ?? false
   return <main className="flex h-full flex-col lg:flex-row">
-    <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
+    {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <p className="text-xs font-medium text-muted-foreground">{t("threads")}</p>
         <Button size="icon-sm" variant="ghost" aria-label={t("newThread")} onClick={onCreate}><PlusIcon /></Button>
@@ -1420,9 +1441,10 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
       <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-9rem)]" aria-label={t("threads")}>
         {threads.map((item) => <ThreadLink key={item.id} thread={item.id === current.id ? current : item} language={language} />)}
       </nav>
-    </aside>
+    </aside>}
     <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
+        {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={() => navigate("/threads")}><ArrowLeftIcon /></Button>}
         {editing ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
           <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
           <Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>

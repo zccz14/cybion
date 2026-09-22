@@ -23,7 +23,8 @@ test("threads are the only conversation hierarchy", () => {
 })
 
 test("new thread preparation waits for the first message before creating a thread", () => {
-  assert.match(source, /path="\/threads" element=\{<NewThreadPage/)
+  assert.match(source, /path="\/threads" element=\{<ThreadsHomePage/)
+  assert.match(source, /path="\/threads\/new" element=\{<NewThreadPage/)
   assert.match(source, /function NewThreadPage\(/)
   assert.match(source, /\/api\/threads\/start/)
   assert.match(source, /newThreadPrompt/)
@@ -101,4 +102,17 @@ test("the shadcn tooltip context and layered error boundaries protect the shell"
   assert.match(source, /import \{ ErrorBoundary, ErrorBoundaryFallback \} from "@\/components\/error-boundary"/)
   assert.match(source, /resetKeys=\{\[location\.pathname\]\}/)
   assert.match(source, /<ErrorBoundary fallback=/)
+})
+
+test("narrow screens render a dedicated searchable thread list instead of the sidebar switcher", () => {
+  const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
+  const hooks = readFileSync(new URL("../src/hooks/use-mobile.ts", import.meta.url), "utf8")
+  assert.match(source, /function ThreadsHomePage\(/)
+  assert.match(source, /function ThreadListPage\(/)
+  assert.match(source, /import \{ ThreadList \} from "@\/components\/thread-list"/)
+  assert.equal(source.match(/\{desktop && <aside/g)?.length, 2)
+  assert.match(source, /aria-label=\{t\("backToThreads"\)\}/)
+  assert.match(hooks, /export function useIsDesktopLayout\(/)
+  assert.match(list, /matchesThreadQuery/)
+  assert.match(list, /onCreate/)
 })
