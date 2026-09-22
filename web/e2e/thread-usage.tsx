@@ -2,7 +2,7 @@ import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
 import { ThreadLink } from "../src/components/thread-status"
-import { ThreadUsagePanel } from "../src/components/thread-usage"
+import { ThreadContextUsage, ThreadUsagePanel } from "../src/components/thread-usage"
 import { emptyThreadUsage, type ThreadUsage } from "../src/lib/thread-usage"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import "../src/styles.css"
@@ -19,7 +19,7 @@ function Fixture() {
         <ThreadLink thread={{ id: "zero", title: "No cache hit", display_status: "completed", usage: { ...emptyThreadUsage, input_tokens: 100, total_tokens: 100, cache_hit_rate: 0 } }} language={language} />
         <ThreadLink thread={{ id: "large", title: "Very large usage", display_status: "completed", usage: { ...emptyThreadUsage, input_tokens: 1000000000000, total_tokens: 1000000000000, cached_tokens: 1000000000000, cache_hit_rate: 1 } }} language={language} />
       </nav>
-      <section className="min-w-0 flex-1 rounded-lg border bg-card"><ThreadUsagePanel usage={usage} language={language} /></section>
+      <section className="min-w-0 flex-1 rounded-lg border bg-card"><ThreadUsagePanel usage={usage} language={language} /><div className="px-4 py-2"><ThreadContextUsage context={{ tokens: 411300, budget: 200000 }} language={language} /></div></section>
     </div>
   </main>
 }

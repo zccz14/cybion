@@ -10,6 +10,7 @@ function Fixture() {
   const [model, setModel] = useState("deepseek-flash")
   const [effort, setEffort] = useState("medium")
   const [fast, setFast] = useState(false)
+  const [budget, setBudget] = useState<number | null>(null)
   return <main className="flex min-h-svh flex-col gap-6 p-5">
     <header className="flex items-center gap-3">
       <h1 className="mr-auto text-sm font-semibold">Cybion · Thread settings</h1>
@@ -20,7 +21,8 @@ function Fixture() {
       <span data-testid="model">{model}</span>
       <span data-testid="effort">{effort}</span>
       <span data-testid="fast">{String(fast)}</span>
-      <ThreadSettingsPopover model={model} reasoningEffort={effort} fast={fast} models={models} language={language} onModelChange={setModel} onReasoningChange={setEffort} onFastChange={setFast} />
+      <span data-testid="budget">{String(budget)}</span>
+      <ThreadSettingsPopover model={model} reasoningEffort={effort} fast={fast} models={models} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} onModelChange={setModel} onReasoningChange={setEffort} onFastChange={setFast} />
     </div>
   </main>
 }

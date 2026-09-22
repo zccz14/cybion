@@ -2,7 +2,8 @@
 
 Every conversation is an independent thread owned by one Auth Mini user. A
 thread is identified by a time-ordered UUID v7 and carries a title, model,
-reasoning effort, Fast mode, status, timestamps, and an append-only history.
+reasoning effort, Fast mode, an optional context-budget override, status,
+timestamps, and an append-only history.
 Inference requests always include the provider-native `web_search` and
 `image_generation` tools. Users and API clients can append input to any thread
 they own.
@@ -35,6 +36,12 @@ The composer also offers **Stop**, **Continue reasoning**, and **Compact**:
 - Compact creates a validated checkpoint from the current context, preserves
   all source records, and returns to `idle` without resuming inference. The
   next continuation starts from that checkpoint. Compaction can also be stopped.
+
+Before each inference request, the thread also compacts automatically once its
+estimated replayed context exceeds the effective context budget (per-thread
+override, otherwise the user's `thread_defaults.context_budget_tokens`, built-in
+default 200,000 tokens; `0` disables proactive compaction). Both endpoints and
+the composer popover expose the override.
 
 Continue and Compact require saved protocol history and an idle or failed
 thread. Stop the running request first. New user input can still supersede a

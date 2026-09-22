@@ -20,7 +20,13 @@ All request kinds and statuses are included: inference, compaction, title
 creation, retries, and failed/cancelled requests with reported usage. Request
 status is not a substitute for whether Tokens were consumed. Each audit row is
 counted once; updating its streaming/final state does not add a second copy.
-This is reported usage, not a billing estimate or current context length.
+This is reported usage, not a billing estimate.
+
+The conversation header separately shows the latest context: the input Tokens of
+the most recent inference request (`context_tokens`) against the effective
+automatic compaction budget (`context_budget_tokens` on the thread, falling back
+to the user's default). The chip turns warning-colored once the recorded context
+reaches the budget, and reads "auto-compaction off" when the budget is 0.
 
 SQL sums recorded values independently for each Token field and skips `NULL`
 values. Cache rate divides summed cached input by summed input, rather than

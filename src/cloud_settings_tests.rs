@@ -121,7 +121,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
     let client = reqwest::Client::new();
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","reasoning_effort":"max","service_tier_fast":true});
+    let defaults = json!({"model":"gpt-6-astra","reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -552,6 +552,7 @@ async fn available_models_come_from_the_configured_endpoint_catalog() {
         model: "meta-llama/Llama-3.1-8B-Instruct".to_owned(),
         reasoning_effort: "high".to_owned(),
         service_tier_fast: false,
+        context_budget_tokens: 150_000,
     };
     assert_eq!(
         update_thread_defaults(
@@ -678,6 +679,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         model: "gpt-6-astra".to_owned(),
         reasoning_effort: "max".to_owned(),
         service_tier_fast: true,
+        context_budget_tokens: 150_000,
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -770,6 +772,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         model: "gpt-6-astra".to_owned(),
         reasoning_effort: "high".to_owned(),
         service_tier_fast: true,
+        context_budget_tokens: 150_000,
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -790,6 +793,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 model: model.to_owned(),
                 reasoning_effort: effort.to_owned(),
                 service_tier_fast: false,
+                context_budget_tokens: 150_000,
             }),
         )
         .await
@@ -797,7 +801,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
     assert_eq!(
-        read_thread_defaults(State(state), browser_identity_for(&user))
+        read_thread_defaults(State(state.clone()), browser_identity_for(&user))
             .await
             .unwrap()
             .0,
@@ -811,6 +815,28 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
     ] {
         assert!(serde_json::from_value::<ThreadDefaults>(input).is_err());
     }
+    for budget in [-1_i64, MAX_CONTEXT_BUDGET_TOKENS + 1] {
+        let error = update_thread_defaults(
+            State(state.clone()),
+            browser_identity_for(&user),
+            Json(ThreadDefaults {
+                model: "gpt-6-astra".to_owned(),
+                reasoning_effort: "high".to_owned(),
+                service_tier_fast: true,
+                context_budget_tokens: budget,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        read_thread_defaults(State(state), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0,
+        saved
+    );
 }
 
 #[test]
@@ -853,6 +879,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
                 model: "gpt-6-astra".to_owned(),
                 reasoning_effort: "max".to_owned(),
                 service_tier_fast: true,
+                context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
             }
         );
     }
