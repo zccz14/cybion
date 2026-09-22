@@ -17,3 +17,19 @@ export function useIsMobile() {
 
   return !!isMobile
 }
+
+const DESKTOP_LAYOUT_BREAKPOINT = 1024
+
+// Matches Tailwind's lg breakpoint, where the thread pages switch to side-by-side columns.
+export function useIsDesktopLayout() {
+  const [isDesktop, setIsDesktop] = React.useState(() => window.matchMedia(`(min-width: ${DESKTOP_LAYOUT_BREAKPOINT}px)`).matches)
+
+  React.useEffect(() => {
+    const mql = window.matchMedia(`(min-width: ${DESKTOP_LAYOUT_BREAKPOINT}px)`)
+    const onChange = () => setIsDesktop(mql.matches)
+    mql.addEventListener("change", onChange)
+    return () => mql.removeEventListener("change", onChange)
+  }, [])
+
+  return isDesktop
+}
