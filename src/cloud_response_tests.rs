@@ -91,7 +91,7 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
     .await
     .unwrap();
     assert_eq!(
-        history_for(&state, &user, thread.id.clone())
+        history_for(&state, &user, thread.id.clone(), 0)
             .await
             .unwrap()
             .len(),
@@ -129,7 +129,9 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         !task.is_finished(),
         "Worker must be queued while the SSE is still open"
     );
-    let records = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let records = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     assert_eq!(
         records
             .iter()
@@ -160,7 +162,9 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         1,
         "duplicate done must not execute twice"
     );
-    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     let output = history.iter().find(|r| r.kind == "tool_output").unwrap();
     assert_eq!(output.payload["type"], "custom_tool_call_output");
     assert_eq!(output.payload["call_id"], "custom-1");
@@ -252,7 +256,7 @@ async fn false_end_turn_continues_and_preserves_commentary_phase_in_replay() {
             .any(|item| item["phase"] == "commentary" && item["content"][0]["text"] == "working")
     );
     assert_eq!(
-        history_for(&state, &user, thread.id)
+        history_for(&state, &user, thread.id, 0)
             .await
             .unwrap()
             .iter()
@@ -275,7 +279,7 @@ async fn invalid_custom_tools_are_answered_with_the_matching_output_type() {
             .unwrap(),
         Some(PendingToolCall::Answered(_))
     ));
-    let history = history_for(&state, &user, thread.id).await.unwrap();
+    let history = history_for(&state, &user, thread.id, 0).await.unwrap();
     assert_eq!(history.last().unwrap().payload["call_id"], "custom-id");
     assert_eq!(
         history.last().unwrap().payload["type"],
@@ -311,7 +315,9 @@ async fn read_context_tool_output(
             .unwrap(),
         Some(PendingToolCall::Answered(_))
     ));
-    let history = history_for(state, user, thread.id.clone()).await.unwrap();
+    let history = history_for(state, user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     let output = history.last().unwrap();
     assert_eq!(output.kind, "tool_output");
     assert_eq!(output.payload["type"], "function_call_output");
@@ -488,7 +494,9 @@ async fn offline_worker_calls_are_answered_without_queueing_execution() {
                 .unwrap(),
             Some(PendingToolCall::Answered(_))
         ));
-        let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+        let history = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
         let output = history.last().unwrap();
         assert_eq!(output.payload["call_id"], id);
         assert_eq!(
@@ -688,7 +696,9 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
         .await
         .unwrap();
     }
-    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     assert_eq!(history.len(), 3);
     assert_eq!(history[2].kind, "activity");
     assert_eq!(history[2].payload["call_id"], "old-call");

@@ -2839,13 +2839,19 @@ async fn delete_thread(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct ThreadHistoryQuery {
+    after: Option<i64>,
+}
+
 async fn thread_history(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ThreadHistoryQuery>,
 ) -> Result<Json<Vec<HistoryRecord>>, ApiError> {
     let id = thread_id(&id)?;
-    let records = history_for(&state, &identity.user, id).await?;
+    let records = history_for(&state, &identity.user, id, query.after.unwrap_or(0)).await?;
     Ok(Json(records))
 }
 
@@ -2922,14 +2928,15 @@ async fn history_for(
     state: &AppState,
     user: &User,
     id: String,
+    after: i64,
 ) -> Result<Vec<HistoryRecord>, ApiError> {
     user_db(state, user, true, move |connection| {
         load_thread(connection, &id)?;
         let mut statement = connection.prepare(
             "SELECT id,thread_id,kind,payload,created_at
-             FROM history_records WHERE thread_id=? ORDER BY id",
+             FROM history_records WHERE thread_id=? AND id>? ORDER BY id",
         )?;
-        let rows = statement.query_map([id], history_from_row)?;
+        let rows = statement.query_map(params![id, after], history_from_row)?;
         let mut records = Vec::new();
         for row in rows {
             records.push(row?);
@@ -6215,7 +6222,7 @@ async fn external_thread_history(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Vec<HistoryRecord>>, ApiError> {
     Ok(Json(
-        history_for(&state, &identity.user, thread_id(&id)?).await?,
+        history_for(&state, &identity.user, thread_id(&id)?, 0).await?,
     ))
 }
 
@@ -6724,7 +6731,7 @@ mod tests {
         .unwrap();
         assert_eq!(list_threads_for(&state, &first).await.unwrap().len(), 1);
         assert_eq!(list_threads_for(&state, &second).await.unwrap().len(), 1);
-        let records = history_for(&state, &first, thread.id.clone())
+        let records = history_for(&state, &first, thread.id.clone(), 0)
             .await
             .unwrap();
         assert_eq!(records.len(), 3);
@@ -6737,6 +6744,53 @@ mod tests {
         );
         assert_eq!(records[2].kind, "checkpoint");
         assert!(read_thread_for(&state, &second, thread.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn history_after_returns_only_later_records() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "history-after-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let ids = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                Ok(vec![
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "input",
+                        json!({"role":"user","content":"one"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "activity",
+                        json!({"role":"system","content":"two"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "activity",
+                        json!({"role":"system","content":"three"}),
+                    ),
+                ])
+            }
+        })
+        .await
+        .unwrap();
+        let all = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(all.iter().map(|record| record.id).collect::<Vec<_>>(), ids);
+        let tail = history_for(&state, &user, thread.id.clone(), ids[0])
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.iter().map(|record| record.id).collect::<Vec<_>>(),
+            vec![ids[1], ids[2]]
+        );
+        let empty = history_for(&state, &user, thread.id, ids[2]).await.unwrap();
+        assert!(empty.is_empty());
     }
 
     #[test]

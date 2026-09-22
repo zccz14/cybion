@@ -176,7 +176,7 @@ async fn browser_controls_accept_empty_posts_and_enforce_authentication_and_owne
         wait_finished(&state, &user, &thread).await;
     }
     assert_eq!(
-        history_for(&state, &user, thread.id)
+        history_for(&state, &user, thread.id, 0)
             .await
             .unwrap()
             .iter()
@@ -214,7 +214,9 @@ async fn continue_replays_saved_history_without_a_new_prompt() {
             .await
             .unwrap()
     );
-    let before = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let before = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     let next = record(&state, &user, &thread, RequestInput::Continue).await;
     assert!(next > before.last().unwrap().id);
     assert!(
@@ -252,7 +254,9 @@ async fn continue_replays_saved_history_without_a_new_prompt() {
             .any(|item| item["content"] == "previous answer")
     );
     assert!(!request.to_string().contains("thread_control"));
-    let after = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let after = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     assert_eq!(
         serde_json::to_value(&after[..before.len()]).unwrap(),
         serde_json::to_value(&before).unwrap()
@@ -314,7 +318,9 @@ async fn cancel_closes_the_in_flight_stream_and_preserves_committed_records() {
     .unwrap();
     let before = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+            let history = history_for(&state, &user, thread.id.clone(), 0)
+                .await
+                .unwrap();
             if history.len() == 2 {
                 break history;
             }
@@ -332,7 +338,9 @@ async fn cancel_closes_the_in_flight_stream_and_preserves_committed_records() {
     );
     server.await.unwrap();
     wait_finished(&state, &user, &thread).await;
-    let after = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let after = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     assert_eq!(
         serde_json::to_value(&after[..before.len()]).unwrap(),
         serde_json::to_value(&before).unwrap()
@@ -361,7 +369,10 @@ async fn cancel_closes_the_in_flight_stream_and_preserves_committed_records() {
     assert_eq!(audits, ["cancelled"]);
     cancel_for(&state, &user, thread.id.clone()).await.unwrap();
     assert_eq!(
-        history_for(&state, &user, thread.id).await.unwrap().len(),
+        history_for(&state, &user, thread.id, 0)
+            .await
+            .unwrap()
+            .len(),
         after.len(),
         "stopping an idle thread is idempotent"
     );
@@ -433,7 +444,9 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
     assert!(request.get("tools").is_none());
     assert_eq!(request["tool_choice"], "none");
     assert!(!request.to_string().contains("thread_control"));
-    let history = history_for(&state, &user, thread.id.clone()).await.unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
     assert_eq!(
         history.iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(),
         ["input", "activity", "checkpoint"]
@@ -518,7 +531,7 @@ async fn cancelled_generation_cannot_checkpoint_dispatch_tools_or_clear_its_repl
             .status,
         "running"
     );
-    let history = history_for(&state, &user, thread.id).await.unwrap();
+    let history = history_for(&state, &user, thread.id, 0).await.unwrap();
     assert!(history[1..].iter().all(|r| r.kind == "activity"));
     assert_ne!(first, next);
 }
@@ -538,7 +551,7 @@ async fn controls_reject_empty_busy_and_other_users_threads_without_appending() 
         assert_eq!(error.status, StatusCode::CONFLICT);
     }
     assert!(
-        history_for(&state, &user, thread.id.clone())
+        history_for(&state, &user, thread.id.clone(), 0)
             .await
             .unwrap()
             .is_empty()
@@ -572,7 +585,7 @@ async fn controls_reject_empty_busy_and_other_users_threads_without_appending() 
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        history_for(&state, &user, thread.id.clone())
+        history_for(&state, &user, thread.id.clone(), 0)
             .await
             .unwrap()
             .len(),
@@ -676,7 +689,7 @@ async fn cancel_marks_all_outstanding_worker_calls_and_keeps_late_results_as_act
     )
     .await
     .unwrap();
-    let history = history_for(&state, &user, thread.id).await.unwrap();
+    let history = history_for(&state, &user, thread.id, 0).await.unwrap();
     assert_eq!(history.last().unwrap().kind, "activity");
     assert_eq!(history.last().unwrap().payload["call_id"], "delivered");
 }
