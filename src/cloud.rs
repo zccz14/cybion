@@ -60,6 +60,10 @@ const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the user's request. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
+
+// Title requests must cover hidden reasoning tokens: reasoning-first models
+// report an incomplete response before emitting the title when the cap is small.
+const THREAD_TITLE_MAX_OUTPUT_TOKENS: usize = 1024;
 const WORKER_ONLINE_SECONDS: i64 = 45;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
@@ -3721,7 +3725,7 @@ async fn maybe_name_thread(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
-    input_record_id: i64,
+    record_idx: i64,
 ) -> ThreadView {
     if thread.title != "Untitled thread" {
         return thread.clone();
@@ -3729,10 +3733,12 @@ async fn maybe_name_thread(
     let source = user_db(state, user, false, {
         let thread_id = thread.id.clone();
         move |connection| {
+            // Continue requests finalize on a thread-control record, so read the
+            // latest user input at or before the finalized record.
             connection
                 .query_row(
-                    "SELECT payload FROM history_records WHERE id=? AND thread_id=? AND kind='input'",
-                    params![input_record_id, thread_id],
+                    "SELECT payload FROM history_records WHERE thread_id=? AND kind='input' AND id<=? ORDER BY id DESC LIMIT 1",
+                    params![thread_id, record_idx],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()
@@ -3767,10 +3773,10 @@ async fn maybe_name_thread(
         state,
         user,
         &thread.id,
-        Some(input_record_id),
+        Some(record_idx),
         "title_generation",
-        input_record_id,
-        input_record_id,
+        record_idx,
+        record_idx,
         &integrations,
         &thread.model,
         None,
@@ -3779,13 +3785,21 @@ async fn maybe_name_thread(
         false,
         false,
         false,
-        Some(40),
+        Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
         None,
         None,
     )
     .await;
-    let Ok(response) = response else {
-        return thread.clone();
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(
+                thread_id = %thread.id,
+                error = %error.message,
+                "thread title generation failed"
+            );
+            return thread.clone();
+        }
     };
     let Some(title) =
         generated_thread_title(response_text(&response.value).as_deref().unwrap_or(""))
