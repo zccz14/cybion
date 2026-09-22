@@ -4,7 +4,7 @@ import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 
-test("the rename form offers generating a title from the full thread context", () => {
+test("the title row offers generating a title from the full thread context", () => {
   assert.match(
     source,
     /api<Thread>\(sdk, `\/api\/threads\/\$\{encodeURIComponent\(threadId\)\}\/title`, \{ method: "POST" \}\)/,
