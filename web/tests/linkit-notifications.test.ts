@@ -5,7 +5,7 @@ const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const notifications = readFileSync(new URL("../src/components/linkit-notifications.tsx", import.meta.url), "utf8")
 test("notification configuration is a separate optional surface with delivery status and no legacy Bot API", () => {
   assert.match(main, /<LinkitNotifications language=\{language\} sessionId=/)
-  assert.match(main, /refreshIntegrations: "开通或刷新 OpenAI-LB"/)
+  assert.match(main, /openai: "Responses-compatible API"/)
   assert.doesNotMatch(main, /integrations\.data\.linkit_configured/)
   assert.match(notifications, /last_error/)
   assert.match(notifications, /last_success_at/)

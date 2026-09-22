@@ -228,6 +228,7 @@ async fn false_end_turn_continues_and_preserves_commentary_phase_in_replay() {
     let integrations = IntegrationSettings {
         openai_consumer_id: "fixture".to_owned(),
         openai_consumer_secret: "fixture".to_owned(),
+        api_key: String::new(),
         openai_base_url: format!("http://{address}"),
         linkit_bot_id: String::new(),
         linkit_bot_token: String::new(),
@@ -550,6 +551,7 @@ async fn inference_keeps_prefix_and_tools_when_the_last_online_worker_disconnect
     let integrations = IntegrationSettings {
         openai_consumer_id: "fixture".to_owned(),
         openai_consumer_secret: "fixture".to_owned(),
+        api_key: String::new(),
         openai_base_url: format!("http://{address}"),
         linkit_bot_id: String::new(),
         linkit_bot_token: String::new(),

@@ -43,6 +43,7 @@ async fn model(
     let settings = IntegrationSettings {
         openai_consumer_id: "fixture".into(),
         openai_consumer_secret: "fixture".into(),
+        api_key: String::new(),
         openai_base_url: format!("http://{}", listener.local_addr().unwrap()),
         linkit_bot_id: String::new(),
         linkit_bot_token: String::new(),
@@ -350,6 +351,7 @@ async fn write_restart_fixture() {
     let settings = IntegrationSettings {
         openai_consumer_id: "fixture".into(),
         openai_consumer_secret: "fixture".into(),
+        api_key: String::new(),
         openai_base_url: base,
         linkit_bot_id: String::new(),
         linkit_bot_token: String::new(),

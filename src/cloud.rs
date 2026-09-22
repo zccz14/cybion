@@ -541,6 +541,10 @@ fn app(state: AppState) -> Router {
             "/api/integrations",
             get(integrations).put(update_integrations),
         )
+        .route(
+            "/api/integrations/openai",
+            get(openai_api_config).put(update_openai_api_config),
+        )
         .route("/api/integrations/refresh", post(refresh_integrations))
         .route(
             "/api/integrations/linkit",
@@ -1013,6 +1017,7 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
   openai_consumer_id TEXT NOT NULL DEFAULT '',
   openai_consumer_secret TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
   openai_base_url TEXT NOT NULL DEFAULT 'https://openai.ntnl.io/v1',
   user_agent TEXT NOT NULL DEFAULT '',
   originator TEXT NOT NULL DEFAULT '',
@@ -1154,6 +1159,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         )?;
     }
     for (name, definition) in [
+        ("api_key", "TEXT NOT NULL DEFAULT ''"),
         ("user_agent", "TEXT NOT NULL DEFAULT ''"),
         ("originator", "TEXT NOT NULL DEFAULT ''"),
     ] {
@@ -1460,6 +1466,12 @@ struct IntegrationStatusView {
     originator: String,
 }
 
+#[derive(Debug, Serialize)]
+struct OpenAiApiConfigView {
+    base_url: String,
+    api_key_configured: bool,
+}
+
 #[derive(Clone, Serialize)]
 struct ExperimentalFeaturesView {
     thread_id_header: bool,
@@ -1480,6 +1492,14 @@ struct UpdateExperimentalFeaturesInput {
 struct UpdateIntegrationHeadersInput {
     user_agent: Option<String>,
     originator: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateOpenAiApiConfigInput {
+    base_url: String,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1683,8 +1703,11 @@ type WorkerCallResultRow = (String, Option<i64>, String, Option<i64>, String, St
 
 #[derive(Clone)]
 struct IntegrationSettings {
+    // `openai_consumer_*` remains for existing OpenAI-LB users; new user-level
+    // configuration is stored in the explicit Responses-compatible fields.
     openai_consumer_id: String,
     openai_consumer_secret: String,
+    api_key: String,
     openai_base_url: String,
     linkit_bot_id: String,
     linkit_bot_token: String,
@@ -2097,9 +2120,7 @@ fn integration_status_view(
     headers: &GlobalRequestHeaders,
 ) -> IntegrationStatusView {
     IntegrationStatusView {
-        openai_configured: !settings.openai_consumer_id.is_empty()
-            && !settings.openai_consumer_secret.is_empty()
-            && !settings.openai_base_url.is_empty(),
+        openai_configured: openai_integration_ready(settings),
         openai_consumer_id: (!settings.openai_consumer_id.is_empty())
             .then(|| settings.openai_consumer_id.clone()),
         openai_base_url: settings.openai_base_url.clone(),
@@ -2118,6 +2139,73 @@ async fn integrations(
     .await?;
     let headers = global_request_headers(&state).await?;
     Ok(Json(integration_status_view(&settings, &headers)))
+}
+
+fn openai_api_config_view(settings: &IntegrationSettings) -> OpenAiApiConfigView {
+    OpenAiApiConfigView {
+        base_url: settings.openai_base_url.clone(),
+        api_key_configured: !openai_api_key(settings).is_empty(),
+    }
+}
+
+async fn openai_api_config(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<OpenAiApiConfigView>, ApiError> {
+    let settings = user_db(&state, &identity.user, true, |connection| {
+        integration_settings(connection)
+    })
+    .await?;
+    Ok(Json(openai_api_config_view(&settings)))
+}
+
+fn validate_openai_base_url(value: String) -> Result<String, ApiError> {
+    let value = value.trim().trim_end_matches('/').to_owned();
+    let parsed = url::Url::parse(&value)
+        .map_err(|_| ApiError::bad_request("base_url must be a valid HTTP or HTTPS URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(ApiError::bad_request(
+            "base_url must be a valid HTTP or HTTPS URL",
+        ));
+    }
+    if value.len() > 2048 || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "base_url must contain at most 2048 visible characters",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_openai_api_key(value: String) -> Result<String, ApiError> {
+    let value = value.trim().to_owned();
+    if value.len() > 4096 || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "api_key must contain at most 4096 visible characters",
+        ));
+    }
+    Ok(value)
+}
+
+async fn update_openai_api_config(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<UpdateOpenAiApiConfigInput>,
+) -> Result<Json<OpenAiApiConfigView>, ApiError> {
+    let base_url = validate_openai_base_url(input.base_url)?;
+    let api_key = input.api_key.map(validate_openai_api_key).transpose()?;
+    let _guard = lock_integrations(&state, format!("openai:{}", identity.user.id)).await;
+    let mut settings = user_db(&state, &identity.user, true, |connection| {
+        integration_settings(connection)
+    })
+    .await?;
+    settings.openai_consumer_id.clear();
+    settings.openai_consumer_secret.clear();
+    settings.openai_base_url = base_url;
+    if let Some(api_key) = api_key {
+        settings.api_key = api_key;
+    }
+    openai_integration::save(&state, &identity.user, &settings).await?;
+    Ok(Json(openai_api_config_view(&settings)))
 }
 
 fn request_header_setting(value: String, field: &str) -> Result<String, ApiError> {
@@ -2175,8 +2263,11 @@ async fn refresh_integrations(
         integration_settings(connection)
     })
     .await?;
-    openai_integration::reconcile(&state, &identity.user, &identity.bearer, &mut settings).await?;
-    openai_integration::verify_ready(&state, &identity.bearer, &settings).await?;
+    if !settings.openai_consumer_id.is_empty() {
+        openai_integration::reconcile(&state, &identity.user, &identity.bearer, &mut settings)
+            .await?;
+        openai_integration::verify_ready(&state, &identity.bearer, &settings).await?;
+    }
     let headers = global_request_headers(&state).await?;
     Ok(Json(integration_status_view(&settings, &headers)))
 }
@@ -3264,16 +3355,17 @@ fn hash_secret(value: &str) -> String {
 fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, ApiError> {
     let settings = connection
         .query_row(
-            "SELECT openai_consumer_id,openai_consumer_secret,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
+            "SELECT openai_consumer_id,openai_consumer_secret,api_key,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
             [],
             |row| {
                 Ok(IntegrationSettings {
                     openai_consumer_id: row.get(0)?,
                     openai_consumer_secret: row.get(1)?,
-                    openai_base_url: row.get(2)?,
-                    linkit_bot_id: row.get(3)?,
-                    linkit_bot_token: row.get(4)?,
-                    linkit_username: row.get(5)?,
+                    api_key: row.get(2)?,
+                    openai_base_url: row.get(3)?,
+                    linkit_bot_id: row.get(4)?,
+                    linkit_bot_token: row.get(5)?,
+                    linkit_username: row.get(6)?,
                 })
             },
         )
@@ -3281,6 +3373,7 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
         .unwrap_or_else(|| IntegrationSettings {
             openai_consumer_id: String::new(),
             openai_consumer_secret: String::new(),
+            api_key: String::new(),
             openai_base_url: OPENAI_BASE_URL.to_owned(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
@@ -3290,9 +3383,15 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
 }
 
 fn openai_integration_ready(settings: &IntegrationSettings) -> bool {
-    !settings.openai_consumer_id.is_empty()
-        && !settings.openai_consumer_secret.is_empty()
-        && !settings.openai_base_url.is_empty()
+    !openai_api_key(settings).is_empty() && !settings.openai_base_url.is_empty()
+}
+
+fn openai_api_key(settings: &IntegrationSettings) -> &str {
+    if settings.api_key.is_empty() {
+        &settings.openai_consumer_secret
+    } else {
+        &settings.api_key
+    }
 }
 
 #[cfg(test)]
@@ -3304,10 +3403,11 @@ async fn save_integration_settings(
     let saved = settings.clone();
     user_db(state, user, true, move |connection| {
         connection.execute(
-            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username,updated_at) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,openai_consumer_secret=excluded.openai_consumer_secret,openai_base_url=excluded.openai_base_url,linkit_bot_id=excluded.linkit_bot_id,linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
+            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,api_key,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username,updated_at) VALUES(1,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,openai_consumer_secret=excluded.openai_consumer_secret,api_key=excluded.api_key,openai_base_url=excluded.openai_base_url,linkit_bot_id=excluded.linkit_bot_id,linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
             params![
                 saved.openai_consumer_id,
                 saved.openai_consumer_secret,
+                saved.api_key,
                 saved.openai_base_url,
                 saved.linkit_bot_id,
                 saved.linkit_bot_token,
@@ -3341,7 +3441,7 @@ async fn ensure_openai_integration(
         integration_settings(connection)
     })
     .await?;
-    if settings.openai_consumer_id.is_empty() || settings.openai_consumer_secret.is_empty() {
+    if openai_api_key(&settings).is_empty() {
         openai_integration::reconcile(state, user, bearer, &mut settings).await?;
         openai_integration::verify_ready(state, bearer, &settings).await?;
     }
@@ -3362,7 +3462,9 @@ async fn required_openai_integration(
     .await?;
     openai_integration_ready(&settings)
         .then_some(settings)
-        .ok_or_else(|| ApiError::conflict("configure OpenAI-LB before using this external API"))
+        .ok_or_else(|| {
+            ApiError::conflict("configure an OpenAI Responses-compatible API before using this API")
+        })
 }
 
 fn request_key(user: &User, thread_id: &str) -> String {
@@ -3417,10 +3519,7 @@ async fn process_request(
     })
     .await;
     let result = match loaded {
-        Ok((thread, integrations))
-            if !integrations.openai_consumer_secret.is_empty()
-                && !integrations.openai_base_url.is_empty() =>
-        {
+        Ok((thread, integrations)) if openai_integration_ready(&integrations) => {
             if operation == RequestOperation::Compact {
                 thread_controls::compact_request(
                     &state,
@@ -4877,7 +4976,7 @@ async fn send_responses_request(
             "{}/responses",
             integrations.openai_base_url.trim_end_matches('/')
         ))
-        .bearer_auth(&integrations.openai_consumer_secret)
+        .bearer_auth(openai_api_key(integrations))
         .header("Accept", "text/event-stream")
         .json(&payload);
     let headers = global_request_headers(state).await?;
@@ -4991,7 +5090,9 @@ async fn send_responses_request(
             upstream_error_detail(&body)
         );
         if status == StatusCode::UNAUTHORIZED {
-            message.push_str(". Open Configuration and refresh the OpenAI-LB integration, then retry or continue this Thread.");
+            message.push_str(
+                ". Open Configuration and verify the Responses-compatible API key, then retry or continue this Thread.",
+            );
         }
         let error = if status == StatusCode::PAYLOAD_TOO_LARGE || context_overflow_response(&body) {
             ApiError::context_overflow(message)
@@ -7177,8 +7278,9 @@ mod tests {
             ).as_bytes()).await.unwrap();
         });
         let integrations = IntegrationSettings {
-            openai_consumer_id: "consumer".to_owned(),
-            openai_consumer_secret: "secret".to_owned(),
+            openai_consumer_id: String::new(),
+            openai_consumer_secret: "legacy-secret".to_owned(),
+            api_key: "sk-direct".to_owned(),
             openai_base_url: format!("http://{address}"),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
@@ -7216,6 +7318,11 @@ mod tests {
             headers
                 .lines()
                 .any(|line| line.eq_ignore_ascii_case("originator: my-client"))
+        );
+        assert!(
+            headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer sk-direct"))
         );
         assert_eq!(request["store"], false);
         assert_eq!(request["input"][0]["role"], "developer");
@@ -7303,6 +7410,7 @@ mod tests {
         let integrations = IntegrationSettings {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
+            api_key: String::new(),
             openai_base_url: format!("http://{address}"),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
@@ -7412,6 +7520,7 @@ mod tests {
         let integrations = IntegrationSettings {
             openai_consumer_id: "consumer".to_owned(),
             openai_consumer_secret: "secret".to_owned(),
+            api_key: String::new(),
             openai_base_url: format!("http://{address}"),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
