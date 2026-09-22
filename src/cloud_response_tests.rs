@@ -923,3 +923,101 @@ async fn thread_titles_use_the_latest_input_and_leave_reasoning_headroom() {
     .unwrap();
     assert_eq!(stored, "Flaky Thread Titles");
 }
+
+#[tokio::test]
+async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_title() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "context-title-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role": "user", "content": "first question"}),
+            );
+            insert_record(
+                connection,
+                &thread_id,
+                "response_output",
+                json!({"type": "message", "id": "m1", "role": "assistant", "content": [{"type": "output_text", "text": "first answer"}]}),
+            );
+            Ok(insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role": "user", "content": "second question"}),
+            ))
+        }
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_json_request(&mut socket).await;
+        let body = json!({"id":"r1","end_turn":true,"output":[{"id":"m2","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Context Title"}]}]}).to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        request
+    });
+    save_integration_settings(
+        &state,
+        &user,
+        &IntegrationSettings {
+            openai_consumer_id: "fixture".to_owned(),
+            openai_consumer_secret: "fixture".to_owned(),
+            api_key: "fixture-key".to_owned(),
+            openai_base_url: format!("http://{address}"),
+            linkit_bot_id: String::new(),
+            linkit_bot_token: String::new(),
+            linkit_username: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let titled = generate_thread_title_for(&state, &user, "fixture", thread.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(titled.title, "Context Title");
+    let request = server.await.unwrap();
+    let input = request["input"].as_array().unwrap();
+    assert!(
+        input.iter().any(|item| item["content"] == "first question")
+            && input
+                .iter()
+                .any(|item| item["content"] == "second question"),
+        "title requests must replay the whole conversation: {request}"
+    );
+    assert!(
+        input.iter().any(|item| item["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("concise title"))),
+        "the title instruction must close the request: {request}"
+    );
+    assert_eq!(request["max_output_tokens"].as_u64().unwrap(), 1024);
+    let stored: String = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            Ok(connection.query_row(
+                "SELECT title FROM threads WHERE id=?",
+                [&thread_id],
+                |row| row.get(0),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(stored, "Context Title");
+}

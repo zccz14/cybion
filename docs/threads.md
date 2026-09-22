@@ -52,9 +52,13 @@ The authenticated browser endpoints accept an empty POST body:
 | `/api/threads/{id}/cancel` | Updated thread; stopping an idle thread is a no-op |
 | `/api/threads/{id}/continue` | Accepted request with its activity `record_idx` |
 | `/api/threads/{id}/compact` | Accepted request with its activity `record_idx` |
+| `/api/threads/{id}/title` | Updated thread; names it from the full compiled context |
 
-All three operate only within the signed-in user's database. Busy or empty
-threads reject Continue and Compact with HTTP 409. Poll thread history and
+All four operate only within the signed-in user's database. Busy or empty
+threads reject Continue and Compact with HTTP 409, and a thread without
+protocol history rejects title generation. The title endpoint replays the
+thread's compiled context to its model and stores the returned title, so the
+rename form can generate one instead of typing it. Poll thread history and
 status to observe completion; inference snapshots also follow continuation
 requests. Reasoning and Worker audits refer to the request's originating
 history record, which may be an input or a control activity.
