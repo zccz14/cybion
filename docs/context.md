@@ -36,15 +36,19 @@ other threads are never eligible, even when their numeric IDs fall inside the
 same range. A missing, foreign, or non-protocol `idx_tail` is an error.
 
 Each Responses request prepends its current developer policy, top-level Context
-metadata, and registered Worker identities to this compiled array. The policy is request metadata; the
-durable conversation remains the record range above. The compiler uses `kind`
-to select protocol records; `activity` stays outside the model context.
+metadata, and registered Worker identities to this compiled array. Compaction
+and title generation append their instruction as the final user message after
+the replayed records, so the warmed request prefix stays reusable. The policy
+is request metadata; the durable conversation remains the record range above.
+The compiler uses `kind` to select protocol records; `activity` stays outside
+the model context.
 
 ## Stable registry prefix
 
-Inference and compaction use the same registered Worker list, ordered by label
-and ID. The prefix contains only each Worker's ID and label. Online state,
-heartbeat timestamps, and resource reports do not change the prefix. Inference
+Inference, compaction, and title generation use the same registered Worker
+list, ordered by label and ID. The prefix contains only each Worker's ID and
+label. Online state, heartbeat timestamps, and resource reports do not change
+the prefix. Inference
 keeps Worker tool definitions available whenever the user has registered Workers,
 even if all of them are offline. Execution checks availability and returns an
 offline tool error before queueing a call. Adding, removing, or renaming a Worker

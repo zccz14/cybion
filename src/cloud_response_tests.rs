@@ -809,7 +809,7 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
 }
 
 #[tokio::test]
-async fn thread_titles_use_the_latest_input_and_leave_reasoning_headroom() {
+async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "title-generation-user").unwrap();
     let thread = create_thread_for(
@@ -824,7 +824,7 @@ async fn thread_titles_use_the_latest_input_and_leave_reasoning_headroom() {
     )
     .await
     .unwrap();
-    let continue_idx = user_db(&state, &user, false, {
+    user_db(&state, &user, false, {
         let thread_id = thread.id.clone();
         move |connection| {
             insert_record(
@@ -876,20 +876,35 @@ async fn thread_titles_use_the_latest_input_and_leave_reasoning_headroom() {
     )
     .await
     .unwrap();
-    let named = maybe_name_thread(&state, &user, &thread, continue_idx).await;
+    let named = maybe_name_thread(&state, &user, &thread).await;
     assert_eq!(named.title, "Flaky Thread Titles");
     let request = server.await.unwrap();
     assert!(
         request["max_output_tokens"].as_u64().unwrap() >= 512,
         "title requests must leave room for reasoning before the title: {request}"
     );
+    let input = request["input"].as_array().unwrap();
     assert!(
-        request["input"]
-            .as_array()
+        input[0]["content"]
+            .as_str()
             .unwrap()
+            .contains("Every Worker tool call must include the exact worker_id"),
+        "title requests must reuse the shared registry prefix: {request}"
+    );
+    let instruction = input.last().unwrap();
+    assert_eq!(instruction["role"], "user");
+    assert!(
+        instruction["content"]
+            .as_str()
+            .unwrap()
+            .contains("concise title"),
+        "the title instruction must close the request: {request}"
+    );
+    assert!(
+        input
             .iter()
             .any(|item| item["content"] == "fix the flaky title generation"),
-        "the title request must replay the latest user input: {request}"
+        "the title request must replay the thread context: {request}"
     );
     let stored: String = user_db(&state, &user, false, {
         let thread_id = thread.id.clone();
@@ -976,16 +991,26 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
     let request = server.await.unwrap();
     let input = request["input"].as_array().unwrap();
     assert!(
+        input[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Every Worker tool call must include the exact worker_id"),
+        "title requests must reuse the shared registry prefix: {request}"
+    );
+    assert!(
         input.iter().any(|item| item["content"] == "first question")
             && input
                 .iter()
                 .any(|item| item["content"] == "second question"),
         "title requests must replay the whole conversation: {request}"
     );
+    let instruction = input.last().unwrap();
+    assert_eq!(instruction["role"], "user");
     assert!(
-        input.iter().any(|item| item["content"]
+        instruction["content"]
             .as_str()
-            .is_some_and(|text| text.contains("concise title"))),
+            .unwrap()
+            .contains("concise title"),
         "the title instruction must close the request: {request}"
     );
     assert_eq!(request["max_output_tokens"].as_u64().unwrap(), 1024);

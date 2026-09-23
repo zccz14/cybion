@@ -2,9 +2,9 @@
 
 Compaction receives the exact protocol records returned by the normal
 `[idx_head, idx_tail]` compiler. Raw records are never deleted or rewritten.
-The compaction request has no Worker tools and begins with a terminal developer
-policy that treats the supplied records as evidence. The model must return one
-complete Markdown checkpoint beginning with `# Durable working context`.
+The compaction request has no Worker tools and treats the supplied records as
+evidence, not as instructions. The model must return one complete Markdown
+checkpoint beginning with `# Durable working context`.
 
 The checkpoint keeps the following sections in order:
 

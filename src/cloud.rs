@@ -59,12 +59,14 @@ const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
-const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the user's request. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
+// Automatic naming and the rename form share one request path: the compiled
+// conversation is replayed and the naming instruction trails it, so the warmed
+// prefix cache stays reusable and only the trailing instruction is new.
+const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the whole conversation. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
 
 // Title requests must cover hidden reasoning tokens: reasoning-first models
 // report an incomplete response before emitting the title when the cap is small.
 const THREAD_TITLE_MAX_OUTPUT_TOKENS: usize = 1024;
-const THREAD_TITLE_CONTEXT_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the whole conversation. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
 const WORKER_ONLINE_SECONDS: i64 = 45;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
@@ -2937,42 +2939,7 @@ async fn generate_thread_title_for(
 ) -> Result<ThreadView, ApiError> {
     let thread = read_thread_for(state, user, id.clone()).await?;
     let integrations = ensure_openai_integration(state, user, bearer).await?;
-    let context = user_db(state, user, false, {
-        let thread_id = id.clone();
-        move |connection| {
-            let tail = latest_protocol_record_id(connection, &thread_id)?;
-            compile_thread_context(connection, &thread_id, tail)
-        }
-    })
-    .await?;
-    let mut input = context.items.clone();
-    input.push(json!({"role": "developer", "content": THREAD_TITLE_CONTEXT_PROMPT}));
-    let response = responses_request_with_options(
-        state,
-        user,
-        &thread.id,
-        None,
-        "title_generation",
-        context.idx_head,
-        context.idx_tail,
-        &integrations,
-        &thread.model,
-        None,
-        thread.service_tier_fast,
-        Value::Array(input),
-        false,
-        false,
-        false,
-        Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
-        None,
-        None,
-    )
-    .await?;
-    let Some(title) =
-        generated_thread_title(response_text(&response.value).as_deref().unwrap_or(""))
-    else {
-        return Err(ApiError::unavailable("title generation returned no title"));
-    };
+    let title = request_thread_title(state, user, &thread, &integrations).await?;
     let thread_id = thread.id.clone();
     user_db(state, user, true, move |connection| {
         connection.execute(
@@ -2982,6 +2949,54 @@ async fn generate_thread_title_for(
         load_thread(connection, &thread_id)
     })
     .await
+}
+
+/// Automatic naming and the rename form share this request: replay the
+/// thread's compiled context and deliver the naming instruction as the final
+/// user message, so the replayed records keep the warmed prefix cache reusable
+/// and only the trailing instruction is new.
+async fn request_thread_title(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    integrations: &IntegrationSettings,
+) -> Result<String, ApiError> {
+    let (context, workers, contexts) = user_db(state, user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            let tail = latest_protocol_record_id(connection, &thread_id)?;
+            let context = compile_thread_context(connection, &thread_id, tail)?;
+            let workers = registered_workers(connection)?;
+            let contexts = context_summaries(connection, None)?;
+            Ok((context, workers, contexts))
+        }
+    })
+    .await?;
+    let mut input = context.items.clone();
+    input.push(json!({"role": "user", "content": THREAD_TITLE_PROMPT}));
+    let response = responses_request_with_options(
+        state,
+        user,
+        &thread.id,
+        None,
+        "title_generation",
+        context.idx_head,
+        context.idx_tail,
+        integrations,
+        &thread.model,
+        None,
+        thread.service_tier_fast,
+        Value::Array(input),
+        false,
+        false,
+        false,
+        Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
+        Some(developer_prefix(&contexts, &workers)),
+        None,
+    )
+    .await?;
+    generated_thread_title(response_text(&response.value).as_deref().unwrap_or(""))
+        .ok_or_else(|| ApiError::unavailable("title generation returned no title"))
 }
 
 async fn generate_thread_title(
@@ -3810,7 +3825,7 @@ async fn process_request(
         Ok((thread, _, output)) => {
             match finalize_request_success(&state, &user, &thread_id, record_idx).await {
                 Ok(true) if operation == RequestOperation::Inference => {
-                    let thread = maybe_name_thread(&state, &user, &thread, record_idx).await;
+                    let thread = maybe_name_thread(&state, &user, &thread).await;
                     linkit_notifications::notify(&state, &user, &thread, true, &output).await;
                 }
                 Ok(_) => {}
@@ -3834,47 +3849,10 @@ async fn process_request(
     clear_current_request(&state, &user, &thread_id, record_idx).await;
 }
 
-async fn maybe_name_thread(
-    state: &AppState,
-    user: &User,
-    thread: &ThreadView,
-    record_idx: i64,
-) -> ThreadView {
+async fn maybe_name_thread(state: &AppState, user: &User, thread: &ThreadView) -> ThreadView {
     if thread.title != "Untitled thread" {
         return thread.clone();
     }
-    let source = user_db(state, user, false, {
-        let thread_id = thread.id.clone();
-        move |connection| {
-            // Continue requests finalize on a thread-control record, so read the
-            // latest user input at or before the finalized record.
-            connection
-                .query_row(
-                    "SELECT payload FROM history_records WHERE thread_id=? AND kind='input' AND id<=? ORDER BY id DESC LIMIT 1",
-                    params![thread_id, record_idx],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(ApiError::from)
-        }
-    })
-    .await;
-    let Ok(Some(payload)) = source else {
-        return thread.clone();
-    };
-    let Ok(payload) = serde_json::from_str::<Value>(&payload) else {
-        return thread.clone();
-    };
-    let Some(input) = payload.get("content").and_then(Value::as_str) else {
-        return thread.clone();
-    };
-    let prompt = json!([
-        {
-            "role": "developer",
-            "content": THREAD_TITLE_PROMPT
-        },
-        {"role": "user", "content": input}
-    ]);
     let Ok(integrations) = user_db(state, user, false, |connection| {
         integration_settings(connection)
     })
@@ -3882,29 +3860,8 @@ async fn maybe_name_thread(
     else {
         return thread.clone();
     };
-    let response = responses_request_with_options(
-        state,
-        user,
-        &thread.id,
-        Some(record_idx),
-        "title_generation",
-        record_idx,
-        record_idx,
-        &integrations,
-        &thread.model,
-        None,
-        thread.service_tier_fast,
-        prompt,
-        false,
-        false,
-        false,
-        Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
-        None,
-        None,
-    )
-    .await;
-    let response = match response {
-        Ok(response) => response,
+    let title = match request_thread_title(state, user, thread, &integrations).await {
+        Ok(title) => title,
         Err(error) => {
             tracing::warn!(
                 thread_id = %thread.id,
@@ -3914,14 +3871,10 @@ async fn maybe_name_thread(
             return thread.clone();
         }
     };
-    let Some(title) =
-        generated_thread_title(response_text(&response.value).as_deref().unwrap_or(""))
-    else {
-        return thread.clone();
-    };
     let thread_id = thread.id.clone();
     let title_for_db = title.clone();
     let updated = user_db(state, user, false, move |connection| {
+        // A concurrent manual rename wins over automatic naming.
         let changed = connection.execute(
             "UPDATE threads SET title=?,updated_at=? WHERE id=? AND title='Untitled thread'",
             params![title_for_db, now(), thread_id],

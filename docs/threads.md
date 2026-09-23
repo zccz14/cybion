@@ -61,12 +61,15 @@ The authenticated browser endpoints accept an empty POST body:
 
 All four operate only within the signed-in user's database. Busy or empty
 threads reject Continue and Compact with HTTP 409, and a thread without
-protocol history rejects title generation. The title endpoint replays the
-thread's compiled context to its model and stores the returned title, so the
-rename form can generate one instead of typing it. Poll thread history and
-status to observe completion; inference snapshots also follow continuation
-requests. Reasoning and Worker audits refer to the request's originating
-history record, which may be an input or a control activity.
+protocol history rejects title generation. Automatic naming after a successful
+request and the title endpoint share one request path: replay the thread's
+compiled context with the naming instruction appended as the final user
+message, so both name from the whole conversation. The endpoint stores the
+returned title unconditionally for the rename form; automatic naming only
+fills a still-`Untitled thread` title. Poll thread history and status to
+observe completion; inference snapshots also follow continuation requests.
+Reasoning and Worker audits refer to the request's originating history record,
+which may be an input or a control activity.
 
 Deleting a thread removes its history, checkpoints, audit rows, and Worker-call
 rows within the owning user database. Other users and threads are independent.
