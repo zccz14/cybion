@@ -50,12 +50,10 @@ test("every thread renders through the shared chat primitives", () => {
   assert.doesNotMatch(source, /<MessageHeader/)
 })
 
-test("history renders reasoning summaries and exposes OpenAI native tools", () => {
+test("history renders reasoning summaries", () => {
   assert.match(source, /recordReasoning: "推理 \(Reasoning\)"/)
   assert.match(source, /function isReasoningRecord\(record: HistoryRecord\)/)
   assert.match(source, /function reasoningSummary\(record: HistoryRecord\)/)
-  assert.match(source, /detail: "web_search"/)
-  assert.match(source, /detail: "image_generation"/)
 })
 
 test("thread settings live in the composer popover while native tools are always injected", () => {
@@ -65,11 +63,34 @@ test("thread settings live in the composer popover while native tools are always
   assert.match(popover, /REASONING_EFFORTS = \["low", "medium", "high", "xhigh", "max"\]/)
   assert.match(popover, /ZapIcon/)
   assert.match(popover, /<Switch aria-label=\{t\.fastMode\}/)
-  assert.equal(source.match(/web_search/g)?.length, 1)
-  assert.equal(source.match(/image_generation/g)?.length, 1)
   assert.doesNotMatch(source, /id="new-thread-web-search"/)
   assert.doesNotMatch(source, /id="default-thread-web-search"/)
   assert.doesNotMatch(source, /settings\.mutate\(\{ web_search/)
+  assert.doesNotMatch(source, /\.web_search\b/)
+  assert.doesNotMatch(source, /\.image_generation\b/)
+})
+
+test("the tools page renders the shared tool catalog", () => {
+  const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
+  assert.match(source, /import toolCatalog from "\.\.\/\.\.\/tools\.json"/)
+  assert.match(source, /toolCatalog\.context\.map/)
+  assert.match(source, /toolCatalog\.worker\.map/)
+  assert.match(source, /Object\.keys\(toolCatalog\.native\)/)
+  const names = [
+    ...catalog.context.map((tool: { name: string }) => tool.name),
+    ...catalog.worker.map((tool: { name: string }) => tool.name),
+    ...Object.keys(catalog.native),
+  ]
+  for (const name of names) {
+    const label = source.match(new RegExp(`${name}: "(tool[A-Za-z]+)"`))
+    assert.ok(label, `missing tool label for ${name}`)
+    const occurrences = source.match(new RegExp(`${label[1]}:`, "g")) ?? []
+    assert.ok(occurrences.length >= 2, `${label[1]} needs English and Chinese copy`)
+  }
+  const mapped = [...source.matchAll(/\n  (\w+): "tool[A-Za-z]+",/g)].map((match) => match[1])
+  for (const name of mapped) {
+    assert.ok(names.includes(name), `stale tool label for ${name}`)
+  }
 })
 
 test("the management surfaces expose integration keys and SQLite-free Worker pairing", () => {

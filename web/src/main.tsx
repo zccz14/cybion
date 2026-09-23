@@ -52,6 +52,7 @@ import {
 } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import toolCatalog from "../../tools.json"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
@@ -581,10 +582,12 @@ const copy = {
     tools: "Tools",
     toolsDescription: "Capabilities available to Cybion threads.",
     toolBash: "Run shell commands",
-    toolBrowser: "Control a browser",
-    toolComputer: "Control the desktop",
+    toolBrowserControl: "Control a browser",
+    toolComputerUse: "Control the desktop",
+    toolReadContext: "Read contexts",
     toolWebSearch: "Web search",
     toolImageGeneration: "Image generation",
+    toolCybion: "Cybion",
     toolOpenAi: "OpenAI",
     history: "History",
     historyDescription: "Browse the rows and stored fields in history_records across your workspace.",
@@ -852,10 +855,12 @@ const copy = {
     tools: "工具",
     toolsDescription: "Cybion 线程可使用的能力。",
     toolBash: "运行 Shell 命令",
-    toolBrowser: "控制浏览器",
-    toolComputer: "控制桌面",
+    toolBrowserControl: "控制浏览器",
+    toolComputerUse: "控制桌面",
+    toolReadContext: "读取上下文",
     toolWebSearch: "网页搜索",
     toolImageGeneration: "图像生成",
+    toolCybion: "Cybion",
     toolOpenAi: "OpenAI",
     history: "历史",
     historyDescription: "查看当前工作区 history_records 表中的记录与原始字段。",
@@ -2239,16 +2244,26 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
   return <WorkerConnections key={sdk.session.getState().sessionId} language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />
 }
 
+// INVARIANT: every tool in tools.json needs a label here; the web tests assert
+// coverage in both languages.
+const toolLabels: Record<string, CopyKey> = {
+  read_context: "toolReadContext",
+  bash: "toolBash",
+  browser_control: "toolBrowserControl",
+  computer_use: "toolComputerUse",
+  web_search: "toolWebSearch",
+  image_generation: "toolImageGeneration",
+}
+
 function ToolsPage() {
   const { t } = useUi()
-  const tools = [
-    { label: t("toolBash"), detail: "bash", provider: "Worker" },
-    { label: t("toolBrowser"), detail: "browser_control", provider: "Worker" },
-    { label: t("toolComputer"), detail: "computer_use", provider: "Worker" },
-    { label: t("toolWebSearch"), detail: "web_search", provider: t("toolOpenAi") },
-    { label: t("toolImageGeneration"), detail: "image_generation", provider: t("toolOpenAi") },
+  const groups = [
+    { names: toolCatalog.context.map((tool) => tool.name), provider: t("toolCybion") },
+    { names: toolCatalog.worker.map((tool) => tool.name), provider: "Worker" },
+    { names: Object.keys(toolCatalog.native), provider: t("toolOpenAi") },
   ]
-  return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.detail}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.label}</p><code className="text-xs text-muted-foreground">{tool.detail}</code></div><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
+  const tools = groups.flatMap((group) => group.names.map((name) => ({ name, provider: group.provider })))
+  return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.name}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{t(toolLabels[tool.name])}</p><code className="text-xs text-muted-foreground">{tool.name}</code></div><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
 }
 
 function SecretValue({ value }: { value: string }) {

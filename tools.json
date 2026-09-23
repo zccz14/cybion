@@ -1,0 +1,116 @@
+{
+  "context": [
+    {
+      "type": "function",
+      "name": "read_context",
+      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "context_id": {
+            "type": "string",
+            "description": "Exact context ID from the top-level Contexts list or children returned by a previous read_context call."
+          }
+        },
+        "required": [
+          "context_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "worker": [
+    {
+      "type": "function",
+      "name": "bash",
+      "description": "Run a shell command on the user's selected Worker.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "worker_id": {
+            "type": "string",
+            "description": "Exact Worker ID from the Workers list."
+          },
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id",
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "browser_control",
+      "description": "Control an isolated browser on the user's selected Worker.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "worker_id": {
+            "type": "string",
+            "description": "Exact Worker ID from the Workers list."
+          },
+          "action": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id",
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "computer_use",
+      "description": "Perform a user-device computer action through the selected Worker.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "worker_id": {
+            "type": "string",
+            "description": "Exact Worker ID from the Workers list."
+          },
+          "action": {
+            "type": "string"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id",
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "native": {
+    "web_search": {
+      "type": "web_search"
+    },
+    "image_generation": {
+      "type": "image_generation"
+    }
+  }
+}

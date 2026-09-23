@@ -4,7 +4,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -6076,48 +6076,24 @@ fn sse_event_data(block: &str) -> Option<(Option<&str>, String)> {
     (!data.is_empty()).then(|| (event_name, data.join("\n")))
 }
 
+// INVARIANT: tools.json is the single source for the tools Cybion sends
+// upstream; the request builder and the Configuration → Tools page both read it.
+static TOOL_CATALOG: LazyLock<Value> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../tools.json")).expect("tools.json is valid JSON")
+});
+
 fn worker_tools() -> Value {
-    json!([
-        {
-            "type":"function",
-            "name":"bash",
-            "description":"Run a shell command on the user's selected Worker.",
-            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact Worker ID from the Workers list."},"command":{"type":"string"}},"required":["worker_id","command"],"additionalProperties":false}
-        },
-        {
-            "type":"function",
-            "name":"browser_control",
-            "description":"Control an isolated browser on the user's selected Worker.",
-            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact Worker ID from the Workers list."},"action":{"type":"string"},"url":{"type":"string"},"selector":{"type":"string"},"text":{"type":"string"}},"required":["worker_id","action"],"additionalProperties":false}
-        },
-        {
-            "type":"function",
-            "name":"computer_use",
-            "description":"Perform a user-device computer action through the selected Worker.",
-            "parameters":{"type":"object","properties":{"worker_id":{"type":"string","description":"Exact Worker ID from the Workers list."},"action":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"text":{"type":"string"}},"required":["worker_id","action"],"additionalProperties":false}
-        }
-    ])
+    TOOL_CATALOG["worker"].clone()
 }
 
 fn context_tools() -> Value {
-    json!([
-        {
-            "type":"function",
-            "name":"read_context",
-            "description":"Read the full content of a context and its direct children metadata (context_id, name, description) from the controller.",
-            "parameters":{
-                "type":"object",
-                "properties":{
-                    "context_id":{
-                        "type":"string",
-                        "description":"Exact context ID from the top-level Contexts list or children returned by a previous read_context call."
-                    }
-                },
-                "required":["context_id"],
-                "additionalProperties":false
-            }
-        }
-    ])
+    TOOL_CATALOG["context"].clone()
+}
+
+fn is_worker_tool(name: &str) -> bool {
+    TOOL_CATALOG["worker"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == name))
 }
 
 fn responses_tools(
@@ -6134,10 +6110,10 @@ fn responses_tools(
         tools.extend(worker_tools().as_array().cloned().unwrap_or_default());
     }
     if web_search {
-        tools.push(json!({"type":"web_search"}));
+        tools.push(TOOL_CATALOG["native"]["web_search"].clone());
     }
     if image_generation {
-        tools.push(json!({"type":"image_generation"}));
+        tools.push(TOOL_CATALOG["native"]["image_generation"].clone());
     }
     Value::Array(tools)
 }
@@ -6258,9 +6234,7 @@ fn prepare_worker_arguments(
     namespace: Option<&str>,
     input: &str,
 ) -> Result<(String, Value), String> {
-    if namespace.is_some_and(|value| !matches!(value, "functions" | ""))
-        || !matches!(name, "bash" | "browser_control" | "computer_use")
-    {
+    if namespace.is_some_and(|value| !matches!(value, "functions" | "")) || !is_worker_tool(name) {
         return Err(format!("unsupported Worker tool: {name}"));
     }
     let worker: WorkerArguments = serde_json::from_str(input).map_err(|error| {
@@ -6369,7 +6343,7 @@ fn enqueue_output_call(
         return Ok(());
     }
     let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-    if !matches!(name, "bash" | "browser_control" | "computer_use") {
+    if !is_worker_tool(name) {
         return Ok(());
     }
     let raw = item
@@ -7811,6 +7785,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_catalog_pins_the_current_tool_surface() {
+        let names = |tools: Value| {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(context_tools()), ["read_context"]);
+        assert_eq!(
+            names(worker_tools()),
+            ["bash", "browser_control", "computer_use"]
+        );
+        assert_eq!(
+            TOOL_CATALOG["native"],
+            json!({"web_search":{"type":"web_search"},"image_generation":{"type":"image_generation"}})
+        );
+    }
+
+    #[test]
     fn worker_developer_prefix_uses_markdown_ids_and_names_only() {
         let prefix = worker_developer_prefix(&[WorkerSummary {
             id: "4b9aa3ae-f5a3-483b-975a-3fdcd148d680".to_owned(),
@@ -7927,29 +7922,11 @@ mod tests {
                 .unwrap()
                 .contains("worker_id")
         );
-        assert_eq!(
-            request["tools"],
-            json!([
-                {
-                    "type":"function",
-                    "name":"read_context",
-                    "description":"Read the full content of a context and its direct children metadata (context_id, name, description) from the controller.",
-                    "parameters":{
-                        "type":"object",
-                        "properties":{
-                            "context_id":{
-                                "type":"string",
-                                "description":"Exact context ID from the top-level Contexts list or children returned by a previous read_context call."
-                            }
-                        },
-                        "required":["context_id"],
-                        "additionalProperties":false
-                    }
-                },
-                {"type":"web_search"},
-                {"type":"image_generation"}
-            ])
-        );
+        let tools = request["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
+        assert_eq!(tools[1], json!({"type":"web_search"}));
+        assert_eq!(tools[2], json!({"type":"image_generation"}));
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(
