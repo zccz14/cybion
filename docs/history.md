@@ -38,6 +38,24 @@ JSON. The conversation renders inputs, messages, reasoning summaries, tool
 results, and runtime activity directly from `kind` and `payload`. Thread naming
 reads the input text from its payload.
 
+The conversation opens on a bounded window instead of the whole thread. The
+browser-authenticated `GET /api/threads/{id}/history/window` endpoint accepts:
+
+| Parameter | Behavior |
+| --- | --- |
+| (none) | Tail window: records from the thread's newest `input` record through the newest record, ascending, with `has_older` when earlier rows exist. |
+| `before` | Positive record id cursor. Returns the newest `limit` records older than it, ascending, with its own `has_older` for anything older still. |
+| `limit` | 1–100, default 50. Applies to `before` pages. |
+
+The window starts at the newest `input` record because Cybion writes that
+record before inference begins, so the first screen always shows the user
+message that started the latest turn and never opens mid-run. The browser
+loads older pages on demand from the window endpoint and keeps using
+`GET /api/threads/{id}/history?after=` as its incremental append channel.
+A thread that somehow held records but no input record — not produced by the
+current protocol — returns every record with `has_older` false instead of
+hiding rows.
+
 ## Conversation process groups
 
 The conversation derives its display from the combined durable history and
