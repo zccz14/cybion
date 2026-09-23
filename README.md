@@ -36,6 +36,9 @@ the first authenticated browser session initializes that key atomically.
   default is 200,000. Threads without an override follow later default changes.
 - Thread turns always include the `web_search` and `image_generation` native
   tools in the inference request to the configured provider.
+- `tools.json` is the single source for the upstream tool catalog. The request
+  builder sends it and the Configuration → Tools page renders it, so the
+  capability list cannot drift from the tools a Thread can actually use.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record
