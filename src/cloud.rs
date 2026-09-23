@@ -549,6 +549,10 @@ fn app(state: AppState) -> Router {
             get(read_thread).patch(update_thread).delete(delete_thread),
         )
         .route("/api/threads/{id}/history", get(thread_history))
+        .route(
+            "/api/threads/{id}/history/window",
+            get(thread_history_window),
+        )
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
         .route("/api/threads/{id}/cancel", post(thread_controls::cancel))
@@ -3132,6 +3136,103 @@ async fn history_for(
         Ok(records)
     })
     .await
+}
+
+#[derive(Deserialize)]
+struct ThreadHistoryWindowQuery {
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+const THREAD_HISTORY_WINDOW_PAGE_DEFAULT: i64 = 50;
+const THREAD_HISTORY_WINDOW_PAGE_MAX: i64 = 100;
+
+#[derive(Serialize)]
+struct ThreadHistoryWindow {
+    records: Vec<HistoryRecord>,
+    has_older: bool,
+}
+
+async fn thread_history_window(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ThreadHistoryWindowQuery>,
+) -> Result<Json<ThreadHistoryWindow>, ApiError> {
+    let id = thread_id(&id)?;
+    let window = history_window_for(&state, &identity.user, id, query).await?;
+    Ok(Json(window))
+}
+
+async fn history_window_for(
+    state: &AppState,
+    user: &User,
+    id: String,
+    query: ThreadHistoryWindowQuery,
+) -> Result<ThreadHistoryWindow, ApiError> {
+    user_db(state, user, true, move |connection| {
+        load_thread(connection, &id)?;
+        let limit = query.limit.unwrap_or(THREAD_HISTORY_WINDOW_PAGE_DEFAULT);
+        if !(1..=THREAD_HISTORY_WINDOW_PAGE_MAX).contains(&limit) {
+            return Err(ApiError::bad_request("limit must be between 1 and 100"));
+        }
+        match query.before {
+            None => thread_history_tail(connection, &id),
+            Some(before) => thread_history_older_page(connection, &id, before, limit),
+        }
+    })
+    .await
+}
+
+fn thread_history_tail(connection: &Connection, id: &str) -> Result<ThreadHistoryWindow, ApiError> {
+    // ASSUMPTION: every thread writes an input record before inference starts, so the newest
+    // input record is the first record of the thread's last turn. If a thread held records but
+    // no input, the anchor falls back to 0 and the window degrades to a full read; the response
+    // stays correct, it just stops being bounded.
+    let anchor: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(id),0) FROM history_records WHERE thread_id=? AND kind='input'",
+        [id],
+        |row| row.get(0),
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT id,thread_id,kind,payload,created_at
+         FROM history_records WHERE thread_id=? AND id>=? ORDER BY id",
+    )?;
+    let rows = statement.query_map(params![id, anchor], history_from_row)?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row?);
+    }
+    let has_older: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM history_records WHERE thread_id=? AND id<?)",
+        params![id, anchor],
+        |row| row.get(0),
+    )?;
+    Ok(ThreadHistoryWindow { records, has_older })
+}
+
+fn thread_history_older_page(
+    connection: &Connection,
+    id: &str,
+    before: i64,
+    limit: i64,
+) -> Result<ThreadHistoryWindow, ApiError> {
+    if before < 1 {
+        return Err(ApiError::bad_request("before must be a positive record id"));
+    }
+    let mut statement = connection.prepare(
+        "SELECT id,thread_id,kind,payload,created_at
+         FROM history_records WHERE thread_id=? AND id<? ORDER BY id DESC LIMIT ?",
+    )?;
+    let rows = statement.query_map(params![id, before, limit + 1], history_from_row)?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row?);
+    }
+    let has_older = records.len() > limit as usize;
+    records.truncate(limit as usize);
+    records.reverse();
+    Ok(ThreadHistoryWindow { records, has_older })
 }
 
 async fn thread_input(
@@ -7219,6 +7320,293 @@ mod tests {
             second_ids
         );
         assert!(other.iter().all(|r| r["thread_id"] == json!(second.id)));
+
+        server.abort();
+    }
+
+    fn record_ids(records: &[HistoryRecord]) -> Vec<i64> {
+        records.iter().map(|record| record.id).collect()
+    }
+
+    #[tokio::test]
+    async fn history_window_starts_at_the_latest_input_and_pages_backwards() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "history-window-user").unwrap();
+        let other = user_for_subject(&state, "history-window-other").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let ids = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                Ok(vec![
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "input",
+                        json!({"role":"user","content":"first"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "response_output",
+                        json!({"type":"message"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "activity",
+                        json!({"role":"system","content":"first done"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "input",
+                        json!({"role":"user","content":"second"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "response_output",
+                        json!({"type":"message"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "tool_output",
+                        json!({"output":"ok"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "activity",
+                        json!({"role":"system","content":"second done"}),
+                    ),
+                ])
+            }
+        })
+        .await
+        .unwrap();
+
+        let tail = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(record_ids(&tail.records), ids[3..].to_vec());
+        assert!(tail.has_older);
+
+        let oldest = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: Some(ids[3]),
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(record_ids(&oldest.records), ids[..3].to_vec());
+        assert!(!oldest.has_older);
+
+        let middle = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: Some(ids[3]),
+                limit: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(record_ids(&middle.records), vec![ids[1], ids[2]]);
+        assert!(middle.has_older);
+
+        let first = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: Some(ids[1]),
+                limit: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(record_ids(&first.records), vec![ids[0]]);
+        assert!(!first.has_older);
+
+        let forbidden = history_window_for(
+            &state,
+            &other,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: None,
+                limit: None,
+            },
+        )
+        .await;
+        assert!(forbidden.is_err());
+    }
+
+    #[tokio::test]
+    async fn history_window_handles_empty_threads_invalid_cursors_and_missing_inputs() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "history-window-empty-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let empty = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(empty.records.is_empty());
+        assert!(!empty.has_older);
+
+        // Not produced by the current protocol: records without any input record fall back to
+        // the previous full read instead of hiding rows.
+        let note_id = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                Ok(insert_record(
+                    connection,
+                    &thread_id,
+                    "activity",
+                    json!({"role":"system","content":"note"}),
+                ))
+            }
+        })
+        .await
+        .unwrap();
+        let fallback = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(record_ids(&fallback.records), vec![note_id]);
+        assert!(!fallback.has_older);
+
+        let invalid_before = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: Some(0),
+                limit: None,
+            },
+        )
+        .await;
+        assert!(invalid_before.is_err());
+        let invalid_limit = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: Some(1),
+                limit: Some(101),
+            },
+        )
+        .await;
+        assert!(invalid_limit.is_err());
+    }
+
+    #[tokio::test]
+    async fn thread_history_window_over_http_returns_the_tail_and_older_pages() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "history-window-http-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let ids = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                Ok(vec![
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "input",
+                        json!({"role":"user","content":"first"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "checkpoint",
+                        json!({"content":"old"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "input",
+                        json!({"role":"user","content":"second"}),
+                    ),
+                    insert_record(
+                        connection,
+                        &thread_id,
+                        "tool_output",
+                        json!({"output":"ok"}),
+                    ),
+                ])
+            }
+        })
+        .await
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route(
+                "/api/threads/{id}/history/window",
+                get(thread_history_window),
+            )
+            .layer(axum::Extension(BrowserIdentity {
+                user: user.clone(),
+                bearer: String::new(),
+            }))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let url = |query: &str| {
+            format!(
+                "http://{address}/api/threads/{}/history/window{query}",
+                thread.id
+            )
+        };
+        let window_ids = |value: &Value| {
+            value["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["id"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let tail: Value = reqwest::get(url("")).await.unwrap().json().await.unwrap();
+        assert_eq!(window_ids(&tail), vec![ids[2], ids[3]]);
+        assert_eq!(tail["has_older"], json!(true));
+
+        let page: Value = reqwest::get(url(&format!("?before={}", ids[2])))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(window_ids(&page), vec![ids[0], ids[1]]);
+        assert_eq!(page["has_older"], json!(false));
 
         server.abort();
     }

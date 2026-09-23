@@ -36,7 +36,7 @@ test("persisted and live protocol messages receive Worker updates through memoiz
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   assert.equal(source.match(/<HistoryMessage language=\{language\} record=\{record\} workers=\{workers.data\}/g)?.length, 1)
   assert.match(source, /<ThreadHistory records=\{records\}/)
-  assert.match(source, /pendingResponseRecords\(liveResponse.data, history.data \?\? \[\], threadId\)/)
+  assert.match(source, /pendingResponseRecords\(liveResponse.data, durableRecords, threadId\)/)
   assert.match(source, /previous.workers === next.workers/)
   assert.ok(source.indexOf("const bashCall = bashFunctionCall(payload)") < source.indexOf('if (record.kind === "checkpoint" ||'))
   assert.match(source, /<BashCommand[^>]*>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/BashCommand>/)

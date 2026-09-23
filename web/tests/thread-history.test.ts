@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, pollThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id): HistoryRecord {
@@ -149,15 +149,42 @@ test("persisted and pending process items join one group and the existing respon
   }
 })
 
-test("incremental polling fetches only records after the newest loaded one and appends them", async () => {
+test("the tail window loads once and later polls fetch only records after the newest loaded one", async () => {
+  let windowLoads = 0
+  const loadWindow = async () => {
+    windowLoads += 1
+    return { records: [record(3, "input"), record(5, "activity")], hasOlder: true }
+  }
   const requests: number[] = []
   const fetchAfter = async (after: number) => {
     requests.push(after)
-    return after === 0 ? [record(1, "input"), record(5, "activity")] : [record(after + 1, "tool_output")]
+    return [record(after + 1, "tool_output")]
   }
-  const initial = await pollThreadHistory(undefined, fetchAfter)
-  const appended = await pollThreadHistory(initial, fetchAfter)
-  assert.deepEqual(requests, [0, 5])
-  assert.deepEqual(appended.map((item) => item.id), [1, 5, 6])
-  assert.deepEqual(initial.map((item) => item.id), [1, 5])
+  const initial = await pollThreadHistory(undefined, loadWindow, fetchAfter)
+  assert.deepEqual(initial.records.map((item) => item.id), [3, 5])
+  assert.equal(initial.hasOlder, true)
+  const appended = await pollThreadHistory(initial, loadWindow, fetchAfter)
+  assert.equal(windowLoads, 1)
+  assert.deepEqual(requests, [5])
+  assert.deepEqual(appended.records.map((item) => item.id), [3, 5, 6])
+  assert.equal(appended.hasOlder, true)
+  assert.deepEqual(initial.records.map((item) => item.id), [3, 5])
+})
+
+test("older pages stay oldest first and assemble in ascending record order before the live window", () => {
+  const pages = [
+    { records: [record(1, "input"), record(2, "activity")], hasOlder: false },
+    { records: [record(5, "input"), record(6, "tool_output")], hasOlder: true },
+  ]
+  const window = { records: [record(9, "input")], hasOlder: true }
+  assert.deepEqual(loadedThreadRecords(pages, window).map((item) => item.id), [1, 2, 5, 6, 9])
+  assert.deepEqual(loadedThreadRecords([], undefined), [])
+})
+
+test("window cursors read the ascending record bounds", () => {
+  assert.equal(newestRecordId([]), 0)
+  assert.equal(oldestRecordId([]), null)
+  const records = [record(3, "input"), record(5, "activity")]
+  assert.equal(newestRecordId(records), 5)
+  assert.equal(oldestRecordId(records), 3)
 })

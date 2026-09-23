@@ -9,7 +9,9 @@ export function ThreadHistory({ records, language, renderRecord }: {
   renderRecord: (record: HistoryRecord) => ReactNode
 }) {
   const entries = useMemo(() => groupThreadHistory(records), [records])
-  return entries.map((entry) => <MessageScrollerItem key={entry.key}>
+  // INVARIANT: a stable messageId per entry keeps the scroller able to anchor the viewport while
+  // older pages are prepended.
+  return entries.map((entry) => <MessageScrollerItem key={entry.key} messageId={entry.key}>
     {entry.type === "process"
       ? <ThreadProcessGroup language={language} count={entry.records.length} durationSeconds={entry.finishedAt - entry.startedAt}>
         {entry.records.map((record) => <div key={threadHistoryRecordKey(record)} className="min-w-0">{renderRecord(record)}</div>)}

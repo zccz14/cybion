@@ -57,7 +57,7 @@ import toolCatalog from "../../tools.json"
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
-import { pollThreadHistory, type HistoryRecord } from "@/lib/thread-history"
+import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
@@ -592,6 +592,8 @@ const copy = {
     history: "History",
     historyDescription: "Browse the rows and stored fields in history_records across your workspace.",
     noHistory: "No messages in this thread yet.",
+    loadEarlierMessages: "Load earlier messages",
+    loadingEarlierMessages: "Loading earlier messages…",
     connection: "Connected",
     hosted: "Hosted workspace",
     pageErrorTitle: "This page hit an unexpected error",
@@ -865,6 +867,8 @@ const copy = {
     history: "历史",
     historyDescription: "查看当前工作区 history_records 表中的记录与原始字段。",
     noHistory: "这个线程还没有消息。",
+    loadEarlierMessages: "加载更早消息",
+    loadingEarlierMessages: "正在加载更早消息…",
     connection: "已连接",
     hosted: "托管工作区",
     pageErrorTitle: "这个页面遇到了意外错误",
@@ -1314,10 +1318,17 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   })
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useOpenAiModels(sdk)
+  // The conversation opens on the window that starts at the most recent user input instead of
+  // the whole thread; older pages load on demand with the returned `has_older` flag.
+  const fetchHistoryWindow = (before?: number) => api<{ records: HistoryRecord[]; has_older: boolean }>(
+    sdk,
+    `/api/threads/${encodeURIComponent(threadId)}/history/window${before === undefined ? "" : `?before=${before}`}`,
+  ).then((page) => ({ records: page.records, hasOlder: page.has_older }))
   const history = useQuery({
     queryKey: ["history", threadId, userId],
     queryFn: () => pollThreadHistory(
-      client.getQueryData<HistoryRecord[]>(["history", threadId, userId]),
+      client.getQueryData<ThreadHistoryWindow>(["history", threadId, userId]),
+      () => fetchHistoryWindow(),
       (after) => api<HistoryRecord[]>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history?after=${after}`),
     ),
     refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
@@ -1329,10 +1340,28 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     refetchInterval: thread.data?.status === "running" ? 750 : false,
     enabled: Boolean(threadId),
   })
+  const [olderPagesByThread, setOlderPagesByThread] = useState<Record<string, ThreadHistoryWindow[]>>({})
+  const olderPages = useMemo(() => olderPagesByThread[threadId] ?? [], [olderPagesByThread, threadId])
+  const durableRecords = useMemo(() => loadedThreadRecords(olderPages, history.data), [olderPages, history.data])
   const records = useMemo(() => [
-    ...history.data ?? [],
-    ...pendingResponseRecords(liveResponse.data, history.data ?? [], threadId),
-  ], [history.data, liveResponse.data, threadId])
+    ...durableRecords,
+    ...pendingResponseRecords(liveResponse.data, durableRecords, threadId),
+  ], [durableRecords, liveResponse.data, threadId])
+  const hasOlder = olderPages[0]?.hasOlder ?? history.data?.hasOlder ?? false
+  const loadEarlier = useMutation({
+    mutationFn: async () => {
+      const before = oldestRecordId(durableRecords)
+      if (before === null) return null
+      return { threadId, page: await fetchHistoryWindow(before) }
+    },
+    onSuccess: (loaded) => {
+      if (!loaded) return
+      setOlderPagesByThread((current) => ({
+        ...current,
+        [loaded.threadId]: [loaded.page, ...(current[loaded.threadId] ?? [])],
+      }))
+    },
+  })
   const composer = useComposerDraft(userId, threadId)
   const { input, setInput, clearSubmitted } = composer
   const [editing, setEditing] = useState(false)
@@ -1408,7 +1437,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
   const running = current.status === "running"
   const busy = submit.isPending || control.isPending
-  const hasHistory = history.data?.some((record) => record.kind !== "activity") ?? false
+  const hasHistory = durableRecords.some((record) => record.kind !== "activity")
   return <main className="flex h-full flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
@@ -1444,12 +1473,22 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
       {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
       <MessageScrollerProvider autoScroll defaultScrollPosition="end">
         <MessageScroller className="min-h-0 flex-1">
+          {/* The load-earlier control floats over the viewport instead of rendering as a transcript row:
+              the scroller preserves the visible row on prepend only while the previous first content
+              child moves down, and a control row kept at index 0 would defeat that detection. */}
+          <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex flex-col items-center gap-2 px-6">
+            {hasOlder && <Button className="pointer-events-auto shadow-sm" type="button" size="sm" variant="outline" disabled={loadEarlier.isPending} onClick={() => loadEarlier.mutate()}>
+              {loadEarlier.isPending && <Spinner data-icon="inline-start" />}
+              {loadEarlier.isPending ? t("loadingEarlierMessages") : t("loadEarlierMessages")}
+            </Button>}
+            {loadEarlier.error && <div className="pointer-events-auto w-full max-w-lg"><RequestError error={loadEarlier.error} onRetry={() => loadEarlier.mutate()} /></div>}
+          </div>
           <MessageScrollerViewport>
             <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
               {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
               <ThreadHistory records={records} language={language} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} />} />
-              {!history.isLoading && !history.error && history.data?.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
+              {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
             </MessageScrollerContent>
