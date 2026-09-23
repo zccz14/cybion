@@ -25,14 +25,37 @@ export function threadHistoryRecordKey(record: HistoryRecord) {
   return `${record.thread_id}:record:${record.id}:${record.created_at}`
 }
 
+export type ThreadHistoryWindow = {
+  records: HistoryRecord[]
+  hasOlder: boolean
+}
+
+// INVARIANT: olderPages stays ordered oldest first, so flattening it before the live window
+// keeps every loaded record in ascending record order.
+export function loadedThreadRecords(pages: readonly ThreadHistoryWindow[], window: ThreadHistoryWindow | undefined) {
+  return [...pages.flatMap((page) => page.records), ...(window?.records ?? [])]
+}
+
+export function newestRecordId(records: readonly HistoryRecord[]) {
+  return records.reduce((newest, record) => Math.max(newest, record.id), 0)
+}
+
+// INVARIANT: loaded records stay ordered by record id, so the first record is the cursor for
+// the page just before this window.
+export function oldestRecordId(records: readonly HistoryRecord[]) {
+  return records.length > 0 ? records[0].id : null
+}
+
 // INVARIANT: thread history is append-only, so incremental polling can ask the server for
-// records newer than the newest loaded one instead of reloading the whole thread.
+// records newer than the newest loaded one instead of reloading the whole thread. The first
+// load asks for the tail window that starts at the most recent user input.
 export async function pollThreadHistory(
-  previous: readonly HistoryRecord[] | undefined,
+  previous: ThreadHistoryWindow | undefined,
+  loadWindow: () => Promise<ThreadHistoryWindow>,
   fetchAfter: (after: number) => Promise<HistoryRecord[]>,
-) {
-  const after = previous?.reduce((newest, record) => Math.max(newest, record.id), 0) ?? 0
-  return [...previous ?? [], ...await fetchAfter(after)]
+): Promise<ThreadHistoryWindow> {
+  if (!previous) return loadWindow()
+  return { ...previous, records: [...previous.records, ...await fetchAfter(newestRecordId(previous.records))] }
 }
 
 export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHistoryEntry[] {
