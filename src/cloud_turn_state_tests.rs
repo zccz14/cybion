@@ -24,10 +24,10 @@ fn reply(value: Option<&str>, streaming: bool, status: StatusCode) -> Response {
     response.body(Body::from(body)).unwrap()
 }
 
-async fn upstream(
+async fn mock_upstream(
     replies: Vec<Response>,
 ) -> (
-    IntegrationSettings,
+    Upstream,
     tokio::sync::mpsc::UnboundedReceiver<HeaderMap>,
     tokio::task::JoinHandle<()>,
 ) {
@@ -52,14 +52,11 @@ async fn upstream(
     );
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (
-        IntegrationSettings {
-            openai_consumer_id: "consumer".to_owned(),
-            openai_consumer_secret: "secret".to_owned(),
-            api_key: String::new(),
-            openai_base_url: format!("http://{address}"),
-            linkit_bot_id: String::new(),
-            linkit_bot_token: String::new(),
-            linkit_username: String::new(),
+        Upstream {
+            id: "fixture-upstream".to_owned(),
+            name: "fixture".to_owned(),
+            base_url: format!("http://{address}"),
+            api_key: "secret".to_owned(),
         },
         received,
         server,
@@ -70,7 +67,7 @@ async fn send(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
 ) -> Result<ResponsesResult, ApiError> {
     let thread_id = thread.id.clone();
     let input = user_db(state, user, false, move |connection| {
@@ -90,7 +87,7 @@ async fn send(
         "inference",
         input,
         input,
-        integrations,
+        upstream,
         &thread.model,
         None,
         false,
@@ -133,7 +130,7 @@ async fn codex_turn_state_round_trips_latest_json_and_sse_headers_only_when_enab
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "turn-state-owner").unwrap();
     let thread = create_test_thread(&state, &user).await;
-    let (integrations, mut received, server) = upstream(vec![
+    let (integrations, mut received, server) = mock_upstream(vec![
         reply(Some("ignored-by-default"), false, StatusCode::OK),
         reply(Some("opaque.A+/="), false, StatusCode::OK),
         reply(Some("opaque.B+/="), true, StatusCode::OK),
@@ -202,7 +199,7 @@ async fn codex_turn_state_is_isolated_by_thread_user_and_upstream() {
         )
         .unwrap();
     same_id_thread.id = thread.id.clone();
-    let (mut integrations, mut received, server) = upstream(vec![
+    let (mut upstream, mut received, server) = mock_upstream(vec![
         reply(Some("first-thread"), false, StatusCode::OK),
         reply(Some("other-thread"), false, StatusCode::OK),
         reply(Some("other-user"), false, StatusCode::OK),
@@ -216,19 +213,19 @@ async fn codex_turn_state_is_isolated_by_thread_user_and_upstream() {
         (&other_user, &same_id_thread, None),
         (&user, &thread, Some("first-thread")),
     ] {
-        send(&state, owner, target, &integrations).await.unwrap();
+        send(&state, owner, target, &upstream).await.unwrap();
         assert_header(&mut received, expected).await;
     }
-    integrations.openai_consumer_secret = "rotated-secret".to_owned();
-    send(&state, &user, &thread, &integrations).await.unwrap();
+    upstream.api_key = "rotated-secret".to_owned();
+    send(&state, &user, &thread, &upstream).await.unwrap();
     assert_header(&mut received, None).await;
 
-    let (mut other_upstream, mut other_received, other_server) = upstream(vec![
+    let (mut other_upstream, mut other_received, other_server) = mock_upstream(vec![
         reply(Some("unscoped-response"), false, StatusCode::OK),
         reply(None, false, StatusCode::OK),
     ])
     .await;
-    other_upstream.openai_consumer_secret = "secret".to_owned();
+    other_upstream.api_key = "secret".to_owned();
     responses_request(
         &state,
         &other_upstream,
@@ -263,12 +260,12 @@ async fn codex_turn_state_is_saved_before_the_stream_completes() {
         .header(CODEX_TURN_STATE_HEADER, "in-flight-state")
         .body(body)
         .unwrap();
-    let (integrations, mut received, server) = upstream(vec![response]).await;
+    let (upstream, mut received, server) = mock_upstream(vec![response]).await;
     let request = tokio::spawn({
         let state = state.clone();
         let user = user.clone();
         let thread = thread.clone();
-        async move { send(&state, &user, &thread, &integrations).await }
+        async move { send(&state, &user, &thread, &upstream).await }
     });
     assert_header(&mut received, None).await;
     tokio::time::timeout(Duration::from_secs(3), async {

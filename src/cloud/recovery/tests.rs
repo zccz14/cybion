@@ -1,5 +1,7 @@
 use super::*;
-use crate::cloud::tests::{create_test_thread, insert_record, test_state};
+use crate::cloud::tests::{
+    bind_thread_upstream, create_test_thread, insert_record, insert_upstream, test_state,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Requests = Arc<Mutex<Vec<Value>>>;
@@ -23,9 +25,7 @@ async fn fixture() -> (tempfile::TempDir, AppState, User, ThreadView, i64) {
     .unwrap();
     (root, state, user, thread, input)
 }
-async fn model(
-    statuses: Vec<StatusCode>,
-) -> (IntegrationSettings, Requests, tokio::task::JoinHandle<()>) {
+async fn model(statuses: Vec<StatusCode>) -> (String, Requests, tokio::task::JoinHandle<()>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let counter = Arc::new(AtomicUsize::new(0));
     let app=Router::new().route("/responses",post({let requests=requests.clone();move |Json(value):Json<Value>|{
@@ -40,17 +40,15 @@ async fn model(
         }
     }}));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let settings = IntegrationSettings {
-        openai_consumer_id: "fixture".into(),
-        openai_consumer_secret: "fixture".into(),
-        api_key: String::new(),
-        openai_base_url: format!("http://{}", listener.local_addr().unwrap()),
-        linkit_bot_id: String::new(),
-        linkit_bot_token: String::new(),
-        linkit_username: String::new(),
-    };
+    let base = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (settings, requests, task)
+    (base, requests, task)
+}
+
+/// Points the thread at a fresh upstream row serving the mock base URL.
+async fn bind_mock(state: &AppState, user: &User, thread: &ThreadView, base: &str) {
+    let upstream = insert_upstream(state, user, "mock", base).await;
+    bind_thread_upstream(state, user, &thread.id, &upstream.id).await;
 }
 async fn wait_finished(state: &AppState, user: &User, thread: &ThreadView) {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -92,10 +90,8 @@ async fn restart_resumes_only_running_threads_once_from_latest_committed_history
     .await
     .unwrap();
     append_response_output_items(&state,&user,&thread,input,&[ResponseItem::from_value(json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"committed progress"}]})).unwrap()]).await.unwrap();
-    let (settings, requests, server) = model(vec![]).await;
-    save_integration_settings(&state, &user, &settings)
-        .await
-        .unwrap();
+    let (base, requests, server) = model(vec![]).await;
+    bind_mock(&state, &user, &thread, &base).await;
     recover_interrupted_requests(&state.data_dir).unwrap();
     let (a, b) = tokio::join!(resume_running(&state), resume_running(&state));
     a.unwrap();
@@ -150,10 +146,8 @@ async fn restart_waits_for_original_tool_and_replays_its_result_without_creating
     })
     .await
     .unwrap();
-    let (settings, requests, server) = model(vec![]).await;
-    save_integration_settings(&state, &user, &settings)
-        .await
-        .unwrap();
+    let (base, requests, server) = model(vec![]).await;
+    bind_mock(&state, &user, &thread, &base).await;
     recover_interrupted_requests(&state.data_dir).unwrap();
     resume_running(&state).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -215,10 +209,8 @@ async fn transient_requests_retry_but_permanent_errors_do_not() {
         StatusCode::UNAUTHORIZED,
     ] {
         let (_root, state, user, thread, _) = fixture().await;
-        let (settings, requests, server) = model(vec![status]).await;
-        save_integration_settings(&state, &user, &settings)
-            .await
-            .unwrap();
+        let (base, requests, server) = model(vec![status]).await;
+        bind_mock(&state, &user, &thread, &base).await;
         resume_running(&state).await.unwrap();
         wait_finished(&state, &user, &thread).await;
         let permanent = status == StatusCode::UNAUTHORIZED;
@@ -350,18 +342,8 @@ async fn write_restart_fixture() {
     let base = std::env::var("CYBION_SMOKE_MODEL_URL").unwrap();
     let (_root, state, user, thread, _) = fixture().await;
     let worker = seed_worker(&state, &user).await;
-    let settings = IntegrationSettings {
-        openai_consumer_id: "fixture".into(),
-        openai_consumer_secret: "fixture".into(),
-        api_key: String::new(),
-        openai_base_url: base,
-        linkit_bot_id: String::new(),
-        linkit_bot_token: String::new(),
-        linkit_username: String::new(),
-    };
-    save_integration_settings(&state, &user, &settings)
-        .await
-        .unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", &base).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
     Connection::open(&user.path)
         .unwrap()
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")

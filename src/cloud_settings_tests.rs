@@ -1,4 +1,4 @@
-use super::tests::test_state;
+use super::tests::{insert_upstream, test_state};
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -120,8 +120,38 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert!(admin_user_sync(&state.admin_db_path, "http-settings-owner", true).unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
     let client = reqwest::Client::new();
+    let upstreams_url = format!("{base}/api/integrations/upstreams");
+    let created_upstream: Value = client
+        .post(&upstreams_url)
+        .bearer_auth(&token)
+        .json(&json!({"name":"http fixture","base_url":"http://127.0.0.1:9/v1","api_key":"sk-http-fixture"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let upstream_id = created_upstream["id"].as_str().unwrap().to_owned();
+    assert_eq!(created_upstream["name"], "http fixture");
+    assert_eq!(created_upstream["base_url"], "http://127.0.0.1:9/v1");
+    assert_eq!(created_upstream["api_key_configured"], true);
+    let listed_upstreams: Value = client
+        .get(&upstreams_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
+    assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -228,7 +258,12 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         .json()
         .await
         .unwrap();
-    for field in ["model", "reasoning_effort", "service_tier_fast"] {
+    for field in [
+        "model",
+        "upstream_id",
+        "reasoning_effort",
+        "service_tier_fast",
+    ] {
         assert_eq!(created[field], defaults[field]);
     }
     let thread_url = format!("{base}/api/threads/{}", created["id"].as_str().unwrap());
@@ -405,11 +440,25 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         unchanged_features,
         json!({"thread_id_header":true,"session_id_header":false,"codex_turn_state_header":false})
     );
+    let other_upstream: Value = client
+        .post(&upstreams_url)
+        .bearer_auth(&other_token)
+        .json(&json!({"name":"other","base_url":"http://127.0.0.1:9/v1"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(other_upstream["api_key_configured"], false);
+    let other_defaults = json!({"model":"gpt-6-astra","upstream_id":other_upstream["id"],"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000});
     assert_eq!(
         client
             .put(&settings_url)
             .bearer_auth(&other_token)
-            .json(&defaults)
+            .json(&other_defaults)
             .send()
             .await
             .unwrap()
@@ -474,10 +523,11 @@ async fn authenticated_http_models_route_serves_the_endpoint_catalog() {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
     let client = reqwest::Client::new();
-    let _ = client
-        .put(format!("{base}/api/integrations/openai"))
+    let created: Value = client
+        .post(format!("{base}/api/integrations/upstreams"))
         .bearer_auth(&token)
         .json(&json!({
+            "name": "catalog",
             "base_url": format!("http://127.0.0.1:{catalog_port}/v1"),
             "api_key": "sk-http-models",
         }))
@@ -485,9 +535,12 @@ async fn authenticated_http_models_route_serves_the_endpoint_catalog() {
         .await
         .unwrap()
         .error_for_status()
+        .unwrap()
+        .json()
+        .await
         .unwrap();
     let models: Value = client
-        .get(format!("{base}/api/integrations/openai/models"))
+        .get(format!("{base}/api/integrations/upstreams/models"))
         .bearer_auth(&token)
         .send()
         .await
@@ -497,13 +550,18 @@ async fn authenticated_http_models_route_serves_the_endpoint_catalog() {
         .json()
         .await
         .unwrap();
+    let upstreams = models["upstreams"].as_array().unwrap();
+    assert_eq!(upstreams.len(), 1);
+    assert_eq!(upstreams[0]["id"], created["id"]);
+    assert_eq!(upstreams[0]["name"], "catalog");
     assert_eq!(
-        models,
-        json!({"models":["gpt-5.6-terra","meta-llama/Llama-3.1-8B-Instruct"]})
+        upstreams[0]["models"],
+        json!(["gpt-5.6-terra", "meta-llama/Llama-3.1-8B-Instruct"])
     );
+    assert!(upstreams[0]["error"].is_null());
     assert_eq!(
         client
-            .get(format!("{base}/api/integrations/openai/models"))
+            .get(format!("{base}/api/integrations/upstreams/models"))
             .send()
             .await
             .unwrap()
@@ -516,33 +574,39 @@ async fn authenticated_http_models_route_serves_the_endpoint_catalog() {
 }
 
 #[tokio::test]
-async fn available_models_come_from_the_configured_endpoint_catalog() {
+async fn available_models_come_from_each_configured_endpoint_catalog() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "models-owner").unwrap();
-    let unconfigured = openai_models(State(state.clone()), browser_identity_for(&user))
+    let empty = upstreams::models(State(state.clone()), browser_identity_for(&user))
         .await
-        .unwrap_err();
-    assert_eq!(unconfigured.status, StatusCode::CONFLICT);
+        .unwrap()
+        .0;
+    assert!(empty.upstreams.is_empty());
 
     let (catalog_port, catalog) = serve_model_catalog_once().await;
-    let _ = update_openai_api_config(
+    let created = upstreams::create(
         State(state.clone()),
         browser_identity_for(&user),
-        Json(UpdateOpenAiApiConfigInput {
+        Json(upstreams::CreateUpstreamInput {
+            name: "custom".to_owned(),
             base_url: format!("http://127.0.0.1:{catalog_port}/v1"),
             api_key: Some("sk-custom".to_owned()),
         }),
     )
     .await
-    .unwrap();
-    let models = openai_models(State(state.clone()), browser_identity_for(&user))
+    .unwrap()
+    .0;
+    let models = upstreams::models(State(state.clone()), browser_identity_for(&user))
         .await
         .unwrap()
         .0;
+    assert_eq!(models.upstreams.len(), 1);
+    assert_eq!(models.upstreams[0].id, created.id);
     assert_eq!(
-        models.models,
+        models.upstreams[0].models,
         ["gpt-5.6-terra", "meta-llama/Llama-3.1-8B-Instruct"]
     );
+    assert!(models.upstreams[0].error.is_none());
     let head = catalog.await.unwrap().to_lowercase();
     assert!(head.starts_with("get /v1/models http/1.1"));
     assert!(head.contains("authorization: bearer sk-custom"));
@@ -550,6 +614,7 @@ async fn available_models_come_from_the_configured_endpoint_catalog() {
 
     let defaults = ThreadDefaults {
         model: "meta-llama/Llama-3.1-8B-Instruct".to_owned(),
+        upstream_id: Some(created.id),
         reasoning_effort: "high".to_owned(),
         service_tier_fast: false,
         context_budget_tokens: 150_000,
@@ -568,20 +633,20 @@ async fn available_models_come_from_the_configured_endpoint_catalog() {
 }
 
 #[tokio::test]
-async fn user_openai_api_configuration_round_trips_without_exposing_the_key() {
+async fn user_upstream_configuration_round_trips_without_exposing_the_key() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "api-config-owner").unwrap();
-    let initial = openai_api_config(State(state.clone()), browser_identity_for(&user))
+    let initial = upstreams::list(State(state.clone()), browser_identity_for(&user))
         .await
         .unwrap()
         .0;
-    assert_eq!(initial.base_url, OPENAI_BASE_URL);
-    assert!(!initial.api_key_configured);
+    assert!(initial.is_empty());
 
-    let saved = update_openai_api_config(
+    let saved = upstreams::create(
         State(state.clone()),
         browser_identity_for(&user),
-        Json(UpdateOpenAiApiConfigInput {
+        Json(upstreams::CreateUpstreamInput {
+            name: "user upstream".to_owned(),
             base_url: "http://127.0.0.1:4242/v1/".to_owned(),
             api_key: Some("sk-user-configured".to_owned()),
         }),
@@ -589,21 +654,56 @@ async fn user_openai_api_configuration_round_trips_without_exposing_the_key() {
     .await
     .unwrap()
     .0;
+    assert_eq!(saved.name, "user upstream");
     assert_eq!(saved.base_url, "http://127.0.0.1:4242/v1");
     assert!(saved.api_key_configured);
-    let stored = user_db(&state, &user, false, |connection| {
-        integration_settings(connection)
+
+    let id = saved.id.clone();
+    let stored = user_db(&state, &user, false, move |connection| {
+        upstreams::load(connection, &id)
     })
     .await
     .unwrap();
-    assert!(stored.openai_consumer_id.is_empty());
-    assert!(stored.openai_consumer_secret.is_empty());
     assert_eq!(stored.api_key, "sk-user-configured");
+    assert_eq!(stored.name, "user upstream");
 
-    let invalid = update_openai_api_config(
-        State(state),
+    // An update without a new key keeps the stored key.
+    let renamed = upstreams::update(
+        State(state.clone()),
         browser_identity_for(&user),
-        Json(UpdateOpenAiApiConfigInput {
+        AxumPath(saved.id.clone()),
+        Json(upstreams::UpdateUpstreamInput {
+            name: "renamed".to_owned(),
+            base_url: "http://127.0.0.1:4243/v1".to_owned(),
+            api_key: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(renamed.name, "renamed");
+    assert_eq!(renamed.base_url, "http://127.0.0.1:4243/v1");
+    assert!(renamed.api_key_configured);
+
+    let duplicate = upstreams::create(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(upstreams::CreateUpstreamInput {
+            name: "renamed".to_owned(),
+            base_url: "http://127.0.0.1:4244/v1".to_owned(),
+            api_key: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(duplicate.status, StatusCode::CONFLICT);
+
+    let invalid = upstreams::update(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath(saved.id.clone()),
+        Json(upstreams::UpdateUpstreamInput {
+            name: "renamed".to_owned(),
             base_url: "ftp://provider.example/v1".to_owned(),
             api_key: None,
         }),
@@ -611,6 +711,20 @@ async fn user_openai_api_configuration_round_trips_without_exposing_the_key() {
     .await
     .unwrap_err();
     assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+
+    let unknown = upstreams::update(
+        State(state),
+        browser_identity_for(&user),
+        AxumPath("00000000-0000-4000-8000-000000000001".to_owned()),
+        Json(upstreams::UpdateUpstreamInput {
+            name: "missing".to_owned(),
+            base_url: "http://127.0.0.1:4245/v1".to_owned(),
+            api_key: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -667,16 +781,18 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         .unwrap()
         .0;
     assert_eq!(initial, ThreadDefaults::default());
+    let upstream = insert_upstream(&state, &user, "defaults", "http://127.0.0.1:9/v1").await;
     let old_thread = create_thread(
         State(state.clone()),
         browser_identity_for(&user),
-        Json(serde_json::from_value(json!({})).unwrap()),
+        Json(serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap()),
     )
     .await
     .unwrap()
     .0;
     let defaults = ThreadDefaults {
         model: "gpt-6-astra".to_owned(),
+        upstream_id: Some(upstream.id.clone()),
         reasoning_effort: "max".to_owned(),
         service_tier_fast: true,
         context_budget_tokens: 150_000,
@@ -713,6 +829,10 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     .unwrap()
     .0;
     assert_eq!(new_thread.model, defaults.model);
+    assert_eq!(
+        new_thread.upstream_id.as_deref(),
+        Some(upstream.id.as_str())
+    );
     assert_eq!(new_thread.reasoning_effort, defaults.reasoning_effort);
     assert!(new_thread.service_tier_fast);
     for model in [None, Some("gpt-5.6-sol")] {
@@ -722,6 +842,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
             Json(CreateThreadInput {
                 title: None,
                 model: model.map(str::to_owned),
+                upstream_id: None,
                 reasoning_effort: None,
                 service_tier_fast: None,
             }),
@@ -730,6 +851,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         .unwrap()
         .0;
         assert_eq!(thread.model, model.unwrap_or(&defaults.model));
+        assert_eq!(thread.upstream_id.as_deref(), Some(upstream.id.as_str()));
         assert_eq!(thread.reasoning_effort, "max");
         assert!(thread.service_tier_fast);
     }
@@ -737,11 +859,22 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     assert_eq!(old_thread.model, initial.model);
     assert_eq!(old_thread.reasoning_effort, initial.reasoning_effort);
     assert!(!old_thread.service_tier_fast);
+    assert_eq!(
+        old_thread.upstream_id.as_deref(),
+        Some(upstream.id.as_str())
+    );
 
+    let reset = ThreadDefaults {
+        model: initial.model.clone(),
+        upstream_id: Some(upstream.id.clone()),
+        reasoning_effort: initial.reasoning_effort.clone(),
+        service_tier_fast: initial.service_tier_fast,
+        context_budget_tokens: initial.context_budget_tokens,
+    };
     let _ = update_thread_defaults(
         State(state.clone()),
         browser_identity_for(&user),
-        Json(initial.clone()),
+        Json(reset),
     )
     .await
     .unwrap();
@@ -749,6 +882,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         .await
         .unwrap();
     assert_eq!(next.model, initial.model);
+    assert_eq!(next.upstream_id.as_deref(), Some(upstream.id.as_str()));
     assert_eq!(next.reasoning_effort, initial.reasoning_effort);
     assert!(!next.service_tier_fast);
     let existing = read_thread_for(&state, &user, new_thread.id).await.unwrap();
@@ -768,8 +902,10 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
 async fn thread_defaults_reject_invalid_values_without_overwriting_saved_settings() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "validation-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "validation", "http://127.0.0.1:9/v1").await;
     let saved = ThreadDefaults {
         model: "gpt-6-astra".to_owned(),
+        upstream_id: Some(upstream.id.clone()),
         reasoning_effort: "high".to_owned(),
         service_tier_fast: true,
         context_budget_tokens: 150_000,
@@ -791,6 +927,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             browser_identity_for(&user),
             Json(ThreadDefaults {
                 model: model.to_owned(),
+                upstream_id: Some(upstream.id.clone()),
                 reasoning_effort: effort.to_owned(),
                 service_tier_fast: false,
                 context_budget_tokens: 150_000,
@@ -821,6 +958,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             browser_identity_for(&user),
             Json(ThreadDefaults {
                 model: "gpt-6-astra".to_owned(),
+                upstream_id: Some(upstream.id.clone()),
                 reasoning_effort: "high".to_owned(),
                 service_tier_fast: true,
                 context_budget_tokens: budget,
@@ -830,6 +968,20 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         .unwrap_err();
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
+    let unknown = update_thread_defaults(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(ThreadDefaults {
+            model: "gpt-6-astra".to_owned(),
+            upstream_id: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            reasoning_effort: "high".to_owned(),
+            service_tier_fast: true,
+            context_budget_tokens: 150_000,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     assert_eq!(
         read_thread_defaults(State(state), browser_identity_for(&user))
             .await
@@ -877,6 +1029,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
             load_thread_defaults(&connection).unwrap(),
             ThreadDefaults {
                 model: "gpt-6-astra".to_owned(),
+                upstream_id: None,
                 reasoning_effort: "max".to_owned(),
                 service_tier_fast: true,
                 context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,

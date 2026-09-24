@@ -4,12 +4,12 @@ import test from "node:test"
 
 const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const system = readFileSync(new URL("../src/components/system-configuration.tsx", import.meta.url), "utf8")
-const personal = main.slice(main.indexOf("function ConfigurationPage("), main.indexOf("function IntegrationRow("))
+const personal = main.slice(main.indexOf("function ConfigurationPage("), main.indexOf("function ApiKeysPage("))
 
 test("personal configuration contains only personal controls, even for administrators", () => {
   assert.match(personal, /function ConfigurationPage\(\{ sdk \}/)
   assert.doesNotMatch(personal, /isAdmin|ExperimentalFeatures|RequestHeaders|user_agent|originator|saveHeaders|SystemConfiguration/)
-  for (const feature of ["ThreadDefaultsCard", "IntegrationRow", "/api/integrations/openai", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
+  for (const feature of ["ThreadDefaultsCard", "UpstreamsCard", "/api/integrations/upstreams", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
   assert.match(main, /path="\/configuration" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
   assert.match(main, /path="\/settings" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
 })

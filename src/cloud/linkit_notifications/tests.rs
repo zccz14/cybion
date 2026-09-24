@@ -1,5 +1,7 @@
 use super::super::tests::test_state;
 use super::*;
+use crate::cloud::tests::insert_upstream;
+use crate::cloud::upstreams::Upstream;
 
 #[derive(Clone)]
 struct Bot {
@@ -17,6 +19,7 @@ struct MockLinkit {
     rotated: usize,
     fault: Option<(usize, StatusCode, Value)>,
     send_status: StatusCode,
+    responses_status: StatusCode,
 }
 
 async fn mock_linkit(State(remote): State<Arc<Mutex<MockLinkit>>>, request: Request) -> Response {
@@ -45,6 +48,13 @@ async fn mock_linkit(State(remote): State<Arc<Mutex<MockLinkit>>>, request: Requ
         return (*status, Json(value.clone())).into_response();
     }
     if path == "/v1/responses" {
+        if remote.responses_status != StatusCode::OK {
+            return (
+                remote.responses_status,
+                Json(json!({"error":{"message":"fixture model rejection"}})),
+            )
+                .into_response();
+        }
         return Json(json!({"id":"response-fixture","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"task completed"}]}]})).into_response();
     }
     let human = bearer == "Bearer owner-auth-fixture";
@@ -123,6 +133,7 @@ struct Fixture {
     _root: tempfile::TempDir,
     state: AppState,
     user: User,
+    upstream: Upstream,
     remote: Arc<Mutex<MockLinkit>>,
     server: tokio::task::JoinHandle<()>,
 }
@@ -149,6 +160,7 @@ async fn fixture() -> Fixture {
         rotated: 0,
         fault: None,
         send_status: StatusCode::OK,
+        responses_status: StatusCode::OK,
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -158,21 +170,17 @@ async fn fixture() -> Fixture {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     state.linkit_api_url = base.clone();
     let settings = IntegrationSettings {
-        openai_consumer_id: "consumer".into(),
-        openai_consumer_secret: "sk-model-fixture".into(),
-        api_key: String::new(),
-        openai_base_url: format!("{base}/v1"),
         linkit_bot_id: "bot-1".into(),
         linkit_bot_token: "sk-bot-token".into(),
         linkit_username: "owner".into(),
     };
-    save_integration_settings(&state, &user, &settings)
-        .await
-        .unwrap();
+    save_settings(&state, &user, &settings).await.unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", &format!("{base}/v1")).await;
     Fixture {
         _root: root,
         state,
         user,
+        upstream,
         remote,
         server,
     }
@@ -184,6 +192,15 @@ fn identity(f: &Fixture) -> axum::Extension<BrowserIdentity> {
         bearer: "owner-auth-fixture".into(),
     })
 }
+async fn upstream_of(f: &Fixture) -> Upstream {
+    let id = f.upstream.id.clone();
+    user_db(&f.state, &f.user, false, move |connection| {
+        upstreams::load(connection, &id)
+    })
+    .await
+    .unwrap()
+}
+
 fn saved(f: &Fixture) -> IntegrationSettings {
     integration_settings(&open_user(&f.user.path, false).unwrap()).unwrap()
 }
@@ -200,7 +217,8 @@ async fn thread(f: &Fixture) -> ThreadView {
     create_thread_for(
         &f.state,
         &f.user,
-        serde_json::from_value(json!({"title":"Notification fixture"})).unwrap(),
+        serde_json::from_value(json!({"title":"Notification fixture","upstream_id":f.upstream.id}))
+            .unwrap(),
     )
     .await
     .unwrap()
@@ -264,9 +282,7 @@ async fn notifications_use_fresh_credentials_and_pausing_keeps_credentials_witho
     let mut settings = saved(&f);
     settings.linkit_bot_token = "sk-refreshed-token".into();
     f.remote.lock().await.bot.as_mut().unwrap().token = settings.linkit_bot_token.clone();
-    save_integration_settings(&f.state, &f.user, &settings)
-        .await
-        .unwrap();
+    save_settings(&f.state, &f.user, &settings).await.unwrap();
     notify(&f.state, &f.user, &t, true, "ok").await;
     assert_eq!(f.remote.lock().await.messages.len(), 1);
     assert!(
@@ -311,15 +327,11 @@ async fn stale_credentials_and_reassigned_recipient_do_not_send_thread_content()
     let f = fixture().await;
     let mut settings = saved(&f);
     settings.linkit_bot_token = "sk-stale".into();
-    save_integration_settings(&f.state, &f.user, &settings)
-        .await
-        .unwrap();
+    save_settings(&f.state, &f.user, &settings).await.unwrap();
     assert!(test_message(&f).await.is_err());
     assert!(f.remote.lock().await.messages.is_empty());
     settings.linkit_bot_token = "sk-bot-token".into();
-    save_integration_settings(&f.state, &f.user, &settings)
-        .await
-        .unwrap();
+    save_settings(&f.state, &f.user, &settings).await.unwrap();
     f.remote.lock().await.counterpart = "another-user".into();
     assert_eq!(
         test_message(&f).await.unwrap_err().status,
@@ -348,25 +360,23 @@ async fn malformed_or_mismatched_receipts_are_not_reported_as_delivered() {
 }
 
 #[tokio::test]
-async fn configure_is_owner_scoped_repairs_stale_bot_token_and_preserves_openai_settings() {
+async fn configure_is_owner_scoped_repairs_stale_bot_token_and_preserves_upstreams() {
     for stale in [false, true] {
         let f = fixture().await;
-        let before = saved(&f);
         let mut settings = saved(&f);
         settings.linkit_username = "previous-username".into();
         if stale {
             settings.linkit_bot_token = "sk-stale".into();
         }
-        save_integration_settings(&f.state, &f.user, &settings)
-            .await
-            .unwrap();
+        save_settings(&f.state, &f.user, &settings).await.unwrap();
         let view = configure_notifications(&f).await.unwrap().0;
         assert!(view.enabled && view.configured);
         assert!(view.last_success_at.is_none());
         let after = saved(&f);
         assert_eq!(after.linkit_username, "owner");
-        assert_eq!(after.openai_consumer_secret, before.openai_consumer_secret);
-        assert_eq!(after.openai_base_url, before.openai_base_url);
+        let upstream = upstream_of(&f).await;
+        assert_eq!(upstream.base_url, f.upstream.base_url);
+        assert_eq!(upstream.api_key, f.upstream.api_key);
         let remote = f.remote.lock().await;
         assert_eq!(remote.rotated, usize::from(stale));
         assert_eq!(remote.created, 0);
@@ -409,19 +419,14 @@ async fn new_bot_token_is_saved_before_final_validation_failure_and_reused_on_re
 }
 
 #[tokio::test]
-async fn linkit_setup_failure_does_not_block_openai_readiness_or_clear_credentials() {
+async fn linkit_setup_failure_does_not_touch_upstreams() {
     let f = fixture().await;
     f.remote.lock().await.username = None;
     assert!(configure_notifications(&f).await.is_err());
     assert_eq!(saved(&f).linkit_bot_token, "sk-bot-token");
-    assert!(openai_integration_ready(
-        &required_openai_integration(&f.state, &f.user)
-            .await
-            .unwrap()
-    ));
-    ensure_openai_integration(&f.state, &f.user, "owner-auth-fixture")
-        .await
-        .unwrap();
+    let upstream = upstream_of(&f).await;
+    assert_eq!(upstream.base_url, f.upstream.base_url);
+    assert_eq!(upstream.api_key, f.upstream.api_key);
     assert_eq!(f.remote.lock().await.calls.len(), 1);
 }
 
@@ -486,14 +491,10 @@ async fn completed_thread_stays_successful_when_notification_delivery_fails() {
 }
 
 #[tokio::test]
-async fn missing_openai_credentials_still_allow_an_independent_failure_notification() {
+async fn failed_model_inference_still_notifies_without_touching_delivery_settings() {
     let f = fixture().await;
     set_enabled(&f.state, &f.user, true).await.unwrap();
-    let mut settings = saved(&f);
-    settings.openai_consumer_secret.clear();
-    save_integration_settings(&f.state, &f.user, &settings)
-        .await
-        .unwrap();
+    f.remote.lock().await.responses_status = StatusCode::UNAUTHORIZED;
     let t = thread(&f).await;
     enqueue_request(
         f.state.clone(),
@@ -545,21 +546,30 @@ async fn notification_management_routes_reject_missing_browser_authentication() 
 }
 
 #[tokio::test]
-async fn parallel_linkit_and_openai_saves_do_not_overwrite_the_other_credentials() {
+async fn linkit_and_upstream_saves_do_not_overwrite_each_other() {
     let f = fixture().await;
     let mut linkit = saved(&f);
-    let mut openai = saved(&f);
     linkit.linkit_bot_token = "sk-new-linkit".into();
     linkit.linkit_username = "new-name".into();
-    openai.openai_consumer_secret = "sk-new-openai".into();
-    let (a, b) = tokio::join!(
-        save_settings(&f.state, &f.user, &linkit),
-        openai_integration::save(&f.state, &f.user, &openai)
-    );
-    a.unwrap();
-    b.unwrap();
+    let upstream = upstreams::update(
+        State(f.state.clone()),
+        identity(&f),
+        AxumPath(f.upstream.id.clone()),
+        Json(upstreams::UpdateUpstreamInput {
+            name: "renamed".to_owned(),
+            base_url: format!("{}/v1", f.upstream.base_url.trim_end_matches("/v1")),
+            api_key: Some("sk-new-upstream".to_owned()),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    save_settings(&f.state, &f.user, &linkit).await.unwrap();
     let result = saved(&f);
     assert_eq!(result.linkit_bot_token, "sk-new-linkit");
     assert_eq!(result.linkit_username, "new-name");
-    assert_eq!(result.openai_consumer_secret, "sk-new-openai");
+    let stored = upstream_of(&f).await;
+    assert_eq!(stored.id, upstream.id);
+    assert_eq!(stored.name, "renamed");
+    assert_eq!(stored.api_key, "sk-new-upstream");
 }

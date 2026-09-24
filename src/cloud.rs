@@ -20,7 +20,7 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, Sse},
     },
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use futures_util::StreamExt;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -35,15 +35,16 @@ use uuid::Uuid;
 mod admin_users;
 mod history;
 mod linkit_notifications;
-mod openai_integration;
 mod recovery;
 mod thread_controls;
 mod traffic;
 mod turn_state;
+mod upstreams;
 mod worker_onboarding;
 mod worker_protocol;
 
 use thread_controls::{RequestOperation, latest_request_record_id, request_superseded};
+use upstreams::Upstream;
 
 use crate::resources;
 use crate::responses::{
@@ -54,7 +55,8 @@ use crate::responses::{
 const AUTH_ISSUER: &str = "https://auth.ntnl.io";
 const AUTH_AUDIENCE: &str = "cybion.ntnl.io";
 const AUTH_AUDIENCES: [&str; 3] = ["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io"];
-const OPENAI_CONSUMERS_URL: &str = "https://openai.ntnl.io/api/consumers";
+// Legacy single-upstream installations without an explicit base URL used this
+// endpoint; schema 16 materializes it into an upstream row.
 const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
 const INTEGRATION_NAME: &str = "Cybion";
@@ -87,7 +89,7 @@ const CONTEXT_ESTIMATE_BYTES_PER_TOKEN: i64 = 4;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 15;
+const USER_SCHEMA_VERSION: i64 = 16;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -108,7 +110,6 @@ struct AppState {
     data_dir: Arc<PathBuf>,
     admin_db_path: Arc<PathBuf>,
     client: reqwest::Client,
-    openai_consumers_url: String,
     linkit_api_url: String,
     auth: Arc<OnceCell<AuthMiniLayer>>,
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -327,7 +328,6 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(600))
             .build()?,
-        openai_consumers_url: OPENAI_CONSUMERS_URL.to_owned(),
         linkit_api_url: LINKIT_API_URL.to_owned(),
         auth: Arc::new(OnceCell::new()),
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -586,11 +586,14 @@ fn app(state: AppState) -> Router {
             get(integrations).put(update_integrations),
         )
         .route(
-            "/api/integrations/openai",
-            get(openai_api_config).put(update_openai_api_config),
+            "/api/integrations/upstreams",
+            get(upstreams::list).post(upstreams::create),
         )
-        .route("/api/integrations/openai/models", get(openai_models))
-        .route("/api/integrations/refresh", post(refresh_integrations))
+        .route(
+            "/api/integrations/upstreams/{id}",
+            put(upstreams::update).delete(upstreams::delete),
+        )
+        .route("/api/integrations/upstreams/models", get(upstreams::models))
         .route(
             "/api/integrations/linkit",
             get(linkit_notifications::read).delete(linkit_notifications::disable),
@@ -1006,6 +1009,7 @@ CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   model TEXT NOT NULL,
+  upstream_id TEXT,
   reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
   context_budget_tokens INTEGER,
@@ -1024,6 +1028,7 @@ CREATE TABLE IF NOT EXISTS thread_turn_states (
 CREATE TABLE IF NOT EXISTS thread_defaults (
   id INTEGER PRIMARY KEY CHECK(id=1),
   model TEXT NOT NULL,
+  upstream_id TEXT,
   reasoning_effort TEXT NOT NULL CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1)),
   context_budget_tokens INTEGER NOT NULL DEFAULT 200000
@@ -1079,6 +1084,14 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   linkit_bot_id TEXT NOT NULL DEFAULT '',
   linkit_bot_token TEXT NOT NULL DEFAULT '',
   linkit_username TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS upstreams (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  api_key TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS workers (
@@ -1233,6 +1246,8 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         }
     }
     for (table, name, definition) in [
+        ("threads", "upstream_id", "TEXT"),
+        ("thread_defaults", "upstream_id", "TEXT"),
         ("threads", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
         ("threads", "next_retry_at", "INTEGER"),
         ("threads", "context_budget_tokens", "INTEGER"),
@@ -1295,6 +1310,14 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if !has_output_type {
         transaction.execute("ALTER TABLE worker_calls ADD COLUMN responses_output_type TEXT NOT NULL DEFAULT 'function_call_output'", [])?;
     }
+    if version < 16 {
+        // COMPATIBILITY: databases before 16 configured one implicit upstream
+        // (an explicit base_url/api_key, or an OpenAI-LB consumer credential).
+        // Materialize it as the first upstream and bind existing threads and
+        // defaults to it, then drop support once every user database is audited
+        // at schema 16+; retain the migration test.
+        migrate_legacy_upstream(&transaction)?;
+    }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
@@ -1305,6 +1328,55 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     }
     transaction.commit()?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
+}
+
+/// Materializes the pre-upstream single configuration into an upstream row.
+/// Runs once per database during the schema 16 upgrade.
+fn migrate_legacy_upstream(connection: &Connection) -> Result<(), ApiError> {
+    let legacy: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT api_key,openai_consumer_secret,openai_base_url FROM integration_settings WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((api_key, consumer_secret, base_url)) = legacy else {
+        return Ok(());
+    };
+    let api_key = if api_key.is_empty() {
+        consumer_secret
+    } else {
+        api_key
+    };
+    if api_key.is_empty() {
+        return Ok(());
+    }
+    let base_url = if base_url.is_empty() {
+        OPENAI_BASE_URL.to_owned()
+    } else {
+        base_url
+    };
+    let id = Uuid::now_v7().to_string();
+    connection.execute(
+        "INSERT INTO upstreams(id,name,base_url,api_key,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        params![
+            id,
+            upstreams::name_from_base_url(&base_url),
+            base_url,
+            api_key,
+            now(),
+            now()
+        ],
+    )?;
+    connection.execute(
+        "UPDATE threads SET upstream_id=? WHERE upstream_id IS NULL",
+        [&id],
+    )?;
+    connection.execute(
+        "UPDATE thread_defaults SET upstream_id=? WHERE upstream_id IS NULL",
+        [&id],
+    )?;
     Ok(())
 }
 
@@ -1328,6 +1400,9 @@ struct ThreadView {
     id: String,
     title: String,
     model: String,
+    /// Upstream used for inference. `None` marks a thread created before
+    /// upstreams existed whose owner had no legacy configuration to migrate.
+    upstream_id: Option<String>,
     reasoning_effort: String,
     service_tier_fast: bool,
     /// Per-thread proactive compaction budget in tokens; `None` follows the
@@ -1540,22 +1615,8 @@ struct WorkerCallAuditPage {
 
 #[derive(Debug, Serialize)]
 struct IntegrationStatusView {
-    openai_configured: bool,
-    openai_consumer_id: Option<String>,
-    openai_base_url: String,
     user_agent: String,
     originator: String,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiApiConfigView {
-    base_url: String,
-    api_key_configured: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiModelsView {
-    models: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1582,19 +1643,13 @@ struct UpdateIntegrationHeadersInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UpdateOpenAiApiConfigInput {
-    base_url: String,
-    #[serde(default)]
-    api_key: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CreateThreadInput {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    upstream_id: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
@@ -1605,6 +1660,8 @@ struct CreateThreadInput {
 #[serde(deny_unknown_fields)]
 struct StartThreadInput {
     model: String,
+    #[serde(default)]
+    upstream_id: Option<String>,
     reasoning_effort: String,
     service_tier_fast: bool,
     input: String,
@@ -1614,6 +1671,8 @@ struct StartThreadInput {
 #[serde(deny_unknown_fields)]
 struct ThreadDefaults {
     model: String,
+    #[serde(default)]
+    upstream_id: Option<String>,
     reasoning_effort: String,
     service_tier_fast: bool,
     #[serde(default = "default_context_budget_tokens")]
@@ -1628,6 +1687,7 @@ impl Default for ThreadDefaults {
     fn default() -> Self {
         Self {
             model: DEFAULT_MODEL.to_owned(),
+            upstream_id: None,
             reasoning_effort: "medium".to_owned(),
             service_tier_fast: false,
             context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
@@ -1642,6 +1702,8 @@ struct UpdateThreadInput {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    upstream_id: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
@@ -1806,21 +1868,13 @@ type WorkerCallResultRow = (String, Option<i64>, String, Option<i64>, String, St
 
 #[derive(Clone)]
 struct IntegrationSettings {
-    // `openai_consumer_*` remains for existing OpenAI-LB users; new user-level
-    // configuration is stored in the explicit Responses-compatible fields.
-    openai_consumer_id: String,
-    openai_consumer_secret: String,
-    api_key: String,
-    openai_base_url: String,
+    // COMPATIBILITY: `openai_consumer_*` and the single `api_key`/`openai_base_url`
+    // columns remain in the database for the schema-16 migration; inference reads
+    // `upstreams` instead. Remove the columns once every user database is audited
+    // at schema 16+.
     linkit_bot_id: String,
     linkit_bot_token: String,
     linkit_username: String,
-}
-
-#[derive(Deserialize)]
-struct OpenAiConsumerGrant {
-    id: String,
-    secret: String,
 }
 
 fn now() -> i64 {
@@ -1828,22 +1882,23 @@ fn now() -> i64 {
 }
 
 fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
-    let input_tokens: i64 = row.get(9)?;
-    let output_tokens: i64 = row.get(10)?;
-    let cached_tokens: i64 = row.get(11)?;
-    let missing_cache_requests: i64 = row.get(12)?;
+    let input_tokens: i64 = row.get(10)?;
+    let output_tokens: i64 = row.get(11)?;
+    let cached_tokens: i64 = row.get(12)?;
+    let missing_cache_requests: i64 = row.get(13)?;
     Ok(ThreadView {
         id: row.get(0)?,
         title: row.get(1)?,
         model: row.get(2)?,
-        reasoning_effort: row.get(3)?,
-        service_tier_fast: row.get::<_, i64>(4)? != 0,
-        status: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        display_status: row.get(8)?,
-        context_budget_tokens: row.get(13)?,
-        context_tokens: row.get(14)?,
+        upstream_id: row.get(3)?,
+        reasoning_effort: row.get(4)?,
+        service_tier_fast: row.get::<_, i64>(5)? != 0,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        display_status: row.get(9)?,
+        context_budget_tokens: row.get(14)?,
+        context_tokens: row.get(15)?,
         usage: ThreadUsage {
             input_tokens,
             output_tokens,
@@ -1958,6 +2013,82 @@ fn model_id(value: String) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+/// Fails unless the upstream row exists.
+fn require_upstream(connection: &Connection, id: &str) -> Result<(), ApiError> {
+    upstreams::exists(connection, id)?
+        .then_some(())
+        .ok_or_else(|| ApiError::not_found("upstream not found"))
+}
+
+/// Resolves the upstream for a new thread: the explicit choice wins, otherwise
+/// the user default. A user without any upstream cannot create a Thread.
+fn resolve_thread_upstream(
+    connection: &Connection,
+    requested: Option<String>,
+    fallback: Option<String>,
+) -> Result<String, ApiError> {
+    let id = requested
+        .or(fallback)
+        .ok_or_else(|| ApiError::conflict("configure a Responses-compatible upstream first"))?;
+    require_upstream(connection, &id)?;
+    Ok(id)
+}
+
+/// Loads the upstream a thread runs on, failing when the thread has none.
+async fn load_thread_upstream(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+) -> Result<Upstream, ApiError> {
+    let id = thread.upstream_id.clone();
+    user_db(state, user, false, move |connection| {
+        upstreams::for_thread_id(connection, id.as_deref())
+    })
+    .await?
+    .ok_or_else(|| ApiError::conflict("configure an upstream for this thread"))
+}
+
+/// Fails unless the thread references an existing upstream, mirroring the
+/// resolver used when the request runs, so the caller sees the conflict
+/// before the Thread is marked running.
+async fn ensure_thread_upstream(
+    state: &AppState,
+    user: &User,
+    thread_id: &str,
+) -> Result<(), ApiError> {
+    let thread_id = thread_id.to_owned();
+    let bound = user_db(state, user, false, move |connection| {
+        let bound: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads t JOIN upstreams u ON u.id=t.upstream_id WHERE t.id=?)",
+            [&thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(bound)
+    })
+    .await?;
+    if !bound {
+        return Err(ApiError::conflict("configure an upstream for this thread"));
+    }
+    Ok(())
+}
+
+/// Fails unless the user has at least one upstream; the Integration API does
+/// not issue keys to a user who cannot run any request.
+async fn require_user_upstream(state: &AppState, user: &User) -> Result<(), ApiError> {
+    let count = user_db(state, user, false, |connection| {
+        let count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM upstreams", [], |row| row.get(0))?;
+        Ok(count)
+    })
+    .await?;
+    if count == 0 {
+        return Err(ApiError::conflict(
+            "configure a Responses-compatible upstream first",
+        ));
+    }
+    Ok(())
+}
+
 fn reasoning_effort(value: String) -> Result<String, ApiError> {
     if !matches!(
         value.as_str(),
@@ -1980,15 +2111,16 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,reasoning_effort,service_tier_fast,context_budget_tokens
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
                 Ok(ThreadDefaults {
                     model: row.get(0)?,
-                    reasoning_effort: row.get(1)?,
-                    service_tier_fast: row.get::<_, i64>(2)? != 0,
-                    context_budget_tokens: row.get(3)?,
+                    upstream_id: row.get(1)?,
+                    reasoning_effort: row.get(2)?,
+                    service_tier_fast: row.get::<_, i64>(3)? != 0,
+                    context_budget_tokens: row.get(4)?,
                 })
             },
         )
@@ -2014,16 +2146,24 @@ async fn update_thread_defaults(
 ) -> Result<Json<ThreadDefaults>, ApiError> {
     let defaults = ThreadDefaults {
         model: model_id(input.model)?,
+        upstream_id: input
+            .upstream_id
+            .map(|value| upstreams::upstream_id(&value))
+            .transpose()?,
         reasoning_effort: reasoning_effort(input.reasoning_effort)?,
         service_tier_fast: input.service_tier_fast,
         context_budget_tokens: context_budget_tokens(input.context_budget_tokens)?,
     };
     user_db(&state, &identity.user, true, move |connection| {
+        if let Some(id) = defaults.upstream_id.as_deref() {
+            require_upstream(connection, id)?;
+        }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens) VALUES(1,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens) VALUES(1,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens",
             params![
                 defaults.model,
+                defaults.upstream_id,
                 defaults.reasoning_effort,
                 defaults.service_tier_fast,
                 defaults.context_budget_tokens
@@ -2049,7 +2189,7 @@ fn input_text(value: String) -> Result<String, ApiError> {
 // The latest input/control boundary distinguishes those outcomes; later tool output,
 // title-generation audits, and superseded-request activity cannot change the result.
 const THREAD_VIEW_SELECT: &str = r#"
-SELECT t.id,t.title,t.model,t.reasoning_effort,t.service_tier_fast,t.status,t.created_at,t.updated_at,
+SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast,t.status,t.created_at,t.updated_at,
        CASE
          WHEN t.status='failed' THEN 'failed'
          WHEN t.status='running' THEN
@@ -2108,15 +2248,21 @@ async fn create_thread_for(
 ) -> Result<ThreadView, ApiError> {
     let title = optional_title(input.title)?;
     let model = input.model.map(model_id).transpose()?;
+    let upstream_id = input
+        .upstream_id
+        .map(|value| upstreams::upstream_id(&value))
+        .transpose()?;
     let reasoning_effort = input.reasoning_effort.map(reasoning_effort).transpose()?;
     let service_tier_fast = input.service_tier_fast;
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let defaults = load_thread_defaults(&transaction)?;
+        let upstream_id = resolve_thread_upstream(&transaction, upstream_id, defaults.upstream_id)?;
         let thread = ThreadView {
             id: Uuid::now_v7().to_string(),
             title,
             model: model.unwrap_or(defaults.model),
+            upstream_id: Some(upstream_id),
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
             context_budget_tokens: None,
@@ -2128,11 +2274,12 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,reasoning_effort,service_tier_fast,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
                 thread.model,
+                thread.upstream_id,
                 thread.reasoning_effort,
                 thread.service_tier_fast as i64,
                 thread.status,
@@ -2242,110 +2389,15 @@ async fn update_experimental_features(
     experimental_features(State(state)).await
 }
 
-fn integration_status_view(
-    settings: &IntegrationSettings,
-    headers: &GlobalRequestHeaders,
-) -> IntegrationStatusView {
-    IntegrationStatusView {
-        openai_configured: openai_integration_ready(settings),
-        openai_consumer_id: (!settings.openai_consumer_id.is_empty())
-            .then(|| settings.openai_consumer_id.clone()),
-        openai_base_url: settings.openai_base_url.clone(),
-        user_agent: headers.user_agent.clone(),
-        originator: headers.originator.clone(),
-    }
-}
-
 async fn integrations(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(_identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<IntegrationStatusView>, ApiError> {
-    let settings = user_db(&state, &identity.user, true, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
     let headers = global_request_headers(&state).await?;
-    Ok(Json(integration_status_view(&settings, &headers)))
-}
-
-fn openai_api_config_view(settings: &IntegrationSettings) -> OpenAiApiConfigView {
-    OpenAiApiConfigView {
-        base_url: settings.openai_base_url.clone(),
-        api_key_configured: !openai_api_key(settings).is_empty(),
-    }
-}
-
-async fn openai_api_config(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-) -> Result<Json<OpenAiApiConfigView>, ApiError> {
-    let settings = user_db(&state, &identity.user, true, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
-    Ok(Json(openai_api_config_view(&settings)))
-}
-
-async fn openai_models(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-) -> Result<Json<OpenAiModelsView>, ApiError> {
-    let settings = user_db(&state, &identity.user, true, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
-    let settings = require_openai_integration(settings)?;
-    let models = openai_integration::list_models(&state, &settings).await?;
-    Ok(Json(OpenAiModelsView { models }))
-}
-
-fn validate_openai_base_url(value: String) -> Result<String, ApiError> {
-    let value = value.trim().trim_end_matches('/').to_owned();
-    let parsed = url::Url::parse(&value)
-        .map_err(|_| ApiError::bad_request("base_url must be a valid HTTP or HTTPS URL"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(ApiError::bad_request(
-            "base_url must be a valid HTTP or HTTPS URL",
-        ));
-    }
-    if value.len() > 2048 || value.chars().any(char::is_control) {
-        return Err(ApiError::bad_request(
-            "base_url must contain at most 2048 visible characters",
-        ));
-    }
-    Ok(value)
-}
-
-fn validate_openai_api_key(value: String) -> Result<String, ApiError> {
-    let value = value.trim().to_owned();
-    if value.len() > 4096 || value.chars().any(char::is_control) {
-        return Err(ApiError::bad_request(
-            "api_key must contain at most 4096 visible characters",
-        ));
-    }
-    Ok(value)
-}
-
-async fn update_openai_api_config(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    Json(input): Json<UpdateOpenAiApiConfigInput>,
-) -> Result<Json<OpenAiApiConfigView>, ApiError> {
-    let base_url = validate_openai_base_url(input.base_url)?;
-    let api_key = input.api_key.map(validate_openai_api_key).transpose()?;
-    let _guard = lock_integrations(&state, format!("openai:{}", identity.user.id)).await;
-    let mut settings = user_db(&state, &identity.user, true, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
-    settings.openai_consumer_id.clear();
-    settings.openai_consumer_secret.clear();
-    settings.openai_base_url = base_url;
-    if let Some(api_key) = api_key {
-        settings.api_key = api_key;
-    }
-    openai_integration::save(&state, &identity.user, &settings).await?;
-    Ok(Json(openai_api_config_view(&settings)))
+    Ok(Json(IntegrationStatusView {
+        user_agent: headers.user_agent,
+        originator: headers.originator,
+    }))
 }
 
 fn request_header_setting(value: String, field: &str) -> Result<String, ApiError> {
@@ -2392,24 +2444,6 @@ async fn update_integrations(
     .await
     .map_err(ApiError::internal)??;
     integrations(State(state), axum::Extension(identity)).await
-}
-
-async fn refresh_integrations(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-) -> Result<Json<IntegrationStatusView>, ApiError> {
-    let _guard = lock_integrations(&state, format!("openai:{}", identity.user.id)).await;
-    let mut settings = user_db(&state, &identity.user, true, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
-    if !settings.openai_consumer_id.is_empty() {
-        openai_integration::reconcile(&state, &identity.user, &identity.bearer, &mut settings)
-            .await?;
-        openai_integration::verify_ready(&state, &identity.bearer, &settings).await?;
-    }
-    let headers = global_request_headers(&state).await?;
-    Ok(Json(integration_status_view(&settings, &headers)))
 }
 
 async fn system_resources(
@@ -2859,13 +2893,13 @@ async fn start_thread(
     let message = input_text(input.input)?;
     let model = model_id(input.model)?;
     let reasoning_effort = reasoning_effort(input.reasoning_effort)?;
-    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
     let thread = create_thread_for(
         &state,
         &identity.user,
         CreateThreadInput {
             title: None,
             model: Some(model),
+            upstream_id: input.upstream_id,
             reasoning_effort: Some(reasoning_effort),
             service_tier_fast: Some(input.service_tier_fast),
         },
@@ -2898,6 +2932,10 @@ async fn update_thread(
         .map(|value| label(&value, "title", 160))
         .transpose()?;
     let model = input.model.map(model_id).transpose()?;
+    let upstream_id = input
+        .upstream_id
+        .map(|value| upstreams::upstream_id(&value))
+        .transpose()?;
     let reasoning_effort = input.reasoning_effort.map(reasoning_effort).transpose()?;
     let context_budget = input
         .context_budget_tokens
@@ -2905,6 +2943,7 @@ async fn update_thread(
         .transpose()?;
     if title.is_none()
         && model.is_none()
+        && upstream_id.is_none()
         && reasoning_effort.is_none()
         && input.service_tier_fast.is_none()
         && input.context_budget_tokens.is_none()
@@ -2913,11 +2952,15 @@ async fn update_thread(
     }
     let updated_at = now();
     let thread = user_db(&state, &identity.user, true, move |connection| {
+        if let Some(id) = upstream_id.as_deref() {
+            require_upstream(connection, id)?;
+        }
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
+                upstream_id,
                 reasoning_effort,
                 input.service_tier_fast.map(|value| value as i64),
                 context_budget.is_some(),
@@ -2938,12 +2981,11 @@ async fn update_thread(
 async fn generate_thread_title_for(
     state: &AppState,
     user: &User,
-    bearer: &str,
     id: String,
 ) -> Result<ThreadView, ApiError> {
     let thread = read_thread_for(state, user, id.clone()).await?;
-    let integrations = ensure_openai_integration(state, user, bearer).await?;
-    let title = request_thread_title(state, user, &thread, &integrations).await?;
+    let upstream = load_thread_upstream(state, user, &thread).await?;
+    let title = request_thread_title(state, user, &thread, &upstream).await?;
     let thread_id = thread.id.clone();
     user_db(state, user, true, move |connection| {
         connection.execute(
@@ -2963,7 +3005,7 @@ async fn request_thread_title(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
 ) -> Result<String, ApiError> {
     let (context, workers, contexts) = user_db(state, user, false, {
         let thread_id = thread.id.clone();
@@ -2986,7 +3028,7 @@ async fn request_thread_title(
         "title_generation",
         context.idx_head,
         context.idx_tail,
-        integrations,
+        upstream,
         &thread.model,
         None,
         thread.service_tier_fast,
@@ -3010,7 +3052,7 @@ async fn generate_thread_title(
 ) -> Result<Json<ThreadView>, ApiError> {
     let id = thread_id(&id)?;
     Ok(Json(
-        generate_thread_title_for(&state, &identity.user, &identity.bearer, id).await?,
+        generate_thread_title_for(&state, &identity.user, id).await?,
     ))
 }
 
@@ -3243,7 +3285,7 @@ async fn thread_input(
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
     let input = input_text(input.input)?;
-    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
+    ensure_thread_upstream(&state, &identity.user, &id).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
@@ -3281,7 +3323,7 @@ async fn create_api_key(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Json(input): Json<CreateApiKeyInput>,
 ) -> Result<Json<CreatedApiKey>, ApiError> {
-    ensure_openai_integration(&state, &identity.user, &identity.bearer).await?;
+    require_user_upstream(&state, &identity.user).await?;
     let label = label(&input.label, "label", 80)?;
     let raw_secret = Uuid::new_v4().simple().to_string();
     let key = ApiKeyView {
@@ -3693,69 +3735,23 @@ fn hash_secret(value: &str) -> String {
 fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, ApiError> {
     let settings = connection
         .query_row(
-            "SELECT openai_consumer_id,openai_consumer_secret,api_key,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
+            "SELECT linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
             [],
             |row| {
                 Ok(IntegrationSettings {
-                    openai_consumer_id: row.get(0)?,
-                    openai_consumer_secret: row.get(1)?,
-                    api_key: row.get(2)?,
-                    openai_base_url: row.get(3)?,
-                    linkit_bot_id: row.get(4)?,
-                    linkit_bot_token: row.get(5)?,
-                    linkit_username: row.get(6)?,
+                    linkit_bot_id: row.get(0)?,
+                    linkit_bot_token: row.get(1)?,
+                    linkit_username: row.get(2)?,
                 })
             },
         )
         .optional()?
         .unwrap_or_else(|| IntegrationSettings {
-            openai_consumer_id: String::new(),
-            openai_consumer_secret: String::new(),
-            api_key: String::new(),
-            openai_base_url: OPENAI_BASE_URL.to_owned(),
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
         });
     Ok(settings)
-}
-
-fn openai_integration_ready(settings: &IntegrationSettings) -> bool {
-    !openai_api_key(settings).is_empty() && !settings.openai_base_url.is_empty()
-}
-
-fn openai_api_key(settings: &IntegrationSettings) -> &str {
-    if settings.api_key.is_empty() {
-        &settings.openai_consumer_secret
-    } else {
-        &settings.api_key
-    }
-}
-
-#[cfg(test)]
-async fn save_integration_settings(
-    state: &AppState,
-    user: &User,
-    settings: &IntegrationSettings,
-) -> Result<(), ApiError> {
-    let saved = settings.clone();
-    user_db(state, user, true, move |connection| {
-        connection.execute(
-            "INSERT INTO integration_settings(id,openai_consumer_id,openai_consumer_secret,api_key,openai_base_url,linkit_bot_id,linkit_bot_token,linkit_username,updated_at) VALUES(1,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET openai_consumer_id=excluded.openai_consumer_id,openai_consumer_secret=excluded.openai_consumer_secret,api_key=excluded.api_key,openai_base_url=excluded.openai_base_url,linkit_bot_id=excluded.linkit_bot_id,linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
-            params![
-                saved.openai_consumer_id,
-                saved.openai_consumer_secret,
-                saved.api_key,
-                saved.openai_base_url,
-                saved.linkit_bot_id,
-                saved.linkit_bot_token,
-                saved.linkit_username,
-                now(),
-            ],
-        )?;
-        Ok(())
-    })
-    .await
 }
 
 async fn lock_integrations(state: &AppState, key: String) -> tokio::sync::OwnedMutexGuard<()> {
@@ -3767,46 +3763,6 @@ async fn lock_integrations(state: &AppState, key: String) -> tokio::sync::OwnedM
             .clone()
     };
     lock.lock_owned().await
-}
-
-async fn ensure_openai_integration(
-    state: &AppState,
-    user: &User,
-    bearer: &str,
-) -> Result<IntegrationSettings, ApiError> {
-    let _guard = lock_integrations(state, format!("openai:{}", user.id)).await;
-    let mut settings = user_db(state, user, true, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
-    if openai_api_key(&settings).is_empty() {
-        openai_integration::reconcile(state, user, bearer, &mut settings).await?;
-        openai_integration::verify_ready(state, bearer, &settings).await?;
-    }
-    if settings.openai_base_url.is_empty() {
-        settings.openai_base_url = OPENAI_BASE_URL.to_owned();
-    }
-    openai_integration::save(state, user, &settings).await?;
-    Ok(settings)
-}
-
-async fn required_openai_integration(
-    state: &AppState,
-    user: &User,
-) -> Result<IntegrationSettings, ApiError> {
-    let settings = user_db(state, user, false, |connection| {
-        integration_settings(connection)
-    })
-    .await?;
-    require_openai_integration(settings)
-}
-
-fn require_openai_integration(
-    settings: IntegrationSettings,
-) -> Result<IntegrationSettings, ApiError> {
-    openai_integration_ready(&settings)
-        .then_some(settings)
-        .ok_or_else(|| ApiError::conflict("configure an OpenAI Responses-compatible API first"))
 }
 
 fn request_key(user: &User, thread_id: &str) -> String {
@@ -3855,46 +3811,47 @@ async fn process_request(
         let thread_id = thread_id.clone();
         move |connection| {
             let thread = load_thread(connection, &thread_id)?;
-            let integrations = integration_settings(connection)?;
-            Ok((thread, integrations))
+            let upstream = upstreams::for_thread(connection, &thread)?;
+            Ok((thread, upstream))
         }
     })
     .await;
     let result = match loaded {
-        Ok((thread, integrations)) if openai_integration_ready(&integrations) => {
+        Ok((thread, Some(upstream))) => {
             if operation == RequestOperation::Compact {
                 thread_controls::compact_request(
                     &state,
                     &user,
                     &thread,
-                    &integrations,
+                    &upstream,
                     record_idx,
                     &mut cancellation,
                 )
                 .await
-                .map(|()| (thread.clone(), integrations, String::new()))
+                .map(|()| (thread.clone(), String::new()))
                 .map_err(|error| (thread, Box::new(error)))
             } else {
                 request_agent(
                     &state,
                     &user,
                     &thread,
-                    &integrations,
+                    &upstream,
                     record_idx,
                     &mut cancellation,
                 )
                 .await
             }
         }
-        Ok((thread, _)) => Err((
+        Ok((thread, None)) => Err((
             thread,
-            Box::new(ApiError::conflict("OpenAI-LB integration is not ready")),
+            Box::new(ApiError::conflict("configure an upstream for this thread")),
         )),
         Err(error) => Err((
             ThreadView {
                 id: thread_id.clone(),
                 title: "Untitled thread".to_owned(),
                 model: DEFAULT_MODEL.to_owned(),
+                upstream_id: None,
                 reasoning_effort: "medium".to_owned(),
                 service_tier_fast: false,
                 context_budget_tokens: None,
@@ -3923,7 +3880,7 @@ async fn process_request(
     }
 
     match result {
-        Ok((thread, _, output)) => {
+        Ok((thread, output)) => {
             match finalize_request_success(&state, &user, &thread_id, record_idx).await {
                 Ok(true) if operation == RequestOperation::Inference => {
                     let thread = maybe_name_thread(&state, &user, &thread).await;
@@ -3954,14 +3911,15 @@ async fn maybe_name_thread(state: &AppState, user: &User, thread: &ThreadView) -
     if thread.title != "Untitled thread" {
         return thread.clone();
     }
-    let Ok(integrations) = user_db(state, user, false, |connection| {
-        integration_settings(connection)
+    let id = thread.upstream_id.clone();
+    let Ok(Some(upstream)) = user_db(state, user, false, move |connection| {
+        upstreams::for_thread_id(connection, id.as_deref())
     })
     .await
     else {
         return thread.clone();
     };
-    let title = match request_thread_title(state, user, thread, &integrations).await {
+    let title = match request_thread_title(state, user, thread, &upstream).await {
         Ok(title) => title,
         Err(error) => {
             tracing::warn!(
@@ -4558,10 +4516,10 @@ async fn request_agent(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     source_record_idx: i64,
     cancellation: &mut watch::Receiver<bool>,
-) -> Result<(ThreadView, IntegrationSettings, String), (ThreadView, Box<ApiError>)> {
+) -> Result<(ThreadView, String), (ThreadView, Box<ApiError>)> {
     let mut checkpoint_retries = 0;
     let mut proactive_compactions = 0;
     let defaults = user_db(state, user, false, |connection| {
@@ -4609,7 +4567,7 @@ async fn request_agent(
                     user,
                     thread,
                     &context,
-                    integrations,
+                    upstream,
                     source_record_idx,
                     cancellation,
                 )
@@ -4637,7 +4595,7 @@ async fn request_agent(
             "inference",
             context.idx_head,
             context.idx_tail,
-            integrations,
+            upstream,
             &thread.model,
             Some(&thread.reasoning_effort),
             thread.service_tier_fast,
@@ -4661,7 +4619,7 @@ async fn request_agent(
                     user,
                     thread,
                     &context,
-                    integrations,
+                    upstream,
                     source_record_idx,
                     cancellation,
                 )
@@ -4711,7 +4669,7 @@ async fn request_agent(
                 .filter(|item| matches!(item, ResponseItem::Message(_)))
                 .map(ResponseItem::text)
                 .collect::<String>();
-            return Ok((thread.clone(), integrations.clone(), text));
+            return Ok((thread.clone(), text));
         }
         // Tool state is durable; settlement at the top of the loop is also
         // the recovery path after a Controller restart.
@@ -4824,7 +4782,7 @@ async fn compact_thread_context(
     user: &User,
     thread: &ThreadView,
     context: &CompiledThreadContext,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     source_record_idx: i64,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<i64, ApiError> {
@@ -4851,7 +4809,7 @@ async fn compact_thread_context(
         source_record_idx,
         context.idx_head,
         context.idx_tail,
-        integrations,
+        upstream,
         &thread.model,
         &context.protocol_items,
         &context.record_metadata,
@@ -4950,7 +4908,7 @@ async fn compact_protocol_context(
     input_record_idx: i64,
     idx_head: i64,
     idx_tail: i64,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     model: &str,
     items: &[Value],
     metadata: &[ProtocolRecordMetadata],
@@ -4974,7 +4932,7 @@ async fn compact_protocol_context(
             "compaction",
             idx_head,
             idx_tail,
-            integrations,
+            upstream,
             model,
             compaction_input(prefix.as_ref(), raw_items, raw_metadata),
             Some(cancellation.clone()),
@@ -4992,7 +4950,7 @@ async fn compact_protocol_context(
                         input_record_idx,
                         idx_head,
                         idx_tail,
-                        integrations,
+                        upstream,
                         model,
                         prefix.as_ref(),
                         &raw_items[0],
@@ -5012,7 +4970,7 @@ async fn compact_protocol_context(
                         "compaction",
                         idx_head,
                         idx_tail,
-                        integrations,
+                        upstream,
                         model,
                         compaction_input(
                             prefix.as_ref(),
@@ -5041,7 +4999,7 @@ async fn compact_protocol_context(
                                 input_record_idx,
                                 idx_head,
                                 idx_tail,
-                                integrations,
+                                upstream,
                                 model,
                                 prefix.as_ref(),
                                 &raw_items[0],
@@ -5073,7 +5031,7 @@ async fn summarize_context_once(
     request_kind: &str,
     idx_head: i64,
     idx_tail: i64,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     model: &str,
     items: Vec<Value>,
     cancellation: Option<watch::Receiver<bool>>,
@@ -5087,7 +5045,7 @@ async fn summarize_context_once(
         request_kind,
         idx_head,
         idx_tail,
-        integrations,
+        upstream,
         model,
         None,
         false,
@@ -5206,7 +5164,7 @@ async fn compact_oversized_record(
     input_record_idx: i64,
     idx_head: i64,
     idx_tail: i64,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     model: &str,
     prefix: Option<&Value>,
     item: &Value,
@@ -5259,7 +5217,7 @@ async fn compact_oversized_record(
                 "compaction",
                 idx_head,
                 idx_tail,
-                integrations,
+                upstream,
                 model,
                 compaction_input(fragment_prefix.as_ref(), raw_fragments, raw_metadata),
                 Some(cancellation.clone()),
@@ -5290,7 +5248,7 @@ async fn compact_oversized_record(
                     "compaction",
                     idx_head,
                     idx_tail,
-                    integrations,
+                    upstream,
                     model,
                     compaction_input(
                         fragment_prefix.as_ref(),
@@ -5355,7 +5313,7 @@ fn response_usage(response: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
 #[allow(dead_code)]
 async fn responses_request(
     state: &AppState,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     model: &str,
     input: Value,
     include_tools: bool,
@@ -5363,7 +5321,7 @@ async fn responses_request(
 ) -> Result<ResponsesResult, ApiError> {
     send_responses_request(
         state,
-        integrations,
+        upstream,
         model,
         None,
         false,
@@ -5388,7 +5346,7 @@ async fn responses_request_with_options(
     request_kind: &str,
     idx_head: i64,
     idx_tail: i64,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     model: &str,
     reasoning_effort: Option<&str>,
     service_tier_fast: bool,
@@ -5411,7 +5369,7 @@ async fn responses_request_with_options(
     };
     send_responses_request(
         state,
-        integrations,
+        upstream,
         model,
         reasoning_effort,
         service_tier_fast,
@@ -5430,7 +5388,7 @@ async fn responses_request_with_options(
 #[allow(clippy::too_many_arguments)]
 async fn send_responses_request(
     state: &AppState,
-    integrations: &IntegrationSettings,
+    upstream: &Upstream,
     model: &str,
     reasoning_effort: Option<&str>,
     service_tier_fast: bool,
@@ -5459,9 +5417,9 @@ async fn send_responses_request(
         .client
         .post(format!(
             "{}/responses",
-            integrations.openai_base_url.trim_end_matches('/')
+            upstream.base_url.trim_end_matches('/')
         ))
-        .bearer_auth(openai_api_key(integrations))
+        .bearer_auth(upstream.api_key.as_str())
         .header("Accept", "text/event-stream")
         .json(&payload);
     let headers = global_request_headers(state).await?;
@@ -5484,7 +5442,7 @@ async fn send_responses_request(
     let turn_state_key = if let Some((spec, _)) = audit.as_ref()
         && experimental_header_enabled(state, EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY).await?
     {
-        let key = turn_state::upstream_key(integrations);
+        let key = turn_state::upstream_key(upstream);
         if let Some(value) = turn_state::load(state, spec, &key).await? {
             request = request.header(CODEX_TURN_STATE_HEADER, value);
         }
@@ -6654,7 +6612,7 @@ async fn external_thread_input(
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
     let input = input_text(input.input)?;
-    required_openai_integration(&state, &identity.user).await?;
+    ensure_thread_upstream(&state, &identity.user, &id).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
@@ -6889,7 +6847,6 @@ mod tests {
                 data_dir: Arc::new(data_dir),
                 admin_db_path: Arc::new(admin_db_path.clone()),
                 client: reqwest::Client::new(),
-                openai_consumers_url: OPENAI_CONSUMERS_URL.to_owned(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -6967,13 +6924,66 @@ mod tests {
         read_http_request(stream).await.1
     }
 
+    pub(super) async fn insert_upstream(
+        state: &AppState,
+        user: &User,
+        name: &str,
+        base_url: &str,
+    ) -> Upstream {
+        let upstream = Upstream {
+            id: Uuid::now_v7().to_string(),
+            name: name.to_owned(),
+            base_url: base_url.to_owned(),
+            api_key: "sk-fixture".to_owned(),
+        };
+        let saved = upstream.clone();
+        user_db(state, user, true, move |connection| {
+            connection.execute(
+                "INSERT INTO upstreams(id,name,base_url,api_key,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                params![
+                    saved.id,
+                    saved.name,
+                    saved.base_url,
+                    saved.api_key,
+                    now(),
+                    now()
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        upstream
+    }
+
+    pub(super) async fn bind_thread_upstream(
+        state: &AppState,
+        user: &User,
+        thread_id: &str,
+        upstream_id: &str,
+    ) {
+        let thread_id = thread_id.to_owned();
+        let upstream_id = upstream_id.to_owned();
+        user_db(state, user, true, move |connection| {
+            connection.execute(
+                "UPDATE threads SET upstream_id=? WHERE id=?",
+                params![upstream_id, thread_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
     pub(super) async fn create_test_thread(state: &AppState, user: &User) -> ThreadView {
+        let upstream = insert_upstream(state, user, "fixture", "http://127.0.0.1:1").await;
         create_thread_for(
             state,
             user,
             CreateThreadInput {
                 title: Some("Test".to_owned()),
                 model: Some("test-model".to_owned()),
+                upstream_id: Some(upstream.id),
                 reasoning_effort: None,
                 service_tier_fast: None,
             },
@@ -7042,12 +7052,15 @@ mod tests {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "insights-user").unwrap();
         let first = create_test_thread(&state, &user).await;
+        let upstream =
+            insert_upstream(&state, &user, "second-upstream", "http://127.0.0.1:1").await;
         let second = create_thread_for(
             &state,
             &user,
             CreateThreadInput {
                 title: Some("Second".to_owned()),
                 model: Some("second-model".to_owned()),
+                upstream_id: Some(upstream.id),
                 reasoning_effort: None,
                 service_tier_fast: None,
             },
@@ -8253,14 +8266,11 @@ mod tests {
                 body.len(), body
             ).as_bytes()).await.unwrap();
         });
-        let integrations = IntegrationSettings {
-            openai_consumer_id: String::new(),
-            openai_consumer_secret: "legacy-secret".to_owned(),
+        let upstream = Upstream {
+            id: "fixture-upstream".to_owned(),
+            name: "fixture".to_owned(),
+            base_url: format!("http://{address}"),
             api_key: "sk-direct".to_owned(),
-            openai_base_url: format!("http://{address}"),
-            linkit_bot_id: String::new(),
-            linkit_bot_token: String::new(),
-            linkit_username: String::new(),
         };
         let result = responses_request_with_options(
             &state,
@@ -8270,7 +8280,7 @@ mod tests {
             "inference",
             input_idx,
             input_idx,
-            &integrations,
+            &upstream,
             &thread.model,
             Some(&thread.reasoning_effort),
             thread.service_tier_fast,
@@ -8367,14 +8377,11 @@ mod tests {
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let integrations = IntegrationSettings {
-            openai_consumer_id: "consumer".to_owned(),
-            openai_consumer_secret: "secret".to_owned(),
-            api_key: String::new(),
-            openai_base_url: format!("http://{address}"),
-            linkit_bot_id: String::new(),
-            linkit_bot_token: String::new(),
-            linkit_username: String::new(),
+        let upstream = Upstream {
+            id: "fixture-upstream".to_owned(),
+            name: "fixture".to_owned(),
+            base_url: format!("http://{address}"),
+            api_key: "secret".to_owned(),
         };
         for (thread_enabled, session_enabled) in [
             (false, false),
@@ -8410,7 +8417,7 @@ mod tests {
                         request_kind,
                         input_idx,
                         input_idx,
-                        &integrations,
+                        &upstream,
                         &thread.model,
                         Some(&thread.reasoning_effort),
                         thread.service_tier_fast,
@@ -8479,18 +8486,15 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         });
-        let integrations = IntegrationSettings {
-            openai_consumer_id: "consumer".to_owned(),
-            openai_consumer_secret: "secret".to_owned(),
-            api_key: String::new(),
-            openai_base_url: format!("http://{address}"),
-            linkit_bot_id: String::new(),
-            linkit_bot_token: String::new(),
-            linkit_username: String::new(),
+        let upstream = Upstream {
+            id: "fixture-upstream".to_owned(),
+            name: "fixture".to_owned(),
+            base_url: format!("http://{address}"),
+            api_key: "secret".to_owned(),
         };
         let result = responses_request(
             &state,
-            &integrations,
+            &upstream,
             "test-model",
             json!([{"role":"user","content":"hello"}]),
             true,

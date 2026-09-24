@@ -1,12 +1,16 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { ThreadSettingsPopover } from "../src/components/thread-settings-popover"
+import { ThreadSettingsPopover, type ModelCatalog } from "../src/components/thread-settings-popover"
 import "../src/styles.css"
 
-const models = ["deepseek-flash", "gpt-6-astra", "meta-llama/Llama-3.1-8B-Instruct"]
+const catalogs: ModelCatalog[] = [
+  { id: "up-deepseek", name: "DeepSeek", models: ["deepseek-flash", "gpt-6-astra"], error: null },
+  { id: "up-lb", name: "OpenAI-LB", models: ["meta-llama/Llama-3.1-8B-Instruct"], error: "Could not load models" },
+]
 
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")
+  const [upstreamId, setUpstreamId] = useState<string | null>("up-deepseek")
   const [model, setModel] = useState("deepseek-flash")
   const [effort, setEffort] = useState("medium")
   const [fast, setFast] = useState(false)
@@ -18,11 +22,11 @@ function Fixture() {
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>
     </header>
     <div className="mt-auto flex items-center justify-end gap-3 border-t pt-4">
-      <span data-testid="model">{model}</span>
+      <span data-testid="selection">{upstreamId}:{model}</span>
       <span data-testid="effort">{effort}</span>
       <span data-testid="fast">{String(fast)}</span>
       <span data-testid="budget">{String(budget)}</span>
-      <ThreadSettingsPopover model={model} reasoningEffort={effort} fast={fast} models={models} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} onModelChange={setModel} onReasoningChange={setEffort} onFastChange={setFast} />
+      <ThreadSettingsPopover model={model} upstreamId={upstreamId} catalogs={catalogs} reasoningEffort={effort} fast={fast} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} onModelChange={(upstreamId, model) => { setUpstreamId(upstreamId); setModel(model) }} onReasoningChange={setEffort} onFastChange={setFast} />
     </div>
   </main>
 }
