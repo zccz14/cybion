@@ -58,7 +58,7 @@ test("history renders reasoning summaries", () => {
 
 test("thread settings live in the composer popover while native tools are always injected", () => {
   const popover = readFileSync(new URL("../src/components/thread-settings-popover.tsx", import.meta.url), "utf8")
-  assert.match(source, /import \{ ThreadSettingsPopover \} from "@\/components\/thread-settings-popover"/)
+  assert.match(source, /import \{ ThreadSettingsPopover, modelGroups, modelSelection, parseModelSelection \} from "@\/components\/thread-settings-popover"/)
   assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 2)
   assert.match(popover, /REASONING_EFFORTS = \["low", "medium", "high", "xhigh", "max"\]/)
   assert.match(popover, /ZapIcon/)

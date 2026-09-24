@@ -79,7 +79,7 @@ import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
 import { ThreadHistory } from "@/components/thread-history"
 import { ThreadList } from "@/components/thread-list"
-import { ThreadSettingsPopover } from "@/components/thread-settings-popover"
+import { ThreadSettingsPopover, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
@@ -114,6 +114,7 @@ import {
   SelectContent,
   SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
@@ -143,6 +144,7 @@ type Language = "en" | "zh"
 const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const
 type ThreadDefaults = {
   model: string
+  upstream_id: string | null
   reasoning_effort: typeof REASONING_EFFORTS[number]
   service_tier_fast: boolean
   context_budget_tokens: number
@@ -244,12 +246,20 @@ type Insights = {
   history: { total_records: number; payload_bytes: number; checkpoint_count: number; latest_record_at: number | null; kinds: { key: string; count: number }[] }
   dimensions: { thread_ids: string[]; models: string[]; request_kinds: string[] }
 }
-type IntegrationStatus = {
+type Upstream = {
+  id: string
+  name: string
   base_url: string
   api_key_configured: boolean
 }
-type OpenAiModels = {
+type UpstreamCatalog = {
+  id: string
+  name: string
   models: string[]
+  error: string | null
+}
+type UpstreamModels = {
+  upstreams: UpstreamCatalog[]
 }
 type SystemResources = {
   generated_at: number
@@ -556,22 +566,29 @@ const copy = {
     saveDefaultsError: "Could not save thread defaults",
     contextBudget: "Context budget",
     contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
-    integrationDescription: "Configure the Responses-compatible API used for model inference. Notification settings are independent.",
+    integrationDescription: "Configure one or more Responses-compatible upstreams. Threads pick a model from any upstream; notification settings are independent.",
     integration: "Integrations",
-    openai: "Responses-compatible API",
+    openai: "Responses-compatible upstreams",
     apiBaseUrl: "Base URL",
     apiBaseUrlDescription: "Cybion sends model requests to this URL with /responses appended.",
     apiKey: "API key",
     apiKeyDescription: "Stored per user and never returned to the browser.",
     apiKeyConfigured: "API key configured",
-    saveApiConfig: "Save API configuration",
-    savingApiConfig: "Saving…",
-    apiConfigSaved: "API configuration saved",
-    apiConfigSaveError: "Could not save API configuration",
-    apiConfigLoadError: "Could not load API configuration",
-    apiKeyPlaceholder: "Enter a new API key to replace the current key",
+    addUpstream: "Add upstream",
+    upstreamName: "Name",
+    upstreamNamePlaceholder: "e.g. DeepSeek",
+    saveUpstream: "Save",
+    savingUpstream: "Saving…",
+    upstreamSaved: "Upstream saved",
+    upstreamSaveError: "Could not save the upstream",
+    upstreamDelete: "Delete",
+    upstreamDeleteError: "Could not delete the upstream",
+    upstreamDeleteConfirm: "Delete this upstream?",
+    upstreamsEmpty: "No upstreams yet. Add one to run threads.",
+    upstreamKeyPlaceholder: "Enter a new API key to replace the stored key",
+    upstreamNewKeyPlaceholder: "Optional API key",
     availableModels: "Available models",
-    availableModelsDescription: "Model identifiers reported by GET /models on the configured base URL.",
+    availableModelsDescription: "Model identifiers reported by GET /models on each upstream.",
     refreshModels: "Refresh models",
     noModels: "The endpoint reported no models.",
     linkit: "Linkit",
@@ -831,22 +848,29 @@ const copy = {
     saveDefaultsError: "无法保存线程默认设置",
     contextBudget: "上下文预算",
     contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为 checkpoint；0 表示关闭，内置默认 200000。",
-    integrationDescription: "配置用于模型推理的 Responses-compatible API。通知配置与此独立。",
+    integrationDescription: "配置一个或多个用于模型推理的 Responses-compatible 上游；线程可以从任意上游选择模型。通知配置与此独立。",
     integration: "集成",
-    openai: "Responses-compatible API",
+    openai: "Responses-compatible 上游",
     apiBaseUrl: "基础地址",
     apiBaseUrlDescription: "Cybion 会在这个地址后追加 /responses 发送模型请求。",
     apiKey: "API Key",
     apiKeyDescription: "按用户保存，永远不会返回到浏览器。",
     apiKeyConfigured: "API Key 已配置",
-    saveApiConfig: "保存 API 配置",
-    savingApiConfig: "保存中…",
-    apiConfigSaved: "API 配置已保存",
-    apiConfigSaveError: "无法保存 API 配置",
-    apiConfigLoadError: "无法加载 API 配置",
-    apiKeyPlaceholder: "输入新的 API Key 以替换当前值",
+    addUpstream: "添加上游",
+    upstreamName: "名称",
+    upstreamNamePlaceholder: "例如 DeepSeek",
+    saveUpstream: "保存",
+    savingUpstream: "保存中…",
+    upstreamSaved: "上游已保存",
+    upstreamSaveError: "无法保存上游",
+    upstreamDelete: "删除",
+    upstreamDeleteError: "无法删除上游",
+    upstreamDeleteConfirm: "删除该上游？",
+    upstreamsEmpty: "还没有配置上游。添加一个即可开始运行线程。",
+    upstreamKeyPlaceholder: "输入新的 API Key 以替换已保存的值",
+    upstreamNewKeyPlaceholder: "可选 API Key",
     availableModels: "可用模型",
-    availableModelsDescription: "由已配置基础地址的 GET /models 返回的模型标识。",
+    availableModelsDescription: "每个上游通过 GET /models 返回的模型标识。",
     refreshModels: "刷新模型",
     noModels: "端点没有返回任何模型。",
     linkit: "Linkit",
@@ -955,19 +979,13 @@ async function api<T>(sdk: AuthMiniApi, path: string, init?: RequestInit): Promi
   return response.json() as Promise<T>
 }
 
-function useOpenAiModels(sdk: AuthMiniApi) {
+function useUpstreamModels(sdk: AuthMiniApi) {
   return useQuery({
-    queryKey: ["openai-models"],
-    queryFn: ({ signal }) => api<OpenAiModels>(sdk, "/api/integrations/openai/models", { signal }),
+    queryKey: ["upstream-models"],
+    queryFn: ({ signal }) => api<UpstreamModels>(sdk, "/api/integrations/upstreams/models", { signal }),
     staleTime: 5 * 60 * 1000,
     retry: false,
   })
-}
-
-// The configured endpoint owns the model catalog, but a thread saved earlier
-// must stay selectable even after its model leaves the catalog.
-function modelOptions(models: string[], current: string) {
-  return models.includes(current) ? models : [current, ...models]
 }
 
 function App() {
@@ -1234,7 +1252,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const models = useOpenAiModels(sdk)
+  const models = useUpstreamModels(sdk)
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   const location = useLocation()
   const composer = useComposerDraft(userId, null)
@@ -1260,7 +1278,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
   const submit = () => {
     const message = input.trim()
     if (!value || !message || start.isPending) return
-    start.mutate({ model: value.model, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1293,7 +1311,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} aria-describedby="new-thread-input-shortcut" disabled={!value || start.isPending} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center justify-between gap-3"><span id="new-thread-input-shortcut" className="text-xs text-muted-foreground">{t("startThreadShortcut")}</span>{value && <ThreadSettingsPopover model={value.model} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} models={modelOptions(models.data?.models ?? [], value.model)} language={language} disabled={start.isPending} onModelChange={(model) => edit({ ...value, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} aria-describedby="new-thread-input-shortcut" disabled={!value || start.isPending} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center justify-between gap-3"><span id="new-thread-input-shortcut" className="text-xs text-muted-foreground">{t("startThreadShortcut")}</span>{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -1317,7 +1335,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     refetchInterval: 5000,
   })
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const models = useOpenAiModels(sdk)
+  const models = useUpstreamModels(sdk)
   // The conversation opens on the window that starts at the most recent user input instead of
   // the whole thread; older pages load on demand with the returned `has_older` flag.
   const fetchHistoryWindow = (before?: number) => api<{ records: HistoryRecord[]; has_older: boolean }>(
@@ -1419,7 +1437,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -1505,7 +1523,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
                 : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
               <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
             </div>
-            <div className="flex items-center gap-3"><span id="thread-input-shortcut" className="hidden text-xs text-muted-foreground sm:inline">{t("sendShortcut")}</span><ThreadSettingsPopover model={current.model} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} models={modelOptions(models.data?.models ?? [], current.model)} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} onModelChange={(model) => settings.mutate({ model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} /><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
+            <div className="flex items-center gap-3"><span id="thread-input-shortcut" className="hidden text-xs text-muted-foreground sm:inline">{t("sendShortcut")}</span><ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} /><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
           </div>
         </FieldGroup>
       </form>
@@ -2125,7 +2143,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const queryKey = ["thread-defaults", sdk.session.getState().sessionId]
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   const defaults = useQuery({ queryKey, queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const models = useOpenAiModels(sdk)
+  const models = useUpstreamModels(sdk)
   const save = useMutation({
     mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
     onMutate: () => client.cancelQueries({ queryKey }),
@@ -2137,6 +2155,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const value = draft ?? defaults.data
   const changed = value && defaults.data && (
     value.model !== defaults.data.model ||
+    value.upstream_id !== defaults.data.upstream_id ||
     value.reasoning_effort !== defaults.data.reasoning_effort ||
     value.service_tier_fast !== defaults.data.service_tier_fast ||
     value.context_budget_tokens !== defaults.data.context_budget_tokens
@@ -2154,11 +2173,15 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
         <FieldGroup>
           <Field data-disabled={save.isPending}>
             <FieldLabel htmlFor="default-thread-model">{t("model")}</FieldLabel>
-            <Select value={value.model} disabled={save.isPending} onValueChange={(model) => edit({ ...value, model })}>
-              <SelectTrigger id="default-thread-model"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectGroup>
-                {modelOptions(models.data?.models ?? [], value.model).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
-              </SelectGroup></SelectContent>
+            <Select value={modelSelection(value.upstream_id, value.model)} disabled={save.isPending} onValueChange={(selection) => { const parsed = parseModelSelection(selection); edit({ ...value, upstream_id: parsed.upstreamId, model: parsed.model }) }}>
+              <SelectTrigger id="default-thread-model"><SelectValue placeholder={value.model} /></SelectTrigger>
+              <SelectContent>{modelGroups(models.data?.upstreams, value.upstream_id, value.model).map((group) => (
+                <SelectGroup key={group.id}>
+                  {group.name && <SelectLabel>{group.name}</SelectLabel>}
+                  {group.models.map((model) => <SelectItem key={`${group.id}:${model}`} value={`${group.id}:${model}`}>{model}</SelectItem>)}
+                  {group.error && <SelectLabel className="text-destructive">{group.error}</SelectLabel>}
+                </SelectGroup>
+              ))}</SelectContent>
             </Select>
           </Field>
           <Field data-disabled={save.isPending}>
@@ -2202,69 +2225,135 @@ function SystemConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
 function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const { session } = useAuthMini()
-  const client = useQueryClient()
-  const integrations = useQuery({ queryKey: ["integrations", "openai"], queryFn: () => api<IntegrationStatus>(sdk, "/api/integrations/openai") })
-  const models = useOpenAiModels(sdk)
-  const [baseUrl, setBaseUrl] = useState("")
-  const [apiKey, setApiKey] = useState("")
-  useEffect(() => {
-    if (integrations.data) setBaseUrl(integrations.data.base_url)
-  }, [integrations.data?.base_url])
-  const save = useMutation({
-    mutationFn: () => api<IntegrationStatus>(sdk, "/api/integrations/openai", {
-      method: "PUT",
-      body: JSON.stringify({ base_url: baseUrl, ...(apiKey.trim() ? { api_key: apiKey } : {}) }),
-    }),
-    onSuccess: (value) => {
-      setApiKey("")
-      client.setQueryData(["integrations", "openai"], value)
-      void client.invalidateQueries({ queryKey: ["openai-models"] })
-    },
-  })
-  const changed = integrations.data && (baseUrl.trim() !== integrations.data.base_url || Boolean(apiKey.trim()))
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
-    <Card><CardHeader><CardTitle>{t("integration")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2">
-      {integrations.error && <div className="sm:col-span-2"><RequestError error={integrations.error} onRetry={() => void integrations.refetch()} /></div>}
-      {integrations.data && <div className="sm:col-span-2"><IntegrationRow label={t("openai")} configured={integrations.data.api_key_configured} detail={integrations.data.api_key_configured ? t("apiKeyConfigured") : t("notConfigured")} /></div>}
-      {!integrations.data && !integrations.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("integration")}</div>}
-      {integrations.data && <form className="sm:col-span-2 flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (changed && !save.isPending) save.mutate() }}>
-        <FieldGroup>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="openai-base-url">{t("apiBaseUrl")}</FieldLabel>
-            <FieldDescription>{t("apiBaseUrlDescription")}</FieldDescription>
-            <Input id="openai-base-url" type="url" value={baseUrl} disabled={save.isPending} onChange={(event) => setBaseUrl(event.target.value)} />
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="openai-api-key">{t("apiKey")}</FieldLabel>
-            <FieldDescription>{t("apiKeyDescription")}</FieldDescription>
-            <Input id="openai-api-key" type="password" autoComplete="new-password" value={apiKey} placeholder={t("apiKeyPlaceholder")} disabled={save.isPending} onChange={(event) => setApiKey(event.target.value)} />
-          </Field>
-        </FieldGroup>
-        {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("apiConfigSaveError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
-        <div className="flex flex-wrap items-center gap-3"><Button disabled={!changed || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingApiConfig") : t("saveApiConfig")}</Button><p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("apiConfigSaved")}</p></div>
-      </form>}
-      <div className="sm:col-span-2 flex max-w-xl flex-col gap-3">
-        <div className="flex items-start justify-between gap-3">
-          <div><p className="text-sm font-medium">{t("availableModels")}</p><p className="mt-1 text-sm text-muted-foreground">{t("availableModelsDescription")}</p></div>
-          <Button type="button" size="sm" variant="outline" disabled={models.isFetching} onClick={() => void models.refetch()}>{models.isFetching ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{t("refreshModels")}</Button>
-        </div>
-        {models.isError && <p className="text-sm text-destructive">{errorMessage(models.error)}</p>}
-        {models.isFetching && !models.data && <Skeleton className="h-6 w-64" />}
-        {models.data && (models.data.models.length > 0
-          ? <div className="flex flex-wrap gap-1.5">{models.data.models.map((model) => <Badge key={model} variant="outline">{model}</Badge>)}</div>
-          : <p className="text-sm text-muted-foreground">{t("noModels")}</p>)}
-      </div>
-    </CardContent></Card>
+    <UpstreamsCard key={session?.sessionId} sdk={sdk} />
     <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
     <Card><CardHeader><CardTitle>{t("workers")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/workers">{t("workers")}</Link></Button></CardContent></Card>
   </Page>
 }
 
-function IntegrationRow({ label, configured, detail }: { label: string; configured: boolean; detail: string }) {
+function UpstreamsCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
-  return <div className="flex min-w-0 items-start justify-between gap-3 rounded-lg border p-4"><div className="min-w-0"><p className="font-medium">{label}</p><p className="mt-1 truncate text-xs text-muted-foreground">{detail}</p></div><Badge variant={configured ? "secondary" : "outline"}>{configured ? t("configured") : t("notConfigured")}</Badge></div>
+  const client = useQueryClient()
+  const upstreams = useQuery({ queryKey: ["upstreams"], queryFn: ({ signal }) => api<Upstream[]>(sdk, "/api/integrations/upstreams", { signal }) })
+  const models = useUpstreamModels(sdk)
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: ["upstreams"] })
+    void client.invalidateQueries({ queryKey: ["upstream-models"] })
+  }
+  return <Card>
+    <CardHeader><CardTitle>{t("openai")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader>
+    <CardContent className="flex flex-col gap-5">
+      {upstreams.error && <RequestError error={upstreams.error} onRetry={() => void upstreams.refetch()} />}
+      {upstreams.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-36" /><Skeleton className="h-36" /></div>}
+      {upstreams.data && upstreams.data.length === 0 && <p className="text-sm text-muted-foreground">{t("upstreamsEmpty")}</p>}
+      {upstreams.data && upstreams.data.length > 0 && <div className="flex max-w-xl flex-wrap items-center gap-3">
+        <p className="mr-auto text-sm font-medium">{t("availableModels")}</p>
+        <Button type="button" size="sm" variant="outline" disabled={models.isFetching} onClick={() => void models.refetch()}>{models.isFetching ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{t("refreshModels")}</Button>
+      </div>}
+      {upstreams.data?.map((upstream) => <UpstreamRow key={upstream.id} sdk={sdk} upstream={upstream} catalog={models.data?.upstreams.find((entry) => entry.id === upstream.id)} catalogLoading={models.isLoading} catalogDescription={t("availableModelsDescription")} onChanged={refresh} />)}
+      {upstreams.data && <AddUpstreamForm sdk={sdk} onAdded={refresh} />}
+    </CardContent>
+  </Card>
+}
+
+function UpstreamRow({ sdk, upstream, catalog, catalogLoading, catalogDescription, onChanged }: { sdk: AuthMiniApi; upstream: Upstream; catalog: UpstreamCatalog | undefined; catalogLoading: boolean; catalogDescription: string; onChanged: () => void }) {
+  const { t } = useUi()
+  const [name, setName] = useState(upstream.name)
+  const [baseUrl, setBaseUrl] = useState(upstream.base_url)
+  const [apiKey, setApiKey] = useState("")
+  useEffect(() => {
+    setName(upstream.name)
+    setBaseUrl(upstream.base_url)
+    setApiKey("")
+  }, [upstream.id, upstream.name, upstream.base_url])
+  const save = useMutation({
+    mutationFn: () => api<Upstream>(sdk, `/api/integrations/upstreams/${encodeURIComponent(upstream.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name: name.trim(), base_url: baseUrl.trim(), ...(apiKey.trim() ? { api_key: apiKey } : {}) }),
+    }),
+    onSuccess: () => { setApiKey(""); onChanged() },
+  })
+  const remove = useMutation({
+    mutationFn: () => api<unknown>(sdk, `/api/integrations/upstreams/${encodeURIComponent(upstream.id)}`, { method: "DELETE" }),
+    onSuccess: onChanged,
+  })
+  const changed = name.trim() !== upstream.name || baseUrl.trim() !== upstream.base_url || Boolean(apiKey.trim())
+  return <div className="flex max-w-xl flex-col gap-5 rounded-lg border p-4">
+    <FieldGroup>
+      <Field data-disabled={save.isPending}>
+        <FieldLabel htmlFor={`upstream-name-${upstream.id}`}>{t("upstreamName")}</FieldLabel>
+        <Input id={`upstream-name-${upstream.id}`} value={name} placeholder={t("upstreamNamePlaceholder")} disabled={save.isPending} onChange={(event) => setName(event.target.value)} />
+      </Field>
+      <Field data-disabled={save.isPending}>
+        <FieldLabel htmlFor={`upstream-base-${upstream.id}`}>{t("apiBaseUrl")}</FieldLabel>
+        <FieldDescription>{t("apiBaseUrlDescription")}</FieldDescription>
+        <Input id={`upstream-base-${upstream.id}`} type="url" value={baseUrl} disabled={save.isPending} onChange={(event) => setBaseUrl(event.target.value)} />
+      </Field>
+      <Field data-disabled={save.isPending}>
+        <FieldLabel htmlFor={`upstream-key-${upstream.id}`}>{t("apiKey")}</FieldLabel>
+        <FieldDescription>{t("apiKeyDescription")}</FieldDescription>
+        <Input id={`upstream-key-${upstream.id}`} type="password" autoComplete="new-password" value={apiKey} placeholder={upstream.api_key_configured ? t("apiKeyConfigured") : t("upstreamNewKeyPlaceholder")} disabled={save.isPending} onChange={(event) => setApiKey(event.target.value)} />
+      </Field>
+    </FieldGroup>
+    {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("upstreamSaveError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
+    {remove.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("upstreamDeleteError")}</AlertTitle><AlertDescription>{errorMessage(remove.error)}</AlertDescription></Alert>}
+    <div className="flex flex-wrap items-center gap-3">
+      <Button size="sm" disabled={!changed || save.isPending} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingUpstream") : t("saveUpstream")}</Button>
+      <Button size="sm" variant="outline" disabled={remove.isPending} onClick={() => { if (window.confirm(t("upstreamDeleteConfirm"))) remove.mutate() }}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("upstreamDelete")}</Button>
+      <p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("upstreamSaved")}</p>
+    </div>
+    <div className="flex flex-col gap-2">
+      <p className="text-sm font-medium">{t("availableModels")}</p>
+      <p className="text-xs text-muted-foreground">{catalogDescription}</p>
+      {catalog?.error && <p className="text-sm text-destructive">{catalog.error}</p>}
+      {catalog && !catalog.error && (catalog.models.length > 0
+        ? <div className="flex flex-wrap gap-1.5">{catalog.models.map((model) => <Badge key={model} variant="outline">{model}</Badge>)}</div>
+        : <p className="text-sm text-muted-foreground">{t("noModels")}</p>)}
+      {!catalog && catalogLoading && <Skeleton className="h-6 w-40" />}
+    </div>
+  </div>
+}
+
+function AddUpstreamForm({ sdk, onAdded }: { sdk: AuthMiniApi; onAdded: () => void }) {
+  const { t } = useUi()
+  const [name, setName] = useState("")
+  const [baseUrl, setBaseUrl] = useState("")
+  const [apiKey, setApiKey] = useState("")
+  const add = useMutation({
+    mutationFn: () => api<Upstream>(sdk, "/api/integrations/upstreams", {
+      method: "POST",
+      body: JSON.stringify({ name: name.trim(), base_url: baseUrl.trim(), ...(apiKey.trim() ? { api_key: apiKey } : {}) }),
+    }),
+    onSuccess: () => { setName(""); setBaseUrl(""); setApiKey(""); onAdded() },
+  })
+  const ready = Boolean(name.trim() && baseUrl.trim())
+  return <form className="flex max-w-xl flex-col gap-5 rounded-lg border border-dashed p-4" onSubmit={(event) => { event.preventDefault(); if (ready && !add.isPending) add.mutate() }}>
+    <p className="text-sm font-medium">{t("addUpstream")}</p>
+    <FieldGroup>
+      <Field data-disabled={add.isPending}>
+        <FieldLabel htmlFor="new-upstream-name">{t("upstreamName")}</FieldLabel>
+        <Input id="new-upstream-name" value={name} placeholder={t("upstreamNamePlaceholder")} disabled={add.isPending} onChange={(event) => setName(event.target.value)} />
+      </Field>
+      <Field data-disabled={add.isPending}>
+        <FieldLabel htmlFor="new-upstream-base-url">{t("apiBaseUrl")}</FieldLabel>
+        <FieldDescription>{t("apiBaseUrlDescription")}</FieldDescription>
+        <Input id="new-upstream-base-url" type="url" value={baseUrl} disabled={add.isPending} onChange={(event) => setBaseUrl(event.target.value)} />
+      </Field>
+      <Field data-disabled={add.isPending}>
+        <FieldLabel htmlFor="new-upstream-api-key">{t("apiKey")}</FieldLabel>
+        <FieldDescription>{t("apiKeyDescription")}</FieldDescription>
+        <Input id="new-upstream-api-key" type="password" autoComplete="new-password" value={apiKey} placeholder={t("upstreamNewKeyPlaceholder")} disabled={add.isPending} onChange={(event) => setApiKey(event.target.value)} />
+      </Field>
+    </FieldGroup>
+    {add.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("upstreamSaveError")}</AlertTitle><AlertDescription>{errorMessage(add.error)}</AlertDescription></Alert>}
+    <div className="flex items-center gap-3">
+      <Button size="sm" disabled={!ready || add.isPending}>{add.isPending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t("addUpstream")}</Button>
+      <p role="status" className="text-sm text-muted-foreground">{add.isSuccess && t("upstreamSaved")}</p>
+    </div>
+  </form>
 }
 
 function ApiKeysPage({ sdk }: { sdk: AuthMiniApi }) {

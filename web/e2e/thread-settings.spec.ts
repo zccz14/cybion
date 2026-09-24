@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test"
 
-test("the popover edits model, reasoning effort and fast mode", async ({ page }) => {
+test("the popover groups models by upstream and edits reasoning effort and fast mode", async ({ page }) => {
   await page.goto("/e2e/thread-settings.html")
   await page.getByRole("button", { name: "线程设置" }).click()
   const popover = page.locator('[data-slot="popover-content"]')
@@ -11,8 +11,14 @@ test("the popover edits model, reasoning effort and fast mode", async ({ page })
   const effortValue = popover.locator('[data-slot="reasoning-effort-value"]')
   await expect(effortValue).toHaveText("medium")
   await popover.getByRole("combobox").click()
+  await expect(page.getByText("DeepSeek", { exact: true })).toBeVisible()
+  await expect(page.getByText("OpenAI-LB", { exact: true })).toBeVisible()
+  await expect(page.getByText("Could not load models")).toBeVisible()
   await page.getByRole("option", { name: "gpt-6-astra" }).click()
-  await expect(page.getByTestId("model")).toHaveText("gpt-6-astra")
+  await expect(page.getByTestId("selection")).toHaveText("up-deepseek:gpt-6-astra")
+  await popover.getByRole("combobox").click()
+  await page.getByRole("option", { name: "meta-llama/Llama-3.1-8B-Instruct" }).click()
+  await expect(page.getByTestId("selection")).toHaveText("up-lb:meta-llama/Llama-3.1-8B-Instruct")
   const slider = popover.getByRole("slider")
   await slider.press("End")
   await expect(page.getByTestId("effort")).toHaveText("max")
