@@ -1,5 +1,8 @@
 use super::*;
-use crate::cloud::tests::{create_test_thread, insert_record, read_json_request, test_state};
+use crate::cloud::tests::{
+    bind_thread_upstream, create_test_thread, insert_record, insert_upstream, read_json_request,
+    test_state,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn record(state: &AppState, user: &User, thread: &ThreadView, input: RequestInput) -> i64 {
@@ -11,16 +14,20 @@ async fn record(state: &AppState, user: &User, thread: &ThreadView, input: Reque
     .unwrap()
 }
 
-fn integrations(address: SocketAddr) -> IntegrationSettings {
-    IntegrationSettings {
-        openai_consumer_id: "fixture".to_owned(),
-        openai_consumer_secret: "fixture".to_owned(),
-        api_key: String::new(),
-        openai_base_url: format!("http://{address}"),
-        linkit_bot_id: "fixture".to_owned(),
-        linkit_bot_token: "fixture".to_owned(),
-        linkit_username: "fixture".to_owned(),
+fn model_upstream(address: SocketAddr) -> Upstream {
+    Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
     }
+}
+
+/// Registers a fresh upstream row pointing at the mock listener and binds the
+/// thread to it, so the request path resolves the mock through the database.
+async fn bind_model(state: &AppState, user: &User, thread: &ThreadView, address: SocketAddr) {
+    let upstream = insert_upstream(state, user, "fixture", &format!("http://{address}")).await;
+    bind_thread_upstream(state, user, &thread.id, &upstream.id).await;
 }
 
 async fn reply(socket: &mut tokio::net::TcpStream, text: &str) {
@@ -106,9 +113,7 @@ async fn browser_controls_accept_empty_posts_and_enforce_authentication_and_owne
         base64url(&key.sign(signing_input.as_bytes()).to_bytes())
     );
     let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    save_integration_settings(&state, &user, &integrations(upstream.local_addr().unwrap()))
-        .await
-        .unwrap();
+    bind_model(&state, &user, &thread, upstream.local_addr().unwrap()).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn({
@@ -247,7 +252,7 @@ async fn continue_replays_saved_history_without_a_new_prompt() {
             .unwrap()
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let settings = integrations(listener.local_addr().unwrap());
+    let upstream = model_upstream(listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_json_request(&mut socket).await;
@@ -255,10 +260,10 @@ async fn continue_replays_saved_history_without_a_new_prompt() {
         request
     });
     let (_tx, mut rx) = watch::channel(false);
-    let result = request_agent(&state, &user, &thread, &settings, next, &mut rx)
+    let result = request_agent(&state, &user, &thread, &upstream, next, &mut rx)
         .await
         .unwrap();
-    assert_eq!(result.2, "continued answer");
+    assert_eq!(result.1, "continued answer");
     let request = server.await.unwrap();
     let input = request["input"].as_array().unwrap();
     assert_eq!(
@@ -309,9 +314,7 @@ async fn cancel_closes_the_in_flight_stream_and_preserves_committed_records() {
     let user = user_for_subject(&state, "cancel-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
-        .await
-        .unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         read_json_request(&mut socket).await;
@@ -426,9 +429,7 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
         .await
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
-        .await
-        .unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_json_request(&mut socket).await;
@@ -633,9 +634,7 @@ async fn controls_reject_empty_busy_and_other_users_threads_without_appending() 
         .await
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
-        .await
-        .unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
     let results = tokio::join!(
         enqueue(
             state.clone(),
@@ -903,9 +902,7 @@ async fn compaction_reduces_the_range_when_the_summary_exhausts_the_output_budge
     .await
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
-        .await
-        .unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
         for index in 0..3 {
@@ -988,9 +985,7 @@ async fn proactive_compaction_checkpoints_the_context_before_an_oversized_infere
     .await
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
-        .await
-        .unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
         for index in 0..2 {
@@ -1083,9 +1078,7 @@ async fn disabled_context_budget_skips_proactive_compaction() {
     .await
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    save_integration_settings(&state, &user, &integrations(listener.local_addr().unwrap()))
-        .await
-        .unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_json_request(&mut socket).await;

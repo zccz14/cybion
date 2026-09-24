@@ -53,16 +53,19 @@ the first authenticated browser session initializes that key atomically.
   long threads never reach the upstream window before compacting. The
   conversation header shows the latest inference context size against that
   budget.
-- **Configuration → Responses-compatible API** lets each user save a `base_url`
-  and `api_key` for an OpenAI Responses-compatible provider. The key is stored
-  in that user's SQLite database and is never returned to the browser. Cybion
-  sends model requests to `{base_url}/responses`, preserving the existing
-  streaming, tool-call, context replay, and audit behavior. The configured
-  endpoint owns the model catalog: Cybion reads `GET {base_url}/models` and the
-  Configuration page lists that catalog, while new and existing Thread model
-  pickers offer it. A Thread keeps its own model selectable even after the
-  catalog stops reporting it. Existing OpenAI-LB credentials remain readable for
-  users who have not migrated.
+- **Configuration → Responses-compatible upstreams** lets each user manage
+  several named upstreams, each with its own `base_url` and `api_key`. Keys are
+  stored in that user's SQLite database and are never returned to the browser.
+  Cybion sends model requests to `{base_url}/responses` of the upstream a Thread
+  selected, preserving the existing streaming, tool-call, context replay, and
+  audit behavior. Each upstream owns its model catalog: Cybion reads
+  `GET {base_url}/models` per upstream, and the Configuration page lists every
+  catalog while the new-thread, thread, and defaults model pickers group the
+  catalogs by upstream name. A Thread keeps its own upstream and model
+  selectable even after a catalog stops reporting it, and an upstream that
+  Threads or defaults still reference cannot be deleted. Schema 16 converts the
+  single legacy configuration (an explicit key, or an OpenAI-LB consumer
+  credential) into one upstream and binds existing Threads to it.
 - Linkit task notifications are optional and configured separately. They do not
   gate model inference, external API requests, or API-key creation.
 - **Configuration → Linkit task notifications** lets the owner enable/repair,

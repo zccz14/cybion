@@ -1,14 +1,12 @@
-use super::{
-    ApiError, AppState, AuditSpec, IntegrationSettings, hash_secret, openai_api_key, user_db,
-};
+use super::{ApiError, AppState, AuditSpec, Upstream, hash_secret, user_db};
 use axum::http::HeaderValue;
 use rusqlite::{OptionalExtension, params};
 
-pub(super) fn upstream_key(integrations: &IntegrationSettings) -> String {
+pub(super) fn upstream_key(upstream: &Upstream) -> String {
     hash_secret(&format!(
         "{}\n{}",
-        integrations.openai_base_url.trim_end_matches('/'),
-        openai_api_key(integrations)
+        upstream.base_url.trim_end_matches('/'),
+        upstream.api_key
     ))
 }
 

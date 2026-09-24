@@ -98,7 +98,8 @@ conversation controls do. Machine identity is always visible near the action.
   resources, and **System configuration** (`#/admin/configuration`).
 - **Configuration** contains **Personal settings** (`#/configuration`), API keys,
   and Tools. Personal settings contains new-thread defaults, the current user's
-  integrations, and their API/Worker shortcuts. This scope is the same for
+  Responses-compatible upstreams, notification integrations, and their
+  API/Worker shortcuts. This scope is the same for
   administrators and ordinary users.
 
 System configuration owns the global experimental request switches (`thread-id`,

@@ -1,4 +1,7 @@
-use super::tests::{create_test_thread, insert_record, read_json_request, test_state};
+use super::tests::{
+    bind_thread_upstream, create_test_thread, insert_record, insert_upstream, read_json_request,
+    test_state,
+};
 use super::*;
 use crate::responses::{ResponseCompleted, ResponseEvent};
 use tokio::io::AsyncWriteExt;
@@ -229,19 +232,16 @@ async fn false_end_turn_continues_and_preserves_commentary_phase_in_replay() {
         }
         requests
     });
-    let integrations = IntegrationSettings {
-        openai_consumer_id: "fixture".to_owned(),
-        openai_consumer_secret: "fixture".to_owned(),
-        api_key: String::new(),
-        openai_base_url: format!("http://{address}"),
-        linkit_bot_id: String::new(),
-        linkit_bot_token: String::new(),
-        linkit_username: String::new(),
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
     };
     let (_tx, mut rx) = watch::channel(false);
-    let (_, _, text) = tokio::time::timeout(
+    let (_, text) = tokio::time::timeout(
         Duration::from_secs(5),
-        request_agent(&state, &user, &thread, &integrations, input, &mut rx),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
     )
     .await
     .unwrap()
@@ -556,19 +556,16 @@ async fn inference_keeps_prefix_and_tools_when_the_last_online_worker_disconnect
         }
         requests
     });
-    let integrations = IntegrationSettings {
-        openai_consumer_id: "fixture".to_owned(),
-        openai_consumer_secret: "fixture".to_owned(),
-        api_key: String::new(),
-        openai_base_url: format!("http://{address}"),
-        linkit_bot_id: String::new(),
-        linkit_bot_token: String::new(),
-        linkit_username: String::new(),
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
     };
     let (_tx, mut rx) = watch::channel(false);
     tokio::time::timeout(
         Duration::from_secs(5),
-        request_agent(&state, &user, &thread, &integrations, input, &mut rx),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
     )
     .await
     .unwrap()
@@ -625,20 +622,17 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
         }
         requests
     });
-    let integrations = IntegrationSettings {
-        openai_consumer_id: "fixture".to_owned(),
-        openai_consumer_secret: "fixture".to_owned(),
-        api_key: String::new(),
-        openai_base_url: format!("http://{address}"),
-        linkit_bot_id: String::new(),
-        linkit_bot_token: String::new(),
-        linkit_username: String::new(),
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
     };
     let input = input_record(&state, &user, &thread).await;
     let (_tx, mut rx) = tokio::sync::watch::channel(false);
     tokio::time::timeout(
         Duration::from_secs(5),
-        request_agent(&state, &user, &thread, &integrations, input, &mut rx),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
     )
     .await
     .unwrap()
@@ -812,12 +806,14 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
 async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "title-generation-user").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:9/v1").await;
     let thread = create_thread_for(
         &state,
         &user,
         CreateThreadInput {
             title: None,
             model: Some("test-model".to_owned()),
+            upstream_id: Some(upstream.id),
             reasoning_effort: None,
             service_tier_fast: None,
         },
@@ -861,21 +857,9 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
             .unwrap();
         request
     });
-    save_integration_settings(
-        &state,
-        &user,
-        &IntegrationSettings {
-            openai_consumer_id: "fixture".to_owned(),
-            openai_consumer_secret: "fixture".to_owned(),
-            api_key: String::new(),
-            openai_base_url: format!("http://{address}"),
-            linkit_bot_id: String::new(),
-            linkit_bot_token: String::new(),
-            linkit_username: String::new(),
-        },
-    )
-    .await
-    .unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
     let named = maybe_name_thread(&state, &user, &thread).await;
     assert_eq!(named.title, "Flaky Thread Titles");
     let request = server.await.unwrap();
@@ -969,22 +953,9 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
             .unwrap();
         request
     });
-    save_integration_settings(
-        &state,
-        &user,
-        &IntegrationSettings {
-            openai_consumer_id: "fixture".to_owned(),
-            openai_consumer_secret: "fixture".to_owned(),
-            api_key: "fixture-key".to_owned(),
-            openai_base_url: format!("http://{address}"),
-            linkit_bot_id: String::new(),
-            linkit_bot_token: String::new(),
-            linkit_username: String::new(),
-        },
-    )
-    .await
-    .unwrap();
-    let titled = generate_thread_title_for(&state, &user, "fixture", thread.id.clone())
+    let upstream = insert_upstream(&state, &user, "fixture", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let titled = generate_thread_title_for(&state, &user, thread.id.clone())
         .await
         .unwrap();
     assert_eq!(titled.title, "Context Title");
