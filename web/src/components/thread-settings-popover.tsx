@@ -1,4 +1,4 @@
-import { SlidersHorizontalIcon, ZapIcon } from "lucide-react"
+import { ZapIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -63,7 +63,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
   const stop = Math.max(0, REASONING_EFFORTS.indexOf(reasoningEffort as ReasoningEffort))
   return <Popover>
     <PopoverTrigger asChild>
-      <Button type="button" variant="outline" size="icon" aria-label={t.settings} title={t.settings} disabled={disabled}><SlidersHorizontalIcon /></Button>
+      <Button type="button" variant="outline" className="min-w-0 shrink gap-0" aria-label={`${t.settings}: ${model} (${reasoningEffort})`} title={t.settings} disabled={disabled}><span className="truncate">{model}</span><span className="whitespace-pre"> ({reasoningEffort})</span></Button>
     </PopoverTrigger>
     <PopoverContent side="top" align="end" className="w-80">
       <div className="flex flex-col gap-2">

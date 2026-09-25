@@ -1,6 +1,7 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { ThreadSettingsPopover, type ModelCatalog } from "../src/components/thread-settings-popover"
+import { Button } from "../src/components/ui/button"
 import "../src/styles.css"
 
 const catalogs: ModelCatalog[] = [
@@ -21,12 +22,16 @@ function Fixture() {
       <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button>
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>
     </header>
-    <div className="mt-auto flex items-center justify-end gap-3 border-t pt-4">
+    <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
       <span data-testid="selection">{upstreamId}:{model}</span>
       <span data-testid="effort">{effort}</span>
       <span data-testid="fast">{String(fast)}</span>
       <span data-testid="budget">{String(budget)}</span>
+    </div>
+    <div className="mt-auto flex items-center justify-between gap-3 border-t pt-4">
+      <span className="text-xs text-muted-foreground">⏎ 开始线程</span>
       <ThreadSettingsPopover model={model} upstreamId={upstreamId} catalogs={catalogs} reasoningEffort={effort} fast={fast} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} onModelChange={(upstreamId, model) => { setUpstreamId(upstreamId); setModel(model) }} onReasoningChange={setEffort} onFastChange={setFast} />
+      <Button>发送</Button>
     </div>
   </main>
 }
