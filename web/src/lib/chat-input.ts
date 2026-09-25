@@ -9,3 +9,10 @@ export function handleChatInputKeyDown(event: KeyboardEvent<HTMLTextAreaElement>
   event.preventDefault()
   if (!event.repeat) event.currentTarget.form?.requestSubmit()
 }
+
+// One action slot: Send for a non-empty draft, otherwise Continue on an idle
+// thread and Stop on a running one.
+export function composerAction(input: string, running: boolean) {
+  if (input.trim()) return "send"
+  return running ? "stop" : "continue"
+}

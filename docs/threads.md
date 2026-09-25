@@ -24,13 +24,13 @@ the source records.
 The UI exposes `idle`, `running`, and `failed` thread states. Failures append
 an activity record and leave the thread ready for a later input.
 
-The composer also offers **Stop**, **Continue reasoning**, and **Compact**:
+The composer also offers **Stop**, **Continue**, and **Compact**:
 
 - Stop cancels the current model request and prevents further inference or
   Worker dispatch for that request. Completed history records stay unchanged.
   Already dispatched Worker actions may finish; their late results are kept as
   activity and cannot restart reasoning. The thread returns to `idle`.
-- Continue reasoning starts from the latest saved protocol record without
+- Continue starts from the latest saved protocol record without
   appending a user message or sending a synthetic prompt. New outputs are
   appended to the same thread. The composer draft is retained.
 - Compact creates a validated checkpoint from the current context, preserves

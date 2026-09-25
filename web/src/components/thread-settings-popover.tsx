@@ -65,7 +65,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
     <PopoverTrigger asChild>
       <Button type="button" variant="outline" className="min-w-0 shrink gap-0" aria-label={`${t.settings}: ${model} (${reasoningEffort})`} title={t.settings} disabled={disabled}><span className="truncate">{model}</span><span className="whitespace-pre"> ({reasoningEffort})</span></Button>
     </PopoverTrigger>
-    <PopoverContent side="top" align="end" className="w-80">
+    <PopoverContent side="top" align="start" className="w-80">
       <div className="flex flex-col gap-2">
         <Label>{t.model}</Label>
         <Select value={modelSelection(upstreamId, model)} onValueChange={(value) => { const parsed = parseModelSelection(value); onModelChange(parsed.upstreamId, parsed.model) }} disabled={disabled}>

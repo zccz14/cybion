@@ -29,7 +29,6 @@ function Fixture() {
       <span data-testid="budget">{String(budget)}</span>
     </div>
     <div className="mt-auto flex items-center justify-between gap-3 border-t pt-4">
-      <span className="text-xs text-muted-foreground">⏎ 开始线程</span>
       <ThreadSettingsPopover model={model} upstreamId={upstreamId} catalogs={catalogs} reasoningEffort={effort} fast={fast} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} onModelChange={(upstreamId, model) => { setUpstreamId(upstreamId); setModel(model) }} onReasoningChange={setEffort} onFastChange={setFast} />
       <Button>发送</Button>
     </div>
