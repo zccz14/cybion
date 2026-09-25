@@ -57,7 +57,7 @@ import { generatedImageSource, pendingResponseRecords, threadControlAction, type
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
-import { handleChatInputKeyDown } from "@/lib/chat-input"
+import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
@@ -353,11 +353,9 @@ const copy = {
     chat: "Thread",
     backToThreads: "Back to thread list",
     send: "Send",
-    sendShortcut: "Enter to send · Shift + Enter for a new line",
-    startThreadShortcut: "Enter to start · Shift + Enter for a new line",
     stopThread: "Stop",
     stopThreadHint: "Stop reasoning and keep saved records",
-    continueThread: "Continue reasoning",
+    continueThread: "Continue",
     continueThreadHint: "Continue from saved history without sending a new prompt",
     compactThread: "Compact",
     compactThreadHint: "Compress context into a checkpoint and keep the original records",
@@ -635,11 +633,9 @@ const copy = {
     chat: "线程",
     backToThreads: "返回线程列表",
     send: "发送",
-    sendShortcut: "Enter 发送 · Shift + Enter 换行",
-    startThreadShortcut: "Enter 开始线程 · Shift + Enter 换行",
     stopThread: "停止",
     stopThreadHint: "停止推理，保留已保存的记录",
-    continueThread: "继续推理",
+    continueThread: "继续",
     continueThreadHint: "从已有记录继续，不发送新的提示词",
     compactThread: "压缩",
     compactThreadHint: "将上下文压缩为 checkpoint，保留原始记录",
@@ -1326,7 +1322,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} aria-describedby="new-thread-input-shortcut" disabled={!value || start.isPending} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center justify-between gap-3"><span id="new-thread-input-shortcut" className="text-xs text-muted-foreground">{t("startThreadShortcut")}</span>{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} disabled={!value || start.isPending} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -1471,6 +1467,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   const running = current.status === "running"
   const busy = submit.isPending || control.isPending
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
+  const action = composerAction(input, running)
   return <main className="flex h-full flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
@@ -1530,15 +1527,17 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
         </MessageScroller>
       </MessageScrollerProvider>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(input) }}>
-        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} aria-describedby="thread-input-shortcut" disabled={busy} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
+        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} disabled={busy} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
           <div className="flex flex-wrap items-center justify-between gap-2">
+            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} />
             <div className="flex flex-wrap items-center gap-2">
-              {running
-                ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
-                : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
               <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
+              {action === "send"
+                ? <Button disabled={busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
+                : action === "stop"
+                  ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
+                  : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
             </div>
-            <div className="flex items-center gap-3"><span id="thread-input-shortcut" className="hidden text-xs text-muted-foreground sm:inline">{t("sendShortcut")}</span><ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} /><Button disabled={!input.trim() || busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button></div>
           </div>
         </FieldGroup>
       </form>

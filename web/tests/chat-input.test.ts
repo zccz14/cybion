@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { handleChatInputKeyDown } from "../src/lib/chat-input.ts"
+import { composerAction, handleChatInputKeyDown } from "../src/lib/chat-input.ts"
 
 type ChatKeyEvent = Parameters<typeof handleChatInputKeyDown>[0]
 
@@ -45,15 +45,21 @@ test("holding Enter does not submit again or insert a newline", () => {
   assert.deepEqual(press({ repeat: true }), { prevented: 1, submitted: 0 })
 })
 
-test("both composers use the shared handler and show localized shortcut hints", () => {
+test("the composer action slot merges send, continue, and stop", () => {
+  assert.equal(composerAction("hello", false), "send")
+  assert.equal(composerAction("hello", true), "send")
+  assert.equal(composerAction("", false), "continue")
+  assert.equal(composerAction("", true), "stop")
+  assert.equal(composerAction("   ", false), "continue")
+  assert.equal(composerAction("   ", true), "stop")
+})
+
+test("both composers use the shared handler and drop shortcut hint copy", () => {
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   for (const id of ["new-thread-input", "thread-input"]) {
     const composer = source.split("\n").find((line) => line.includes(`<Textarea id="${id}"`))
-    assert.ok(composer?.includes(`onKeyDown={handleChatInputKeyDown} aria-describedby="${id}-shortcut"`))
+    assert.ok(composer?.includes("onKeyDown={handleChatInputKeyDown}"))
   }
-  for (const key of ["sendShortcut", "startThreadShortcut"]) {
-    assert.equal(source.match(new RegExp(`${key}: "Enter[^"\\n]*Shift \\+ Enter`, "g"))?.length, 2)
-    assert.match(source, new RegExp(`t\\("${key}"\\)`))
-  }
-  assert.doesNotMatch(source, /⌘ \/ Ctrl \+ Enter/)
+  assert.doesNotMatch(source, /sendShortcut|startThreadShortcut/)
+  assert.doesNotMatch(source, /Shift \+ Enter|⌘ \/ Ctrl \+ Enter/)
 })
