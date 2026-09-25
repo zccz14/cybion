@@ -20,7 +20,7 @@ import {
 } from "@tanstack/react-query"
 import { AuthMiniProvider, useAuthMini } from "auth-mini-react-components"
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
-import { LinkitMyInfo, LinkitProvider } from "linkit-react-components"
+import { LinkitMyInfo, LinkitProvider, useLinkit } from "linkit-react-components"
 import {
   ActivityIcon,
   ArrowLeftIcon,
@@ -35,7 +35,6 @@ import {
   DownloadIcon,
   ExternalLinkIcon,
   FileKey2Icon,
-  LanguagesIcon,
   MoonIcon,
   NetworkIcon,
   PencilIcon,
@@ -1070,6 +1069,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
     t: (key) => copy[language][key],
   }), [dark, language])
   return <LinkitProvider linkitBaseUrl="https://linkit.ntnl.io" lang={language === "zh" ? "zh-CN" : "en-US"}>
+    <LinkitLanguageSync setLanguage={setLanguage} />
     <UiContext.Provider value={ui}>
       <ErrorBoundary fallback={({ error, reset }) => <ErrorBoundaryFallback
         error={error}
@@ -1094,6 +1094,24 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   </LinkitProvider>
 }
 
+function LinkitLanguageSync({ setLanguage }: { setLanguage: (language: Language) => void }) {
+  const { languages } = useLinkit()
+  useEffect(() => {
+    const next = negotiateLanguage(languages)
+    if (next) setLanguage(next)
+  }, [languages, setLanguage])
+  return null
+}
+
+function negotiateLanguage(languages: readonly string[]): Language | undefined {
+  for (const language of languages) {
+    const base = language.toLowerCase().split("-")[0]
+    if (base === "zh") return "zh"
+    if (base === "en") return "en"
+  }
+  return undefined
+}
+
 function WorkspaceShell({
   sdk,
   userId,
@@ -1109,7 +1127,7 @@ function WorkspaceShell({
   threadsLoading: boolean
   threadsError: unknown
 }) {
-  const { language, dark, toggleTheme, setLanguage, t } = useUi()
+  const { language, dark, toggleTheme, t } = useUi()
   const location = useLocation()
   const navigate = useNavigate()
   const routeTitle = pageTitle(location.pathname, t)
@@ -1166,9 +1184,6 @@ function WorkspaceShell({
           {threadsLoading && <p className="sr-only">{t("threads")}</p>}
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon-sm" aria-label={t("language")} onClick={() => setLanguage(language === "en" ? "zh" : "en")}>
-            <LanguagesIcon />
-          </Button>
           <Button variant="ghost" size="icon-sm" aria-label={t("theme")} onClick={toggleTheme}>
             {dark ? <SunIcon /> : <MoonIcon />}
           </Button>
