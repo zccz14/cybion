@@ -49,8 +49,6 @@ import {
   WrenchIcon,
   UsersIcon,
 } from "lucide-react"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import toolCatalog from "../../tools.json"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
@@ -76,6 +74,7 @@ import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
+import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
 import { ThreadList } from "@/components/thread-list"
 import { ThreadSettingsPopover, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
@@ -1599,7 +1598,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
           <span className="text-sm font-medium text-primary">{t("recordReasoning")}</span>
           <time className="text-xs text-muted-foreground">{time}</time>
         </div>
-        {summary ? <div className="prose prose-sm mt-2 max-w-none break-words dark:prose-neutral dark:prose-invert prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0"><ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
+        {summary ? <div className="prose prose-sm mt-2 max-w-none break-words dark:prose-neutral dark:prose-invert prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0"><Markdown>{summary}</Markdown></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
         <details className="group mt-2">
           <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
             <span>{t("recordPayload")}</span>
@@ -1625,7 +1624,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
         </div>
         <div className="max-w-[75ch] rounded-2xl rounded-tl-md bg-card px-4 py-3 shadow-sm ring-1 ring-foreground/10">
           <div className="prose prose-sm max-w-none break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <Markdown>{text}</Markdown>
           </div>
         </div>
       </MessageContent>
