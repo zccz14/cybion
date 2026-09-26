@@ -18,6 +18,7 @@ chrono = { version = "0.4.41", features = ["serde"] }
 directories = "6.0.0"
 futures-util = { version = "0.3.31", features = ["sink"] }
 hex = "0.4"
+mimalloc = { version = "0.1.52", default-features = false }
 eventsource-stream = "0.2.3"
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
