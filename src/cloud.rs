@@ -2571,8 +2571,9 @@ async fn insights(
     let model = query.model.filter(|value| !value.trim().is_empty());
     let request_kind = query.request_kind.filter(|value| !value.trim().is_empty());
     user_db(&state, &identity.user, true, move |connection| {
+        let transaction = connection.transaction()?;
         load_insights(
-            connection,
+            &transaction,
             range,
             started_after,
             thread_id,
@@ -2596,15 +2597,11 @@ fn insight_range(value: Option<&str>) -> Result<(String, Option<i64>), ApiError>
     Ok((range.to_owned(), seconds.map(|seconds| now() - seconds)))
 }
 
-fn utc_date(timestamp: i64) -> NaiveDate {
+fn utc_date(timestamp: i64) -> Result<NaiveDate, ApiError> {
     Utc.timestamp_opt(timestamp, 0)
         .single()
-        .unwrap_or_else(|| {
-            Utc.timestamp_opt(0, 0)
-                .single()
-                .expect("Unix epoch is valid")
-        })
-        .date_naive()
+        .map(|value| value.date_naive())
+        .ok_or_else(|| ApiError::internal("activity timestamp is out of range"))
 }
 
 fn utc_day_bounds(date: NaiveDate) -> (i64, i64) {
@@ -2613,14 +2610,7 @@ fn utc_day_bounds(date: NaiveDate) -> (i64, i64) {
         .expect("midnight is valid")
         .and_utc()
         .timestamp();
-    let end = date
-        .succ_opt()
-        .expect("date range must fit in chrono")
-        .and_hms_opt(0, 0, 0)
-        .expect("midnight is valid")
-        .and_utc()
-        .timestamp();
-    (start, end)
+    (start, start + 86_400)
 }
 
 fn insight_day_range(
@@ -2628,24 +2618,22 @@ fn insight_day_range(
     started_after: Option<i64>,
     generated_at: i64,
 ) -> Result<Option<(NaiveDate, NaiveDate)>, ApiError> {
-    let today = utc_date(generated_at);
-    let first_history: Option<i64> = connection.query_row(
-        "SELECT MIN(created_at) FROM history_records
-         WHERE kind <> 'checkpoint' AND (?1 IS NULL OR created_at >= ?1)",
-        params![started_after],
-        |row| row.get(0),
-    )?;
-    let first_request: Option<i64> = connection.query_row(
-        "SELECT MIN(started_at) FROM reasoning_audits
-         WHERE (?1 IS NULL OR started_at >= ?1)",
-        params![started_after],
-        |row| row.get(0),
-    )?;
-    let first_timestamp = [first_history, first_request].into_iter().flatten().min();
-    let Some(start) = first_timestamp.or(started_after) else {
+    let today = utc_date(generated_at)?;
+    let start = match started_after {
+        Some(start) => Some(start),
+        None => connection.query_row(
+            "SELECT MIN(timestamp) FROM (
+                SELECT MIN(created_at) AS timestamp FROM history_records WHERE kind <> 'checkpoint'
+                UNION ALL SELECT MIN(started_at) FROM reasoning_audits
+             )",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?,
+    };
+    let Some(start) = start else {
         return Ok(None);
     };
-    Ok(Some((utc_date(start).min(today), today)))
+    Ok(Some((utc_date(start)?.min(today), today)))
 }
 
 fn empty_active_day(date: String) -> InsightActiveDay {
@@ -2671,6 +2659,9 @@ fn load_insight_activity(
             days: Vec::new(),
         });
     };
+    let (first_day_start, _) = utc_day_bounds(first_day);
+    let (_, end) = utc_day_bounds(last_day);
+    let filter_start = started_after.unwrap_or(first_day_start);
     let mut by_date = HashMap::<String, InsightActiveDay>::new();
     let mut history_statement = connection.prepare(
         "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch') AS date,
@@ -2678,11 +2669,11 @@ fn load_insight_activity(
                 COUNT(*),
                 COALESCE(SUM(CASE WHEN kind='input' THEN 1 ELSE 0 END), 0)
          FROM history_records
-         WHERE kind <> 'checkpoint' AND (?1 IS NULL OR created_at >= ?1)
+         WHERE kind <> 'checkpoint' AND created_at >= ?1 AND created_at < ?2
          GROUP BY date
          ORDER BY date",
     )?;
-    let history_rows = history_statement.query_map(params![started_after], |row| {
+    let history_rows = history_statement.query_map(params![filter_start, end], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
@@ -2704,11 +2695,11 @@ fn load_insight_activity(
                 COUNT(*),
                 COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
          FROM reasoning_audits
-         WHERE (?1 IS NULL OR started_at >= ?1)
+         WHERE started_at >= ?1 AND started_at < ?2
          GROUP BY date
          ORDER BY date",
     )?;
-    let request_rows = request_statement.query_map(params![started_after], |row| {
+    let request_rows = request_statement.query_map(params![filter_start, end], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
@@ -2723,20 +2714,16 @@ fn load_insight_activity(
         item.requests = requests;
         item.total_tokens = total_tokens;
     }
-    let mut days = Vec::new();
-    let mut date = first_day;
-    while date <= last_day {
-        let key = date.format("%Y-%m-%d").to_string();
-        days.push(
+    let days = first_day
+        .iter_days()
+        .take_while(|date| *date <= last_day)
+        .map(|date| {
+            let key = date.format("%Y-%m-%d").to_string();
             by_date
                 .remove(&key)
-                .unwrap_or_else(|| empty_active_day(key)),
-        );
-        let Some(next) = date.succ_opt() else {
-            break;
-        };
-        date = next;
-    }
+                .unwrap_or_else(|| empty_active_day(key))
+        })
+        .collect();
     Ok(InsightActivity {
         timezone: INSIGHT_TIMEZONE,
         days,
@@ -2744,14 +2731,15 @@ fn load_insight_activity(
 }
 
 fn report_date(value: Option<&str>) -> Result<NaiveDate, ApiError> {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| {
-            NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
-                .map_err(|_| ApiError::bad_request("report date must be YYYY-MM-DD"))
-        })
-        .transpose()
-        .map(|value| value.unwrap_or_else(|| utc_date(now())))
+    let Some(value) = value else {
+        return utc_date(now());
+    };
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("report date must be YYYY-MM-DD"))?;
+    if value.len() != 10 || date.format("%Y-%m-%d").to_string() != value {
+        return Err(ApiError::bad_request("report date must be YYYY-MM-DD"));
+    }
+    Ok(date)
 }
 
 fn report_input_summary(payload: Option<String>) -> Option<String> {
@@ -2862,7 +2850,8 @@ async fn daily_report(
 ) -> Result<Json<DailyReport>, ApiError> {
     let date = report_date(query.date.as_deref())?;
     user_db(&state, &identity.user, true, move |connection| {
-        load_daily_report(connection, date)
+        let transaction = connection.transaction()?;
+        load_daily_report(&transaction, date)
     })
     .await
     .map(Json)
@@ -7805,7 +7794,7 @@ mod tests {
         let first_id = first.id.clone();
         let second_id = second.id.clone();
         let base = 1_700_000_000_i64;
-        let (activity, report) = user_db(&state, &user, false, move |connection| {
+        let (activity, recent_activity, report) = user_db(&state, &user, false, move |connection| {
             let first_input = persist_history_record(
                 connection,
                 HistoryRecordInsert {
@@ -7839,7 +7828,7 @@ mod tests {
                     thread_id: &second_id,
                     kind: "input",
                     payload: &json!({"role":"user","content":"second prompt"}),
-                    created_at: base + 86_400,
+                    created_at: base + 2 * 86_400,
                 },
             )?;
             connection.execute(
@@ -7850,16 +7839,20 @@ mod tests {
             connection.execute(
                 "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens)
                  VALUES(?,?,?,'fixture','completed',?,?,20,8)",
-                params![second_input, &second_id, "inference", base + 86_410, base + 86_420],
+                params![second_input, &second_id, "inference", base + 2 * 86_400 + 10, base + 2 * 86_400 + 20],
             )?;
-            let activity = load_insight_activity(connection, None, base + 2 * 86_400)?;
-            let report = load_daily_report(connection, utc_date(base))?;
-            Ok((activity, report))
+            let activity = load_insight_activity(connection, None, base + 3 * 86_400)?;
+            let recent_activity = load_insight_activity(connection, Some(base + 50), base + 3 * 86_400)?;
+            let report = load_daily_report(connection, utc_date(base)?)?;
+            Ok((activity, recent_activity, report))
         })
         .await
         .unwrap();
-        let first_date = utc_date(base).format("%Y-%m-%d").to_string();
-        let second_date = utc_date(base + 86_400).format("%Y-%m-%d").to_string();
+        let first_date = utc_date(base).unwrap().format("%Y-%m-%d").to_string();
+        let second_date = utc_date(base + 2 * 86_400)
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
         let first_day = activity
             .days
             .iter()
@@ -7885,6 +7878,36 @@ mod tests {
                 second_day.input_records
             ),
             (1, 1, 1)
+        );
+        let empty_date = utc_date(base + 86_400)
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+        let empty_day = activity
+            .days
+            .iter()
+            .find(|day| day.date == empty_date)
+            .unwrap();
+        assert_eq!(
+            (
+                empty_day.active_threads,
+                empty_day.activity_records,
+                empty_day.input_records
+            ),
+            (0, 0, 0)
+        );
+        let recent_first_day = recent_activity
+            .days
+            .iter()
+            .find(|day| day.date == first_date)
+            .unwrap();
+        assert_eq!(
+            (
+                recent_first_day.active_threads,
+                recent_first_day.activity_records,
+                recent_first_day.input_records
+            ),
+            (1, 1, 0)
         );
         assert_eq!(report.date, first_date);
         assert_eq!(
