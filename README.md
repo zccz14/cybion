@@ -34,6 +34,13 @@ the first authenticated browser session initializes that key atomically.
   own settings. The context budget is the token threshold for proactive
   compaction; each thread may override it, `0` disables it, and the built-in
   default is 200,000. Threads without an override follow later default changes.
+- The conversation supports a minimal mode that folds every turn down to its
+  input plus one tail item: the turn's last AI reply or its last activity
+  line, whichever came later; all other replies, activities, and protocol
+  records stay collapsed. The personal default lives in Configuration →
+  Personal settings; a per-thread override in the thread settings takes
+  precedence. It is a display preference stored with the user's settings, and
+  it changes neither inference nor history records.
 - Thread turns always include the `web_search` and `image_generation` native
   tools in the inference request to the configured provider.
 - `tools.json` is the single source for the upstream tool catalog. The request

@@ -162,6 +162,7 @@ async fn creating_threads_requires_an_existing_upstream() {
             reasoning_effort: "medium".to_owned(),
             service_tier_fast: false,
             context_budget_tokens: 200_000,
+            minimal_mode: false,
         }),
     )
     .await
@@ -262,6 +263,7 @@ async fn upstream_crud_enforces_unique_names_and_blocks_deletion_in_use() {
             reasoning_effort: "medium".to_owned(),
             service_tier_fast: false,
             context_budget_tokens: 200_000,
+            minimal_mode: false,
         }),
     )
     .await

@@ -147,14 +147,16 @@ type ThreadDefaults = {
   reasoning_effort: typeof REASONING_EFFORTS[number]
   service_tier_fast: boolean
   context_budget_tokens: number
+  minimal_mode: boolean
 }
 type ThreadStatus = "idle" | "running" | "failed"
-type Thread = Omit<ThreadDefaults, "context_budget_tokens"> & {
+type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & {
   id: string
   title: string
   status: ThreadStatus
   display_status: ThreadDisplayStatus
   context_budget_tokens: number | null
+  minimal_mode: boolean | null
   context_tokens: number | null
   usage: ThreadUsage
   created_at: number
@@ -165,7 +167,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens"> & { input: string }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & { input: string }
 type ApiKey = {
   id: string
   label: string
@@ -578,6 +580,8 @@ const copy = {
     saveDefaultsError: "Could not save thread defaults",
     contextBudget: "Context budget",
     contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
+    minimalMode: "Minimal mode",
+    minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
     integrationDescription: "Configure one or more Responses-compatible upstreams. Threads pick a model from any upstream; notification settings are independent.",
     integration: "Integrations",
     openai: "Responses-compatible upstreams",
@@ -866,6 +870,8 @@ const copy = {
     saveDefaultsError: "无法保存线程默认设置",
     contextBudget: "上下文预算",
     contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为 checkpoint；0 表示关闭，内置默认 200000。",
+    minimalMode: "极简模式",
+    minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
     integrationDescription: "配置一个或多个用于模型推理的 Responses-compatible 上游；线程可以从任意上游选择模型。通知配置与此独立。",
     integration: "集成",
     openai: "Responses-compatible 上游",
@@ -1471,7 +1477,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -1487,6 +1493,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   if (thread.isError || !thread.data) return <Page title={t("chat")} description=""><RequestError error={thread.error} /></Page>
   const current = thread.data
   const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
+  const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
   const running = current.status === "running"
   const busy = submit.isPending || control.isPending
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
@@ -1540,7 +1547,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
             <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
               {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-              <ThreadHistory records={records} language={language} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} />} />
+              <ThreadHistory records={records} language={language} minimal={minimal} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} />} />
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
@@ -1552,7 +1559,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(input) }}>
         <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} disabled={busy} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} />
+            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} />
             <div className="flex flex-wrap items-center gap-2">
               <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
               {action === "send"
@@ -2212,7 +2219,8 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
     value.upstream_id !== defaults.data.upstream_id ||
     value.reasoning_effort !== defaults.data.reasoning_effort ||
     value.service_tier_fast !== defaults.data.service_tier_fast ||
-    value.context_budget_tokens !== defaults.data.context_budget_tokens
+    value.context_budget_tokens !== defaults.data.context_budget_tokens ||
+    value.minimal_mode !== defaults.data.minimal_mode
   )
   function edit(next: ThreadDefaults) {
     setDraft(next)
@@ -2256,6 +2264,13 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
             <FieldLabel htmlFor="default-thread-context-budget">{t("contextBudget")}</FieldLabel>
             <Input id="default-thread-context-budget" type="number" min={0} max={10000000} step={1000} inputMode="numeric" disabled={save.isPending} value={String(value.context_budget_tokens)} onChange={(event) => { const parsed = Number(event.target.value); if (Number.isFinite(parsed)) edit({ ...value, context_budget_tokens: parsed }) }} />
             <FieldDescription id="default-thread-context-budget-description">{t("contextBudgetDescription")}</FieldDescription>
+          </Field>
+          <Field orientation="horizontal" data-disabled={save.isPending}>
+            <FieldContent>
+              <FieldLabel htmlFor="default-thread-minimal">{t("minimalMode")}</FieldLabel>
+              <FieldDescription id="default-thread-minimal-description">{t("minimalModeDescription")}</FieldDescription>
+            </FieldContent>
+            <Switch id="default-thread-minimal" aria-describedby="default-thread-minimal-description" checked={value.minimal_mode} disabled={save.isPending} onCheckedChange={(minimal_mode) => edit({ ...value, minimal_mode })} />
           </Field>
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}

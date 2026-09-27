@@ -50,6 +50,16 @@ running request as before. Control operations are recorded as `activity` with
 These records are execution boundaries, never model input. They keep late
 responses and concurrent requests isolated even without a new user message.
 
+The conversation view supports a minimal mode. It folds each turn — the span
+from one user input to the next — down to the input plus a single tail item:
+the turn's last AI reply or its last activity line, whichever came later.
+Earlier replies, activities, and protocol records join the collapsed process
+group. The personal default is stored in the user's database and edited under
+Configuration → Personal settings; each thread can override it from the
+thread settings popover, and the thread value wins. The setting is display
+only: it is stored on the thread and defaults rows, and never part of model
+input or context compilation.
+
 The authenticated browser endpoints accept an empty POST body:
 
 | Endpoint | Result |

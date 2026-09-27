@@ -78,6 +78,49 @@ export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHis
   return entries
 }
 
+// Minimal mode keeps one tail candidate per turn: the last activity or message record.
+// Earlier activities, earlier replies, tool turns, and checkpoints all fold around it.
+function threadHistoryTailCandidate(record: HistoryRecord) {
+  return record.kind === "activity" || (record.kind === "response_output"
+    && record.payload !== null && typeof record.payload === "object"
+    && "type" in record.payload && record.payload.type === "message")
+}
+
+// INVARIANT: a turn is the span from an input record to the next input; only its tail
+// candidate stays visible, so every emitted entry still keys off a stable record key.
+export function groupThreadHistoryMinimal(records: readonly HistoryRecord[]): ThreadHistoryEntry[] {
+  const entries: ThreadHistoryEntry[] = []
+  let segment: HistoryRecord[] = []
+  const flush = () => {
+    let winner = -1
+    for (let index = segment.length - 1; index >= 0; index -= 1) {
+      if (threadHistoryTailCandidate(segment[index])) { winner = index; break }
+    }
+    segment.forEach((record, index) => {
+      if (record.kind === "input" || index === winner) {
+        entries.push({ type: "message", key: threadHistoryRecordKey(record), record })
+        return
+      }
+      const previous = entries.at(-1)
+      if (previous?.type === "process") {
+        previous.records.push(record)
+        previous.startedAt = Math.min(previous.startedAt, record.created_at)
+        previous.finishedAt = Math.max(previous.finishedAt, record.created_at)
+        return
+      }
+      const key = threadHistoryRecordKey(record)
+      entries.push({ type: "process", key: `process:${key}`, records: [record], startedAt: record.created_at, finishedAt: record.created_at })
+    })
+    segment = []
+  }
+  for (const record of records) {
+    if (record.kind === "input") flush()
+    segment.push(record)
+  }
+  flush()
+  return entries
+}
+
 export function formatThreadProcessDuration(durationSeconds: number, language: "en" | "zh") {
   const total = Math.max(0, Math.floor(durationSeconds))
   const hours = String(Math.floor(total / 3600)).padStart(2, "0")

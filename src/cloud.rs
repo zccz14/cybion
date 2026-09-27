@@ -89,7 +89,7 @@ const CONTEXT_ESTIMATE_BYTES_PER_TOKEN: i64 = 4;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 16;
+const USER_SCHEMA_VERSION: i64 = 17;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1013,6 +1013,7 @@ CREATE TABLE IF NOT EXISTS threads (
   reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
   context_budget_tokens INTEGER,
+  minimal_mode INTEGER,
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -1031,7 +1032,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   upstream_id TEXT,
   reasoning_effort TEXT NOT NULL CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1)),
-  context_budget_tokens INTEGER NOT NULL DEFAULT 200000
+  context_budget_tokens INTEGER NOT NULL DEFAULT 200000,
+  minimal_mode INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1253,10 +1255,16 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("threads", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
         ("threads", "next_retry_at", "INTEGER"),
         ("threads", "context_budget_tokens", "INTEGER"),
+        ("threads", "minimal_mode", "INTEGER"),
         (
             "thread_defaults",
             "context_budget_tokens",
             "INTEGER NOT NULL DEFAULT 200000",
+        ),
+        (
+            "thread_defaults",
+            "minimal_mode",
+            "INTEGER NOT NULL DEFAULT 0",
         ),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
@@ -1410,6 +1418,8 @@ struct ThreadView {
     /// Per-thread proactive compaction budget in tokens; `None` follows the
     /// user default and `0` disables proactive compaction.
     context_budget_tokens: Option<i64>,
+    /// Per-thread minimal mode override; `None` follows the user default.
+    minimal_mode: Option<bool>,
     /// Input tokens of the most recent inference request, for the context display.
     context_tokens: Option<i64>,
     status: String,
@@ -1699,6 +1709,9 @@ struct ThreadDefaults {
     service_tier_fast: bool,
     #[serde(default = "default_context_budget_tokens")]
     context_budget_tokens: i64,
+    /// Whether threads without an override start in minimal mode.
+    #[serde(default)]
+    minimal_mode: bool,
 }
 
 fn default_context_budget_tokens() -> i64 {
@@ -1713,6 +1726,7 @@ impl Default for ThreadDefaults {
             reasoning_effort: "medium".to_owned(),
             service_tier_fast: false,
             context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
+            minimal_mode: false,
         }
     }
 }
@@ -1733,6 +1747,9 @@ struct UpdateThreadInput {
     // `null` clears the override back to the user default; a number sets it.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     context_budget_tokens: Option<Option<i64>>,
+    // `null` clears the override back to the user default; true/false sets it.
+    #[serde(default, deserialize_with = "deserialize_double_option_bool")]
+    minimal_mode: Option<Option<bool>>,
 }
 
 fn deserialize_double_option<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
@@ -1740,6 +1757,13 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Some(Option::<i64>::deserialize(deserializer)?))
+}
+
+fn deserialize_double_option_bool<'de, D>(deserializer: D) -> Result<Option<Option<bool>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<bool>::deserialize(deserializer)?))
 }
 
 #[derive(Deserialize)]
@@ -1921,6 +1945,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         display_status: row.get(9)?,
         context_budget_tokens: row.get(14)?,
         context_tokens: row.get(15)?,
+        minimal_mode: row.get(16)?,
         usage: ThreadUsage {
             input_tokens,
             output_tokens,
@@ -2133,7 +2158,7 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -2143,6 +2168,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                     reasoning_effort: row.get(2)?,
                     service_tier_fast: row.get::<_, i64>(3)? != 0,
                     context_budget_tokens: row.get(4)?,
+                    minimal_mode: row.get::<_, i64>(5)? != 0,
                 })
             },
         )
@@ -2175,20 +2201,22 @@ async fn update_thread_defaults(
         reasoning_effort: reasoning_effort(input.reasoning_effort)?,
         service_tier_fast: input.service_tier_fast,
         context_budget_tokens: context_budget_tokens(input.context_budget_tokens)?,
+        minimal_mode: input.minimal_mode,
     };
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = defaults.upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens) VALUES(1,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode) VALUES(1,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode",
             params![
                 defaults.model,
                 defaults.upstream_id,
                 defaults.reasoning_effort,
                 defaults.service_tier_fast,
-                defaults.context_budget_tokens
+                defaults.context_budget_tokens,
+                defaults.minimal_mode
             ],
         )?;
         Ok(defaults)
@@ -2226,7 +2254,8 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        t.context_budget_tokens,
        (SELECT ra.input_tokens FROM reasoning_audits ra
          WHERE ra.thread_id=t.id AND ra.request_kind='inference' AND ra.input_tokens IS NOT NULL
-         ORDER BY ra.id DESC LIMIT 1)
+         ORDER BY ra.id DESC LIMIT 1),
+       t.minimal_mode
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT id FROM history_records WHERE thread_id=t.id
@@ -2288,6 +2317,7 @@ async fn create_thread_for(
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
             context_budget_tokens: None,
+            minimal_mode: None,
             context_tokens: None,
             status: "idle".to_owned(),
             display_status: "ready".to_owned(),
@@ -3195,6 +3225,7 @@ async fn update_thread(
         && reasoning_effort.is_none()
         && input.service_tier_fast.is_none()
         && input.context_budget_tokens.is_none()
+        && input.minimal_mode.is_none()
     {
         return Err(ApiError::bad_request("thread update is empty"));
     }
@@ -3204,7 +3235,7 @@ async fn update_thread(
             require_upstream(connection, id)?;
         }
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -3213,6 +3244,8 @@ async fn update_thread(
                 input.service_tier_fast.map(|value| value as i64),
                 context_budget.is_some(),
                 context_budget.flatten(),
+                input.minimal_mode.is_some(),
+                input.minimal_mode.flatten(),
                 updated_at,
                 id
             ],
@@ -4103,6 +4136,7 @@ async fn process_request(
                 reasoning_effort: "medium".to_owned(),
                 service_tier_fast: false,
                 context_budget_tokens: None,
+                minimal_mode: None,
                 context_tokens: None,
                 status: "failed".to_owned(),
                 display_status: "failed".to_owned(),
