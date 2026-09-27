@@ -34,6 +34,7 @@ function Fixture() {
   const [threadId, setThreadId] = useState("thread-a")
   const [history, setHistory] = useState(historyRecords)
   const [view, setView] = useState(responseView)
+  const [minimal, setMinimal] = useState(false)
   const records = useMemo(() => {
     const saved = history.map((item) => ({ ...item, thread_id: threadId }))
     return [...saved, ...pendingResponseRecords(view, saved, threadId)]
@@ -51,12 +52,13 @@ function Fixture() {
       <button onClick={append}>Append</button>
       <button onClick={() => setHistory([...history, record(10, "response_output", { id: "msg_10", type: "message", content: [{ text: "AI 回复：全部检查通过。" }] }, 4140)])}>Finish</button>
       <button onClick={() => setThreadId(threadId === "thread-a" ? "thread-b" : "thread-a")}>Thread</button>
+      <button aria-pressed={minimal} onClick={() => setMinimal(!minimal)}>Minimal</button>
     </header>
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
       <MessageScroller className="min-h-0 flex-1">
         <MessageScrollerViewport>
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
-            <ThreadHistory records={records} language={language} renderRecord={(item) => <article data-record-id={item.id} className="min-w-0 rounded-lg border bg-card p-3 text-sm">
+            <ThreadHistory records={records} language={language} minimal={minimal} renderRecord={(item) => <article data-record-id={item.id} className="min-w-0 rounded-lg border bg-card p-3 text-sm">
               <p className="whitespace-pre-wrap break-words">{historyPayloadText(item.payload)}</p>
               <details className="mt-2 text-xs text-muted-foreground">
                 <summary className="cursor-pointer">原始记录 #{item.id}</summary>

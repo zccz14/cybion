@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id): HistoryRecord {
@@ -187,4 +187,67 @@ test("window cursors read the ascending record bounds", () => {
   const records = [record(3, "input"), record(5, "activity")]
   assert.equal(newestRecordId(records), 5)
   assert.equal(oldestRecordId(records), 3)
+})
+
+test("minimal mode keeps only the last message of each turn visible and folds earlier replies", () => {
+  const records = [
+    record(1, "input", { role: "user", content: "first" }),
+    record(2, "response_output", { id: "rs_2", type: "reasoning" }),
+    record(3, "response_output", { id: "msg_3", type: "message" }),
+    record(4, "response_output", { id: "msg_4", type: "message" }),
+    record(5, "input", { role: "user", content: "second" }),
+    record(6, "response_output", { id: "msg_6", type: "message" }),
+  ]
+  const entries = groupThreadHistoryMinimal(records)
+  assert.deepEqual(entries.map((entry) => entry.type), ["message", "process", "message", "message", "message"])
+  const [input, fold, reply, secondInput, secondReply] = entries
+  assert.equal(input.type === "message" && input.record.id, 1)
+  assert.deepEqual(fold.type === "process" && fold.records.map((item) => item.id), [2, 3])
+  assert.equal(reply.type === "message" && reply.record.id, 4)
+  assert.equal(secondInput.type === "message" && secondInput.record.id, 5)
+  assert.equal(secondReply.type === "message" && secondReply.record.id, 6)
+})
+
+test("minimal activities fold unless they are the turn's tail candidate", () => {
+  const records = [
+    record(1, "input"),
+    record(2, "activity", { type: "thread_control", action: "compact" }),
+    record(3, "activity", { role: "system", content: "auto compaction" }),
+    record(4, "response_output", { id: "msg_4", type: "message" }),
+    record(5, "tool_output", { output: "late" }),
+    record(6, "input"),
+    record(7, "response_output", { id: "msg_7", type: "message" }),
+    record(8, "activity", { type: "thread_control", action: "cancel" }),
+  ]
+  const entries = groupThreadHistoryMinimal(records)
+  assert.deepEqual(entries.map((entry) => entry.type), ["message", "process", "message", "process", "message", "process", "message"])
+  assert.deepEqual(entries[1].type === "process" && entries[1].records.map((item) => item.id), [2, 3])
+  assert.equal(entries[2].type === "message" && entries[2].record.id, 4)
+  assert.deepEqual(entries[3].type === "process" && entries[3].records.map((item) => item.id), [5])
+  assert.equal(entries[4].type === "message" && entries[4].record.id, 6)
+  // The later cancel activity replaces the reply as the only tail candidate of its turn.
+  assert.deepEqual(entries[5].type === "process" && entries[5].records.map((item) => item.id), [7])
+  assert.equal(entries[6].type === "message" && entries[6].record.id, 8)
+})
+
+test("a leading partial turn without an input still resolves one tail candidate", () => {
+  const records = [
+    record(1, "response_output", { id: "msg_1", type: "message" }),
+    record(2, "response_output", { id: "msg_2", type: "message" }),
+  ]
+  const entries = groupThreadHistoryMinimal(records)
+  assert.deepEqual(entries.map((entry) => entry.type), ["process", "message"])
+  assert.deepEqual(entries[0].type === "process" && entries[0].records.map((item) => item.id), [1])
+  assert.equal(entries[1].type === "message" && entries[1].record.id, 2)
+})
+
+test("minimal entries keep stable keys through polling and the preview handoff", () => {
+  const preview = record(-1, "response_output", { id: "rs_1", type: "reasoning" }, 100)
+  const message = record(-2, "response_output", { id: "msg_1", type: "message", content: [] }, 105)
+  const initial = groupThreadHistoryMinimal([preview, message])
+  const polled = groupThreadHistoryMinimal([structuredClone(preview), structuredClone(message)])
+  assert.deepEqual(initial.map((entry) => entry.key), polled.map((entry) => entry.key))
+  const committed = groupThreadHistoryMinimal([{ ...preview, id: 10, created_at: 105 }, { ...message, id: 11, created_at: 110 }])
+  assert.deepEqual(initial.map((entry) => entry.key), committed.map((entry) => entry.key))
+  assert.deepEqual(initial.map((entry) => entry.type), ["process", "message"])
 })

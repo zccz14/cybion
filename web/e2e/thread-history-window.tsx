@@ -39,7 +39,7 @@ function Fixture() {
         </div>}
         <MessageScrollerViewport>
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
-            <ThreadHistory records={records} language="zh" renderRecord={(item) => <article data-record-id={item.id} className="min-w-0 rounded-lg border bg-card p-3 text-sm">
+            <ThreadHistory records={records} language="zh" minimal={false} renderRecord={(item) => <article data-record-id={item.id} className="min-w-0 rounded-lg border bg-card p-3 text-sm">
               <p className="whitespace-pre-wrap break-words">{historyPayloadText(item.payload)}</p>
             </article>} />
           </MessageScrollerContent>

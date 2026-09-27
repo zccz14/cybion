@@ -151,7 +151,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
     assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -618,6 +618,7 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
         reasoning_effort: "high".to_owned(),
         service_tier_fast: false,
         context_budget_tokens: 150_000,
+        minimal_mode: false,
     };
     assert_eq!(
         update_thread_defaults(
@@ -796,6 +797,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         reasoning_effort: "max".to_owned(),
         service_tier_fast: true,
         context_budget_tokens: 150_000,
+        minimal_mode: false,
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -870,6 +872,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         reasoning_effort: initial.reasoning_effort.clone(),
         service_tier_fast: initial.service_tier_fast,
         context_budget_tokens: initial.context_budget_tokens,
+        minimal_mode: false,
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -909,6 +912,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         reasoning_effort: "high".to_owned(),
         service_tier_fast: true,
         context_budget_tokens: 150_000,
+        minimal_mode: false,
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -931,6 +935,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 reasoning_effort: effort.to_owned(),
                 service_tier_fast: false,
                 context_budget_tokens: 150_000,
+                minimal_mode: false,
             }),
         )
         .await
@@ -962,6 +967,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 reasoning_effort: "high".to_owned(),
                 service_tier_fast: true,
                 context_budget_tokens: budget,
+                minimal_mode: false,
             }),
         )
         .await
@@ -977,6 +983,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             reasoning_effort: "high".to_owned(),
             service_tier_fast: true,
             context_budget_tokens: 150_000,
+            minimal_mode: false,
         }),
     )
     .await
@@ -1025,6 +1032,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
         assert_eq!(thread.title, "Keep me");
         assert_eq!(thread.reasoning_effort, "high");
         assert!(thread.service_tier_fast);
+        assert_eq!(thread.minimal_mode, None);
         assert_eq!(
             load_thread_defaults(&connection).unwrap(),
             ThreadDefaults {
@@ -1033,6 +1041,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
                 reasoning_effort: "max".to_owned(),
                 service_tier_fast: true,
                 context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
+                minimal_mode: false,
             }
         );
     }
@@ -1143,5 +1152,68 @@ fn max_reasoning_upgrade_preserves_existing_history_and_foreign_keys() {
                 .get::<_, i64>(0))
             .unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn minimal_mode_round_trips_at_both_configuration_levels() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "minimal-mode-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "minimal", "http://127.0.0.1:9/v1").await;
+    let thread = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(thread.minimal_mode, None);
+    for (override_value, expected) in [
+        (Some(true), Some(true)),
+        (None, None),
+        (Some(false), Some(false)),
+    ] {
+        let patched = update_thread(
+            State(state.clone()),
+            browser_identity_for(&user),
+            AxumPath(thread.id.clone()),
+            Json(UpdateThreadInput {
+                title: None,
+                model: None,
+                upstream_id: None,
+                reasoning_effort: None,
+                service_tier_fast: None,
+                context_budget_tokens: None,
+                minimal_mode: Some(override_value),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(patched.minimal_mode, expected);
+    }
+    let defaults = ThreadDefaults {
+        model: "gpt-6-astra".to_owned(),
+        upstream_id: Some(upstream.id.clone()),
+        reasoning_effort: "high".to_owned(),
+        service_tier_fast: false,
+        context_budget_tokens: 150_000,
+        minimal_mode: true,
+    };
+    let saved = update_thread_defaults(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(defaults.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(saved.minimal_mode);
+    assert_eq!(
+        read_thread_defaults(State(state), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0,
+        defaults
     );
 }

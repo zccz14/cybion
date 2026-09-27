@@ -17,11 +17,11 @@ export type ModelCatalog = {
   error: string | null
 }
 
-type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint"
+type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint" | "minimalMode" | "minimalModeHint" | "minimalModeDefault" | "minimalModeOn" | "minimalModeOff"
 
 const copy = {
-  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default." },
-  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "上下文预算", contextBudgetHint: "超过后自动压缩；留空跟随默认值。" },
+  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default.", minimalMode: "Minimal mode", minimalModeHint: "Only the final reply or status of each turn stays open.", minimalModeDefault: "Follow default", minimalModeOn: "On", minimalModeOff: "Off" },
+  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "上下文预算", contextBudgetHint: "超过后自动压缩；留空跟随默认值。", minimalMode: "极简模式", minimalModeHint: "每轮仅展开最后一条回复或状态。", minimalModeDefault: "跟随默认", minimalModeOn: "开启", minimalModeOff: "关闭" },
 } satisfies Record<"en" | "zh", Record<ThreadSettingsCopyKey, string>>
 
 // A model is chosen as an upstream/model pair; the encoded value keeps the two
@@ -46,7 +46,7 @@ export function modelGroups(catalogs: ModelCatalog[] | undefined, upstreamId: st
   return [...groups, { id: upstreamId, name: "", models: [model], error: null }]
 }
 
-export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, disabled, onModelChange, onReasoningChange, onFastChange }: {
+export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, minimalMode, disabled, onModelChange, onReasoningChange, onFastChange }: {
   model: string
   upstreamId: string | null
   catalogs: ModelCatalog[] | undefined
@@ -54,6 +54,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
   fast: boolean
   language: "en" | "zh"
   contextBudget?: { override: number | null; fallback: number; onChange: (value: number | null) => void }
+  minimalMode?: { override: boolean | null; fallback: boolean; onChange: (value: boolean | null) => void }
   disabled?: boolean
   onModelChange: (upstreamId: string, model: string) => void
   onReasoningChange: (effort: ReasoningEffort) => void
@@ -110,6 +111,18 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
           }}
         />
         <p className="text-xs text-muted-foreground">{t.contextBudgetHint}</p>
+      </div>}
+      {minimalMode && <div className="flex flex-col gap-2">
+        <Label>{t.minimalMode}</Label>
+        <Select value={minimalMode.override === null ? "default" : minimalMode.override ? "on" : "off"} onValueChange={(value) => minimalMode.onChange(value === "default" ? null : value === "on")} disabled={disabled}>
+          <SelectTrigger className="w-full" aria-label={t.minimalMode}><SelectValue /></SelectTrigger>
+          <SelectContent><SelectGroup>
+            <SelectItem value="default">{`${t.minimalModeDefault} (${minimalMode.fallback ? t.minimalModeOn : t.minimalModeOff})`}</SelectItem>
+            <SelectItem value="on">{t.minimalModeOn}</SelectItem>
+            <SelectItem value="off">{t.minimalModeOff}</SelectItem>
+          </SelectGroup></SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{t.minimalModeHint}</p>
       </div>}
     </PopoverContent>
   </Popover>

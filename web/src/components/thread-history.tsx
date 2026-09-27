@@ -1,14 +1,15 @@
 import { useMemo, type ReactNode } from "react"
-import { groupThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "@/lib/thread-history"
+import { groupThreadHistory, groupThreadHistoryMinimal, threadHistoryRecordKey, type HistoryRecord } from "@/lib/thread-history"
 import { MessageScrollerItem } from "@/components/ui/message-scroller"
 import { ThreadProcessGroup } from "@/components/thread-process-group"
 
-export function ThreadHistory({ records, language, renderRecord }: {
+export function ThreadHistory({ records, language, minimal, renderRecord }: {
   records: readonly HistoryRecord[]
   language: "en" | "zh"
+  minimal: boolean
   renderRecord: (record: HistoryRecord) => ReactNode
 }) {
-  const entries = useMemo(() => groupThreadHistory(records), [records])
+  const entries = useMemo(() => minimal ? groupThreadHistoryMinimal(records) : groupThreadHistory(records), [minimal, records])
   // INVARIANT: a stable messageId per entry keeps the scroller able to anchor the viewport while
   // older pages are prepended.
   return entries.map((entry) => <MessageScrollerItem key={entry.key} messageId={entry.key}>
