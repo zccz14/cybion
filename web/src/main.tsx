@@ -53,7 +53,7 @@ import toolCatalog from "../../tools.json"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
-import { formattedTime } from "@/lib/time"
+import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
@@ -188,6 +188,7 @@ type ReasoningAudit = {
   thread_title: string
   request_kind: string
   model: string
+  reasoning_effort: string | null
   status: "in_flight" | "completed" | "failed" | "cancelled"
   started_at: number
   finished_at: number | null
@@ -207,6 +208,7 @@ type ReasoningAuditPage = {
 }
 type InsightModel = {
   model: string
+  reasoning_effort: string | null
   calls: number
   completed: number
   in_flight: number
@@ -218,6 +220,8 @@ type InsightModel = {
   cached_tokens: number
   cache_hit_rate: number | null
   input_output_ratio: number | null
+  duration_seconds: number
+  average_duration_seconds: number | null
 }
 type InsightWorkerItem = {
   worker_id: string
@@ -225,6 +229,8 @@ type InsightWorkerItem = {
   calls: number
   read_bytes: number
   write_bytes: number
+  duration_seconds: number
+  average_duration_seconds: number | null
 }
 type Insights = {
   range: "24h" | "7d" | "30d" | "all"
@@ -240,7 +246,8 @@ type Insights = {
   }
   requests: { total: number; completed: number; in_flight: number; failed: number; cancelled: number }
   by_model: InsightModel[]
-  worker: { calls: number; read_bytes: number; write_bytes: number; by_worker: InsightWorkerItem[] }
+  worker: { calls: number; read_bytes: number; write_bytes: number; duration_seconds: number; average_duration_seconds: number | null; by_worker: InsightWorkerItem[] }
+  attribution: { runs: number; running_seconds: number; inference_seconds: number; worker_seconds: number; overhead_seconds: number }
   history: { total_records: number; payload_bytes: number; checkpoint_count: number; latest_record_at: number | null; kinds: { key: string; count: number }[] }
   dimensions: { thread_ids: string[]; models: string[]; request_kinds: string[] }
 }
@@ -437,7 +444,7 @@ const copy = {
     contextCollapse: "Collapse context",
     contextExpand: "Expand context",
     navAudit: "Audit",
-    inferenceStats: "Inference statistics",
+    usageStats: "Usage statistics",
     navAdministration: "Administration",
     users: "Users",
     usersDescription: "All Cybion users, inference usage, stored records and traffic. Updates every 5 seconds.",
@@ -474,7 +481,7 @@ const copy = {
     saveWorker: "Save name",
     workerAuditRange: "{from}–{to} of {total} calls",
     auditRange: "{from}–{to} of {total} requests",
-    inferenceStatsDescription: "Token usage, cache efficiency, input/output ratio, calls by model, and Worker byte consumption.",
+    usageStatsDescription: "Token usage, cache efficiency, request outcomes, Worker call duration and bytes, and how Thread running time divides between inference, Worker calls, and Cybion overhead.",
     statsRange: "Time range",
     stats24h: "Last 24 hours",
     stats7d: "Last 7 days",
@@ -501,13 +508,21 @@ const copy = {
     statsFailed: "Failed",
     statsCancelled: "Cancelled",
     statsByModel: "By model",
-    statsWorkerBytes: "Worker bytes",
-    statsWorkerBytesDescription: "Bytes in Worker call payloads: arguments read by the Worker and results written back.",
     statsWorkerCalls: "Worker calls",
+    statsWorkerDescription: "Worker calls from queue to result: duration, arguments read by the Worker, and results written back.",
     statsReadBytes: "Read Bytes",
     statsWriteBytes: "Write Bytes",
     statsWorker: "Worker",
     statsNoWorkers: "No Worker calls in this range.",
+    statsTotalDuration: "Total duration",
+    statsAverageDuration: "Avg duration",
+    statsTimeAttribution: "Time attribution",
+    statsTimeAttributionDescription: "Thread running time divided between inference, Worker calls, and Cybion overhead. A run starts at its input record and ends when it settles; runs that started inside the selected time range are counted.",
+    statsThreadRunning: "Thread running",
+    statsInferenceTime: "Inference",
+    statsWorkerTime: "Worker calls",
+    statsOverheadTime: "Cybion overhead",
+    statsRunsCounted: "{count} runs counted",
     statsHistory: "Protocol history",
     statsHistoryRecords: "Records",
     statsPayloadBytes: "Payload bytes",
@@ -717,7 +732,7 @@ const copy = {
     contextCollapse: "收起上下文",
     contextExpand: "展开上下文",
     navAudit: "审计",
-    inferenceStats: "推理统计",
+    usageStats: "用量统计",
     navAdministration: "管理员",
     users: "用户",
     usersDescription: "所有 Cybion 用户的推理用量、数据记录与网络流量，每 5 秒刷新。",
@@ -754,7 +769,7 @@ const copy = {
     saveWorker: "保存名称",
     workerAuditRange: "第 {from}–{to} 条，共 {total} 次调用",
     auditRange: "第 {from}–{to} 条，共 {total} 个请求",
-    inferenceStatsDescription: "按模型查看 Token 用量、缓存效率、输入输出比、调用次数，以及 Worker 字节消耗。",
+    usageStatsDescription: "按模型查看 Token 用量、缓存效率、请求结果、Worker 调用耗时与字节流量，以及 Thread 运行耗时在推理、Worker 调用和 Cybion 开销之间的拆分。",
     statsRange: "时间范围",
     stats24h: "近 24 小时",
     stats7d: "近 7 天",
@@ -781,13 +796,21 @@ const copy = {
     statsFailed: "失败",
     statsCancelled: "已取消",
     statsByModel: "按模型",
-    statsWorkerBytes: "Worker 字节",
-    statsWorkerBytesDescription: "Worker 调用负载的字节数：Worker 读取的参数与写回的结果。",
     statsWorkerCalls: "Worker 调用",
+    statsWorkerDescription: "Worker 调用从排队到返回结果：耗时、Worker 读取的参数与写回的结果。",
     statsReadBytes: "读取 Bytes",
     statsWriteBytes: "写入 Bytes",
     statsWorker: "Worker",
     statsNoWorkers: "当前范围没有 Worker 调用。",
+    statsTotalDuration: "总耗时",
+    statsAverageDuration: "平均耗时",
+    statsTimeAttribution: "耗时归因",
+    statsTimeAttributionDescription: "Thread 运行耗时在推理、Worker 调用与 Cybion 开销之间的拆分。只统计在所选时间范围内开始的运行；一次运行从收到输入开始，到产生最后一条已结束记录为止。",
+    statsThreadRunning: "Thread 运行",
+    statsInferenceTime: "推理",
+    statsWorkerTime: "Worker 调用",
+    statsOverheadTime: "Cybion 开销",
+    statsRunsCounted: "已统计 {count} 次运行",
     statsHistory: "协议历史",
     statsHistoryRecords: "记录数",
     statsPayloadBytes: "负载字节",
@@ -1132,7 +1155,7 @@ function WorkspaceShell({
     { to: "/workers", label: t("workers"), icon: NetworkIcon },
   ]
   const auditNav = [
-    { to: "/insights", label: t("inferenceStats"), icon: ActivityIcon },
+    { to: "/insights", label: t("usageStats"), icon: ActivityIcon },
     { to: "/reasoning-audit", label: t("audit"), icon: ActivityIcon },
     { to: "/worker-audit", label: t("workerAudit"), icon: WrenchIcon },
     { to: "/history", label: t("history"), icon: DatabaseIcon },
@@ -1228,7 +1251,7 @@ function WorkspaceShell({
 
 function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/contexts")) return t("contextsTitle")
-  if (pathname.startsWith("/insights")) return t("inferenceStats")
+  if (pathname.startsWith("/insights")) return t("usageStats")
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/history")) return t("history")
@@ -1953,10 +1976,14 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
   const ratio = (value: number | null) => value === null
     ? "—"
     : `${value.toLocaleString(language === "zh" ? "zh-CN" : "en", { maximumFractionDigits: 2 })}:1`
+  const duration = (value: number) => formatStatsDuration(value, language)
   const clear = () => { setRange("7d"); setModel("all"); setRequestKind("all") }
-  if (query.error) return <Page title={t("inferenceStats")} description={t("inferenceStatsDescription")}><RequestError error={query.error} onRetry={() => void query.refetch()} /></Page>
-  if (!query.data) return <Page title={t("inferenceStats")} description={t("inferenceStatsDescription")}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t("inferenceStats")}</CardContent></Card></Page>
+  if (query.error) return <Page title={t("usageStats")} description={t("usageStatsDescription")}><RequestError error={query.error} onRetry={() => void query.refetch()} /></Page>
+  if (!query.data) return <Page title={t("usageStats")} description={t("usageStatsDescription")}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t("usageStats")}</CardContent></Card></Page>
   const data = query.data
+  const share = (value: number) => data.attribution.running_seconds > 0
+    ? rate(value / data.attribution.running_seconds * 100)
+    : "—"
   const tokenMetrics = [
     [t("statsCompletedRequests"), number(data.tokens.completed_requests)],
     [t("statsInputTokens"), number(data.tokens.input_tokens)],
@@ -1973,7 +2000,7 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
     { label: t("statsFailed"), count: data.requests.failed, variant: "destructive" },
     { label: t("statsCancelled"), count: data.requests.cancelled, variant: "outline" },
   ]
-  return <Page title={t("inferenceStats")} description={t("inferenceStatsDescription")}>
+  return <Page title={t("usageStats")} description={t("usageStatsDescription")}>
     <Card>
       <CardContent className="flex flex-wrap items-center gap-2 pt-6">
         <Select value={range} onValueChange={(value) => setRange(value as Insights["range"])}>
@@ -1999,14 +2026,26 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
       </CardContent>
     </Card>
     <Card>
+      <CardHeader><CardTitle>{t("statsTimeAttribution")}</CardTitle><CardDescription>{t("statsTimeAttributionDescription")}</CardDescription></CardHeader>
+      <CardContent>
+        <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div><dt className="text-xs text-muted-foreground">{t("statsThreadRunning")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.running_seconds)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">{t("statsInferenceTime")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.inference_seconds)}</dd><p className="mt-1 text-xs text-muted-foreground">{share(data.attribution.inference_seconds)}</p></div>
+          <div><dt className="text-xs text-muted-foreground">{t("statsWorkerTime")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.worker_seconds)}</dd><p className="mt-1 text-xs text-muted-foreground">{share(data.attribution.worker_seconds)}</p></div>
+          <div><dt className="text-xs text-muted-foreground">{t("statsOverheadTime")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.overhead_seconds)}</dd><p className="mt-1 text-xs text-muted-foreground">{share(data.attribution.overhead_seconds)}</p></div>
+        </dl>
+        <p className="mt-4 text-xs text-muted-foreground">{t("statsRunsCounted").replace("{count}", number(data.attribution.runs))}</p>
+      </CardContent>
+    </Card>
+    <Card>
       <CardHeader><CardTitle>{t("statsByModel")}</CardTitle><CardDescription>{number(data.requests.total)} {t("statsCalls")}</CardDescription></CardHeader>
       <CardContent>
-        {data.by_model.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoData")}</p> : <div className="overflow-x-auto"><table className="w-full min-w-[66rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("statsModel")}</th><th className="px-3 py-2 font-medium">{t("statsCalls")}</th><th className="px-3 py-2 font-medium">{t("statsInputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsOutputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsTotalTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCachedTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("statsInputOutputRatio")}</th></tr></thead><tbody className="divide-y">{data.by_model.map((item) => <tr key={item.model} className="align-top"><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{number(item.completed)} {t("statsCompleted")}</p></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.calls)}<p className="mt-1 text-xs text-muted-foreground">{number(item.in_flight)} {t("statsInFlight")}</p></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.input_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.output_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.total_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.cached_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{rate(item.cache_hit_rate)}</td><td className="px-3 py-3 font-mono tabular-nums">{ratio(item.input_output_ratio)}</td></tr>)}</tbody></table></div>}
+        {data.by_model.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoData")}</p> : <div className="overflow-x-auto"><table className="w-full min-w-[78rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("statsModel")}</th><th className="px-3 py-2 font-medium">{t("reasoningEffort")}</th><th className="px-3 py-2 font-medium">{t("statsCalls")}</th><th className="px-3 py-2 font-medium">{t("statsInputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsOutputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsTotalTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCachedTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("statsInputOutputRatio")}</th><th className="px-3 py-2 font-medium">{t("statsAverageDuration")}</th><th className="px-3 py-2 font-medium">{t("statsTotalDuration")}</th></tr></thead><tbody className="divide-y">{data.by_model.map((item) => <tr key={JSON.stringify([item.model, item.reasoning_effort])} className="align-top"><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{number(item.completed)} {t("statsCompleted")}</p></td><td className="px-3 py-3"><code>{item.reasoning_effort ?? "—"}</code></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.calls)}<p className="mt-1 text-xs text-muted-foreground">{number(item.in_flight)} {t("statsInFlight")}</p></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.input_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.output_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.total_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.cached_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{rate(item.cache_hit_rate)}</td><td className="px-3 py-3 font-mono tabular-nums">{ratio(item.input_output_ratio)}</td><td className="px-3 py-3 font-mono tabular-nums">{item.average_duration_seconds === null ? "—" : duration(item.average_duration_seconds)}</td><td className="px-3 py-3 font-mono tabular-nums">{duration(item.duration_seconds)}</td></tr>)}</tbody></table></div>}
       </CardContent>
     </Card>
     <section className="grid gap-4 xl:grid-cols-2">
       <Card><CardHeader><CardTitle>{t("statsRequests")}</CardTitle></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2">{outcomes.map(({ label, count, variant }) => <div className="flex items-center justify-between rounded-lg border px-3 py-2" key={label}><Badge variant={variant}>{label}</Badge><span className="font-mono text-sm tabular-nums">{number(count)}</span></div>)}</CardContent></Card>
-      <Card><CardHeader><CardTitle>{t("statsWorkerBytes")}</CardTitle><CardDescription>{t("statsWorkerBytesDescription")}</CardDescription></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-3"><div><dt className="text-xs text-muted-foreground">{t("statsWorkerCalls")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.worker.calls)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsReadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.read_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsWriteBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.write_bytes)}</dd></div></dl>{data.worker.by_worker.length === 0 ? <p className="mt-6 text-sm text-muted-foreground">{t("statsNoWorkers")}</p> : <div className="mt-6 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-2 py-2 font-medium">{t("statsWorker")}</th><th className="px-2 py-2 font-medium">{t("statsCalls")}</th><th className="px-2 py-2 font-medium">{t("statsReadBytes")}</th><th className="px-2 py-2 font-medium">{t("statsWriteBytes")}</th></tr></thead><tbody className="divide-y">{data.worker.by_worker.map((item) => <tr key={item.worker_id}><td className="px-2 py-2"><p>{item.worker_label}</p><code className="text-xs text-muted-foreground">{item.worker_id}</code></td><td className="px-2 py-2 font-mono tabular-nums">{number(item.calls)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.read_bytes)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.write_bytes)}</td></tr>)}</tbody></table></div>}</CardContent></Card>
+      <Card><CardHeader><CardTitle>{t("statsWorkerCalls")}</CardTitle><CardDescription>{t("statsWorkerDescription")}</CardDescription></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-3"><div><dt className="text-xs text-muted-foreground">{t("statsCalls")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.worker.calls)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsTotalDuration")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.worker.duration_seconds)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsAverageDuration")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{data.worker.average_duration_seconds === null ? "—" : duration(data.worker.average_duration_seconds)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsReadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.read_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsWriteBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.write_bytes)}</dd></div></dl>{data.worker.by_worker.length === 0 ? <p className="mt-6 text-sm text-muted-foreground">{t("statsNoWorkers")}</p> : <div className="mt-6 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-2 py-2 font-medium">{t("statsWorker")}</th><th className="px-2 py-2 font-medium">{t("statsCalls")}</th><th className="px-2 py-2 font-medium">{t("statsTotalDuration")}</th><th className="px-2 py-2 font-medium">{t("statsAverageDuration")}</th><th className="px-2 py-2 font-medium">{t("statsReadBytes")}</th><th className="px-2 py-2 font-medium">{t("statsWriteBytes")}</th></tr></thead><tbody className="divide-y">{data.worker.by_worker.map((item) => <tr key={item.worker_id}><td className="px-2 py-2"><p>{item.worker_label}</p><code className="text-xs text-muted-foreground">{item.worker_id}</code></td><td className="px-2 py-2 font-mono tabular-nums">{number(item.calls)}</td><td className="px-2 py-2 font-mono tabular-nums">{duration(item.duration_seconds)}</td><td className="px-2 py-2 font-mono tabular-nums">{item.average_duration_seconds === null ? "—" : duration(item.average_duration_seconds)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.read_bytes)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.write_bytes)}</td></tr>)}</tbody></table></div>}</CardContent></Card>
     </section>
     <Card><CardHeader><CardTitle>{t("statsHistory")}</CardTitle></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><div><dt className="text-xs text-muted-foreground">{t("statsHistoryRecords")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.total_records)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsPayloadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.history.payload_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsCheckpoints")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.checkpoint_count)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsLatestRecord")}</dt><dd className="mt-1 text-sm font-medium">{formattedTime(language, data.history.latest_record_at)}</dd></div></dl></CardContent></Card>
   </Page>
@@ -2036,7 +2075,7 @@ function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
       {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
       {!query.data && !query.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("audit")}</div>}
       {query.data && query.data.items.length === 0 && <p className="py-8 text-sm text-muted-foreground">{t("auditEmpty")}</p>}
-      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[56rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium" title={t("auditCacheRateDescription")}>{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{auditCacheRate(item.input_tokens, item.cached_tokens, language)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <a href={openaiAuditUrl(item.openai_lb_request_id)} target="_blank" rel="noopener noreferrer" title={t("auditOpenLink")} className="inline-flex max-w-full items-start gap-1 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><code className="break-all text-xs">{item.openai_lb_request_id}</code><ExternalLinkIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="sr-only">{t("auditOpenLink")}</span></a> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
+      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[60rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("reasoningEffort")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium" title={t("auditCacheRateDescription")}>{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><code>{item.reasoning_effort ?? "—"}</code></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{auditCacheRate(item.input_tokens, item.cached_tokens, language)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <a href={openaiAuditUrl(item.openai_lb_request_id)} target="_blank" rel="noopener noreferrer" title={t("auditOpenLink")} className="inline-flex max-w-full items-start gap-1 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><code className="break-all text-xs">{item.openai_lb_request_id}</code><ExternalLinkIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="sr-only">{t("auditOpenLink")}</span></a> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
       {query.data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-sm text-muted-foreground">{range}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</Button><Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>{t("next")}</Button></div></div>}
     </CardContent></Card>
   </Page>

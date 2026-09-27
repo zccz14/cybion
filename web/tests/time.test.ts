@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
-import { formattedTime } from "../src/lib/time.ts"
+import { formatStatsDuration, formattedTime } from "../src/lib/time.ts"
 
 for (const language of ["en", "zh"] as const) {
   test(`${language} timestamps always display two-digit seconds, including whole minutes`, () => {
@@ -36,3 +36,22 @@ for (const [timeZone, en, zh] of [
     assert.deepEqual(JSON.parse(result.stdout), [en, zh])
   })
 }
+
+test("stats durations collapse to the largest useful unit in both languages", () => {
+  for (const [seconds, en, zh] of [
+    [0, "0s", "0 秒"],
+    [2.34, "2.3s", "2.3 秒"],
+    [14.46, "14s", "14 秒"],
+    [60, "1m", "1 分钟"],
+    [90, "1m 30s", "1 分钟 30 秒"],
+    [3600, "1h", "1 小时"],
+    [3900, "1h 5m", "1 小时 5 分钟"],
+    [3 * 86400, "3d", "3 天"],
+    [3 * 86400 + 10 * 3600, "3d 10h", "3 天 10 小时"],
+    [296212, "3d 10h", "3 天 10 小时"],
+    [-5, "0s", "0 秒"],
+  ] as const) {
+    assert.equal(formatStatsDuration(seconds, "en"), en)
+    assert.equal(formatStatsDuration(seconds, "zh"), zh)
+  }
+})

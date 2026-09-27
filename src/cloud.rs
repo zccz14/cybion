@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     fs,
     net::SocketAddr,
@@ -1047,6 +1047,7 @@ CREATE TABLE IF NOT EXISTS reasoning_audits (
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   request_kind TEXT NOT NULL DEFAULT 'inference',
   model TEXT NOT NULL,
+  reasoning_effort TEXT,
   status TEXT NOT NULL CHECK(status IN ('in_flight','completed','failed','cancelled')),
   started_at INTEGER NOT NULL,
   finished_at INTEGER,
@@ -1246,6 +1247,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         }
     }
     for (table, name, definition) in [
+        ("reasoning_audits", "reasoning_effort", "TEXT"),
         ("threads", "upstream_id", "TEXT"),
         ("thread_defaults", "upstream_id", "TEXT"),
         ("threads", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -1460,6 +1462,7 @@ struct ReasoningAuditView {
     idx_head: Option<i64>,
     idx_tail: Option<i64>,
     error: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1495,6 +1498,7 @@ struct Insights {
     requests: InsightRequests,
     by_model: Vec<InsightModel>,
     worker: InsightWorker,
+    attribution: InsightAttribution,
     history: InsightHistory,
     dimensions: InsightDimensions,
 }
@@ -1522,6 +1526,7 @@ struct InsightRequests {
 #[derive(Serialize)]
 struct InsightModel {
     model: String,
+    reasoning_effort: Option<String>,
     calls: i64,
     completed: i64,
     in_flight: i64,
@@ -1533,6 +1538,8 @@ struct InsightModel {
     cached_tokens: i64,
     cache_hit_rate: Option<f64>,
     input_output_ratio: Option<f64>,
+    duration_seconds: i64,
+    average_duration_seconds: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -1540,6 +1547,8 @@ struct InsightWorker {
     calls: i64,
     read_bytes: i64,
     write_bytes: i64,
+    duration_seconds: i64,
+    average_duration_seconds: Option<f64>,
     by_worker: Vec<InsightWorkerItem>,
 }
 
@@ -1550,6 +1559,19 @@ struct InsightWorkerItem {
     calls: i64,
     read_bytes: i64,
     write_bytes: i64,
+    duration_seconds: i64,
+    average_duration_seconds: Option<f64>,
+}
+
+/// Thread running time split into inference, Worker-call and Cybion overhead
+/// seconds, plus the number of runs that contributed.
+#[derive(Default, Serialize)]
+struct InsightAttribution {
+    runs: i64,
+    running_seconds: i64,
+    inference_seconds: i64,
+    worker_seconds: i64,
+    overhead_seconds: i64,
 }
 
 #[derive(Serialize)]
@@ -2500,6 +2522,7 @@ fn load_insights(
     model: Option<String>,
     request_kind: Option<String>,
 ) -> Result<Insights, ApiError> {
+    let generated_at = now();
     let audit_where = "(?1 IS NULL OR started_at >= ?1)
         AND (?2 IS NULL OR thread_id = ?2)
         AND (?3 IS NULL OR model = ?3)
@@ -2543,31 +2566,38 @@ fn load_insights(
         )?;
     let mut models = Vec::new();
     let mut statement = connection.prepare(&format!(
-        "SELECT model, COUNT(*),
+        "SELECT model, reasoning_effort, COUNT(*),
                 COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN status='in_flight' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(input_tokens, 0) ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(output_tokens, 0) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(cached_tokens, 0) ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(cached_tokens, 0) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN finished_at IS NOT NULL THEN finished_at - started_at ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN finished_at IS NOT NULL THEN 1 ELSE 0 END), 0)
          FROM reasoning_audits WHERE {audit_where}
-         GROUP BY model
+         GROUP BY model, reasoning_effort
          ORDER BY (SUM(CASE WHEN status='completed' THEN COALESCE(input_tokens, 0) ELSE 0 END)
                  + SUM(CASE WHEN status='completed' THEN COALESCE(output_tokens, 0) ELSE 0 END)) DESC,
-                  model"
+                  model,
+                  CASE reasoning_effort WHEN 'none' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2
+                       WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END"
     ))?;
     let rows = statement.query_map(audit_params, |row| {
-        let input_tokens: i64 = row.get(6)?;
-        let output_tokens: i64 = row.get(7)?;
-        let cached_tokens: i64 = row.get(8)?;
+        let input_tokens: i64 = row.get(7)?;
+        let output_tokens: i64 = row.get(8)?;
+        let cached_tokens: i64 = row.get(9)?;
+        let duration_seconds: i64 = row.get(10)?;
+        let timed_requests: i64 = row.get(11)?;
         Ok(InsightModel {
             model: row.get(0)?,
-            calls: row.get(1)?,
-            completed: row.get(2)?,
-            in_flight: row.get(3)?,
-            failed: row.get(4)?,
-            cancelled: row.get(5)?,
+            reasoning_effort: row.get(1)?,
+            calls: row.get(2)?,
+            completed: row.get(3)?,
+            in_flight: row.get(4)?,
+            failed: row.get(5)?,
+            cancelled: row.get(6)?,
             input_tokens,
             output_tokens,
             total_tokens: input_tokens.saturating_add(output_tokens),
@@ -2576,6 +2606,9 @@ fn load_insights(
                 .then(|| cached_tokens as f64 / input_tokens as f64 * 100.0),
             input_output_ratio: (output_tokens > 0)
                 .then(|| input_tokens as f64 / output_tokens as f64),
+            duration_seconds,
+            average_duration_seconds: (timed_requests > 0)
+                .then(|| duration_seconds as f64 / timed_requests as f64),
         })
     })?;
     for row in rows {
@@ -2595,22 +2628,41 @@ fn load_insights(
               AND a.request_kind = ?3
         ))";
     let worker_params = params![started_after, model, request_kind];
-    let (worker_calls, worker_read_bytes, worker_write_bytes): (i64, i64, i64) = connection
-        .query_row(
-            &format!(
-                "SELECT COUNT(*),
+    let duration_sum = "COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN c.completed_at - c.created_at ELSE 0 END), 0)";
+    let duration_count = "COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN 1 ELSE 0 END), 0)";
+    let (worker_calls, worker_read_bytes, worker_write_bytes, worker_duration, worker_timed): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = connection.query_row(
+        &format!(
+            "SELECT COUNT(*),
                     COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
-                    COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0)
+                    COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0),
+                    {duration_sum},
+                    {duration_count}
              FROM worker_calls c WHERE {worker_where}"
-            ),
-            worker_params,
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+        ),
+        worker_params,
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
     let mut workers = Vec::new();
     let mut worker_statement = connection.prepare(&format!(
         "SELECT c.worker_id, COALESCE(MAX(c.worker_label), MAX(w.label), c.worker_id), COUNT(*),
                 COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
-                COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0)
+                COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0),
+                {duration_sum},
+                {duration_count}
          FROM worker_calls c LEFT JOIN workers w ON w.id = c.worker_id
          WHERE {worker_where}
          GROUP BY c.worker_id
@@ -2619,12 +2671,17 @@ fn load_insights(
                   c.worker_id"
     ))?;
     let worker_rows = worker_statement.query_map(worker_params, |row| {
+        let duration_seconds: i64 = row.get(5)?;
+        let timed_calls: i64 = row.get(6)?;
         Ok(InsightWorkerItem {
             worker_id: row.get(0)?,
             worker_label: row.get(1)?,
             calls: row.get(2)?,
             read_bytes: row.get(3)?,
             write_bytes: row.get(4)?,
+            duration_seconds,
+            average_duration_seconds: (timed_calls > 0)
+                .then(|| duration_seconds as f64 / timed_calls as f64),
         })
     })?;
     for row in worker_rows {
@@ -2674,9 +2731,15 @@ fn load_insights(
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?,
     };
+    let attribution = load_attribution(
+        connection,
+        generated_at,
+        started_after,
+        thread_id.as_deref(),
+    )?;
     Ok(Insights {
         range,
-        generated_at: now(),
+        generated_at,
         tokens: InsightTokens {
             completed_requests,
             input_tokens,
@@ -2700,8 +2763,12 @@ fn load_insights(
             calls: worker_calls,
             read_bytes: worker_read_bytes,
             write_bytes: worker_write_bytes,
+            duration_seconds: worker_duration,
+            average_duration_seconds: (worker_timed > 0)
+                .then(|| worker_duration as f64 / worker_timed as f64),
             by_worker: workers,
         },
+        attribution,
         history: InsightHistory {
             total_records,
             payload_bytes,
@@ -2711,6 +2778,186 @@ fn load_insights(
         },
         dimensions,
     })
+}
+
+/// How a Thread run splits between model inference, Worker calls and Cybion
+/// processing. A run starts at its input or thread-control record and ends at
+/// the last settled timestamp it produced. The latest run of a still-running
+/// Thread ends at `now`. Inference keeps overlapping Worker time: a Worker call
+/// only counts for the part that runs after the model stream it raced.
+fn load_attribution(
+    connection: &Connection,
+    now_ts: i64,
+    started_after: Option<i64>,
+    thread_id: Option<&str>,
+) -> Result<InsightAttribution, ApiError> {
+    struct Run {
+        thread: String,
+        started_at: i64,
+        audits: Vec<(i64, i64)>,
+        workers: Vec<(i64, i64)>,
+    }
+    let mut boundaries = Vec::new();
+    let mut boundary_statement = connection.prepare(
+        "SELECT thread_id,id,created_at FROM history_records
+         WHERE (kind='input' OR (kind='activity' AND json_extract(payload,'$.type')='thread_control'))
+           AND (?1 IS NULL OR created_at >= ?1)
+           AND (?2 IS NULL OR thread_id = ?2)
+         ORDER BY thread_id,id",
+    )?;
+    let rows = boundary_statement.query_map(params![started_after, thread_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        boundaries.push(row?);
+    }
+    let mut runs: HashMap<i64, Run> = HashMap::new();
+    let mut last_boundary: HashMap<String, i64> = HashMap::new();
+    for (thread, id, created_at) in boundaries {
+        runs.insert(
+            id,
+            Run {
+                thread: thread.clone(),
+                started_at: created_at,
+                audits: Vec::new(),
+                workers: Vec::new(),
+            },
+        );
+        last_boundary.insert(thread, id);
+    }
+    let mut running_threads = HashSet::new();
+    let mut running_statement =
+        connection.prepare("SELECT id FROM threads WHERE status='running'")?;
+    let rows = running_statement.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        running_threads.insert(row?);
+    }
+    // An unsettled audit or Worker call belongs to the run it was started
+    // from; only the current run of a running Thread stays open at `now`.
+    let open_run = |runs: &HashMap<i64, Run>, id: i64| -> bool {
+        runs.get(&id).is_some_and(|run| {
+            running_threads.contains(&run.thread) && last_boundary.get(&run.thread) == Some(&id)
+        })
+    };
+    let mut audit_statement = connection.prepare(
+        "SELECT input_record_id,started_at,finished_at FROM reasoning_audits
+         WHERE input_record_id IS NOT NULL AND (?1 IS NULL OR started_at >= ?1)",
+    )?;
+    let rows = audit_statement.query_map(params![started_after], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (input_record_id, started_at, finished_at) = row?;
+        let end = finished_at.or_else(|| open_run(&runs, input_record_id).then_some(now_ts));
+        if let (Some(end), Some(run)) = (end, runs.get_mut(&input_record_id)) {
+            run.audits.push((started_at, end));
+        }
+    }
+    let mut worker_statement = connection.prepare(
+        "SELECT input_record_id,created_at,completed_at FROM worker_calls
+         WHERE input_record_id IS NOT NULL AND (?1 IS NULL OR created_at >= ?1)",
+    )?;
+    let rows = worker_statement.query_map(params![started_after], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (input_record_id, created_at, completed_at) = row?;
+        let end = completed_at.or_else(|| open_run(&runs, input_record_id).then_some(now_ts));
+        if let (Some(end), Some(run)) = (end, runs.get_mut(&input_record_id)) {
+            run.workers.push((created_at, end));
+        }
+    }
+    let mut attribution = InsightAttribution::default();
+    for (id, run) in &runs {
+        let end = if open_run(&runs, *id) {
+            now_ts
+        } else {
+            let Some(end) = run
+                .audits
+                .iter()
+                .chain(run.workers.iter())
+                .map(|(_, end)| *end)
+                .max()
+            else {
+                continue;
+            };
+            end
+        };
+        if end <= run.started_at {
+            continue;
+        }
+        let audits = merged_intervals(clip_intervals(&run.audits, run.started_at, end));
+        let inference_seconds = interval_duration(&audits);
+        let workers = merged_intervals(clip_intervals(&run.workers, run.started_at, end));
+        let worker_seconds = interval_duration(&subtracted_intervals(workers, &audits));
+        attribution.runs += 1;
+        attribution.running_seconds += end - run.started_at;
+        attribution.inference_seconds += inference_seconds;
+        attribution.worker_seconds += worker_seconds;
+        attribution.overhead_seconds = attribution.overhead_seconds.saturating_add(
+            (end - run.started_at).saturating_sub(inference_seconds + worker_seconds),
+        );
+    }
+    Ok(attribution)
+}
+
+fn clip_intervals(intervals: &[(i64, i64)], start: i64, end: i64) -> Vec<(i64, i64)> {
+    intervals
+        .iter()
+        .filter_map(|&(from, to)| {
+            let from = from.max(start);
+            let to = to.min(end);
+            (to > from).then_some((from, to))
+        })
+        .collect()
+}
+
+fn merged_intervals(mut intervals: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    intervals.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (from, to) in intervals {
+        match merged.last_mut() {
+            Some(last) if from <= last.1 => last.1 = last.1.max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    merged
+}
+
+fn interval_duration(intervals: &[(i64, i64)]) -> i64 {
+    intervals.iter().map(|(from, to)| to - from).sum()
+}
+
+fn subtracted_intervals(mut base: Vec<(i64, i64)>, mask: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    for &(mask_from, mask_to) in mask {
+        let mut remaining = Vec::new();
+        for (from, to) in base {
+            if mask_to <= from || mask_from >= to {
+                remaining.push((from, to));
+                continue;
+            }
+            if mask_from > from {
+                remaining.push((from, mask_from));
+            }
+            if mask_to < to {
+                remaining.push((mask_to, to));
+            }
+        }
+        base = remaining;
+    }
+    base
 }
 
 async fn reasoning_audits(
@@ -2730,7 +2977,7 @@ async fn reasoning_audits(
     let model = query.model.filter(|value| !value.trim().is_empty());
     user_db(&state, &identity.user, true, move |connection| {
         let mut statement = connection.prepare(
-            "SELECT a.id,a.input_record_id,a.thread_id,COALESCE(t.title,''),a.request_kind,a.model,a.status,a.started_at,a.finished_at,a.input_tokens,a.output_tokens,a.cached_tokens,a.openai_lb_request_id,a.idx_head,a.idx_tail,a.error
+            "SELECT a.id,a.input_record_id,a.thread_id,COALESCE(t.title,''),a.request_kind,a.model,a.status,a.started_at,a.finished_at,a.input_tokens,a.output_tokens,a.cached_tokens,a.openai_lb_request_id,a.idx_head,a.idx_tail,a.error,a.reasoning_effort
              FROM reasoning_audits a LEFT JOIN threads t ON t.id=a.thread_id ORDER BY a.started_at DESC,a.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
@@ -2751,6 +2998,7 @@ async fn reasoning_audits(
                 idx_head: row.get(13)?,
                 idx_tail: row.get(14)?,
                 error: row.get(15)?,
+                reasoning_effort: row.get(16)?,
             })
         })?;
         let mut items = Vec::new();
@@ -5292,6 +5540,7 @@ struct AuditSpec {
     thread_id: String,
     request_kind: String,
     model: String,
+    reasoning_effort: Option<String>,
     idx_head: i64,
     idx_tail: i64,
 }
@@ -5364,6 +5613,7 @@ async fn responses_request_with_options(
         thread_id: thread_id.to_owned(),
         request_kind: request_kind.to_owned(),
         model: model.to_owned(),
+        reasoning_effort: reasoning_effort.map(str::to_owned),
         idx_head,
         idx_tail,
     };
@@ -5907,6 +6157,7 @@ async fn begin_reasoning_audit(state: &AppState, spec: &AuditSpec) -> Result<i64
     let thread_id = spec.thread_id.clone();
     let request_kind = spec.request_kind.clone();
     let model = spec.model.clone();
+    let reasoning_effort = spec.reasoning_effort.clone();
     let idx_head = spec.idx_head;
     let idx_tail = spec.idx_tail;
     user_db(
@@ -5915,13 +6166,14 @@ async fn begin_reasoning_audit(state: &AppState, spec: &AuditSpec) -> Result<i64
         true,
         move |connection| {
             connection.execute(
-                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,idx_head,idx_tail)
-                 VALUES(?,?,?,?, 'in_flight', ?, ?, ?)",
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,idx_head,idx_tail)
+                 VALUES(?,?,?,?,?, 'in_flight', ?, ?, ?)",
                 params![
                     input_record_id,
                     thread_id,
                     request_kind,
                     model,
+                    reasoning_effort,
                     now(),
                     idx_head,
                     idx_tail
@@ -7048,7 +7300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insights_aggregate_tokens_by_model_and_worker_payload_bytes() {
+    async fn insights_aggregate_tokens_durations_worker_payload_bytes_and_time_attribution() {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "insights-user").unwrap();
         let first = create_test_thread(&state, &user).await;
@@ -7067,39 +7319,53 @@ mod tests {
         )
         .await
         .unwrap();
+        let first_id = first.id.clone();
+        let first_model = first.model.clone();
+        let second_id = second.id.clone();
+        let second_model = second.model.clone();
+        let second_model_name = second.model.clone();
         let stats = user_db(&state, &user, false, move |connection| {
-            let timestamp = now();
-            connection.execute(
-                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens)
-                 VALUES(?,?,?,'completed',?,?,?,?,?)",
-                params![
-                    &first.id,
-                    "inference",
-                    &first.model,
-                    timestamp,
-                    timestamp,
-                    100_i64,
-                    25_i64,
-                    40_i64
-                ],
+            let base = now();
+            let input = persist_history_record(
+                connection,
+                HistoryRecordInsert {
+                    thread_id: &first.id,
+                    kind: "input",
+                    payload: &json!({"role":"user","content":"hello"}),
+                    created_at: base,
+                },
             )?;
+            connection.execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens)
+                 VALUES(?,?,?,?,'high','completed',?,?,?,?,?)",
+                params![input, &first_id, "inference", &first_model, base + 1, base + 11, 100_i64, 25_i64, 40_i64],
+            )?;
+            for (started_at, finished_at) in [(base + 13, base + 23), (base + 44, base + 54)] {
+                connection.execute(
+                    "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,finished_at)
+                     VALUES(?,?,?,?,'low','failed',?,?)",
+                    params![input, &first_id, "inference", &first_model, started_at, finished_at],
+                )?;
+            }
             connection.execute(
                 "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at)
                  VALUES(?,?,?,'in_flight',?)",
-                params![&second.id, "inference", &second.model, timestamp],
+                params![&second_id, "inference", &second_model, base + 5],
             )?;
             connection.execute(
                 "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at)
                  VALUES('worker-1','Laptop','hash',?,'online',?)",
-                params![timestamp, timestamp],
+                params![base, base],
             )?;
             connection.execute(
-                "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,result_json)
-                 VALUES('call-1','worker-1',?,'bash',?,'completed',?,?)",
+                "INSERT INTO worker_calls(id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,completed_at,result_json)
+                 VALUES('call-1','worker-1',?,?,'bash',?,'completed',?,?,?)",
                 params![
-                    &first.id,
+                    &first_id,
+                    input,
                     r#"{"command":"ls"}"#,
-                    timestamp,
+                    base + 12,
+                    base + 42,
                     r#"{"stdout":"ok"}"#
                 ],
             )?;
@@ -7114,7 +7380,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(stats.requests.total, 2);
+        assert_eq!(stats.requests.total, 4);
         assert_eq!(stats.requests.in_flight, 1);
         assert_eq!(stats.tokens.completed_requests, 1);
         assert_eq!(stats.tokens.input_tokens, 100);
@@ -7122,11 +7388,110 @@ mod tests {
         assert_eq!(stats.tokens.cached_tokens, 40);
         assert_eq!(stats.tokens.cache_hit_rate, Some(40.0));
         assert_eq!(stats.tokens.input_output_ratio, Some(4.0));
-        assert_eq!(stats.by_model.len(), 2);
+        assert_eq!(stats.by_model.len(), 3);
+        let model = |effort: &str| {
+            stats
+                .by_model
+                .iter()
+                .find(|item| item.reasoning_effort.as_deref() == Some(effort))
+                .unwrap()
+        };
+        let high = model("high");
+        assert_eq!((high.calls, high.completed), (1, 1));
+        assert_eq!(high.duration_seconds, 10);
+        assert_eq!(high.average_duration_seconds, Some(10.0));
+        let low = model("low");
+        assert_eq!((low.calls, low.failed), (2, 2));
+        assert_eq!(low.duration_seconds, 20);
+        assert_eq!(low.average_duration_seconds, Some(10.0));
+        let unset = stats
+            .by_model
+            .iter()
+            .find(|item| item.model == second_model_name)
+            .unwrap();
+        assert_eq!(unset.reasoning_effort, None);
+        assert_eq!(unset.in_flight, 1);
+        assert_eq!(unset.duration_seconds, 0);
+        assert_eq!(unset.average_duration_seconds, None);
         assert_eq!(stats.worker.calls, 1);
+        assert_eq!(stats.worker.duration_seconds, 30);
+        assert_eq!(stats.worker.average_duration_seconds, Some(30.0));
         assert_eq!(stats.worker.read_bytes, r#"{"command":"ls"}"#.len() as i64);
         assert_eq!(stats.worker.write_bytes, r#"{"stdout":"ok"}"#.len() as i64);
         assert_eq!(stats.worker.by_worker[0].worker_label, "Laptop");
+        assert_eq!(stats.worker.by_worker[0].duration_seconds, 30);
+        assert_eq!(
+            stats.worker.by_worker[0].average_duration_seconds,
+            Some(30.0)
+        );
+        assert_eq!(stats.attribution.runs, 1);
+        assert_eq!(stats.attribution.running_seconds, 54);
+        assert_eq!(stats.attribution.inference_seconds, 30);
+        assert_eq!(stats.attribution.worker_seconds, 20);
+        assert_eq!(stats.attribution.overhead_seconds, 4);
+    }
+
+    #[test]
+    fn attribution_interval_helpers_merge_clip_and_subtract() {
+        assert_eq!(
+            merged_intervals(vec![(5, 10), (1, 3), (2, 6)]),
+            vec![(1, 10)]
+        );
+        assert_eq!(interval_duration(&[(1, 3), (5, 10)]), 7);
+        assert_eq!(
+            subtracted_intervals(vec![(12, 42)], &[(13, 23)]),
+            vec![(12, 13), (23, 42)]
+        );
+        assert_eq!(
+            clip_intervals(&[(0, 5), (8, 20)], 3, 10),
+            vec![(3, 5), (8, 10)]
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_column_is_added_to_existing_audit_tables() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audits.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(THREAD_SCHEMA).unwrap();
+        connection.execute_batch(USER_SCHEMA).unwrap();
+        connection
+            .execute_batch("ALTER TABLE reasoning_audits DROP COLUMN reasoning_effort;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads(id,title,model,status,created_at,updated_at)
+                 VALUES('thread','kept','model','idle',1,1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO reasoning_audits(thread_id,model,status,started_at)
+                 VALUES('thread','model','completed',1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", USER_SCHEMA_VERSION)
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        let columns = connection
+            .prepare("PRAGMA table_info(reasoning_audits)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.contains(&"reasoning_effort".to_owned()));
+        let kept: i64 = connection
+            .query_row("SELECT COUNT(*) FROM reasoning_audits", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, 1);
     }
 
     #[tokio::test]
