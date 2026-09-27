@@ -22,6 +22,7 @@ use axum::{
     },
     routing::{delete, get, post, put},
 };
+use chrono::{NaiveDate, TimeZone, Utc};
 use futures_util::StreamExt;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rust_embed::RustEmbed;
@@ -100,6 +101,7 @@ const CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const GLOBAL_REQUEST_HEADERS_MIGRATED_KEY: &str = "global_request_headers_migrated";
 const GLOBAL_USER_AGENT_KEY: &str = "openai_user_agent";
 const GLOBAL_ORIGINATOR_KEY: &str = "openai_originator";
+const INSIGHT_TIMEZONE: &str = "UTC";
 
 // The browser bearer is minted for all three resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -563,6 +565,7 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/compact", post(thread_controls::compact))
         .route("/api/threads/{id}/title", post(generate_thread_title))
         .route("/api/insights", get(insights))
+        .route("/api/reports/daily", get(daily_report))
         .route("/api/history", get(history::list))
         .route("/api/history/{id}", get(history::read))
         .route("/api/reasoning-audits", get(reasoning_audits))
@@ -1148,6 +1151,8 @@ CREATE INDEX IF NOT EXISTS history_records_thread_kind_created
   ON history_records(thread_id,kind,id);
 CREATE INDEX IF NOT EXISTS reasoning_audits_input_record
   ON reasoning_audits(input_record_id);
+CREATE INDEX IF NOT EXISTS reasoning_audits_started_at
+  ON reasoning_audits(started_at);
 "#;
 
 fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
@@ -1511,6 +1516,53 @@ struct Insights {
     attribution: InsightAttribution,
     history: InsightHistory,
     dimensions: InsightDimensions,
+    activity: InsightActivity,
+}
+
+#[derive(Serialize)]
+struct InsightActivity {
+    timezone: &'static str,
+    days: Vec<InsightActiveDay>,
+}
+
+#[derive(Serialize, Clone)]
+struct InsightActiveDay {
+    date: String,
+    active_threads: i64,
+    activity_records: i64,
+    input_records: i64,
+    requests: i64,
+    total_tokens: i64,
+}
+
+#[derive(Deserialize, Default)]
+struct DailyReportQuery {
+    date: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DailyReport {
+    date: String,
+    timezone: &'static str,
+    generated_at: i64,
+    active_thread_count: i64,
+    activity_records: i64,
+    input_records: i64,
+    requests: i64,
+    total_tokens: i64,
+    threads: Vec<DailyThreadSummary>,
+}
+
+#[derive(Serialize)]
+struct DailyThreadSummary {
+    id: String,
+    title: String,
+    summary: Option<String>,
+    activity_count: i64,
+    input_count: i64,
+    request_count: i64,
+    total_tokens: i64,
+    last_activity_at: i64,
 }
 
 #[derive(Serialize)]
@@ -2544,6 +2596,278 @@ fn insight_range(value: Option<&str>) -> Result<(String, Option<i64>), ApiError>
     Ok((range.to_owned(), seconds.map(|seconds| now() - seconds)))
 }
 
+fn utc_date(timestamp: i64) -> NaiveDate {
+    Utc.timestamp_opt(timestamp, 0)
+        .single()
+        .unwrap_or_else(|| {
+            Utc.timestamp_opt(0, 0)
+                .single()
+                .expect("Unix epoch is valid")
+        })
+        .date_naive()
+}
+
+fn utc_day_bounds(date: NaiveDate) -> (i64, i64) {
+    let start = date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is valid")
+        .and_utc()
+        .timestamp();
+    let end = date
+        .succ_opt()
+        .expect("date range must fit in chrono")
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is valid")
+        .and_utc()
+        .timestamp();
+    (start, end)
+}
+
+fn insight_day_range(
+    connection: &Connection,
+    started_after: Option<i64>,
+    generated_at: i64,
+) -> Result<Option<(NaiveDate, NaiveDate)>, ApiError> {
+    let today = utc_date(generated_at);
+    let first_history: Option<i64> = connection.query_row(
+        "SELECT MIN(created_at) FROM history_records
+         WHERE kind <> 'checkpoint' AND (?1 IS NULL OR created_at >= ?1)",
+        params![started_after],
+        |row| row.get(0),
+    )?;
+    let first_request: Option<i64> = connection.query_row(
+        "SELECT MIN(started_at) FROM reasoning_audits
+         WHERE (?1 IS NULL OR started_at >= ?1)",
+        params![started_after],
+        |row| row.get(0),
+    )?;
+    let first_timestamp = [first_history, first_request].into_iter().flatten().min();
+    let Some(start) = first_timestamp.or(started_after) else {
+        return Ok(None);
+    };
+    Ok(Some((utc_date(start).min(today), today)))
+}
+
+fn empty_active_day(date: String) -> InsightActiveDay {
+    InsightActiveDay {
+        date,
+        active_threads: 0,
+        activity_records: 0,
+        input_records: 0,
+        requests: 0,
+        total_tokens: 0,
+    }
+}
+
+fn load_insight_activity(
+    connection: &Connection,
+    started_after: Option<i64>,
+    generated_at: i64,
+) -> Result<InsightActivity, ApiError> {
+    let Some((first_day, last_day)) = insight_day_range(connection, started_after, generated_at)?
+    else {
+        return Ok(InsightActivity {
+            timezone: INSIGHT_TIMEZONE,
+            days: Vec::new(),
+        });
+    };
+    let mut by_date = HashMap::<String, InsightActiveDay>::new();
+    let mut history_statement = connection.prepare(
+        "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch') AS date,
+                COUNT(DISTINCT thread_id),
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN kind='input' THEN 1 ELSE 0 END), 0)
+         FROM history_records
+         WHERE kind <> 'checkpoint' AND (?1 IS NULL OR created_at >= ?1)
+         GROUP BY date
+         ORDER BY date",
+    )?;
+    let history_rows = history_statement.query_map(params![started_after], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in history_rows {
+        let (date, active_threads, activity_records, input_records) = row?;
+        let item = by_date
+            .entry(date.clone())
+            .or_insert_with(|| empty_active_day(date));
+        item.active_threads = active_threads;
+        item.activity_records = activity_records;
+        item.input_records = input_records;
+    }
+    let mut request_statement = connection.prepare(
+        "SELECT strftime('%Y-%m-%d', started_at, 'unixepoch') AS date,
+                COUNT(*),
+                COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
+         FROM reasoning_audits
+         WHERE (?1 IS NULL OR started_at >= ?1)
+         GROUP BY date
+         ORDER BY date",
+    )?;
+    let request_rows = request_statement.query_map(params![started_after], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in request_rows {
+        let (date, requests, total_tokens) = row?;
+        let item = by_date
+            .entry(date.clone())
+            .or_insert_with(|| empty_active_day(date));
+        item.requests = requests;
+        item.total_tokens = total_tokens;
+    }
+    let mut days = Vec::new();
+    let mut date = first_day;
+    while date <= last_day {
+        let key = date.format("%Y-%m-%d").to_string();
+        days.push(
+            by_date
+                .remove(&key)
+                .unwrap_or_else(|| empty_active_day(key)),
+        );
+        let Some(next) = date.succ_opt() else {
+            break;
+        };
+        date = next;
+    }
+    Ok(InsightActivity {
+        timezone: INSIGHT_TIMEZONE,
+        days,
+    })
+}
+
+fn report_date(value: Option<&str>) -> Result<NaiveDate, ApiError> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+                .map_err(|_| ApiError::bad_request("report date must be YYYY-MM-DD"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or_else(|| utc_date(now())))
+}
+
+fn report_input_summary(payload: Option<String>) -> Option<String> {
+    let payload = payload?;
+    let value: Value = serde_json::from_str(&payload).ok()?;
+    let content = value.get("content")?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => return None,
+    };
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return None;
+    }
+    let summary = text.chars().take(240).collect::<String>();
+    Some(if summary.chars().count() < text.chars().count() {
+        format!("{summary}…")
+    } else {
+        summary
+    })
+}
+
+fn load_daily_report(connection: &Connection, date: NaiveDate) -> Result<DailyReport, ApiError> {
+    let (start, end) = utc_day_bounds(date);
+    let (active_thread_count, activity_records, input_records): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(DISTINCT thread_id), COUNT(*),
+                    COALESCE(SUM(CASE WHEN kind='input' THEN 1 ELSE 0 END), 0)
+             FROM history_records
+             WHERE kind <> 'checkpoint' AND created_at >= ?1 AND created_at < ?2",
+            params![start, end],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    let (requests, total_tokens): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
+         FROM reasoning_audits WHERE started_at >= ?1 AND started_at < ?2",
+        params![start, end],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT t.id, t.title,
+                (SELECT COUNT(*) FROM history_records h
+                 WHERE h.thread_id=t.id AND h.kind <> 'checkpoint'
+                   AND h.created_at >= ?1 AND h.created_at < ?2),
+                (SELECT COUNT(*) FROM history_records h
+                 WHERE h.thread_id=t.id AND h.kind='input'
+                   AND h.created_at >= ?1 AND h.created_at < ?2),
+                (SELECT COUNT(*) FROM reasoning_audits a
+                 WHERE a.thread_id=t.id AND a.started_at >= ?1 AND a.started_at < ?2),
+                (SELECT COALESCE(SUM(COALESCE(a.input_tokens, 0) + COALESCE(a.output_tokens, 0)), 0)
+                 FROM reasoning_audits a
+                 WHERE a.thread_id=t.id AND a.started_at >= ?1 AND a.started_at < ?2),
+                (SELECT MAX(h.created_at) FROM history_records h
+                 WHERE h.thread_id=t.id AND h.kind <> 'checkpoint'
+                   AND h.created_at >= ?1 AND h.created_at < ?2) AS last_activity_at,
+                (SELECT h.payload FROM history_records h
+                 WHERE h.thread_id=t.id AND h.kind='input'
+                   AND h.created_at >= ?1 AND h.created_at < ?2
+                 ORDER BY h.created_at DESC, h.id DESC LIMIT 1)
+         FROM threads t
+         WHERE EXISTS(
+             SELECT 1 FROM history_records h
+             WHERE h.thread_id=t.id AND h.kind <> 'checkpoint'
+               AND h.created_at >= ?1 AND h.created_at < ?2
+         )
+         ORDER BY last_activity_at DESC, t.id",
+    )?;
+    let rows = statement.query_map(params![start, end], |row| {
+        let latest_input: Option<String> = row.get(7)?;
+        Ok(DailyThreadSummary {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            summary: report_input_summary(latest_input),
+            activity_count: row.get(2)?,
+            input_count: row.get(3)?,
+            request_count: row.get(4)?,
+            total_tokens: row.get(5)?,
+            last_activity_at: row.get(6)?,
+        })
+    })?;
+    let mut threads = Vec::new();
+    for row in rows {
+        threads.push(row?);
+    }
+    Ok(DailyReport {
+        date: date.format("%Y-%m-%d").to_string(),
+        timezone: INSIGHT_TIMEZONE,
+        generated_at: now(),
+        active_thread_count,
+        activity_records,
+        input_records,
+        requests,
+        total_tokens,
+        threads,
+    })
+}
+
+async fn daily_report(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Query(query): Query<DailyReportQuery>,
+) -> Result<Json<DailyReport>, ApiError> {
+    let date = report_date(query.date.as_deref())?;
+    user_db(&state, &identity.user, true, move |connection| {
+        load_daily_report(connection, date)
+    })
+    .await
+    .map(Json)
+}
+
 fn load_insights(
     connection: &Connection,
     range: String,
@@ -2767,6 +3091,7 @@ fn load_insights(
         started_after,
         thread_id.as_deref(),
     )?;
+    let activity = load_insight_activity(connection, started_after, generated_at)?;
     Ok(Insights {
         range,
         generated_at,
@@ -2807,6 +3132,7 @@ fn load_insights(
             kinds,
         },
         dimensions,
+        activity,
     })
 }
 
@@ -7468,6 +7794,112 @@ mod tests {
         assert_eq!(stats.attribution.inference_seconds, 30);
         assert_eq!(stats.attribution.worker_seconds, 20);
         assert_eq!(stats.attribution.overhead_seconds, 4);
+    }
+
+    #[tokio::test]
+    async fn insights_include_daily_active_thread_rollups_and_reports() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "daily-activity-user").unwrap();
+        let first = create_test_thread(&state, &user).await;
+        let second = create_test_thread(&state, &user).await;
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+        let base = 1_700_000_000_i64;
+        let (activity, report) = user_db(&state, &user, false, move |connection| {
+            let first_input = persist_history_record(
+                connection,
+                HistoryRecordInsert {
+                    thread_id: &first_id,
+                    kind: "input",
+                    payload: &json!({"role":"user","content":"first prompt"}),
+                    created_at: base,
+                },
+            )?;
+            persist_history_record(
+                connection,
+                HistoryRecordInsert {
+                    thread_id: &first_id,
+                    kind: "response_output",
+                    payload: &json!({"type":"message","content":"done"}),
+                    created_at: base + 100,
+                },
+            )?;
+            persist_history_record(
+                connection,
+                HistoryRecordInsert {
+                    thread_id: &first_id,
+                    kind: "checkpoint",
+                    payload: &json!({"role":"developer","content":"checkpoint"}),
+                    created_at: base + 200,
+                },
+            )?;
+            let second_input = persist_history_record(
+                connection,
+                HistoryRecordInsert {
+                    thread_id: &second_id,
+                    kind: "input",
+                    payload: &json!({"role":"user","content":"second prompt"}),
+                    created_at: base + 86_400,
+                },
+            )?;
+            connection.execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens)
+                 VALUES(?,?,?,'fixture','completed',?,?,10,5)",
+                params![first_input, &first_id, "inference", base + 10, base + 20],
+            )?;
+            connection.execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens)
+                 VALUES(?,?,?,'fixture','completed',?,?,20,8)",
+                params![second_input, &second_id, "inference", base + 86_410, base + 86_420],
+            )?;
+            let activity = load_insight_activity(connection, None, base + 2 * 86_400)?;
+            let report = load_daily_report(connection, utc_date(base))?;
+            Ok((activity, report))
+        })
+        .await
+        .unwrap();
+        let first_date = utc_date(base).format("%Y-%m-%d").to_string();
+        let second_date = utc_date(base + 86_400).format("%Y-%m-%d").to_string();
+        let first_day = activity
+            .days
+            .iter()
+            .find(|day| day.date == first_date)
+            .unwrap();
+        let second_day = activity
+            .days
+            .iter()
+            .find(|day| day.date == second_date)
+            .unwrap();
+        assert_eq!(
+            (
+                first_day.active_threads,
+                first_day.activity_records,
+                first_day.input_records
+            ),
+            (1, 2, 1)
+        );
+        assert_eq!(
+            (
+                second_day.active_threads,
+                second_day.activity_records,
+                second_day.input_records
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(report.date, first_date);
+        assert_eq!(
+            (
+                report.active_thread_count,
+                report.activity_records,
+                report.input_records
+            ),
+            (1, 2, 1)
+        );
+        assert_eq!(report.requests, 1);
+        assert_eq!(report.total_tokens, 15);
+        assert_eq!(report.threads.len(), 1);
+        assert_eq!(report.threads[0].summary.as_deref(), Some("first prompt"));
+        assert_eq!(report.threads[0].request_count, 1);
     }
 
     #[test]

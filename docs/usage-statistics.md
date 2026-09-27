@@ -59,3 +59,41 @@ existed display `—`.
 
 The By-model table groups rows by model and reasoning effort, and the
 Reasoning audit page shows the recorded effort next to every request.
+
+## Daily active Threads
+
+The page also exposes a daily activity calendar. A Thread is **active on a day**
+when that UTC calendar day contains at least one `history_records` row for the
+Thread whose `kind` is not `checkpoint`. Checkpoint-only maintenance does not
+make a Thread active. The heatmap reports the distinct active Thread count for
+each day and keeps empty days in the calendar so gaps remain visible.
+
+Selecting a day opens the first report layer:
+
+- distinct active Thread count;
+- protocol activity records and user inputs;
+- reasoning requests and reported input/output Tokens;
+- one row per active Thread with its latest user-input excerpt, activity count,
+  input count, request count, reported Tokens, and latest activity time.
+
+Daily report dates and heatmap buckets are UTC (`YYYY-MM-DD`). This keeps the
+rollup deterministic across browsers and is intentionally stated in the UI.
+The detailed daily rollup is served by `GET /api/reports/daily?date=YYYY-MM-DD`.
+
+## Report progression
+
+Daily reports are the first aggregation layer. The next layers should consume
+completed daily rollups rather than repeatedly scanning raw protocol history:
+
+1. **Day** — summarize active Threads and preserve the latest user-input excerpt
+   and measured usage as evidence.
+2. **Week** — group seven UTC daily rollups, deduplicate Threads by ID, and
+   summarize the week from the daily evidence.
+3. **Month** — group the month's weekly rollups plus any partial-week daily
+   rollups, keeping the same source links and measured totals.
+
+The current daily layer is a deterministic, inspectable Summary foundation; it
+does not make an implicit model request or persist generated prose. A later
+semantic Summary can be added as a separate report field with its own source
+fingerprint, model, status, and retry history without changing the activity
+count contract.

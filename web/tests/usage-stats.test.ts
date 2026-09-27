@@ -42,3 +42,18 @@ test("reasoning audits expose the recorded reasoning effort", () => {
   assert.match(auditPage, /<th[^>]*>\{t\("reasoningEffort"\)\}<\/th>/)
   assert.match(auditPage, /<code>\{item\.reasoning_effort \?\? "—"\}<\/code>/)
 })
+
+test("usage statistics render the daily active-thread calendar and selected daily report", () => {
+  assert.match(source, /activity: \{ timezone: string; days: InsightActiveDay\[\] \}/)
+  assert.match(insightsPage, /<DailyActivityCard/)
+  assert.match(insightsPage, /data\.activity\.days/)
+  assert.match(source, /function DailyActivityCard\(/)
+  assert.match(source, /function DailyReportCard\(/)
+  assert.match(source, /`\/api\/reports\/daily\?date=\$\{encodeURIComponent\(selectedDate!\)\}`/)
+})
+
+test("daily activity defines non-checkpoint protocol records and exposes a UTC label", () => {
+  assert.match(source, /A Thread is active when it has at least one non-checkpoint protocol record\./)
+  assert.match(source, /statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。日历按 UTC 统计。"/)
+  assert.match(source, /<Badge variant="outline">\{t\("statsTimezone"\)\}: \{timezone\}<\/Badge>/)
+})
