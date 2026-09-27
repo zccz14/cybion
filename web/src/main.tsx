@@ -74,6 +74,7 @@ import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
 import { BashCommand } from "@/components/bash-command"
+import { CopyReplyButton } from "@/components/copy-reply-button"
 import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
 import { ThreadList } from "@/components/thread-list"
@@ -1650,6 +1651,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
             <Markdown>{text}</Markdown>
           </div>
         </div>
+        <CopyReplyButton text={text} language={language} />
       </MessageContent>
     </Message>
   }
