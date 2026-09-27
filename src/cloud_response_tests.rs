@@ -1088,7 +1088,7 @@ fn replayed_tool_items_stay_paired_with_outputs_after_the_call() {
 }
 
 #[test]
-fn replayed_tool_calls_without_reasoning_keep_stream_order() {
+fn replayed_tool_calls_without_reasoning_group_before_their_outputs() {
     let items = vec![
         json!({"role":"user","content":"hello"}),
         json!({"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"working"}]}),
@@ -1104,6 +1104,32 @@ fn replayed_tool_calls_without_reasoning_keep_stream_order() {
         .collect::<Vec<_>>();
     assert_eq!(
         call_ids,
-        vec!["", "", "call-a", "call-a", "call-b", "call-b"]
+        vec!["", "", "call-a", "call-b", "call-a", "call-b"]
+    );
+}
+
+#[test]
+fn replayed_tool_calls_move_messages_out_of_the_pending_batch() {
+    // A message can stream between a call and its still-running output while
+    // the response that made the call is streaming. Strict Responses
+    // validators (DeepSeek) reject any request that carries a non-output item
+    // while a call is unanswered, naming that call, so the message must move
+    // ahead of the call batch.
+    let items = vec![
+        json!({"role":"user","content":"hello"}),
+        json!({"type":"function_call","id":"fc-1","name":"bash","call_id":"call-a","arguments":"{}"}),
+        json!({"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"next"}]}),
+        json!({"type":"function_call","id":"fc-2","name":"bash","call_id":"call-b","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-a","output":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-b","output":"{}"}),
+    ];
+    let replay = replayable_context_items(&items);
+    let call_ids = replay
+        .iter()
+        .map(|item| item["call_id"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call_ids,
+        vec!["", "", "call-a", "call-b", "call-a", "call-b"]
     );
 }

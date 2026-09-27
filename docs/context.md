@@ -94,10 +94,14 @@ Cleanup works on a request copy:
 - remove `action` from `web_search_call`;
 - remove `action` and `size` from `image_generation_call`;
 - retain a function call pair only when one non-empty `call_id` has exactly one
-  `function_call`, exactly one later `function_call_output`, and no ambiguity.
+  `function_call`, exactly one later `function_call_output`, and no ambiguity;
+- regroup each assistant segment so message, reasoning, and native items come
+  first, every tool call follows, and the tool outputs form one contiguous run:
+  strict Responses validators reject any item between a call and its
+  unanswered output.
 
-All other items keep their stored order. Tool output is bounded only in the
-request copy; the complete output stays in `history_records.payload`.
+Within those rules other items keep their stored order. Tool output is bounded
+only in the request copy; the complete output stays in `history_records.payload`.
 
 ## Persistence and retry
 

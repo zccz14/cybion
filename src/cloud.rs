@@ -4597,15 +4597,18 @@ fn replayable_context_items(items: &[Value]) -> Vec<Value> {
         })
         .cloned()
         .collect();
-    regroup_thinking_tool_calls(paired)
+    regroup_tool_calls(paired)
 }
 
 /// A tool result can settle while the upstream response that made the call is
-/// still streaming, so its output record can land between two sibling calls of
-/// one response. Thinking-mode providers require every call to stay in the
-/// reasoning turn that made it: within each turn, emit all calls before their
-/// outputs, and keep every output after its own call.
-fn regroup_thinking_tool_calls(items: Vec<Value>) -> Vec<Value> {
+/// still streaming, so its output record can land between the items of one
+/// response. Two provider contracts constrain the replay order. Thinking-mode
+/// providers require every call to stay in the turn that made it, with every
+/// call emitted before its own output. Strict Responses validators (DeepSeek)
+/// reject a request whenever a non-output item sits between a call and its
+/// unanswered output. Emitting message, reasoning, and native items first,
+/// then every call, then every output as one contiguous run satisfies both.
+fn regroup_tool_calls(items: Vec<Value>) -> Vec<Value> {
     let mut regrouped = Vec::with_capacity(items.len());
     let mut turn: Vec<Value> = Vec::new();
     for item in items {
@@ -4614,34 +4617,32 @@ fn regroup_thinking_tool_calls(items: Vec<Value>) -> Vec<Value> {
             turn.push(item);
             continue;
         }
-        flush_thinking_turn(&mut regrouped, &mut turn);
+        flush_tool_turn(&mut regrouped, &mut turn);
         if starts_turn {
             turn.push(item);
         } else {
             regrouped.push(item);
         }
     }
-    flush_thinking_turn(&mut regrouped, &mut turn);
+    flush_tool_turn(&mut regrouped, &mut turn);
     regrouped
 }
 
-fn flush_thinking_turn(regrouped: &mut Vec<Value>, turn: &mut Vec<Value>) {
+fn flush_tool_turn(regrouped: &mut Vec<Value>, turn: &mut Vec<Value>) {
     let items = std::mem::take(turn);
-    if !items.first().is_some_and(is_reasoning_item) {
-        regrouped.extend(items);
-        return;
-    }
-    let Some(first_output) = items
-        .iter()
-        .position(|item| matches!(tool_pair(item), Some((_, true))))
-    else {
-        regrouped.extend(items);
-        return;
-    };
-    let (prefix, rest) = items.split_at(first_output);
-    regrouped.extend(prefix.iter().cloned());
-    regrouped.extend(rest.iter().filter(|item| is_tool_call_item(item)).cloned());
-    regrouped.extend(rest.iter().filter(|item| !is_tool_call_item(item)).cloned());
+    regrouped.extend(
+        items
+            .iter()
+            .filter(|item| !is_tool_call_item(item) && !is_tool_output_item(item))
+            .cloned(),
+    );
+    regrouped.extend(items.iter().filter(|item| is_tool_call_item(item)).cloned());
+    regrouped.extend(
+        items
+            .iter()
+            .filter(|item| is_tool_output_item(item))
+            .cloned(),
+    );
 }
 
 fn is_reasoning_item(item: &Value) -> bool {
@@ -4650,6 +4651,10 @@ fn is_reasoning_item(item: &Value) -> bool {
 
 fn is_tool_call_item(item: &Value) -> bool {
     matches!(tool_pair(item), Some((_, false)))
+}
+
+fn is_tool_output_item(item: &Value) -> bool {
+    matches!(tool_pair(item), Some((_, true)))
 }
 
 fn is_assistant_turn_item(item: &Value) -> bool {
@@ -8500,6 +8505,60 @@ mod tests {
                 .is_none()
         );
         assert_eq!(original[7]["action"]["query"], "secret");
+    }
+
+    #[test]
+    fn sanitization_keeps_tool_outputs_contiguous_for_strict_validators() {
+        let original = json!([
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"plan the patch"}]},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"patching the file"}]},
+            {"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"},
+            {"type":"function_call_output","call_id":"c1","output":"patched"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"wiring it into the service"}]},
+            {"type":"function_call","call_id":"c2","name":"bash","arguments":"{}"},
+            {"type":"function_call_output","call_id":"c2","output":"wired"}
+        ]);
+        let payload = responses_payload("test-model", original, false, None);
+        let input = payload["input"].as_array().unwrap();
+        // Strict Responses validators reject any item between a call and its
+        // unanswered output, so a turn must replay as message(s), then calls,
+        // then one contiguous run of their outputs.
+        let kinds = input
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                "reasoning",
+                "message",
+                "message",
+                "function_call",
+                "function_call",
+                "function_call_output",
+                "function_call_output"
+            ]
+        );
+        let mut unanswered = 0;
+        for item in input {
+            match item["type"].as_str().unwrap() {
+                "function_call" | "custom_tool_call" => unanswered += 1,
+                "function_call_output" | "custom_tool_call_output" => unanswered -= 1,
+                _ => assert_eq!(
+                    unanswered, 0,
+                    "non-output item while a tool call is unanswered: {item}"
+                ),
+            }
+        }
+        assert_eq!(unanswered, 0);
+        assert_eq!(
+            input.iter().filter(|item| item["call_id"] == "c1").count(),
+            2
+        );
+        assert_eq!(
+            input.iter().filter(|item| item["call_id"] == "c2").count(),
+            2
+        );
     }
 
     #[test]
