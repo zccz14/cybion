@@ -44,6 +44,7 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         thread_id: thread.id.clone(),
         request_kind: "inference".to_owned(),
         model: "fixture".to_owned(),
+        reasoning_effort: Some("high".to_owned()),
         idx_head: input,
         idx_tail: input,
     };
@@ -181,6 +182,19 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         replay.iter().filter(|r| r["call_id"] == "custom-1").count(),
         2
     );
+    let recorded: Option<String> = user_db(&state, &user, false, move |connection| {
+        connection
+            .query_row(
+                "SELECT reasoning_effort FROM reasoning_audits WHERE id=?",
+                [audit_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap();
+    assert_eq!(recorded.as_deref(), Some("high"));
     let other = user_for_subject(&state, "other-user").unwrap();
     assert!(
         response_for(&state, &other, thread.id.clone())

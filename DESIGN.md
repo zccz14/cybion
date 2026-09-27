@@ -92,8 +92,11 @@ conversation controls do. Machine identity is always visible near the action.
 
 - **Work** contains Threads, Contexts, and Workers. Device management belongs to
   the user's work, alongside conversations and context.
-- **Audit** contains inference statistics, reasoning requests, Worker calls,
-  and history records.
+- **Audit** contains usage statistics, reasoning requests, Worker calls,
+  and history records. Usage statistics combines token accounting, request
+  outcomes, Worker call duration and traffic, and the split of Thread running
+  time between inference, Worker calls, and Cybion overhead; see
+  [usage statistics](docs/usage-statistics.md).
 - **Administration**, visible only to administrators, contains Users, System
   resources, and **System configuration** (`#/admin/configuration`).
 - **Configuration** contains **Personal settings** (`#/configuration`), API keys,
