@@ -25,6 +25,7 @@ import {
   ActivityIcon,
   ArrowLeftIcon,
   CheckIcon,
+  CalendarDaysIcon,
   ChevronDownIcon,
   CircleAlertIcon,
   CopyIcon,
@@ -235,9 +236,39 @@ type InsightWorkerItem = {
   duration_seconds: number
   average_duration_seconds: number | null
 }
+type InsightActiveDay = {
+  date: string
+  active_threads: number
+  activity_records: number
+  input_records: number
+  requests: number
+  total_tokens: number
+}
+type DailyThreadSummary = {
+  id: string
+  title: string
+  summary: string | null
+  activity_count: number
+  input_count: number
+  request_count: number
+  total_tokens: number
+  last_activity_at: number
+}
+type DailyReport = {
+  date: string
+  timezone: string
+  generated_at: number
+  active_thread_count: number
+  activity_records: number
+  input_records: number
+  requests: number
+  total_tokens: number
+  threads: DailyThreadSummary[]
+}
 type Insights = {
   range: "24h" | "7d" | "30d" | "all"
   generated_at: number
+  activity: { timezone: string; days: InsightActiveDay[] }
   tokens: {
     completed_requests: number
     input_tokens: number
@@ -484,7 +515,7 @@ const copy = {
     saveWorker: "Save name",
     workerAuditRange: "{from}–{to} of {total} calls",
     auditRange: "{from}–{to} of {total} requests",
-    usageStatsDescription: "Token usage, cache efficiency, request outcomes, Worker call duration and bytes, and how Thread running time divides between inference, Worker calls, and Cybion overhead.",
+    usageStatsDescription: "Token usage, cache efficiency, request outcomes, Worker call duration and bytes, and how Thread running time divides between inference, Worker calls, and Cybion overhead. Daily activity is a workspace-wide UTC calendar independent of model/request filters, with a drill-down report.",
     statsRange: "Time range",
     stats24h: "Last 24 hours",
     stats7d: "Last 7 days",
@@ -531,6 +562,23 @@ const copy = {
     statsPayloadBytes: "Payload bytes",
     statsCheckpoints: "Checkpoints",
     statsLatestRecord: "Latest record",
+    statsDailyActivity: "Daily active Threads",
+    statsDailyActivityDescription: "A Thread is active when it has at least one non-checkpoint protocol record. Calendar days use UTC.",
+    statsActiveThreads: "Active Threads",
+    statsActivityRecords: "Activity records",
+    statsInputs: "Inputs",
+    statsDailyReport: "Daily report",
+    statsDailyReportDescription: "A deterministic rollup of Threads active on the selected day. This is the source layer for weekly and monthly reports.",
+    statsDailyReportEmpty: "Select a day with activity to inspect its Threads.",
+    statsThreadSummary: "Latest input",
+    statsLatestActivity: "Latest activity",
+    statsNoActiveThreads: "No active Threads on this day.",
+    statsCalendarLegend: "Fewer",
+    statsCalendarLegendMore: "More",
+    statsTimezone: "Timezone",
+    statsSummary: "Summary",
+    statsRequestsCount: "Requests",
+    statsTotalTokensShort: "Tokens",
     statsNoData: "No statistics for this range.",
     previous: "Previous",
     next: "Next",
@@ -774,7 +822,7 @@ const copy = {
     saveWorker: "保存名称",
     workerAuditRange: "第 {from}–{to} 条，共 {total} 次调用",
     auditRange: "第 {from}–{to} 条，共 {total} 个请求",
-    usageStatsDescription: "按模型查看 Token 用量、缓存效率、请求结果、Worker 调用耗时与字节流量，以及 Thread 运行耗时在推理、Worker 调用和 Cybion 开销之间的拆分。",
+    usageStatsDescription: "按模型查看 Token 用量、缓存效率、请求结果、Worker 调用耗时与字节流量，以及 Thread 运行耗时在推理、Worker 调用和 Cybion 开销之间的拆分。每日活跃统计是独立于模型/请求类型筛选的工作区级 UTC 日历，并可展开日报。",
     statsRange: "时间范围",
     stats24h: "近 24 小时",
     stats7d: "近 7 天",
@@ -821,6 +869,23 @@ const copy = {
     statsPayloadBytes: "负载字节",
     statsCheckpoints: "检查点",
     statsLatestRecord: "最近记录",
+    statsDailyActivity: "每日活跃 Thread",
+    statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。日历按 UTC 统计。",
+    statsActiveThreads: "活跃 Thread",
+    statsActivityRecords: "活动记录",
+    statsInputs: "输入",
+    statsDailyReport: "日报",
+    statsDailyReportDescription: "对所选日期活跃 Thread 的可复现聚合。这一层是后续周报、月报的基础数据。",
+    statsDailyReportEmpty: "请选择有活动的日期查看其中的 Thread。",
+    statsThreadSummary: "最近输入",
+    statsLatestActivity: "最近活动",
+    statsNoActiveThreads: "这一天没有活跃 Thread。",
+    statsCalendarLegend: "少",
+    statsCalendarLegendMore: "多",
+    statsTimezone: "时区",
+    statsSummary: "摘要",
+    statsRequestsCount: "请求",
+    statsTotalTokensShort: "Token",
     statsNoData: "当前范围没有统计数据。",
     previous: "上一页",
     next: "下一页",
@@ -1968,6 +2033,7 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
   const [range, setRange] = useState<Insights["range"]>("7d")
   const [model, setModel] = useState("all")
   const [requestKind, setRequestKind] = useState("all")
+  const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const query = useQuery({
     queryKey: ["insights", range, model, requestKind],
     queryFn: () => {
@@ -1977,6 +2043,19 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
       return api<Insights>(sdk, `/api/insights?${params}`)
     },
     refetchInterval: 5000,
+  })
+  const activityDays = query.data?.activity.days ?? []
+  useEffect(() => {
+    if (!query.data) return
+    setSelectedDate((current) => current && activityDays.some((day) => day.date === current)
+      ? current
+      : [...activityDays].reverse().find((day) => day.active_threads > 0)?.date ?? activityDays.at(-1)?.date ?? null)
+  }, [activityDays, query.data])
+  const dailyReport = useQuery({
+    queryKey: ["daily-report", selectedDate],
+    queryFn: () => api<DailyReport>(sdk, `/api/reports/daily?date=${encodeURIComponent(selectedDate!)}`),
+    enabled: selectedDate !== null,
+    refetchInterval: 10000,
   })
   const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
   const rate = (value: number | null) => value === null
@@ -2028,6 +2107,18 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
       </CardContent>
     </Card>
     <p className="text-xs text-muted-foreground">{t("statsGenerated").replace("{time}", formattedTime(language, data.generated_at))}</p>
+    <DailyActivityCard
+      days={data.activity.days}
+      timezone={data.activity.timezone}
+      selectedDate={selectedDate}
+      onSelectDate={setSelectedDate}
+    />
+    <DailyReportCard
+      report={dailyReport.data}
+      loading={dailyReport.isLoading}
+      error={dailyReport.error}
+      onRetry={() => void dailyReport.refetch()}
+    />
     <Card>
       <CardHeader><CardTitle>{t("statsTokenUsage")}</CardTitle><CardDescription>{t("statsByModel")}</CardDescription></CardHeader>
       <CardContent>
@@ -2058,6 +2149,115 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
     </section>
     <Card><CardHeader><CardTitle>{t("statsHistory")}</CardTitle></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><div><dt className="text-xs text-muted-foreground">{t("statsHistoryRecords")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.total_records)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsPayloadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.history.payload_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsCheckpoints")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.checkpoint_count)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsLatestRecord")}</dt><dd className="mt-1 text-sm font-medium">{formattedTime(language, data.history.latest_record_at)}</dd></div></dl></CardContent></Card>
   </Page>
+}
+
+function DailyActivityCard({
+  days,
+  timezone,
+  selectedDate,
+  onSelectDate,
+}: {
+  days: InsightActiveDay[]
+  timezone: string
+  selectedDate: string | null
+  onSelectDate: (date: string) => void
+}) {
+  const { t, language } = useUi()
+  const maxActiveThreads = Math.max(1, ...days.map((day) => day.active_threads))
+  const calendar = useMemo(() => {
+    if (days.length === 0) return [] as Array<{ date: string | null; day: InsightActiveDay | null }>
+    const byDate = new Map(days.map((day) => [day.date, day]))
+    const first = new Date(`${days[0].date}T00:00:00Z`)
+    const last = new Date(`${days.at(-1)!.date}T00:00:00Z`)
+    first.setUTCDate(first.getUTCDate() - first.getUTCDay())
+    last.setUTCDate(last.getUTCDate() + (6 - last.getUTCDay()))
+    const cells: Array<{ date: string | null; day: InsightActiveDay | null }> = []
+    for (const cursor = new Date(first); cursor <= last; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+      const date = cursor.toISOString().slice(0, 10)
+      cells.push({ date: byDate.has(date) ? date : null, day: byDate.get(date) ?? null })
+    }
+    return cells
+  }, [days])
+  const dateLabel = (date: string) => new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en", {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  }).format(new Date(`${date}T00:00:00Z`))
+  const tone = (count: number) => {
+    if (count === 0) return "bg-muted"
+    const share = count / maxActiveThreads
+    if (share <= 0.25) return "bg-primary/20"
+    if (share <= 0.5) return "bg-primary/40"
+    if (share <= 0.75) return "bg-primary/65"
+    return "bg-primary"
+  }
+  const dayDescription = (day: InsightActiveDay) => `${dateLabel(day.date)} · ${day.active_threads} ${t("statsActiveThreads")} · ${day.input_records} ${t("statsInputs")}`
+  return <Card>
+    <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+      <div><CardTitle className="flex items-center gap-2"><CalendarDaysIcon />{t("statsDailyActivity")}</CardTitle><CardDescription>{t("statsDailyActivityDescription")}</CardDescription></div>
+      <Badge variant="outline">{t("statsTimezone")}: {timezone}</Badge>
+    </CardHeader>
+    <CardContent>
+      {days.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoData")}</p> : <>
+        <div className="overflow-x-auto pb-2" role="grid" aria-label={t("statsDailyActivity")}>
+          <div className="grid min-w-max grid-flow-col grid-rows-7 gap-1" style={{ gridAutoColumns: "0.8rem" }}>
+            {calendar.map((cell, index) => cell.day && cell.date
+              ? <button
+                key={cell.date}
+                type="button"
+                role="gridcell"
+                aria-label={dayDescription(cell.day)}
+                aria-pressed={selectedDate === cell.date}
+                title={dayDescription(cell.day)}
+                onClick={() => onSelectDate(cell.date!)}
+                className={`size-3.5 rounded-sm ${tone(cell.day.active_threads)} ${selectedDate === cell.date ? "ring-2 ring-ring ring-offset-2 ring-offset-background" : ""}`}
+              />
+              : <span key={`blank-${index}`} aria-hidden="true" className="size-3.5" />)}
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+          <p>{selectedDate ? `${t("statsSummary")}: ${dateLabel(selectedDate)}` : t("statsDailyActivity")}</p>
+          <div className="flex items-center gap-2" aria-label={t("statsDailyActivity")}><span>{t("statsCalendarLegend")}</span><span className="size-3 rounded-sm bg-muted" /><span className="size-3 rounded-sm bg-primary/20" /><span className="size-3 rounded-sm bg-primary/40" /><span className="size-3 rounded-sm bg-primary/65" /><span className="size-3 rounded-sm bg-primary" /><span>{t("statsCalendarLegendMore")}</span></div>
+        </div>
+      </>}
+    </CardContent>
+  </Card>
+}
+
+function DailyReportCard({
+  report,
+  loading,
+  error,
+  onRetry,
+}: {
+  report: DailyReport | undefined
+  loading: boolean
+  error: unknown
+  onRetry: () => void
+}) {
+  const { t, language } = useUi()
+  const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
+  return <Card>
+    <CardHeader><CardTitle>{t("statsDailyReport")}</CardTitle><CardDescription>{t("statsDailyReportDescription")}</CardDescription></CardHeader>
+    <CardContent>
+      {Boolean(error) && <RequestError error={error} onRetry={onRetry} />}
+      {loading && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("statsDailyReport")}</div>}
+      {!loading && !error && !report && <p className="py-6 text-sm text-muted-foreground">{t("statsDailyReportEmpty")}</p>}
+      {report && <>
+        <div className="grid gap-4 border-b pb-5 sm:grid-cols-2 lg:grid-cols-5">
+          <div><dt className="text-xs text-muted-foreground">{t("statsSummary")}</dt><dd className="mt-1 font-medium">{report.date}</dd><p className="mt-1 text-xs text-muted-foreground">{t("statsTimezone")}: {report.timezone}</p></div>
+          <div><dt className="text-xs text-muted-foreground">{t("statsActiveThreads")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.active_thread_count)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">{t("statsActivityRecords")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.activity_records)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">{t("statsInputs")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.input_records)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">{t("statsRequestsCount")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.requests)}<span className="ml-2 text-xs font-normal text-muted-foreground">{number(report.total_tokens)} {t("statsTotalTokensShort")}</span></dd></div>
+        </div>
+        {report.threads.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoActiveThreads")}</p> : <div className="divide-y">{report.threads.map((thread) => <div key={thread.id} className="grid gap-3 py-4 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(0,1.6fr)_auto] lg:items-start">
+          <div className="min-w-0"><Link className="font-medium hover:underline" to={`/threads/${thread.id}`}>{thread.title || thread.id}</Link><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{thread.id}</p></div>
+          <div className="min-w-0"><p className="text-xs text-muted-foreground">{t("statsThreadSummary")}</p><p className="mt-1 break-words text-sm">{thread.summary ?? "—"}</p></div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground"><span>{number(thread.activity_count)} {t("statsActivityRecords")}</span><span>{number(thread.input_count)} {t("statsInputs")}</span><span>{number(thread.request_count)} {t("statsRequestsCount")}</span><span>{number(thread.total_tokens)} {t("statsTotalTokensShort")}</span><span>{t("statsLatestActivity")}: {formattedTime(language, thread.last_activity_at)}</span></div>
+        </div>)}</div>}
+      </>}
+    </CardContent>
+  </Card>
 }
 
 function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
