@@ -99,7 +99,7 @@ const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 19;
+const USER_SCHEMA_VERSION: i64 = 20;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1034,6 +1034,7 @@ CREATE TABLE IF NOT EXISTS threads (
   service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
   context_budget_tokens INTEGER,
   minimal_mode INTEGER,
+  archived_at INTEGER,
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -1290,6 +1291,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("threads", "next_retry_at", "INTEGER"),
         ("threads", "context_budget_tokens", "INTEGER"),
         ("threads", "minimal_mode", "INTEGER"),
+        ("threads", "archived_at", "INTEGER"),
         (
             "thread_defaults",
             "context_budget_tokens",
@@ -1456,6 +1458,8 @@ struct ThreadView {
     context_budget_tokens: Option<i64>,
     /// Per-thread minimal mode override; `None` follows the user default.
     minimal_mode: Option<bool>,
+    /// When the thread was archived; `None` keeps it in the thread list.
+    archived_at: Option<i64>,
     /// Input tokens of the most recent inference request, for the context display.
     context_tokens: Option<i64>,
     status: String,
@@ -1838,6 +1842,10 @@ struct UpdateThreadInput {
     // `null` clears the override back to the user default; true/false sets it.
     #[serde(default, deserialize_with = "deserialize_double_option_bool")]
     minimal_mode: Option<Option<bool>>,
+    /// `true` archives the thread and hides it from the thread list; `false`
+    /// restores it. Omitted keeps the current state.
+    #[serde(default)]
+    archived: Option<bool>,
 }
 
 fn deserialize_double_option<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
@@ -2037,6 +2045,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         context_budget_tokens: row.get(14)?,
         context_tokens: row.get(15)?,
         minimal_mode: row.get(16)?,
+        archived_at: row.get(18)?,
         usage: ThreadUsage {
             input_tokens,
             output_tokens,
@@ -2391,7 +2400,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        (SELECT ra.input_tokens FROM reasoning_audits ra
          WHERE ra.thread_id=t.id AND ra.request_kind='inference' AND ra.input_tokens IS NOT NULL
          ORDER BY ra.id DESC LIMIT 1),
-       t.minimal_mode,t.purpose
+       t.minimal_mode,t.purpose,t.archived_at
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT id FROM history_records WHERE thread_id=t.id
@@ -2455,6 +2464,7 @@ async fn create_thread_for(
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
             context_budget_tokens: None,
             minimal_mode: None,
+            archived_at: None,
             context_tokens: None,
             status: "idle".to_owned(),
             display_status: "ready".to_owned(),
@@ -2482,11 +2492,21 @@ async fn create_thread_for(
     .await
 }
 
-async fn list_threads_for(state: &AppState, user: &User) -> Result<Vec<ThreadView>, ApiError> {
-    user_db(state, user, true, |connection| {
+async fn list_threads_for(
+    state: &AppState,
+    user: &User,
+    archived: bool,
+) -> Result<Vec<ThreadView>, ApiError> {
+    user_db(state, user, true, move |connection| {
+        let archive_scope = if archived {
+            "t.archived_at IS NOT NULL"
+        } else {
+            "t.archived_at IS NULL"
+        };
         let mut statement = connection.prepare(&format!(
             "{THREAD_VIEW_SELECT}
              LEFT JOIN ({THREAD_USAGE_SELECT} GROUP BY thread_id) usage ON usage.thread_id=t.id
+             WHERE {archive_scope}
              ORDER BY t.updated_at DESC,t.id DESC"
         ))?;
         let rows = statement.query_map([], thread_from_row)?;
@@ -3552,11 +3572,21 @@ async fn worker_call_audits(
     .map(Json)
 }
 
+#[derive(Deserialize)]
+struct ListThreadsQuery {
+    /// `true` lists only archived threads; the default lists active ones.
+    #[serde(default)]
+    archived: bool,
+}
+
 async fn list_threads(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<Vec<ThreadView>>, ApiError> {
-    Ok(Json(list_threads_for(&state, &identity.user).await?))
+    Ok(Json(
+        list_threads_for(&state, &identity.user, query.archived).await?,
+    ))
 }
 
 async fn create_thread(
@@ -3632,6 +3662,7 @@ async fn update_thread(
         && input.service_tier_fast.is_none()
         && input.context_budget_tokens.is_none()
         && input.minimal_mode.is_none()
+        && input.archived.is_none()
     {
         return Err(ApiError::bad_request("thread update is empty"));
     }
@@ -3647,7 +3678,7 @@ async fn update_thread(
             require_upstream(connection, id)?;
         }
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -3658,6 +3689,8 @@ async fn update_thread(
                 context_budget.flatten(),
                 input.minimal_mode.is_some(),
                 input.minimal_mode.flatten(),
+                input.archived.is_some(),
+                input.archived.map(|archived| archived.then_some(updated_at)),
                 updated_at,
                 id
             ],
@@ -4562,6 +4595,7 @@ async fn process_request(
                 service_tier_fast: false,
                 context_budget_tokens: None,
                 minimal_mode: None,
+                archived_at: None,
                 context_tokens: None,
                 status: "failed".to_owned(),
                 display_status: "failed".to_owned(),
@@ -8347,8 +8381,17 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(list_threads_for(&state, &first).await.unwrap().len(), 1);
-        assert_eq!(list_threads_for(&state, &second).await.unwrap().len(), 1);
+        assert_eq!(
+            list_threads_for(&state, &first, false).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            list_threads_for(&state, &second, false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         let records = history_for(&state, &first, thread.id.clone(), 0)
             .await
             .unwrap();
@@ -8518,6 +8561,150 @@ mod tests {
             second_ids
         );
         assert!(other.iter().all(|r| r["thread_id"] == json!(second.id)));
+
+        server.abort();
+    }
+
+    fn test_identity(user: &User) -> axum::Extension<BrowserIdentity> {
+        axum::Extension(BrowserIdentity {
+            user: user.clone(),
+            bearer: String::new(),
+        })
+    }
+
+    fn archived_input(archived: bool) -> UpdateThreadInput {
+        UpdateThreadInput {
+            title: None,
+            model: None,
+            upstream_id: None,
+            reasoning_effort: None,
+            service_tier_fast: None,
+            context_budget_tokens: None,
+            minimal_mode: None,
+            archived: Some(archived),
+        }
+    }
+
+    #[tokio::test]
+    async fn archived_threads_leave_the_thread_list_and_restore_with_history() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "archive-owner").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"keep me"}),
+                );
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+        let archived = update_thread(
+            State(state.clone()),
+            test_identity(&user),
+            AxumPath(thread.id.clone()),
+            Json(archived_input(true)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(archived.archived_at.is_some());
+        assert!(
+            list_threads_for(&state, &user, false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            list_threads_for(&state, &user, true).await.unwrap().len(),
+            1
+        );
+
+        // Archiving hides the Thread without deleting its history.
+        let detail = read_thread_for(&state, &user, thread.id.clone())
+            .await
+            .unwrap();
+        assert!(detail.archived_at.is_some());
+        let records = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].payload["content"], json!("keep me"));
+
+        let restored = update_thread(
+            State(state.clone()),
+            test_identity(&user),
+            AxumPath(thread.id.clone()),
+            Json(archived_input(false)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(restored.archived_at, None);
+        assert_eq!(
+            list_threads_for(&state, &user, false).await.unwrap().len(),
+            1
+        );
+        assert!(
+            list_threads_for(&state, &user, true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_list_over_http_separates_archived_threads_from_active_ones() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "archive-http-user").unwrap();
+        let active = create_test_thread(&state, &user).await;
+        let archived = create_test_thread(&state, &user).await;
+        let _ = update_thread(
+            State(state.clone()),
+            test_identity(&user),
+            AxumPath(archived.id.clone()),
+            Json(archived_input(true)),
+        )
+        .await
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/api/threads", get(list_threads))
+            .layer(axum::Extension(BrowserIdentity {
+                user,
+                bearer: String::new(),
+            }))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let listed: Vec<Value> = reqwest::get(format!("http://{address}/api/threads"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], json!(active.id));
+        assert_eq!(listed[0]["archived_at"], json!(null));
+
+        let archived_list: Vec<Value> =
+            reqwest::get(format!("http://{address}/api/threads?archived=true"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(archived_list.len(), 1);
+        assert_eq!(archived_list[0]["id"], json!(archived.id));
+        assert!(archived_list[0]["archived_at"].as_i64().is_some());
 
         server.abort();
     }

@@ -25,8 +25,11 @@ the first authenticated browser session initializes that key atomically.
 - Controller restarts automatically resume `running` Threads from committed
   history and original Worker calls. Transient model failures retry within a
   persisted five-attempt budget; stopped/completed Threads stay stopped.
-- Threads are independent. A user can create, rename, inspect, and delete
-  them from the web UI.
+- Threads are independent. A user can create, rename, inspect, archive, and
+  delete them from the web UI. Archiving hides a Thread from the thread list
+  without deleting its history; archived Threads stay readable, remain
+  available through the archived group, and can be restored from the list or
+  the conversation header.
 - Configuration lets each user save the default model, reasoning effort,
   Fast mode, and the context budget for new threads. These defaults are
   stored in the user's database and apply to both web and API creation. An

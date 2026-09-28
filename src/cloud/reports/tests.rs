@@ -1029,7 +1029,7 @@ async fn schema_18_preserves_legacy_reports_and_report_thread_creation_is_idempo
     assert_eq!(
         c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        20
     );
     assert_eq!(load_thread(&c, &source).unwrap().purpose, "work");
     let old = summary(&c, legacy).unwrap();

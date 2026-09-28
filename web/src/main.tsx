@@ -24,6 +24,8 @@ import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitMyInfo, LinkitProvider, useLinkit } from "linkit-react-components"
 import {
   ActivityIcon,
+  ArchiveIcon,
+  ArchiveRestoreIcon,
   ArrowLeftIcon,
   CheckIcon,
   CalendarDaysIcon,
@@ -84,7 +86,7 @@ import { BashCommand } from "@/components/bash-command"
 import { CopyReplyButton } from "@/components/copy-reply-button"
 import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
-import { ThreadList } from "@/components/thread-list"
+import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadSettingsPopover, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
@@ -164,6 +166,7 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & {
   display_status: ThreadDisplayStatus
   context_budget_tokens: number | null
   minimal_mode: boolean | null
+  archived_at: number | null
   context_tokens: number | null
   usage: ThreadUsage
   created_at: number
@@ -394,6 +397,9 @@ const copy = {
     delete: "Delete",
     deleteTitle: "Delete this thread?",
     deleteDescription: "This Thread’s history, reasoning audits and Worker calls will be removed. Copies already read into other Threads remain there. Saved reports outlive a deleted report Thread, but its audit links will be unavailable.",
+    archiveThread: "Archive",
+    restoreThread: "Restore",
+    archived: "Archived",
     api: "API keys",
     apiTitle: "Integration API",
     apiDescription: "Create a user-scoped key for another application to create threads and append inputs.",
@@ -698,6 +704,9 @@ const copy = {
     delete: "删除",
     deleteTitle: "删除这个线程？",
     deleteDescription: "该 Thread 的历史、推理审计和 Worker 调用会被删除。其他 Thread 已读取的副本仍保留。删除报告 Thread 会保留日报，但其生成审计链接将不可用。",
+    archiveThread: "归档",
+    restoreThread: "恢复",
+    archived: "已归档",
     api: "API 密钥",
     apiTitle: "集成 API",
     apiDescription: "创建仅属于当前用户的密钥，让其他应用创建线程或追加输入。",
@@ -1122,6 +1131,19 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
     queryFn: () => api<Thread[]>(sdk, "/api/threads"),
     refetchInterval: 2000,
   })
+  const archivedThreads = useQuery({
+    queryKey: ["threads", sdk.session.getState().sessionId, "archived"],
+    queryFn: () => api<Thread[]>(sdk, "/api/threads?archived=true"),
+    refetchInterval: 2000,
+  })
+  const client = useQueryClient()
+  const restoreThread = useMutation({
+    mutationFn: (threadId: string) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify({ archived: false }) }),
+    onSuccess: (thread) => {
+      void client.invalidateQueries({ queryKey: ["threads"] })
+      void client.invalidateQueries({ queryKey: ["thread", thread.id] })
+    },
+  })
   useEffect(() => {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en"
     localStorage.setItem("cybion.language", language)
@@ -1157,6 +1179,9 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
           threads={threads.data ?? []}
           threadsLoading={threads.isLoading}
           threadsError={threads.error}
+          archivedThreads={archivedThreads.data ?? []}
+          onRestoreThread={restoreThread.mutate}
+          restoringThreadId={restoreThread.isPending ? restoreThread.variables ?? null : null}
         />}
       </ErrorBoundary>
     </UiContext.Provider>
@@ -1188,6 +1213,9 @@ function WorkspaceShell({
   threads,
   threadsLoading,
   threadsError,
+  archivedThreads,
+  onRestoreThread,
+  restoringThreadId,
 }: {
   sdk: AuthMiniApi
   userId: string
@@ -1195,6 +1223,9 @@ function WorkspaceShell({
   threads: Thread[]
   threadsLoading: boolean
   threadsError: unknown
+  archivedThreads: Thread[]
+  onRestoreThread: (threadId: string) => void
+  restoringThreadId: string | null
 }) {
   const { language, dark, toggleTheme, t } = useUi()
   const location = useLocation()
@@ -1274,9 +1305,9 @@ function WorkspaceShell({
           />}
         >
           <Routes>
-            <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
-            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />} />
-            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} onCreate={() => navigate("/threads")} />} />
+            <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} />} />
+            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} />} />
+            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate("/threads")} />} />
             <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
@@ -1316,21 +1347,21 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   return t("threads")
 }
 
-function ThreadsHomePage({ sdk, userId, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
+function ThreadsHomePage({ sdk, userId, threads, threadsLoading, threadsError, archivedThreads, onRestoreThread, restoringThreadId }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null }) {
   const desktop = useIsDesktopLayout()
-  if (desktop) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} />
-  return <ThreadListPage threads={threads} threadsLoading={threadsLoading} />
+  if (desktop) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} />
+  return <ThreadListPage threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} />
 }
 
-function ThreadListPage({ threads, threadsLoading }: { threads: Thread[]; threadsLoading: boolean }) {
+function ThreadListPage({ threads, threadsLoading, archivedThreads, onRestoreThread, restoringThreadId }: { threads: Thread[]; threadsLoading: boolean; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null }) {
   const { language } = useUi()
   const navigate = useNavigate()
   return <main className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-    <ThreadList threads={threads} loading={threadsLoading} language={language} onCreate={() => navigate("/threads/new")} />
+    <ThreadList threads={threads} archivedThreads={archivedThreads} loading={threadsLoading} language={language} onCreate={() => navigate("/threads/new")} onRestore={onRestoreThread} restoringId={restoringThreadId} />
   </main>
 }
 
-function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown }) {
+function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, archivedThreads, onRestoreThread, restoringThreadId }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null }) {
   const { t, language } = useUi()
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
@@ -1375,6 +1406,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
         {threadsLoading && <div className="flex flex-col gap-2 px-2 py-1"><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>}
         {!threadsLoading && threads.length === 0 && <p className="px-3 py-2 text-sm text-muted-foreground">{t("emptyTitle")}</p>}
         {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
+        <ArchivedThreadGroup threads={archivedThreads} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
         {Boolean(threadsError) && <p className="px-3 py-2 text-xs text-destructive">{errorMessage(threadsError)}</p>}
       </nav>
     </aside>}
@@ -1402,7 +1434,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
   </main>
 }
 
-function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; onCreate: () => void }) {
+function ThreadConversation({ sdk, userId, threads, archivedThreads, onRestoreThread, restoringThreadId, onCreate }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; onCreate: () => void }) {
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
   const navigate = useNavigate()
@@ -1536,12 +1568,24 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
       navigate("/threads")
     },
   })
+  const setArchived = useMutation({
+    mutationFn: (archived: boolean) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify({ archived }) }),
+    onSuccess: (_thread, archived) => {
+      void client.invalidateQueries({ queryKey: ["threads"] })
+      void client.invalidateQueries({ queryKey: ["thread", threadId] })
+      if (archived) navigate("/threads")
+    },
+  })
   if (thread.isLoading) return <Page title={t("chat")} description=""><div className="flex flex-col gap-3"><Skeleton className="h-8 w-56" /><Skeleton className="h-20" /><Skeleton className="h-20" /></div></Page>
   if (thread.isError || !thread.data) return <Page title={t("chat")} description=""><RequestError error={thread.error} /></Page>
   const current = thread.data
   const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
   const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
   const running = current.status === "running"
+  const archived = current.archived_at !== null
+  const archiveAction = archived
+    ? { label: t("restoreThread"), icon: <ArchiveRestoreIcon className="size-4" />, next: false }
+    : { label: t("archiveThread"), icon: <ArchiveIcon className="size-4" />, next: true }
   const busy = submit.isPending || control.isPending
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
   const action = composerAction(input, attachments.images.length, running)
@@ -1553,6 +1597,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
       </div>
       <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-9rem)]" aria-label={t("threads")}>
         {threads.map((item) => <ThreadLink key={item.id} thread={item.id === current.id ? current : item} language={language} />)}
+        <ArchivedThreadGroup threads={archivedThreads} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
       </nav>
     </aside>}
     <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
@@ -1564,6 +1609,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
         </form> : <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <div className="flex min-w-0 items-center gap-1">
             <h1 className="min-w-0 truncate text-base font-semibold">{current.title}</h1>
+            {archived && <Badge variant="outline" className="shrink-0 text-muted-foreground">{t("archived")}</Badge>}
             <Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
             <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button>
           </div>
@@ -1572,6 +1618,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
             {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
           </div>
         </div>}
+        <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
       {current.purpose === "reports" && <ReportThreadNotice id={current.id} language={language} />}
