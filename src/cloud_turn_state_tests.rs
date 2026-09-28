@@ -228,6 +228,7 @@ async fn codex_turn_state_is_isolated_by_thread_user_and_upstream() {
     other_upstream.api_key = "secret".to_owned();
     responses_request(
         &state,
+        None,
         &other_upstream,
         &thread.model,
         json!([]),
