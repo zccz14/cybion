@@ -24,7 +24,7 @@ async fn empty_threads_return_zero_usage_and_no_cache_rate_everywhere() {
     let read = read_thread_for(&state, &user, created.id.clone())
         .await
         .unwrap();
-    let list = list_threads_for(&state, &user).await.unwrap();
+    let list = list_threads_for(&state, &user, false).await.unwrap();
     assert_eq!(read.usage, created.usage);
     assert_eq!(list[0].usage, created.usage);
     let json = serde_json::to_value(read).unwrap();
@@ -96,7 +96,7 @@ async fn thread_usage_adds_all_reported_requests_and_weights_cache_by_input() {
     );
     assert_eq!(usage.cached_tokens, 1085);
     assert_eq!(usage.cache_hit_rate, Some(1085.0 / 1390.0));
-    let list = list_threads_for(&state, &user).await.unwrap();
+    let list = list_threads_for(&state, &user, false).await.unwrap();
     assert_eq!(
         list.iter().find(|item| item.id == thread.id).unwrap().usage,
         usage
@@ -116,7 +116,7 @@ async fn thread_usage_adds_all_reported_requests_and_weights_cache_by_input() {
             .is_err()
     );
     assert!(
-        list_threads_for(&state, &other_user)
+        list_threads_for(&state, &other_user, false)
             .await
             .unwrap()
             .is_empty()
@@ -301,5 +301,10 @@ async fn audit_updates_do_not_double_count_and_renames_or_thread_status_do_not_r
     })
     .await
     .unwrap();
-    assert!(list_threads_for(&state, &user).await.unwrap().is_empty());
+    assert!(
+        list_threads_for(&state, &user, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

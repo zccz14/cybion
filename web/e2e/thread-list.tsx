@@ -12,9 +12,15 @@ const threads: ThreadListItem[] = [
   { id: "remote", title: "检查远程服务器连接", display_status: "failed", usage: emptyThreadUsage },
 ]
 
+const archivedSeed: ThreadListItem[] = [
+  { id: "legacy", title: "Legacy thread archive", display_status: "stopped", usage: emptyThreadUsage },
+]
+
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")
   const [created, setCreated] = useState(0)
+  const [archived, setArchived] = useState(archivedSeed)
+  const [restored, setRestored] = useState("")
   return <main className="flex h-svh flex-col bg-background text-foreground">
     <header className="flex shrink-0 items-center gap-3 border-b p-3">
       <img src="/cybion-mark.png" alt="" className="size-5 dark:invert" />
@@ -22,8 +28,9 @@ function Fixture() {
       <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button>
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>
       <span data-testid="created">{created}</span>
+      <span data-testid="restored">{restored}</span>
     </header>
-    <ThreadList threads={threads} loading={false} language={language} onCreate={() => setCreated((value) => value + 1)} />
+    <ThreadList threads={threads} archivedThreads={archived} loading={false} language={language} onCreate={() => setCreated((value) => value + 1)} onRestore={(id) => { setArchived((items) => items.filter((item) => item.id !== id)); setRestored(id) }} restoringId={null} />
   </main>
 }
 createRoot(document.getElementById("root")!).render(<StrictMode><TooltipProvider delayDuration={0}><HashRouter><Fixture /></HashRouter></TooltipProvider></StrictMode>)

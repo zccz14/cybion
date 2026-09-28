@@ -1033,6 +1033,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
         assert_eq!(thread.reasoning_effort, "high");
         assert!(thread.service_tier_fast);
         assert_eq!(thread.minimal_mode, None);
+        assert_eq!(thread.archived_at, None);
         assert_eq!(
             load_thread_defaults(&connection).unwrap(),
             ThreadDefaults {
@@ -1185,6 +1186,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
                 service_tier_fast: None,
                 context_budget_tokens: None,
                 minimal_mode: Some(override_value),
+                archived: None,
             }),
         )
         .await

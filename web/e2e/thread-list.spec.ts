@@ -35,3 +35,16 @@ test("rows stay within narrow light and dark layouts in both languages", async (
   }
   await page.screenshot({ path: "test-results/thread-list-mobile.png" })
 })
+
+test("archived threads stay hidden until their group expands, then restore in place", async ({ page }) => {
+  await page.goto("/e2e/thread-list.html")
+  await expect(page.getByRole("link")).toHaveCount(3)
+  await expect(page.getByRole("link", { name: /Legacy thread archive/ })).toHaveCount(0)
+  await page.getByRole("button", { name: "已归档 (1)" }).click()
+  await expect(page.getByRole("link")).toHaveCount(4)
+  await expect(page.getByRole("link", { name: /Legacy thread archive/ })).toBeVisible()
+  await page.getByRole("button", { name: "恢复" }).click()
+  await expect(page.getByTestId("restored")).toHaveText("legacy")
+  await expect(page.getByRole("link")).toHaveCount(3)
+  await expect(page.getByRole("button", { name: "已归档 (1)" })).toHaveCount(0)
+})

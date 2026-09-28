@@ -96,6 +96,19 @@ history remain in that destination Thread until it is deleted. Deleting the
 report executor Thread preserves independently saved report artifacts but
 removes its audit links. Other users' databases are unaffected.
 
+## Archive
+
+Archiving hides a Thread from the thread list without deleting anything.
+`GET /api/threads` returns active Threads only, and
+`GET /api/threads?archived=true` returns the archived ones; both views expose
+`archived_at`. `PATCH /api/threads/{id}` with `{"archived":true}` archives a
+Thread and `{"archived":false}` restores it. Archived Threads keep their
+history, audits, Worker calls, and recovery state, and stay usable through
+their normal endpoints; appending input does not restore them. The web UI
+lists archived Threads in a collapsed state under the thread list with a
+per-row restore action, and the conversation header offers Archive and
+Restore.
+
 ## Report-purpose Threads
 
 An account can explicitly create one visible report Thread with purpose

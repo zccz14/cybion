@@ -780,7 +780,7 @@ async fn assert_display_status(state: &AppState, user: &User, thread: &ThreadVie
     let detail = read_thread_for(state, user, thread.id.clone())
         .await
         .unwrap();
-    let list = list_threads_for(state, user).await.unwrap();
+    let list = list_threads_for(state, user, false).await.unwrap();
     let listed = list.iter().find(|item| item.id == thread.id).unwrap();
     assert_eq!(detail.display_status, expected);
     assert_eq!(listed.display_status, expected);
@@ -911,7 +911,12 @@ async fn display_status_ignores_audits_and_late_output_and_is_scoped_to_the_thre
     assert_display_status(&state, &user, &thread, "completed").await;
     assert_display_status(&state, &user, &untouched, "ready").await;
     let other = user_for_subject(&state, "status-noise-other").unwrap();
-    assert!(list_threads_for(&state, &other).await.unwrap().is_empty());
+    assert!(
+        list_threads_for(&state, &other, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(read_thread_for(&state, &other, thread.id).await.is_err());
 }
 
