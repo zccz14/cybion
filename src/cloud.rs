@@ -4537,9 +4537,15 @@ async fn process_request(
                 }
             };
             if thread.purpose == "reports" {
-                tokio::time::timeout(Duration::from_secs(1800), turn).await.unwrap_or_else(|_| {
-                    Err((thread.clone(), Box::new(ApiError::unavailable("report turn exceeded 30 minutes; continue manually to resume saved progress"))))
-                })
+                match tokio::time::timeout(Duration::from_secs(1800), turn).await {
+                    Ok(result) => result,
+                    Err(_) => Err((
+                        thread.clone(),
+                        Box::new(ApiError::unavailable(
+                            "report turn exceeded 30 minutes; continue manually to resume saved progress",
+                        )),
+                    )),
+                }
             } else {
                 turn.await
             }
