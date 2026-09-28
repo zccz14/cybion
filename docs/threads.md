@@ -21,6 +21,14 @@ the thread from durable records after a process restart. A context checkpoint
 is another history record; it summarizes an earlier prefix without removing
 the source records.
 
+An input is one Responses `input` item. Text stays a plain string; a pasted
+image makes it a message whose `content` array holds an `input_text` part and
+one `input_image` data URL per image. The append endpoints accept optional
+`images`, at most 4 per input and each a png/jpeg/webp/gif base64 data URL of
+at most 4 MiB of characters. The browser downsizes larger pastes before
+sending, and the estimate prices each stored image at a bounded token cost
+instead of its base64 length.
+
 The UI exposes `idle`, `running`, and `failed` thread states. Failures append
 an activity record and leave the thread ready for a later input.
 
