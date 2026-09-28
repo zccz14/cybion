@@ -39,6 +39,7 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         Ok(())
     }).await.unwrap();
     let spec = AuditSpec {
+        report_thread: false,
         user: user.clone(),
         input_record_id: Some(input),
         thread_id: thread.id.clone(),

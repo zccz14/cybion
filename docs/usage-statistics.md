@@ -80,7 +80,8 @@ Selecting a day opens the daily report:
 
 Daily report dates and heatmap buckets are UTC (`YYYY-MM-DD`). The activity
 calendar includes the **whole first UTC day** touched by the selected time
-range, so its count matches that date's detail. Other usage sections retain
+range. It counts all purposes, including report Threads; the selected daily
+detail counts work Threads only, so those counts can differ. Other usage sections retain
 their rolling time-range semantics. Model and request-kind filters do not
 change the activity calendar or daily report.
 
@@ -91,18 +92,28 @@ of generated claims.
 
 ## Semantic daily reports
 
-Use **Generate / update report** to summarize the active Threads and combine
-those summaries by topic. Each Thread also has its own generation control.
-Reports use the personal default upstream and model shown beside the controls;
-explicit generation can incur model charges. Unchanged summaries with the same
-source, model, upstream and output language are reused.
+Use **Generate / update report** to summarize active work Threads and combine
+those summaries by topic. Each work Thread also has a generation control.
+The visible report Thread is created from personal defaults and subsequently
+uses its own settings. Its four Controller tools read owned data and save
+versions; the button and direct conversation share normal execution, history,
+stop/continue, compaction and recovery. Explicit generation can incur charges.
+Eligible saved summaries are reused, but maintenance inference may still cost
+Tokens. Creating the empty report Thread and reading reports do not infer.
 
-Report-generation tokens are recorded separately from `reasoning_audits` and
-are visible in summary version details. They do not increase the source
-Thread's usage or the existing Token usage charts. Upstream byte traffic is
-still attributed to the account.
+All new report model requests are ordinary `reasoning_audits`, including
+compaction and retries. They increase the report Thread's and account's usage,
+not the source work Thread's usage. The report card links to a Thread-filtered
+reasoning audit page. Task usage aggregates its runs; summary version usage
+labels only the request that issued the write. A completed model request does
+not prove a report was saved. Pre-upgrade standalone `report_requests` remain
+historical usage in legacy version details, without fabricated Thread audits.
 
-See [Daily reports](daily-reports.md) for evidence provenance, versions,
-staleness, retry behavior, API contracts and generation limits. Weekly and
-monthly reports, scheduled generation and notification delivery are not part
-of this increment.
+Daily sources and deterministic daily work metrics exclude report/management
+Threads. The heatmap and general account usage continue to include them.
+Upstream byte traffic is attributed to the account.
+
+See [Daily reports](daily-reports.md) for provenance, independent versioned
+artifacts, retention/deletion caveats, snapshots, budgets and API contracts.
+Weekly/monthly reports, scheduling and notification delivery are outside this
+increment.

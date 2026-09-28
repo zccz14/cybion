@@ -1,15 +1,18 @@
 use super::*;
 
-mod generation;
+mod agent;
+mod document;
 mod source;
 #[cfg(test)]
 mod tests;
+mod tools;
 
-use generation::{Generator, generate_summary};
 use source::{Source, daily_source, thread_source};
 
-const PROMPT_VERSION: i64 = 1;
-const JOB_TIMEOUT_SECONDS: u64 = 1800;
+const PROMPT_VERSION: i64 = 2;
+const RUN_TIMEOUT_SECONDS: u64 = 1800;
+const MAX_RUN_CALLS: i64 = 256;
+const MAX_READ_BYTES: i64 = 64 * 1024 * 1024;
 
 pub(super) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS report_jobs (
@@ -103,6 +106,10 @@ pub(super) struct Summary {
     input_tokens: i64,
     output_tokens: i64,
     missing_usage_requests: i64,
+    executor_thread_id: Option<String>,
+    input_record_id: Option<i64>,
+    audit_id: Option<i64>,
+    execution_kind: String,
 }
 
 #[derive(Serialize)]
@@ -125,13 +132,22 @@ pub(super) struct Job {
     started_at: i64,
     finished_at: Option<i64>,
     error: Option<String>,
+    executor_thread_id: Option<String>,
+    input_record_id: Option<i64>,
+    source_cutoff: Option<i64>,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    missing_usage_requests: i64,
 }
 
 #[derive(Serialize)]
 pub(super) struct GenerationView {
     job: Option<Job>,
     running_job: Option<Job>,
+    resumable_job_id: Option<i64>,
     generator: Option<Value>,
+    report_thread: Option<ThreadView>,
 }
 
 #[derive(Deserialize)]
@@ -154,16 +170,39 @@ fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         started_at: row.get(8)?,
         finished_at: row.get(9)?,
         error: row.get(10)?,
+        executor_thread_id: row.get(11)?,
+        input_record_id: row.get(12)?,
+        source_cutoff: row.get(13)?,
+        requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        missing_usage_requests: 0,
     })
 }
-const JOB_SELECT: &str = "SELECT id,date,thread_id,language,status,completed_threads,total_threads,phase,started_at,finished_at,error FROM report_jobs";
+const JOB_SELECT: &str = "SELECT id,date,thread_id,language,status,completed_threads,total_threads,phase,started_at,finished_at,error,executor_thread_id,input_record_id,source_cutoff FROM report_jobs";
 fn job(connection: &Connection, id: i64) -> Result<Job, ApiError> {
-    Ok(connection.query_row(&format!("{JOB_SELECT} WHERE id=?"), [id], job_row)?)
+    let mut job = connection.query_row(&format!("{JOB_SELECT} WHERE id=?"), [id], job_row)?;
+    let usage: (i64,i64,i64,i64) = connection.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(a.input_tokens),0),COALESCE(SUM(a.output_tokens),0),COALESCE(SUM(a.input_tokens IS NULL OR a.output_tokens IS NULL),0) FROM reasoning_audits a JOIN report_runs r ON r.input_record_id=a.input_record_id WHERE r.job_id=?",
+        [id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    )?;
+    (
+        job.requests,
+        job.input_tokens,
+        job.output_tokens,
+        job.missing_usage_requests,
+    ) = usage;
+    Ok(job)
 }
 fn running_job(connection: &Connection) -> Result<Option<Job>, ApiError> {
-    Ok(connection
-        .query_row(&format!("{JOB_SELECT} WHERE status='running'"), [], job_row)
-        .optional()?)
+    let id: Option<i64> = connection
+        .query_row(
+            "SELECT id FROM report_jobs WHERE status='running'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|id| job(connection, id)).transpose()
 }
 
 fn summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
@@ -201,18 +240,32 @@ fn summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
         input_tokens: 0,
         output_tokens: 0,
         missing_usage_requests: 0,
+        executor_thread_id: row.get(14)?,
+        input_record_id: row.get(15)?,
+        audit_id: row.get(16)?,
+        execution_kind: row.get(17)?,
     })
 }
 
 fn summary(connection: &Connection, id: i64) -> Result<Summary, ApiError> {
     let mut result = connection.query_row(
-        "SELECT id,date,thread_id,source_fingerprint,source_manifest,prompt_version,model,upstream_name,language,status,content_json,error,started_at,finished_at FROM report_summaries WHERE id=?",
+        "SELECT id,date,thread_id,source_fingerprint,source_manifest,prompt_version,model,upstream_name,language,status,content_json,error,started_at,finished_at,executor_thread_id,input_record_id,audit_id,execution_kind FROM report_summaries WHERE id=?",
         [id], summary_row,
     ).optional()?.ok_or_else(|| ApiError::not_found("summary not found"))?;
-    let usage: (i64,i64,i64,i64) = connection.query_row(
-        "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(input_tokens IS NULL OR output_tokens IS NULL),0) FROM report_requests WHERE summary_id=?",
-        [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
-    )?;
+    // COMPATIBILITY: pre-schema-19 artifacts retain standalone usage. Remove
+    // the legacy reader only after retained DBs/backups have no legacy versions;
+    // Controller migration tests must prove no historical usage is lost.
+    let usage: (i64, i64, i64, i64) = if result.execution_kind == "thread" {
+        connection.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(input_tokens IS NULL OR output_tokens IS NULL),0) FROM reasoning_audits WHERE id=?",
+            [result.audit_id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        )?
+    } else {
+        connection.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(input_tokens IS NULL OR output_tokens IS NULL),0) FROM report_requests WHERE summary_id=?",
+            [id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        )?
+    };
     (
         result.requests,
         result.input_tokens,
@@ -270,12 +323,25 @@ pub(super) fn view(connection: &Connection, date: &str) -> Result<GenerationView
             job_row,
         )
         .optional()?;
+    let thread = agent::report_thread(connection)?;
     let defaults = load_thread_defaults(connection)?;
-    let upstream = upstreams::for_thread_id(connection, defaults.upstream_id.as_deref())?;
+    let (model, upstream_id) = thread
+        .as_ref()
+        .map(|thread| (thread.model.clone(), thread.upstream_id.clone()))
+        .unwrap_or((defaults.model, defaults.upstream_id));
+    let upstream = upstreams::for_thread_id(connection, upstream_id.as_deref())?;
     Ok(GenerationView {
-        job: last,
+        job: last.map(|item| job(connection, item.id)).transpose()?,
         running_job: running_job(connection)?,
-        generator: upstream.map(|u| json!({"model":defaults.model,"upstream_name":u.name})),
+        resumable_job_id: thread
+            .as_ref()
+            .filter(|t| t.status != "running")
+            .map(|t| agent::resume_candidate(connection, t))
+            .transpose()?
+            .flatten()
+            .map(|job| job.id),
+        generator: upstream.map(|u| json!({"model":model,"upstream_name":u.name})),
+        report_thread: thread,
     })
 }
 
@@ -292,9 +358,14 @@ pub(super) async fn read_summary(
 pub(super) fn recover(connection: &Connection) -> Result<(), ApiError> {
     let message = "Report generation interrupted by a Controller restart. Retry manually; completed summaries are retained.";
     for table in ["report_jobs", "report_summaries", "report_requests"] {
+        let legacy = if table == "report_jobs" {
+            " AND executor_thread_id IS NULL"
+        } else {
+            ""
+        };
         connection.execute(
             &format!(
-                "UPDATE {table} SET status='failed',finished_at=?,error=? WHERE status='running'"
+                "UPDATE {table} SET status='failed',finished_at=?,error=? WHERE status='running'{legacy}"
             ),
             params![now(), message],
         )?;
@@ -302,146 +373,122 @@ pub(super) fn recover(connection: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(super) async fn generate(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    AxumPath(date): AxumPath<String>,
-    Json(input): Json<GenerateInput>,
-) -> Result<(StatusCode, Json<Job>), ApiError> {
-    let date = report_date(Some(&date))?;
-    if date > utc_date(now())? {
-        return Err(ApiError::bad_request("cannot summarize a future date"));
-    }
-    if !matches!(input.language.as_str(), "en" | "zh") {
-        return Err(ApiError::bad_request("language must be en or zh"));
-    }
-    let thread = input.thread_id.map(|id| thread_id(&id)).transpose()?;
-    let language = input.language;
-    let prepared = user_db(&state, &identity.user, true, move |connection| {
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(active) = running_job(&tx)? {
-            if active.date == date.to_string() && active.thread_id == thread && active.language == language {
-                return Ok((active, None));
-            }
-            return Err(ApiError::conflict("another report is generating; wait for it to finish"));
-        }
-        let sources = match &thread {
-            Some(id) => vec![thread_source(&tx, date, id)?],
-            None => source::active_threads(&tx, date)?.iter()
-                .map(|id| thread_source(&tx, date, id)).collect::<Result<Vec<_>, _>>()?,
-        };
-        if sources.is_empty() || sources.iter().any(|source| source.manifest.records.is_empty()) {
-            return Err(ApiError::bad_request("no activity on this date"));
-        }
-        let generator = Generator::load(&tx, &language)?;
-        tx.execute(
-            "INSERT INTO report_jobs(date,thread_id,language,status,total_threads,started_at) VALUES(?,?,?,'running',?,?)",
-            params![date.to_string(),thread,language,sources.len() as i64,now()],
-        )?;
-        let result = job(&tx, tx.last_insert_rowid())?;
-        tx.commit()?;
-        Ok((result, Some((sources, generator))))
-    }).await?;
-    let (job, work) = prepared;
-    if let Some((sources, generator)) = work {
-        let user = identity.user;
-        let job_for_task = job.clone();
-        tokio::spawn(async move { run_job(state, user, job_for_task, sources, generator).await });
-    }
-    Ok((StatusCode::ACCEPTED, Json(job)))
-}
+pub(super) use agent::{ensure_report_thread, generate};
 
-async fn run_job(
-    state: AppState,
-    user: User,
-    job: Job,
-    sources: Vec<Source>,
-    generator: Generator,
-) {
-    let result = tokio::time::timeout(
-        Duration::from_secs(JOB_TIMEOUT_SECONDS),
-        run_work(&state, &user, &job, sources, &generator),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        Err(ApiError::unavailable(
-            "report exceeded the 30-minute job budget; retry to reuse completed summaries",
-        ))
-    });
-    let error = result.err().map(|error| error.message);
-    // RECOVERY: this is the detached job boundary. Persist terminal failures so
-    // reloading the page cannot turn an interrupted request into apparent success.
-    let id = job.id;
-    if let Err(error) = user_db(&state, &user, false, move |connection| {
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let status = if error.is_some() { "failed" } else { "completed" };
-        tx.execute(
-            "UPDATE report_jobs SET status=?,finished_at=?,error=? WHERE id=? AND status='running'",
-            params![status,now(),error,id],
+pub(super) fn migrate(c: &Connection) -> Result<(), ApiError> {
+    for (table, name, definition) in [
+        (
+            "report_jobs",
+            "executor_thread_id",
+            "TEXT REFERENCES threads(id) ON DELETE SET NULL",
+        ),
+        (
+            "report_jobs",
+            "input_record_id",
+            "INTEGER REFERENCES history_records(id) ON DELETE SET NULL",
+        ),
+        ("report_jobs", "source_cutoff", "INTEGER"),
+        (
+            "report_summaries",
+            "executor_thread_id",
+            "TEXT REFERENCES threads(id) ON DELETE SET NULL",
+        ),
+        (
+            "report_summaries",
+            "input_record_id",
+            "INTEGER REFERENCES history_records(id) ON DELETE SET NULL",
+        ),
+        (
+            "report_summaries",
+            "audit_id",
+            "INTEGER REFERENCES reasoning_audits(id) ON DELETE SET NULL",
+        ),
+        (
+            "report_summaries",
+            "generator_fingerprint",
+            "TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "report_summaries",
+            "execution_kind",
+            "TEXT NOT NULL DEFAULT 'legacy'",
+        ),
+    ] {
+        let exists: bool = c.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?)"),
+            [name],
+            |r| r.get(0),
         )?;
-        tx.execute(
-            "UPDATE report_requests SET status='failed',finished_at=?,error=? WHERE status='running' AND summary_id IN (SELECT id FROM report_summaries WHERE job_id=?)",
-            params![now(),error,id],
-        )?;
-        tx.execute(
-            "UPDATE report_summaries SET status='failed',finished_at=?,error=? WHERE job_id=? AND status='running'",
-            params![now(),error,id],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }).await {
-        tracing::error!(job_id=id,error=%error.message,"could not settle report job");
-    }
-}
-
-async fn run_work(
-    state: &AppState,
-    user: &User,
-    job: &Job,
-    sources: Vec<Source>,
-    generator: &Generator,
-) -> Result<(), ApiError> {
-    let mut failed = 0;
-    for (index, source) in sources.into_iter().enumerate() {
-        if generate_summary(state, user, job.id, source, generator)
-            .await
-            .is_err()
-        {
-            failed += 1;
-        }
-        let id = job.id;
-        let done = index as i64 + 1;
-        user_db(state, user, false, move |c| {
+        if !exists {
             c.execute(
-                "UPDATE report_jobs SET completed_threads=? WHERE id=?",
-                params![done, id],
+                &format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"),
+                [],
             )?;
-            Ok(())
-        })
-        .await?;
+        }
     }
-    if failed > 0 {
-        return Err(ApiError::unavailable(format!(
-            "{failed} Thread summaries failed. Retry the failed Threads; completed summaries will be reused."
-        )));
-    }
-    if job.thread_id.is_some() {
-        return Ok(());
-    }
-    let date = report_date(Some(&job.date))?;
-    let source = user_db(state, user, false, move |c| {
-        let tx = c.transaction()?;
-        let source = daily_source(&tx, date)?;
-        source::require_current_children(&tx, &source)?;
-        Ok(source)
-    })
-    .await?;
-    let id = job.id;
-    user_db(state, user, false, move |c| {
-        c.execute("UPDATE report_jobs SET phase='daily' WHERE id=?", [id])?;
-        Ok(())
-    })
-    .await?;
-    generate_summary(state, user, job.id, source, generator).await?;
+    c.execute_batch(r#"
+CREATE UNIQUE INDEX IF NOT EXISTS threads_one_report_thread ON threads(purpose) WHERE purpose='reports';
+CREATE TABLE IF NOT EXISTS report_runs (
+ input_record_id INTEGER PRIMARY KEY REFERENCES history_records(id) ON DELETE CASCADE,
+ executor_thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+ job_id INTEGER REFERENCES report_jobs(id) ON DELETE SET NULL,
+ started_at INTEGER NOT NULL,
+ read_bytes INTEGER NOT NULL DEFAULT 0,
+ generator_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS report_runs_job ON report_runs(job_id);
+CREATE TABLE IF NOT EXISTS report_snapshots (
+ id TEXT PRIMARY KEY,
+ job_id INTEGER NOT NULL REFERENCES report_jobs(id) ON DELETE CASCADE,
+ thread_id TEXT REFERENCES threads(id) ON DELETE CASCADE,
+ source_json TEXT NOT NULL,
+ expected_version INTEGER,
+ read_cursor INTEGER NOT NULL DEFAULT 0,
+ total_units INTEGER,
+ read_complete INTEGER NOT NULL DEFAULT 0,
+ summary_id INTEGER REFERENCES report_summaries(id) ON DELETE SET NULL,
+ write_error TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS report_snapshot_scope ON report_snapshots(job_id,COALESCE(thread_id,''));
+CREATE TABLE IF NOT EXISTS report_source_units (
+ snapshot_id TEXT NOT NULL REFERENCES report_snapshots(id) ON DELETE CASCADE,
+ ordinal INTEGER NOT NULL,
+ text TEXT NOT NULL,
+ PRIMARY KEY(snapshot_id,ordinal)
+);
+CREATE TRIGGER IF NOT EXISTS report_executor_delete BEFORE DELETE ON threads WHEN OLD.purpose='reports' BEGIN
+ UPDATE report_jobs SET status='failed',finished_at=unixepoch(),error='Report Thread deleted; saved reports retained' WHERE executor_thread_id=OLD.id AND status='running';
+ DELETE FROM report_snapshots WHERE job_id IN (SELECT id FROM report_jobs WHERE executor_thread_id=OLD.id);
+END;
+"#)?;
     Ok(())
+}
+
+pub(super) use agent::{
+    check_budget, finish, on_continue, on_prompt, prefix, prepare_task, register_run,
+};
+pub(super) use tools::answer_tool;
+
+pub(super) fn agent_config(
+    model: &str,
+    upstream: &Upstream,
+    effort: Option<&str>,
+    fast: bool,
+) -> agent::Config {
+    agent::Config {
+        model: model.to_owned(),
+        upstream_id: upstream.id.clone(),
+        upstream_name: upstream.name.clone(),
+        upstream_url: upstream.base_url.clone(),
+        reasoning_effort: effort.unwrap_or_default().to_owned(),
+        service_tier_fast: fast,
+    }
+}
+pub(super) use agent::validate_config;
+pub(super) fn failed_message(c: &Connection, input: i64) -> Result<Option<String>, ApiError> {
+    let Some(id) = agent::run_job_id(c, input)? else {
+        return Ok(None);
+    };
+    let job = job(c, id)?;
+    Ok((job.status == "failed").then_some(job.error).flatten())
 }

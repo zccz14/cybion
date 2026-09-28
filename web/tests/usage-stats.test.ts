@@ -58,3 +58,14 @@ test("daily activity defines non-checkpoint protocol records and exposes a UTC l
   assert.match(source, /statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，包含范围首日的完整数据；不受模型和请求类型筛选影响。"/)
   assert.match(source, /<Badge variant="outline">\{t\("statsTimezone"\)\}: \{timezone\}<\/Badge>/)
 })
+
+
+test("report execution is visibly scoped to its Thread and audit filters follow evidence links", () => {
+  assert.match(reportSource, /\/api\/reports\/thread/)
+  assert.match(reportSource, /reportAuditPath\(reportThread.id\)/)
+  assert.match(reportSource, /control\.mutate\("cancel"\)/)
+  assert.match(reportSource, /control\.mutate\("continue"\)/)
+  assert.match(source, /current\.purpose === "reports" && <ReportThreadNotice/)
+  assert.match(source, /const threadFilter = filters\.get\("thread_id"\)/)
+  assert.match(source, /if \(threadFilter\) params\.set\("thread_id", threadFilter\)/)
+})

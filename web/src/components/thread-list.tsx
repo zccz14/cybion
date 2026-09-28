@@ -9,6 +9,7 @@ import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import type { ThreadUsage } from "@/lib/thread-usage"
 
 export type ThreadListItem = {
+  purpose?: "work" | "reports"
   id: string
   title: string
   display_status: ThreadDisplayStatus

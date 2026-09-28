@@ -18,7 +18,7 @@ pub(super) struct Manifest {
     pub background_input_id: Option<i64>,
     pub children: Vec<Child>,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Source {
     pub date: String,
     pub thread_id: Option<String>,
@@ -27,7 +27,7 @@ pub(super) struct Source {
     pub manifest: Manifest,
 }
 
-fn make_source(
+pub(super) fn make_source(
     date: NaiveDate,
     thread_id: Option<String>,
     title: String,
@@ -47,13 +47,17 @@ fn make_source(
 
 pub(super) fn active_threads(c: &Connection, date: NaiveDate) -> Result<Vec<String>, ApiError> {
     let (start, end) = utc_day_bounds(date);
-    Ok(c.prepare("SELECT DISTINCT thread_id FROM history_records WHERE kind<>'checkpoint' AND created_at>=? AND created_at<? ORDER BY thread_id")?
+    Ok(c.prepare("SELECT DISTINCT h.thread_id FROM history_records h JOIN threads t ON t.id=h.thread_id WHERE t.purpose='work' AND h.kind<>'checkpoint' AND h.created_at>=? AND h.created_at<? ORDER BY h.thread_id")?
         .query_map(params![start,end],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
 pub(super) fn thread_source(c: &Connection, date: NaiveDate, id: &str) -> Result<Source, ApiError> {
     let title: String = c
-        .query_row("SELECT title FROM threads WHERE id=?", [id], |r| r.get(0))
+        .query_row(
+            "SELECT title FROM threads WHERE id=? AND purpose='work'",
+            [id],
+            |r| r.get(0),
+        )
         .optional()?
         .ok_or_else(|| ApiError::not_found("thread not found"))?;
     let (start, end) = utc_day_bounds(date);
@@ -120,7 +124,6 @@ pub(super) fn require_current_children(c: &Connection, source: &Source) -> Resul
 
 pub(super) struct Unit {
     pub text: String,
-    pub evidence: HashSet<i64>,
 }
 
 // Textual evidence is fragmented, never silently truncated. Binary images and
@@ -176,8 +179,7 @@ pub(super) fn units(c: &Connection, source: &Source) -> Result<(Vec<Unit>, Strin
             let document = saved
                 .content
                 .ok_or_else(|| ApiError::internal("completed summary has no content"))?;
-            let evidence = citations(&document);
-            units.push(Unit{text:json!({"thread_id":child.thread_id,"summary_version":saved.id,"summary":document}).to_string(),evidence});
+            units.push(Unit{text:json!({"thread_id":child.thread_id,"summary_version":saved.id,"summary":document}).to_string()});
         }
         return Ok((units, String::new()));
     }
@@ -212,7 +214,7 @@ pub(super) fn units(c: &Connection, source: &Source) -> Result<(Vec<Unit>, Strin
         let text = value.to_string();
         let fragments = split_utf8_by_bytes(&text, 16 * 1024);
         for (part, fragment) in fragments.iter().enumerate() {
-            units.push(Unit{text:json!({"record_id":id,"thread_id":thread,"kind":kind,"created_at":created_at,"part":part+1,"parts":fragments.len(),"payload_fragment":fragment}).to_string(),evidence:HashSet::from([id])});
+            units.push(Unit{text:json!({"record_id":id,"thread_id":thread,"kind":kind,"created_at":created_at,"part":part+1,"parts":fragments.len(),"payload_fragment":fragment}).to_string()});
         }
     }
     let background = match source.manifest.background_input_id {
