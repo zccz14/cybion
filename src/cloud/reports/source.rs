@@ -151,6 +151,22 @@ fn text_projection(value: &mut Value) {
     }
 }
 
+fn screenshot_projection(value: &mut Value) {
+    // INVARIANT: the Worker call ledger identifies screenshot results. Their
+    // structured result is encoded inside Responses function_call_output.output;
+    // ordinary bash stdout is never classified as an image by size or appearance.
+    let Some(Value::String(output)) = value.get_mut("output") else {
+        return;
+    };
+    let Ok(mut result) = serde_json::from_str::<Value>(output) else {
+        return;
+    };
+    if let Some(data) = result.get_mut("data") {
+        *data = json!("[binary screenshot omitted; inspect original record]");
+        *output = result.to_string();
+    }
+}
+
 pub(super) fn units(c: &Connection, source: &Source) -> Result<(Vec<Unit>, String), ApiError> {
     if source.thread_id.is_none() {
         require_current_children(c, source)?;
@@ -183,9 +199,15 @@ pub(super) fn units(c: &Connection, source: &Source) -> Result<(Vec<Unit>, Strin
     {
         return Err(ApiError::conflict("source records changed or were deleted"));
     }
+    let screenshots = c.prepare(
+        "SELECT output_record_id FROM worker_calls WHERE thread_id=? AND output_record_id IS NOT NULL AND name IN ('browser_control','computer_use') AND json_extract(arguments_json,'$.action')='screenshot'",
+    )?.query_map([thread], |row| row.get::<_, i64>(0))?.collect::<rusqlite::Result<HashSet<_>>>()?;
     let mut units = Vec::new();
     for (id, kind, created_at, payload) in records {
         let mut value: Value = serde_json::from_str(&payload).map_err(ApiError::internal)?;
+        if screenshots.contains(&id) {
+            screenshot_projection(&mut value);
+        }
         text_projection(&mut value);
         let text = value.to_string();
         let fragments = split_utf8_by_bytes(&text, 16 * 1024);

@@ -64,7 +64,9 @@ The last pre-day user input can be included as background, up to 4096
 characters, but cannot be cited as same-day evidence or counted as that day's
 accomplishment. Binary images/files and encrypted reasoning have explicit
 omission markers rather than being interpreted as text; inspect the original
-record for those materials. Textual payloads are fragmented rather than
+record for those materials. Worker screenshots are identified by the call
+ledger, including Base64 carried inside serialized tool output. Ordinary bash
+stdout is not classified as an image by size or appearance. Textual payloads are fragmented rather than
 silently truncated. Summaries remain selective condensations, not a guarantee
 that every source fact is repeated.
 
@@ -108,9 +110,9 @@ remains explicit.
 | --- | --- |
 | Raw retained payloads per Thread day | 16 MiB; larger input fails explicitly |
 | Textual fragment | 16 KiB (UTF-8 boundaries preserved) |
-| Packed evidence per model call | 48 KiB, plus bounded instructions/background |
-| Initial chunks per summary | 32 |
-| Model calls per summary / per job | 64 / 128 |
+| Packed evidence per model call | 192 KiB, plus bounded instructions/background |
+| Initial chunks per summary | 64 |
+| Model calls per summary / per job | 128 / 256 |
 | Requested maximum output tokens per call | 16,384 (provider must honor the request) |
 | Validated summary JSON | 16 KiB |
 | Items per section / characters per item | 8 / 500 |
@@ -174,3 +176,24 @@ Run the opt-in probe with:
 ```sh
 cargo test --locked daily_report_retained_history_probe -- --ignored --nocapture
 ```
+
+A read-only production-size probe before release found Thread-day payloads up
+to 5.66 MB and 157 initial chunks at the original 48 KiB request width. That
+initial 32-chunk budget would have rejected useful retained days, so delivery
+was held. The final request width is 192 KiB with 64 initial chunks (128 calls
+per summary, 256 per job), plus explicit Worker screenshot projection. A >6 MB
+text fixture checks that the final source tail reaches a leaf call. Context
+limits still depend on the selected model: a provider can reject a large
+request, in which case the attempt fails visibly rather than dropping evidence.
+
+With the final projection/width, the same read-only probe covered all active
+Threads on 2026-09-26/27/28: maximum initial chunks per Thread were 11/30/33;
+none exceeded 64. Conservative worst-case call counts (including reduction
+and the daily aggregate) were 67/192/69, within the 256-call job budget. A fourth
+synthetic-only real-upstream request used 161,245 bytes of evidence (34,657
+reported input tokens), completed in 12.79 seconds, passed validation, and
+cited the final source record. This checks one large call, not full-day
+inference latency: a busy day can still exceed the 30-minute deadline and
+require a manual retry to reuse already completed Thread summaries. No
+full-history model sweep or real-user-day generation was performed for these
+probes.

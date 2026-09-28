@@ -550,7 +550,7 @@ async fn large_thread_day_summarizes_all_fragments_before_reducing_and_keeps_pri
     let (background,large)=user_db(&state,&user,false,move|c|{
         let(start,_)=utc_day_bounds(date());
         let before=persist_history_record(c,HistoryRecordInsert{thread_id:&copy,kind:"input",payload:&json!({"role":"user","content":"Yesterday's result must not be reported as today's achievement."}),created_at:start-1})?;
-        let large=persist_history_record(c,HistoryRecordInsert{thread_id:&copy,kind:"tool_output",payload:&json!({"output":"部署结果".repeat(12000)}),created_at:start+2})?;
+        let large=persist_history_record(c,HistoryRecordInsert{thread_id:&copy,kind:"tool_output",payload:&json!({"output":"部署结果".repeat(90000)}),created_at:start+2})?;
         Ok((before,large))
     }).await.unwrap();
     let initial = begin(&state, &user, Some(thread)).await;
@@ -558,7 +558,7 @@ async fn large_thread_day_summarizes_all_fragments_before_reducing_and_keeps_pri
     let bodies = &fake.lock().await.bodies;
     assert!(bodies.len() > 2);
     for body in bodies {
-        assert!(body["input"][1]["content"].as_str().unwrap().len() < 64 * 1024);
+        assert!(body["input"][1]["content"].as_str().unwrap().len() < 208 * 1024);
     }
     let report = read(&state, &user).await;
     let saved = report.threads[0]
@@ -760,6 +760,9 @@ async fn binary_projection_and_evidence_limits_are_explicit_and_deleted_snapshot
     user_db(&state,&user,false,move|c| {
         let(start,_)=utc_day_bounds(date());
         let media=persist_history_record(c,HistoryRecordInsert{thread_id:&thread,kind:"response_output",created_at:start+2,payload:&json!({"type":"image_generation_call","result":"SECRET_BINARY","encrypted_content":"SECRET_ENCRYPTED","file_data":"SECRET_FILE","input":{"image_url":"data:image/png;base64,SECRET_IMAGE"},"text":"Readable outcome"})})?;
+        let screenshot = persist_history_record(c,HistoryRecordInsert{thread_id:&thread,kind:"tool_output",created_at:start+3,payload:&json!({"type":"function_call_output","call_id":"screenshot-call","output":json!({"data":"SECRET_SCREENSHOT".repeat(10000),"width":390}).to_string()})})?;
+        c.execute("INSERT INTO workers(id,label,token_hash,created_at) VALUES('report-test-worker','fixture','fixture-hash',?)",[start])?;
+        c.execute("INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id) VALUES('screenshot-call','report-test-worker',?,'browser_control',?, 'completed',?,?)",params![thread,json!({"action":"screenshot"}).to_string(),start,screenshot])?;
         let source=thread_source(c,date(),&thread)?;
         let (units,_) = source::units(c,&source)?;
         let text=units.iter().map(|u|u.text.as_str()).collect::<String>();
@@ -767,6 +770,7 @@ async fn binary_projection_and_evidence_limits_are_explicit_and_deleted_snapshot
         assert!(text.contains("omitted"));
         assert!(text.contains("Readable outcome"));
         assert!(units.iter().any(|u|u.evidence.contains(&media)));
+        assert!(units.iter().any(|u|u.evidence.contains(&screenshot) && u.text.contains("binary screenshot omitted") && u.text.contains("390")));
         c.execute("DELETE FROM history_records WHERE id=?",[record])?;
         assert_eq!(source::units(c,&source).err().unwrap().status,StatusCode::CONFLICT);
         // Oversized retained evidence must fail before sending any model call.
@@ -837,4 +841,38 @@ fn daily_report_retained_history_probe() {
         assert!(began.elapsed() < Duration::from_secs(3));
         previous = total;
     }
+}
+
+#[tokio::test]
+async fn multi_megabyte_text_day_fits_bounded_chunks_without_dropping_the_tail() {
+    let (_root, state, user, fake, server) = fixture().await;
+    let (thread, _) = evidence(&state, &user, "Retained-scale").await;
+    let copy = thread.clone();
+    let last=user_db(&state,&user,false,move|c| {
+        let (start,_) = utc_day_bounds(date());
+        persist_history_record(c,HistoryRecordInsert{thread_id:&copy,kind:"tool_output",created_at:start+2,payload:&json!({"output":format!("{}TAIL_EVIDENCE_RETAINED", "build log abc def ".repeat(370000))})})
+    }).await.unwrap();
+    let job = begin(&state, &user, Some(thread)).await;
+    assert_eq!(wait(&state, &user, job.id).await.status, "completed");
+    let bodies = &fake.lock().await.bodies;
+    assert!(bodies.len() > 32 && bodies.len() <= 128);
+    assert!(bodies.iter().any(|body| {
+        body["input"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("TAIL_EVIDENCE_RETAINED")
+    }));
+    for body in bodies {
+        assert!(body["input"][1]["content"].as_str().unwrap().len() < 208 * 1024);
+    }
+    let saved = read(&state, &user)
+        .await
+        .threads
+        .remove(0)
+        .daily_summary
+        .unwrap()
+        .saved
+        .unwrap();
+    assert!(source::citations(saved.content.as_ref().unwrap()).contains(&last));
+    server.abort();
 }

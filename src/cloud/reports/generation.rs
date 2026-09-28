@@ -1,9 +1,9 @@
 use super::*;
 use source::{Unit, citations};
 
-const INPUT_BYTES: usize = 48 * 1024;
+const INPUT_BYTES: usize = 192 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 16 * 1024;
-const MAX_CALLS: usize = 64;
+const MAX_CALLS: usize = 128;
 const CALL_TIMEOUT_SECONDS: u64 = 180;
 const THREAD_SECTIONS: [&str; 4] = ["goal", "progress", "decisions", "next_steps"];
 const DAY_SECTIONS: [&str; 4] = ["completed", "decisions", "in_progress", "blocked"];
@@ -207,7 +207,7 @@ async fn build_document(
             calls += 1;
             if calls > MAX_CALLS {
                 return Err(ApiError::unavailable(
-                    "summary exceeded the 64-request budget",
+                    "summary exceeded the 128-request budget",
                 ));
             }
             let text =
@@ -218,7 +218,7 @@ async fn build_document(
         if outputs.len() == 1 {
             return Ok(outputs.remove(0));
         }
-        // Each validated output is <=16 KiB, so a 48 KiB merge group strictly
+        // Each validated output is <=16 KiB, so a 192 KiB merge group strictly
         // reduces the number of chunks. No truncation or unbounded reduction.
         chunks = pack(
             outputs
@@ -247,8 +247,8 @@ async fn request(
             "SELECT COUNT(*) FROM report_requests WHERE summary_id IN (SELECT id FROM report_summaries WHERE job_id=(SELECT job_id FROM report_summaries WHERE id=?))",
             [summary_id], |row| row.get(0),
         )?;
-        if calls >= 128 {
-            return Err(ApiError::unavailable("daily report job exceeded the 128-request budget; completed summaries are reusable"));
+        if calls >= 256 {
+            return Err(ApiError::unavailable("daily report job exceeded the 256-request budget; completed summaries are reusable"));
         }
         c.execute(
             "INSERT INTO report_requests(summary_id,status,started_at) VALUES(?,'running',?)",
