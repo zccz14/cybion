@@ -3700,14 +3700,11 @@ async fn request_thread_title(
     thread: &ThreadView,
     upstream: &Upstream,
 ) -> Result<String, ApiError> {
-    let (context, workers, contexts) = user_db(state, user, false, {
+    let context = user_db(state, user, false, {
         let thread_id = thread.id.clone();
         move |connection| {
             let tail = latest_protocol_record_id(connection, &thread_id)?;
-            let context = compile_thread_context(connection, &thread_id, tail)?;
-            let workers = registered_workers(connection)?;
-            let contexts = context_summaries(connection, None)?;
-            Ok((context, workers, contexts))
+            compile_thread_context(connection, &thread_id, tail)
         }
     })
     .await?;
@@ -3730,7 +3727,7 @@ async fn request_thread_title(
         false,
         false,
         Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
-        Some(developer_prefix(&contexts, &workers)),
+        None,
         None,
     )
     .await?;
@@ -5241,49 +5238,6 @@ fn context_summaries(
         .map_err(Into::into)
 }
 
-fn developer_prefix(contexts: &[ContextSummary], workers: &[WorkerSummary]) -> Value {
-    let context_section = if contexts.is_empty() {
-        None
-    } else {
-        let list = contexts
-            .iter()
-            .map(|context| {
-                format!(
-                    "- context_id: {} ({}) — {}",
-                    context.context_id, context.name, context.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(format!(
-            "Contexts (top-level; content is intentionally omitted from this initial context):\n{list}\n\nUse read_context to read a context and discover its direct children. Use context_id values from this list or from children returned by read_context to explore further levels as needed."
-        ))
-    };
-    let list = workers
-        .iter()
-        .map(|worker| format!("- worker_id: {} ({})", worker.id, worker.label))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let worker_section = format!(
-        "Workers:\n{}\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.\nWorkers listed above are registered devices, not necessarily online. Availability is checked when a tool is called.",
-        list
-    );
-    let content = context_section
-        .into_iter()
-        .chain(std::iter::once(worker_section))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    json!({
-        "role": "developer",
-        "content": content,
-    })
-}
-
-#[allow(dead_code)]
-fn worker_developer_prefix(workers: &[WorkerSummary]) -> Value {
-    developer_prefix(&[], workers)
-}
-
 fn truncate(value: &str, limit: usize) -> String {
     let mut end = value.len();
     for (index, _) in value.char_indices() {
@@ -5368,21 +5322,20 @@ async fn request_agent(
         }
         let (prefix, has_workers) = if thread.purpose == "reports" {
             (
-                reports::prefix(state, user, source_record_idx)
-                    .await
-                    .map_err(|error| (thread.clone(), Box::new(error)))?,
+                Some(
+                    reports::prefix(state, user, source_record_idx)
+                        .await
+                        .map_err(|error| (thread.clone(), Box::new(error)))?,
+                ),
                 false,
             )
         } else {
-            let (workers, contexts) = user_db(state, user, false, |connection| {
-                Ok((
-                    registered_workers(connection)?,
-                    context_summaries(connection, None)?,
-                ))
+            let workers = user_db(state, user, false, |connection| {
+                registered_workers(connection)
             })
             .await
             .map_err(|error| (thread.clone(), Box::new(error)))?;
-            (developer_prefix(&contexts, &workers), !workers.is_empty())
+            (None, !workers.is_empty())
         };
         let response = match responses_request_with_options(
             state,
@@ -5402,7 +5355,7 @@ async fn request_agent(
             true,
             true,
             None,
-            Some(prefix),
+            prefix,
             Some(cancellation.clone()),
         )
         .await
@@ -5596,16 +5549,9 @@ async fn compact_thread_context(
         ));
     }
     let prefix = if thread.purpose == "reports" {
-        reports::prefix(state, user, source_record_idx).await?
+        Some(reports::prefix(state, user, source_record_idx).await?)
     } else {
-        let (workers, contexts) = user_db(state, user, false, |connection| {
-            Ok((
-                registered_workers(connection)?,
-                context_summaries(connection, None)?,
-            ))
-        })
-        .await?;
-        developer_prefix(&contexts, &workers)
+        None
     };
     let summary = compact_protocol_context(
         state,
@@ -5718,7 +5664,7 @@ async fn compact_protocol_context(
     items: &[Value],
     metadata: &[ProtocolRecordMetadata],
     cancellation: watch::Receiver<bool>,
-    worker_prefix: Value,
+    request_prefix: Option<Value>,
 ) -> Result<String, ApiError> {
     if items.is_empty() || items.len() != metadata.len() {
         return Err(ApiError::conflict(
@@ -5741,7 +5687,7 @@ async fn compact_protocol_context(
             model,
             compaction_input(prefix.as_ref(), raw_items, raw_metadata),
             Some(cancellation.clone()),
-            Some(worker_prefix.clone()),
+            request_prefix.clone(),
         )
         .await
         {
@@ -5761,7 +5707,7 @@ async fn compact_protocol_context(
                         &raw_items[0],
                         &raw_metadata[0],
                         cancellation.clone(),
-                        worker_prefix.clone(),
+                        request_prefix.clone(),
                     )
                     .await;
                 }
@@ -5783,7 +5729,7 @@ async fn compact_protocol_context(
                             &raw_metadata[..left_len],
                         ),
                         Some(cancellation.clone()),
-                        Some(worker_prefix.clone()),
+                        request_prefix.clone(),
                     )
                     .await
                     {
@@ -5810,7 +5756,7 @@ async fn compact_protocol_context(
                                 &raw_items[0],
                                 &raw_metadata[0],
                                 cancellation.clone(),
-                                worker_prefix.clone(),
+                                request_prefix.clone(),
                             )
                             .await?;
                             prefix = Some(compacted_checkpoint_item(&summary));
@@ -5840,7 +5786,7 @@ async fn summarize_context_once(
     model: &str,
     items: Vec<Value>,
     cancellation: Option<watch::Receiver<bool>>,
-    developer_prefix: Option<Value>,
+    prefix: Option<Value>,
 ) -> Result<String, ApiError> {
     let response = responses_request_with_options(
         state,
@@ -5859,7 +5805,7 @@ async fn summarize_context_once(
         false,
         false,
         Some(CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS),
-        developer_prefix,
+        prefix,
         cancellation,
     )
     .await?;
@@ -5975,7 +5921,7 @@ async fn compact_oversized_record(
     item: &Value,
     metadata: &ProtocolRecordMetadata,
     cancellation: watch::Receiver<bool>,
-    worker_prefix: Value,
+    request_prefix: Option<Value>,
 ) -> Result<String, ApiError> {
     let encoded = serde_json::to_string(item).map_err(ApiError::internal)?;
     let digest = format!("{:x}", Sha256::digest(encoded.as_bytes()));
@@ -6026,7 +5972,7 @@ async fn compact_oversized_record(
                 model,
                 compaction_input(fragment_prefix.as_ref(), raw_fragments, raw_metadata),
                 Some(cancellation.clone()),
-                Some(worker_prefix.clone()),
+                request_prefix.clone(),
             )
             .await
             {
@@ -6061,7 +6007,7 @@ async fn compact_oversized_record(
                         &raw_metadata[..left_len],
                     ),
                     Some(cancellation.clone()),
-                    Some(worker_prefix.clone()),
+                    request_prefix.clone(),
                 )
                 .await
                 {
@@ -6164,7 +6110,7 @@ async fn responses_request_with_options(
     web_search: bool,
     image_generation: bool,
     max_output_tokens: Option<usize>,
-    developer_prefix: Option<Value>,
+    prefix: Option<Value>,
     cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<ResponsesResult, ApiError> {
     let id = thread_id.to_owned();
@@ -6208,7 +6154,7 @@ async fn responses_request_with_options(
         web_search,
         image_generation,
         max_output_tokens,
-        developer_prefix,
+        prefix,
         Some((audit, cancellation)),
     );
     if reporting {
@@ -6238,7 +6184,7 @@ async fn send_responses_request(
     web_search: bool,
     image_generation: bool,
     max_output_tokens: Option<usize>,
-    developer_prefix: Option<Value>,
+    prefix: Option<Value>,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
 ) -> Result<ResponsesResult, ApiError> {
     let mut payload = responses_payload_with_prefix(
@@ -6251,7 +6197,7 @@ async fn send_responses_request(
         web_search,
         image_generation,
         max_output_tokens,
-        developer_prefix,
+        prefix,
     );
     if let Some((spec, _)) = &audit
         && spec.report_thread
@@ -6867,9 +6813,9 @@ fn responses_payload_with_prefix(
     web_search: bool,
     image_generation: bool,
     max_output_tokens: Option<usize>,
-    developer_prefix: Option<Value>,
+    prefix: Option<Value>,
 ) -> Value {
-    let input = match (developer_prefix, input) {
+    let input = match (prefix, input) {
         (Some(prefix), Value::Array(mut items)) => {
             items.insert(0, prefix);
             Value::Array(items)
@@ -7052,6 +6998,40 @@ struct ReadContextArguments {
     context_id: String,
 }
 
+async fn read_context_tool_output(
+    state: &AppState,
+    user: &User,
+    input: &str,
+) -> Result<Value, ApiError> {
+    let arguments: ReadContextArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!(
+            "read_context arguments must contain an explicit context_id: {error}"
+        ))
+    })?;
+    let context = read_context_for(state, user, arguments.context_id).await?;
+    serde_json::to_value(context).map_err(ApiError::internal)
+}
+
+async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
+    let contexts = user_db(state, user, false, |connection| {
+        context_summaries(connection, None)
+    })
+    .await?;
+    Ok(json!({ "contexts": contexts }))
+}
+
+async fn list_workers_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
+    let workers = user_db(state, user, false, |connection| {
+        registered_workers(connection)
+    })
+    .await?;
+    let workers = workers
+        .iter()
+        .map(|worker| json!({"worker_id": worker.id, "label": worker.label}))
+        .collect::<Vec<_>>();
+    Ok(json!({ "workers": workers }))
+}
+
 async fn start_response_tool(
     state: &AppState,
     user: &User,
@@ -7088,18 +7068,19 @@ async fn start_response_tool(
         ),
         _ => return Ok(None),
     };
-    if name == "read_context" {
-        let output = match serde_json::from_str::<ReadContextArguments>(input) {
-            Ok(arguments) => match read_context_for(state, user, arguments.context_id).await {
-                Ok(context) => serde_json::to_value(context).map_err(ApiError::internal)?,
-                Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
-                    json!({"error":error.message})
-                }
-                Err(error) => return Err(error),
-            },
-            Err(error) => {
-                json!({"error":format!("read_context arguments must contain an explicit context_id: {error}")})
+    let controller_output = match name.as_str() {
+        "read_context" => Some(read_context_tool_output(state, user, input).await),
+        "cybion_list_contexts" => Some(list_contexts_tool_output(state, user).await),
+        "cybion_list_workers" => Some(list_workers_tool_output(state, user).await),
+        _ => None,
+    };
+    if let Some(output) = controller_output {
+        let output = match output {
+            Ok(output) => output,
+            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                json!({"error":error.message})
             }
+            Err(error) => return Err(error),
         };
         let output = json!({
             "type": output_type,
@@ -8915,49 +8896,7 @@ mod tests {
     }
 
     #[test]
-    fn developer_prefix_lists_only_top_level_context_metadata() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("contexts.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        connection.execute_batch(USER_SCHEMA).unwrap();
-        let parent = Uuid::new_v4().to_string();
-        let child = Uuid::new_v4().to_string();
-        connection
-            .execute(
-                "INSERT INTO contexts(id,name,description,content) VALUES(?,?,?,?)",
-                params![
-                    &parent,
-                    "Skills",
-                    "Reusable worker skills",
-                    "top-secret parent content"
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
-                params![
-                    &child,
-                    "Bash skill",
-                    "Run bash",
-                    "worker_id = 'worker'; path = '/skill'",
-                    &parent
-                ],
-            )
-            .unwrap();
-        let contexts = context_summaries(&connection, None).unwrap();
-        let prefix = developer_prefix(&contexts, &[]);
-        let content = prefix["content"].as_str().unwrap();
-        assert!(content.contains(&parent));
-        assert!(content.contains("Skills"));
-        assert!(content.contains("Reusable worker skills"));
-        assert!(!content.contains(&child));
-        assert!(!content.contains("top-secret parent content"));
-        assert!(!content.contains("worker_id = 'worker'"));
-    }
-
-    #[test]
-    fn registered_workers_keep_prefix_and_tools_stable_across_runtime_changes() {
+    fn registered_workers_keep_tools_stable_across_runtime_changes() {
         let root = tempfile::tempdir().unwrap();
         let connection = open_user(&root.path().join("workers.sqlite3"), true).unwrap();
         for (id, name, status, last_seen) in [
@@ -8995,9 +8934,9 @@ mod tests {
             true,
             true,
             None,
-            Some(developer_prefix(&[], &workers)),
+            None,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 8);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -9012,7 +8951,7 @@ mod tests {
             true,
             true,
             None,
-            Some(developer_prefix(&[], &workers)),
+            None,
         );
         assert_eq!(
             serde_json::to_vec(&before).unwrap(),
@@ -9023,38 +8962,13 @@ mod tests {
     }
 
     #[test]
-    fn system_authored_prompts_and_tool_definitions_are_product_neutral() {
-        let contexts = [ContextSummary {
-            context_id: "context".to_owned(),
-            name: "Skills".to_owned(),
-            description: "Reusable skills".to_owned(),
-        }];
-        let workers = [WorkerSummary {
-            id: "worker".to_owned(),
-            label: "Laptop".to_owned(),
-        }];
+    fn system_authored_prompts_are_product_neutral() {
         for text in [
             THREAD_TITLE_PROMPT.to_owned(),
-            developer_prefix(&contexts, &workers).to_string(),
-            developer_prefix(&[], &[]).to_string(),
-            responses_tools(true, true, true, true).to_string(),
             checkpoint_developer_prompt_with_metadata(&[]),
         ] {
             assert!(!text.to_lowercase().contains("cybion"), "{text}");
         }
-        let tools = context_tools();
-        assert!(
-            tools[0]["description"]
-                .as_str()
-                .unwrap()
-                .contains("direct children")
-        );
-        assert!(
-            tools[0]["parameters"]["properties"]["context_id"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("children returned by a previous read_context call")
-        );
     }
 
     #[test]
@@ -9424,22 +9338,35 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
-        assert_eq!(tools.as_array().unwrap().len(), 3);
-        assert_eq!(tools[0]["name"], "read_context");
-        assert_eq!(tools[0]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[1], json!({"type":"web_search"}));
-        assert_eq!(tools[2], json!({"type":"image_generation"}));
+        assert_eq!(tools.as_array().unwrap().len(), 5);
+        assert_eq!(tools[0]["name"], "cybion_list_contexts");
+        assert_eq!(tools[1]["name"], "cybion_list_workers");
+        assert_eq!(tools[2]["name"], "read_context");
+        assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
+        assert_eq!(tools[3], json!({"type":"web_search"}));
+        assert_eq!(tools[4], json!({"type":"image_generation"}));
         let worker_and_native = responses_tools(true, true, true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 6);
-        assert_eq!(worker_and_native[0]["name"], "read_context");
-        assert_eq!(worker_and_native[4]["type"], "web_search");
-        assert_eq!(worker_and_native[5]["type"], "image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 8);
+        assert_eq!(worker_and_native[3]["name"], "bash");
+        assert_eq!(worker_and_native[6]["type"], "web_search");
+        assert_eq!(worker_and_native[7]["type"], "image_generation");
         let web_search_only = responses_tools(false, true, true, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 2);
-        assert_eq!(web_search_only[1], json!({"type":"web_search"}));
+        assert_eq!(web_search_only.as_array().unwrap().len(), 4);
+        assert_eq!(web_search_only[3], json!({"type":"web_search"}));
         let context_only = responses_tools(false, true, false, false);
-        assert_eq!(context_only.as_array().unwrap().len(), 1);
-        assert_eq!(context_only[0]["name"], "read_context");
+        assert_eq!(
+            context_only
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "cybion_list_contexts",
+                "cybion_list_workers",
+                "read_context"
+            ]
+        );
         assert_eq!(responses_tools(false, false, false, false), json!([]));
     }
 
@@ -9453,26 +9380,46 @@ mod tests {
                 .map(|tool| tool["name"].as_str().unwrap().to_owned())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(context_tools()), ["read_context"]);
+        assert_eq!(
+            names(context_tools()),
+            [
+                "cybion_list_contexts",
+                "cybion_list_workers",
+                "read_context"
+            ]
+        );
         assert_eq!(
             names(worker_tools()),
             ["bash", "browser_control", "computer_use"]
         );
+        let catalog = context_tools();
+        let read_context = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "read_context")
+            .unwrap();
+        assert!(
+            read_context["description"]
+                .as_str()
+                .unwrap()
+                .contains("direct children")
+        );
+        assert!(
+            read_context["parameters"]["properties"]["context_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("children returned by a previous read_context call")
+        );
+        for tool in worker_tools().as_array().unwrap() {
+            assert_eq!(
+                tool["parameters"]["properties"]["worker_id"]["description"],
+                "Exact worker_id from cybion_list_workers."
+            );
+        }
         assert_eq!(
             TOOL_CATALOG["native"],
             json!({"web_search":{"type":"web_search"},"image_generation":{"type":"image_generation"}})
-        );
-    }
-
-    #[test]
-    fn worker_developer_prefix_uses_markdown_ids_and_names_only() {
-        let prefix = worker_developer_prefix(&[WorkerSummary {
-            id: "4b9aa3ae-f5a3-483b-975a-3fdcd148d680".to_owned(),
-            label: "MBA".to_owned(),
-        }]);
-        assert_eq!(
-            prefix["content"].as_str().unwrap(),
-            "Workers:\n- worker_id: 4b9aa3ae-f5a3-483b-975a-3fdcd148d680 (MBA)\n\nEvery Worker tool call must include the exact worker_id from this list; never choose a Worker implicitly.\nWorkers listed above are registered devices, not necessarily online. Availability is checked when a tool is called."
         );
     }
 
@@ -9486,7 +9433,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audited_request_has_idx_snapshot_and_worker_prefix() {
+    async fn audited_request_has_idx_snapshot_and_global_headers() {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "audit-user").unwrap();
         let thread = create_test_thread(&state, &user).await;
@@ -9547,7 +9494,7 @@ mod tests {
             true,
             true,
             None,
-            Some(worker_developer_prefix(&[])),
+            None,
             None,
         )
         .await
@@ -9571,18 +9518,14 @@ mod tests {
                 .any(|line| line.eq_ignore_ascii_case("authorization: Bearer sk-direct"))
         );
         assert_eq!(request["store"], false);
-        assert_eq!(request["input"][0]["role"], "developer");
-        assert!(
-            request["input"][0]["content"]
-                .as_str()
-                .unwrap()
-                .contains("worker_id")
-        );
+        assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 5);
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
-        assert_eq!(tools[1], json!({"type":"web_search"}));
-        assert_eq!(tools[2], json!({"type":"image_generation"}));
+        assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
+        assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
+        assert_eq!(tools[3], json!({"type":"web_search"}));
+        assert_eq!(tools[4], json!({"type":"image_generation"}));
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

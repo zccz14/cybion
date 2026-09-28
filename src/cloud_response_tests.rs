@@ -308,20 +308,21 @@ async fn invalid_custom_tools_are_answered_with_the_matching_output_type() {
     );
 }
 
-async fn read_context_tool_output(
+async fn tool_output(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
     input: i64,
-    context_id: &str,
+    call_id: &str,
+    name: &str,
+    arguments: Value,
 ) -> Value {
-    let call_id = format!("read-{context_id}");
     let tool = ResponseItem::from_value(json!({
         "type":"function_call",
-        "id":format!("fc-{context_id}"),
+        "id":format!("fc-{call_id}"),
         "call_id":call_id,
-        "name":"read_context",
-        "arguments":json!({"context_id":context_id}).to_string()
+        "name":name,
+        "arguments":arguments.to_string()
     }))
     .unwrap();
     assert!(matches!(
@@ -380,7 +381,16 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
     })
     .await
     .unwrap();
-    let content = read_context_tool_output(&state, &user, &thread, input, parent).await;
+    let content = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "read-root",
+        "read_context",
+        json!({"context_id": parent}),
+    )
+    .await;
     assert_eq!(
         content,
         json!({
@@ -407,12 +417,14 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
     .await
     .unwrap();
     assert_eq!(serde_json::to_value(api_content).unwrap(), content);
-    let child = read_context_tool_output(
+    let child = tool_output(
         &state,
         &user,
         &thread,
         input,
-        content["children"][0]["context_id"].as_str().unwrap(),
+        "read-child",
+        "read_context",
+        json!({"context_id": content["children"][0]["context_id"].as_str().unwrap()}),
     )
     .await;
     assert_eq!(child["id"], child_a);
@@ -424,12 +436,14 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
             {"context_id":grandchild,"name":"Grandchild","description":"Metadata for Grandchild"}
         ])
     );
-    let leaf = read_context_tool_output(
+    let leaf = tool_output(
         &state,
         &user,
         &thread,
         input,
-        child["children"][0]["context_id"].as_str().unwrap(),
+        "read-leaf",
+        "read_context",
+        json!({"context_id": child["children"][0]["context_id"].as_str().unwrap()}),
     )
     .await;
     assert_eq!(leaf["id"], grandchild);
@@ -461,12 +475,100 @@ async fn read_context_cannot_disclose_another_users_nodes() {
         Ok(())
     }).await.unwrap();
     for id in [foreign, "00000000-0000-4000-8000-000000000098"] {
-        let output = read_context_tool_output(&state, &other, &thread, input, id).await;
+        let output = tool_output(
+            &state,
+            &other,
+            &thread,
+            input,
+            &format!("read-{id}"),
+            "read_context",
+            json!({"context_id": id}),
+        )
+        .await;
         assert_eq!(output, json!({"error":"context not found"}));
     }
-    let output = read_context_tool_output(&state, &other, &thread, input, "invalid-id").await;
+    let output = tool_output(
+        &state,
+        &other,
+        &thread,
+        input,
+        "read-invalid",
+        "read_context",
+        json!({"context_id": "invalid-id"}),
+    )
+    .await;
     assert!(output["error"].is_string());
     assert!(output.get("children").is_none());
+}
+
+#[tokio::test]
+async fn registry_tools_list_top_level_contexts_and_registered_workers() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "registry-tool-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let parent = "00000000-0000-4000-8000-0000000000b0";
+    let child = "00000000-0000-4000-8000-0000000000b1";
+    user_db(&state, &user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,?,?,?)",
+            params![
+                parent,
+                "Skills",
+                "Reusable worker skills",
+                "top-secret parent content"
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+            params![
+                child,
+                "Bash skill",
+                "Run bash",
+                "worker_id = 'worker'; path = '/skill'",
+                parent
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at) VALUES('worker-z','Zulu','worker-z',1)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at) VALUES('worker-a','Alpha','worker-a',1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let contexts = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "list-contexts",
+        "cybion_list_contexts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        contexts,
+        json!({"contexts":[{"context_id":parent,"name":"Skills","description":"Reusable worker skills"}]})
+    );
+    let workers = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "list-workers",
+        "cybion_list_workers",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        workers,
+        json!({"workers":[{"worker_id":"worker-a","label":"Alpha"},{"worker_id":"worker-z","label":"Zulu"}]})
+    );
 }
 
 #[tokio::test]
@@ -530,9 +632,9 @@ async fn offline_worker_calls_are_answered_without_queueing_execution() {
 }
 
 #[tokio::test]
-async fn inference_keeps_prefix_and_tools_when_the_last_online_worker_disconnects() {
+async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "worker-prefix-user").unwrap();
+    let user = user_for_subject(&state, "worker-tools-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let worker_id = "00000000-0000-4000-8000-000000000001";
@@ -586,23 +688,20 @@ async fn inference_keeps_prefix_and_tools_when_the_last_online_worker_disconnect
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert!(
-        requests[0]["input"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains(worker_id)
-    );
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 8);
+    let names = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"bash"));
     for key in ["tools", "tool_choice"] {
         assert_eq!(
             serde_json::to_vec(&requests[0][key]).unwrap(),
             serde_json::to_vec(&requests[1][key]).unwrap()
         );
     }
-    assert_eq!(
-        serde_json::to_vec(&requests[0]["input"][0]).unwrap(),
-        serde_json::to_vec(&requests[1]["input"][0]).unwrap()
-    );
 }
 
 #[tokio::test]
@@ -672,7 +771,14 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
     };
     assert_eq!(
         names(&requests[0]),
-        ["read_context", "bash", "browser_control", "computer_use"]
+        [
+            "cybion_list_contexts",
+            "cybion_list_workers",
+            "read_context",
+            "bash",
+            "browser_control",
+            "computer_use"
+        ]
     );
     assert_eq!(natives(&requests[0]), ["web_search", "image_generation"]);
     for request in &requests {
@@ -883,12 +989,9 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
         "title requests must leave room for reasoning before the title: {request}"
     );
     let input = request["input"].as_array().unwrap();
-    assert!(
-        input[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Every Worker tool call must include the exact worker_id"),
-        "title requests must reuse the shared registry prefix: {request}"
+    assert_eq!(
+        input[0]["content"], "fix the flaky title generation",
+        "title requests must start with the replayed conversation: {request}"
     );
     let instruction = input.last().unwrap();
     assert_eq!(instruction["role"], "user");
@@ -976,12 +1079,9 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
     assert_eq!(titled.title, "Context Title");
     let request = server.await.unwrap();
     let input = request["input"].as_array().unwrap();
-    assert!(
-        input[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Every Worker tool call must include the exact worker_id"),
-        "title requests must reuse the shared registry prefix: {request}"
+    assert_eq!(
+        input[0]["content"], "first question",
+        "title requests must start with the replayed conversation: {request}"
     );
     assert!(
         input.iter().any(|item| item["content"] == "first question")

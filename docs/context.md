@@ -35,24 +35,29 @@ The checkpoint is included as the first item when one exists. Records from
 other threads are never eligible, even when their numeric IDs fall inside the
 same range. A missing, foreign, or non-protocol `idx_tail` is an error.
 
-Each Responses request prepends its current developer policy, top-level Context
-metadata, and registered Worker identities to this compiled array. Compaction
-and title generation append their instruction as the final user message after
-the replayed records, so the warmed request prefix stays reusable. The policy
-is request metadata; the durable conversation remains the record range above.
-The compiler uses `kind` to select protocol records; `activity` stays outside
-the model context.
+Each Responses request replays this compiled array. Report Threads prepend
+their task policy as a developer message; every other request starts with the
+conversation records themselves. Compaction and title generation append their
+instruction as the final user message after the replayed records, so the
+warmed request prefix stays reusable. The report policy is request metadata;
+the durable conversation remains the record range above. The compiler uses
+`kind` to select protocol records; `activity` stays outside the model context.
 
-## Stable registry prefix
+## Registry tools
 
-Inference, compaction, and title generation use the same registered Worker
-list, ordered by label and ID. The prefix contains only each Worker's ID and
-label. Online state, heartbeat timestamps, and resource reports do not change
-the prefix. Inference
-keeps Worker tool definitions available whenever the user has registered Workers,
-even if all of them are offline. Execution checks availability and returns an
-offline tool error before queueing a call. Adding, removing, or renaming a Worker
-can change the prefix.
+Registered Contexts and Workers are disclosed through controller-answered
+tools instead of a replayed prefix. `cybion_list_contexts` returns only
+top-level Context metadata, ordered by name and ID. `cybion_list_workers`
+returns the registered Worker identities (`worker_id`, `label`), ordered by
+label and ID; runtime state such as online status, heartbeat timestamps, and
+resource reports is not listed.
+
+Every Worker tool call must include an exact `worker_id` from
+`cybion_list_workers`; a Worker is never chosen implicitly. Registration does
+not imply availability: inference keeps Worker tool definitions available
+whenever the user has registered Workers, even if all of them are offline, and
+execution checks availability, returning an offline tool error before queueing
+a call.
 
 System-authored prompts and tool descriptions use neutral Context, Worker, and
 conversation terminology. User-authored metadata, content, and conversation
@@ -60,9 +65,10 @@ history are preserved as supplied.
 
 ## Progressive Context discovery
 
-The initial prefix lists only top-level Context metadata, ordered by name and ID.
-`read_context` and `GET /api/contexts/{id}` return the current node's existing
-`id`, `name`, `description`, `content`, and `parent_id` fields, plus `children`:
+`cybion_list_contexts` lists only top-level Context metadata, ordered by name
+and ID. `read_context` and `GET /api/contexts/{id}` return the current node's
+existing `id`, `name`, `description`, `content`, and `parent_id` fields, plus
+`children`:
 
 ```json
 {

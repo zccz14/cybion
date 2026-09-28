@@ -646,6 +646,8 @@ const copy = {
     toolComputerUse: "Control the desktop",
     toolListThreads: "List work Threads", toolReadHistory: "Read source history", toolReadReport: "Read reports and versions", toolUpdateReport: "Append report version", toolCybionReports: "Cybion · report Thread only",
     toolReadContext: "Read contexts",
+    toolListContexts: "List contexts",
+    toolListWorkers: "List Workers",
     toolWebSearch: "Web search",
     toolImageGeneration: "Image generation",
     toolCybion: "Cybion",
@@ -948,6 +950,8 @@ const copy = {
     toolComputerUse: "控制桌面",
     toolListThreads: "列出工作 Thread", toolReadHistory: "读取原始历史", toolReadReport: "读取日报及版本", toolUpdateReport: "保存报表新版本", toolCybionReports: "Cybion · 仅报告 Thread",
     toolReadContext: "读取上下文",
+    toolListContexts: "列出上下文",
+    toolListWorkers: "列出 Worker",
     toolWebSearch: "网页搜索",
     toolImageGeneration: "图像生成",
     toolCybion: "Cybion",
@@ -2577,6 +2581,8 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
 // INVARIANT: every tool in tools.json needs a label here; the web tests assert
 // coverage in both languages.
 const toolLabels: Record<string, CopyKey> = {
+  cybion_list_contexts: "toolListContexts",
+  cybion_list_workers: "toolListWorkers",
   read_context: "toolReadContext",
   cybion_list_threads: "toolListThreads",
   cybion_read_history: "toolReadHistory",
