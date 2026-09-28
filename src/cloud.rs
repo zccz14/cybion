@@ -74,6 +74,11 @@ const THREAD_TITLE_MAX_OUTPUT_TOKENS: usize = 1024;
 const WORKER_ONLINE_SECONDS: i64 = 45;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
+// A pasted image is an input record and an upstream `input_image` part, so its
+// base64 data URL must stay bounded for SQLite, the history API and the
+// upstream body. The browser downsizes before sending; these caps reject the rest.
+const MAX_INPUT_IMAGES: usize = 4;
+const MAX_INPUT_IMAGE_CHARS: usize = 4 * 1024 * 1024;
 const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
 // The checkpoint summary must fit inside this cap; reasoning-first providers
 // charge their hidden reasoning tokens to the same output budget.
@@ -88,6 +93,9 @@ const PROACTIVE_COMPACTION_RETRY_LIMIT: usize = 2;
 // Record payload bytes per estimated token, used only for appended deltas and
 // for ranges without a measured anchor; conservative for CJK-heavy content.
 const CONTEXT_ESTIMATE_BYTES_PER_TOKEN: i64 = 4;
+// Binary media inside a record (a pasted image data URL) is priced as a fixed
+// token cost; its base64 characters would otherwise dwarf every text record.
+const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
@@ -1763,6 +1771,8 @@ struct StartThreadInput {
     reasoning_effort: String,
     service_tier_fast: bool,
     input: String,
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1836,6 +1846,8 @@ where
 #[serde(deny_unknown_fields)]
 struct InputRequest {
     input: String,
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -2291,14 +2303,59 @@ async fn update_thread_defaults(
     .map(Json)
 }
 
-fn input_text(value: String) -> Result<String, ApiError> {
-    let value = value.trim();
-    if value.is_empty() || value.chars().count() > 100_000 {
+fn input_message(input: String, images: Vec<String>) -> Result<Value, ApiError> {
+    let text = input.trim();
+    if text.chars().count() > 100_000 {
         return Err(ApiError::bad_request(
             "input must contain 1-100000 characters",
         ));
     }
-    Ok(value.to_owned())
+    if images.len() > MAX_INPUT_IMAGES {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_INPUT_IMAGES} images are supported per input"
+        )));
+    }
+    for image in &images {
+        input_image(image)?;
+    }
+    if images.is_empty() {
+        if text.is_empty() {
+            return Err(ApiError::bad_request(
+                "input must contain 1-100000 characters",
+            ));
+        }
+        return Ok(json!({"role":"user","content":text}));
+    }
+    let mut content = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        content.push(json!({"type":"input_text","text":text}));
+    }
+    for image in images {
+        content.push(json!({"type":"input_image","image_url":image}));
+    }
+    Ok(json!({"role":"user","content":content}))
+}
+
+fn input_image(image: &str) -> Result<(), ApiError> {
+    let supported = [
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/webp;base64,",
+        "data:image/gif;base64,",
+    ]
+    .iter()
+    .any(|prefix| image.starts_with(prefix));
+    if !supported {
+        return Err(ApiError::bad_request(
+            "images must be base64 data URLs of type png, jpeg, webp, or gif",
+        ));
+    }
+    if image.len() > MAX_INPUT_IMAGE_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "each image must be at most {MAX_INPUT_IMAGE_CHARS} data URL characters"
+        )));
+    }
+    Ok(())
 }
 
 // INVARIANT: idle is written only on creation, successful finalization, or cancel.
@@ -3502,7 +3559,7 @@ async fn start_thread(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Json(input): Json<StartThreadInput>,
 ) -> Result<Json<RequestView>, ApiError> {
-    let message = input_text(input.input)?;
+    let message = input_message(input.input, input.images)?;
     let model = model_id(input.model)?;
     let reasoning_effort = reasoning_effort(input.reasoning_effort)?;
     let thread = create_thread_for(
@@ -3899,7 +3956,7 @@ async fn thread_input(
     Json(input): Json<InputRequest>,
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
-    let input = input_text(input.input)?;
+    let input = input_message(input.input, input.images)?;
     ensure_thread_upstream(&state, &identity.user, &id).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
@@ -4403,7 +4460,7 @@ async fn enqueue_request(
     state: AppState,
     user: User,
     thread_id: String,
-    input: String,
+    input: Value,
 ) -> Result<RequestView, ApiError> {
     thread_controls::enqueue(
         state,
@@ -4776,7 +4833,8 @@ fn validate_protocol_record(
 /// Estimate the next inference request's input tokens from recorded evidence:
 /// the latest measured inference input plus appended record bytes, or the whole
 /// compiled range's bytes when no measured anchor still applies. Bytes are
-/// priced at `CONTEXT_ESTIMATE_BYTES_PER_TOKEN` and rounded up.
+/// priced at `CONTEXT_ESTIMATE_BYTES_PER_TOKEN` and rounded up; embedded media
+/// data URLs are priced at a bounded cost instead of their raw characters.
 fn estimate_context_tokens(
     connection: &Connection,
     thread_id: &str,
@@ -4802,25 +4860,69 @@ fn estimate_context_tokens(
         && anchor_tail <= idx_tail
         && latest_checkpoint.is_none_or(|checkpoint| checkpoint <= anchor_tail)
     {
-        let appended_bytes: i64 = connection.query_row(
-            "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
-             WHERE thread_id=? AND id>? AND id<=?
-               AND kind IN ('input','response_output','tool_output','checkpoint')",
-            params![thread_id, anchor_tail, idx_tail],
-            |row| row.get(0),
-        )?;
+        let appended_bytes =
+            estimate_range_bytes(connection, thread_id, anchor_tail + 1, idx_tail)?;
         return Ok(anchor_input
             + (appended_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1)
                 / CONTEXT_ESTIMATE_BYTES_PER_TOKEN);
     }
-    let range_bytes: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
+    let range_bytes = estimate_range_bytes(connection, thread_id, idx_head, idx_tail)?;
+    Ok((range_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1) / CONTEXT_ESTIMATE_BYTES_PER_TOKEN)
+}
+
+/// Estimated replay bytes of the protocol records in an inclusive record range.
+/// Integer record ids make `id > anchor_tail` the same as `id >= anchor_tail + 1`.
+fn estimate_range_bytes(
+    connection: &Connection,
+    thread_id: &str,
+    idx_from: i64,
+    idx_to: i64,
+) -> Result<i64, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT payload FROM history_records
          WHERE thread_id=? AND id>=? AND id<=?
            AND kind IN ('input','response_output','tool_output','checkpoint')",
-        params![thread_id, idx_head, idx_tail],
-        |row| row.get(0),
     )?;
-    Ok((range_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1) / CONTEXT_ESTIMATE_BYTES_PER_TOKEN)
+    let rows = statement.query_map(params![thread_id, idx_from, idx_to], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut bytes = 0;
+    for row in rows {
+        bytes += estimated_payload_bytes(&row?);
+    }
+    Ok(bytes)
+}
+
+/// One record's estimated replay bytes: its stored character count, except that
+/// each embedded media data URL is priced at a bounded cost instead of its raw
+/// base64 characters.
+fn estimated_payload_bytes(payload: &str) -> i64 {
+    let bytes = payload.chars().count() as i64;
+    if !payload.contains("\"data:") {
+        return bytes;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        return bytes;
+    };
+    let mut savings = 0;
+    accumulate_media_savings(&value, &mut savings);
+    bytes - savings
+}
+
+fn accumulate_media_savings(value: &Value, savings: &mut i64) {
+    let capped = CONTEXT_MEDIA_ESTIMATE_TOKENS * CONTEXT_ESTIMATE_BYTES_PER_TOKEN;
+    match value {
+        Value::String(text) if text.starts_with("data:") => {
+            *savings += (text.chars().count() as i64 - capped).max(0);
+        }
+        Value::Array(values) => values
+            .iter()
+            .for_each(|value| accumulate_media_savings(value, savings)),
+        Value::Object(object) => object
+            .values()
+            .for_each(|value| accumulate_media_savings(value, savings)),
+        _ => {}
+    }
 }
 
 fn context_idx_head(
@@ -7238,7 +7340,7 @@ async fn external_thread_input(
     Json(input): Json<InputRequest>,
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
-    let input = input_text(input.input)?;
+    let input = input_message(input.input, input.images)?;
     ensure_thread_upstream(&state, &identity.user, &id).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
@@ -7651,6 +7753,99 @@ mod tests {
         );
         assert!(generated_thread_title("Untitled thread").is_none());
         assert!(generated_thread_title("\n\n").is_none());
+    }
+
+    #[test]
+    fn thread_input_builds_text_messages_and_image_content_parts() {
+        assert_eq!(
+            input_message("  fix the flaky test  ".to_owned(), Vec::new()).unwrap(),
+            json!({"role":"user","content":"fix the flaky test"})
+        );
+        assert_eq!(
+            input_message(String::new(), vec!["data:image/png;base64,AAAA".to_owned()]).unwrap(),
+            json!({"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]})
+        );
+        assert_eq!(
+            input_message(
+                "read this".to_owned(),
+                vec!["data:image/jpeg;base64,BBBB".to_owned()]
+            )
+            .unwrap(),
+            json!({"role":"user","content":[
+                {"type":"input_text","text":"read this"},
+                {"type":"input_image","image_url":"data:image/jpeg;base64,BBBB"}
+            ]})
+        );
+    }
+
+    #[test]
+    fn thread_input_rejects_empty_messages_and_unusable_images() {
+        assert!(input_message("   ".to_owned(), Vec::new()).is_err());
+        assert!(input_message("x".repeat(100_001), Vec::new()).is_err());
+        for image in [
+            "https://example.com/screenshot.png".to_owned(),
+            "data:image/svg+xml;base64,AAAA".to_owned(),
+            format!(
+                "data:image/png;base64,{}",
+                "A".repeat(MAX_INPUT_IMAGE_CHARS)
+            ),
+        ] {
+            assert!(
+                input_message("hello".to_owned(), vec![image]).is_err(),
+                "only bounded base64 image data URLs are accepted"
+            );
+        }
+        let image = "data:image/webp;base64,AAAA".to_owned();
+        assert!(input_message("hello".to_owned(), vec![image; MAX_INPUT_IMAGES + 1]).is_err());
+    }
+
+    #[tokio::test]
+    async fn context_estimate_prices_pasted_images_as_bounded_media() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "estimate-media-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let data_url = format!("data:image/png;base64,{}", "A".repeat(400_000));
+        let media_chars = data_url.chars().count() as i64;
+        let (first, second, raw) = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                let first = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    input_message("describe this screenshot".to_owned(), vec![data_url]).unwrap(),
+                );
+                let second = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    input_message("thanks".to_owned(), Vec::new()).unwrap(),
+                );
+                let raw: i64 = connection.query_row(
+                    "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
+                     WHERE thread_id=? AND id>=? AND id<=?",
+                    params![thread_id, first, second],
+                    |row| row.get(0),
+                )?;
+                Ok((first, second, raw))
+            }
+        })
+        .await
+        .unwrap();
+        let estimate = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| estimate_context_tokens(connection, &thread_id, first, second)
+        })
+        .await
+        .unwrap();
+        let capped = CONTEXT_MEDIA_ESTIMATE_TOKENS * CONTEXT_ESTIMATE_BYTES_PER_TOKEN;
+        assert_eq!(
+            estimate,
+            (raw - (media_chars - capped) + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1)
+                / CONTEXT_ESTIMATE_BYTES_PER_TOKEN,
+            "a pasted image data URL is priced at a bounded cost, not by its base64 characters"
+        );
+        assert!(estimate < raw / CONTEXT_ESTIMATE_BYTES_PER_TOKEN);
     }
 
     #[test]
