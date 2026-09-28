@@ -227,6 +227,114 @@ async fn transient_requests_retry_but_permanent_errors_do_not() {
 }
 
 #[tokio::test]
+async fn output_budget_exhaustion_schedules_a_bounded_retry() {
+    let (_root, state, user, thread, input) = fixture().await;
+    let error = ApiError::output_budget_exhausted(
+        "Incomplete response returned, reason: max_output_tokens",
+    );
+    for n in 1..=5 {
+        assert_eq!(
+            retry(&state, &user, &thread.id, input, &error)
+                .await
+                .unwrap(),
+            n < 5
+        );
+    }
+    let id = thread.id.clone();
+    user_db(&state, &user, false, move |c| {
+        assert_eq!(
+            c.query_row("SELECT retry_count FROM threads WHERE id=?", [id], |r| r
+                .get::<_, i64>(0))?,
+            5
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let message = format!(
+        "Transient model error; retry 1/{} scheduled: Incomplete response returned, reason: max_output_tokens",
+        MAX_FAILURES - 1
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|record| record.kind == "activity"
+                && record.payload["content"].as_str() == Some(message.as_str()))
+            .count(),
+        1
+    );
+    assert_eq!(
+        read_thread_for(&state, &user, thread.id)
+            .await
+            .unwrap()
+            .status,
+        "failed"
+    );
+}
+
+#[tokio::test]
+async fn truncated_inference_stream_retries_and_finishes_the_turn() {
+    let (_root, state, user, thread, _) = fixture().await;
+    let requests: Requests = Arc::new(Mutex::new(Vec::new()));
+    let counter = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/responses",
+        post({
+            let requests = requests.clone();
+            let counter = counter.clone();
+            move |Json(value): Json<Value>| {
+                let requests = requests.clone();
+                let counter = counter.clone();
+                async move {
+                    requests.lock().await.push(value);
+                    let body = if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json!({"id":"response-0","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}})
+                    } else {
+                        json!({"id":"response-1","end_turn":true,"output":[{"type":"message","id":"message-1","role":"assistant","content":[{"type":"output_text","text":"finished"}]}]})
+                    };
+                    Json(body)
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    bind_mock(&state, &user, &thread, &base).await;
+    resume_running(&state).await.unwrap();
+    wait_finished(&state, &user, &thread).await;
+    let requests = requests.lock().await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "a response stopped at the output cap must retry the inference request"
+    );
+    assert!(requests[1]["input"].to_string().contains("original"));
+    drop(requests);
+    assert_eq!(
+        read_thread_for(&state, &user, thread.id.clone())
+            .await
+            .unwrap()
+            .status,
+        "idle"
+    );
+    let history = history_for(&state, &user, thread.id, 0).await.unwrap();
+    let retried = history
+        .iter()
+        .filter(|record| record.kind == "activity")
+        .any(|record| {
+            record.payload["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("retry 1/4 scheduled"))
+        });
+    assert!(retried);
+    server.abort();
+}
+
+#[tokio::test]
 async fn retry_budget_is_durable_and_exhaustion_cannot_be_reset_by_restart() {
     let (_root, state, user, thread, input) = fixture().await;
     let error = ApiError::transient("temporary", Some(0));
