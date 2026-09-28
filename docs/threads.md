@@ -90,7 +90,23 @@ Reasoning and Worker audits refer to the request's originating history record,
 which may be an input or a control activity.
 
 Deleting a thread removes its history, checkpoints, audit rows, and Worker-call
-rows within the owning user database. Other users and threads are independent.
+rows within the owning user database. Its source-linked reports and derived
+daily reports are removed too. Copies already read into another Thread's
+history remain in that destination Thread until it is deleted. Deleting the
+report executor Thread preserves independently saved report artifacts but
+removes its audit links. Other users' databases are unaffected.
+
+## Report-purpose Threads
+
+An account can explicitly create one visible report Thread with purpose
+`reports`; other Threads have purpose `work`. Purpose is server-assigned, not
+a general editable field. A report Thread uses the common runtime but receives
+only four owner-scoped Cybion Controller tools and cannot dispatch Worker,
+context or external tools. Report buttons and direct conversation share its
+history, audits and controls. It skips automatic naming and Linkit task
+notifications. Daily sources/metrics exclude it; general account usage and the
+activity heatmap include it. See [Daily reports](daily-reports.md) for its
+snapshot-aware continue/restart behavior and retention boundaries.
 
 Administrators can enable **Return x-codex-turn-state header** under
 Configuration → Experimental features. It is disabled by default. When enabled,

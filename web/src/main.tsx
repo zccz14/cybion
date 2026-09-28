@@ -10,6 +10,7 @@ import {
   useLocation,
   useNavigate,
   useParams,
+  useSearchParams,
 } from "react-router-dom"
 import {
   QueryClient,
@@ -74,6 +75,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { WorkerConnections } from "@/components/worker-connections"
 import { DailyReports } from "@/components/daily-reports"
+import { ReportThreadNotice } from "@/components/report-thread-notice"
 import { AdminUsers } from "@/components/admin-users"
 import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
@@ -155,6 +157,7 @@ type ThreadDefaults = {
 }
 type ThreadStatus = "idle" | "running" | "failed"
 type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & {
+  purpose: "work" | "reports"
   id: string
   title: string
   status: ThreadStatus
@@ -390,7 +393,7 @@ const copy = {
     generateTitle: "Generate a title from the full conversation",
     delete: "Delete",
     deleteTitle: "Delete this thread?",
-    deleteDescription: "Its history and Worker calls will be removed.",
+    deleteDescription: "This Thread’s history, reasoning audits and Worker calls will be removed. Copies already read into other Threads remain there. Saved reports outlive a deleted report Thread, but its audit links will be unavailable.",
     api: "API keys",
     apiTitle: "Integration API",
     apiDescription: "Create a user-scoped key for another application to create threads and append inputs.",
@@ -641,6 +644,7 @@ const copy = {
     toolBash: "Run shell commands",
     toolBrowserControl: "Control a browser",
     toolComputerUse: "Control the desktop",
+    toolListThreads: "List work Threads", toolReadHistory: "Read source history", toolReadReport: "Read reports and versions", toolUpdateReport: "Append report version", toolCybionReports: "Cybion · report Thread only",
     toolReadContext: "Read contexts",
     toolWebSearch: "Web search",
     toolImageGeneration: "Image generation",
@@ -691,7 +695,7 @@ const copy = {
     generateTitle: "引用全部上下文生成标题",
     delete: "删除",
     deleteTitle: "删除这个线程？",
-    deleteDescription: "该线程的历史和 Worker 调用都会被删除。",
+    deleteDescription: "该 Thread 的历史、推理审计和 Worker 调用会被删除。其他 Thread 已读取的副本仍保留。删除报告 Thread 会保留日报，但其生成审计链接将不可用。",
     api: "API 密钥",
     apiTitle: "集成 API",
     apiDescription: "创建仅属于当前用户的密钥，让其他应用创建线程或追加输入。",
@@ -942,6 +946,7 @@ const copy = {
     toolBash: "运行 Shell 命令",
     toolBrowserControl: "控制浏览器",
     toolComputerUse: "控制桌面",
+    toolListThreads: "列出工作 Thread", toolReadHistory: "读取原始历史", toolReadReport: "读取日报及版本", toolUpdateReport: "保存报表新版本", toolCybionReports: "Cybion · 仅报告 Thread",
     toolReadContext: "读取上下文",
     toolWebSearch: "网页搜索",
     toolImageGeneration: "图像生成",
@@ -1565,6 +1570,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
         </div>}
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
+      {current.purpose === "reports" && <ReportThreadNotice id={current.id} language={language} />}
       <ThreadUsagePanel usage={current.usage} language={language} />
       {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || attachments.images.length > 0) && submit.mutate({ input, images: attachments.images })} /></div>}
       {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
@@ -2184,14 +2190,17 @@ function DailyActivityCard({
 
 function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
+  const [filters, setFilters] = useSearchParams()
+  const threadFilter = filters.get("thread_id")
   const [status, setStatus] = useState<ReasoningAudit["status"] | "all">("all")
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const query = useQuery({
-    queryKey: ["reasoning-audits", status, page, pageSize],
+    queryKey: ["reasoning-audits", sdk.session.getState().sessionId, threadFilter, status, page, pageSize],
     queryFn: () => {
       const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
       if (status !== "all") params.set("status", status)
+      if (threadFilter) params.set("thread_id", threadFilter)
       return api<ReasoningAuditPage>(sdk, `/api/reasoning-audits?${params}`)
     },
     refetchInterval: 2000,
@@ -2201,12 +2210,14 @@ function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
   const rangeStart = query.data?.total ? (page - 1) * pageSize + 1 : 0
   const rangeEnd = query.data ? rangeStart + query.data.items.length - 1 : 0
   const range = t("auditRange").replace("{from}", String(rangeStart)).replace("{to}", String(rangeEnd)).replace("{total}", String(query.data?.total ?? 0))
+  useEffect(() => { setPage(1) }, [threadFilter])
   return <Page title={t("audit")} description={t("auditDescription")}>
+    {threadFilter && <div className="flex flex-wrap items-center gap-2 text-sm"><span>{t("auditThread")}:</span><Link className="break-all underline" to={`/threads/${threadFilter}`}>{threadFilter}</Link><Button variant="outline" size="sm" onClick={() => setFilters({})}>{language === "zh" ? "显示全部" : "Show all"}</Button></div>}
     <Card><CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><CardTitle>{t("audit")}</CardTitle><CardDescription>{t("auditDescription")}</CardDescription></div><div className="flex items-center gap-2"><Select value={status} onValueChange={(value) => { setStatus(value as ReasoningAudit["status"] | "all"); setPage(1) }}><SelectTrigger aria-label={t("auditStatus")} size="sm"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">{t("auditAll")}</SelectItem><SelectItem value="in_flight">{t("auditInFlight")}</SelectItem><SelectItem value="completed">{t("auditCompleted")}</SelectItem><SelectItem value="failed">{t("auditFailed")}</SelectItem><SelectItem value="cancelled">{t("auditCancelled")}</SelectItem></SelectContent></Select><Select value={String(pageSize)} onValueChange={(value) => { setPageSize(Number(value)); setPage(1) }}><SelectTrigger aria-label={t("pageSize")} size="sm"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="20">20</SelectItem><SelectItem value="50">50</SelectItem><SelectItem value="100">100</SelectItem></SelectContent></Select></div></CardHeader><CardContent>
       {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
       {!query.data && !query.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("audit")}</div>}
       {query.data && query.data.items.length === 0 && <p className="py-8 text-sm text-muted-foreground">{t("auditEmpty")}</p>}
-      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[60rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("reasoningEffort")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium" title={t("auditCacheRateDescription")}>{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><code>{item.reasoning_effort ?? "—"}</code></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{auditCacheRate(item.input_tokens, item.cached_tokens, language)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <a href={openaiAuditUrl(item.openai_lb_request_id)} target="_blank" rel="noopener noreferrer" title={t("auditOpenLink")} className="inline-flex max-w-full items-start gap-1 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><code className="break-all text-xs">{item.openai_lb_request_id}</code><ExternalLinkIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="sr-only">{t("auditOpenLink")}</span></a> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
+      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[60rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("reasoningEffort")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium" title={t("auditCacheRateDescription")}>{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">#{item.id} · {item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><code>{item.reasoning_effort ?? "—"}</code></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{auditCacheRate(item.input_tokens, item.cached_tokens, language)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <a href={openaiAuditUrl(item.openai_lb_request_id)} target="_blank" rel="noopener noreferrer" title={t("auditOpenLink")} className="inline-flex max-w-full items-start gap-1 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><code className="break-all text-xs">{item.openai_lb_request_id}</code><ExternalLinkIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="sr-only">{t("auditOpenLink")}</span></a> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
       {query.data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-sm text-muted-foreground">{range}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</Button><Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>{t("next")}</Button></div></div>}
     </CardContent></Card>
   </Page>
@@ -2567,6 +2578,10 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
 // coverage in both languages.
 const toolLabels: Record<string, CopyKey> = {
   read_context: "toolReadContext",
+  cybion_list_threads: "toolListThreads",
+  cybion_read_history: "toolReadHistory",
+  cybion_read_report: "toolReadReport",
+  cybion_update_report: "toolUpdateReport",
   bash: "toolBash",
   browser_control: "toolBrowserControl",
   computer_use: "toolComputerUse",
@@ -2578,6 +2593,7 @@ function ToolsPage() {
   const { t } = useUi()
   const groups = [
     { names: toolCatalog.context.map((tool) => tool.name), provider: t("toolCybion") },
+    { names: toolCatalog.cybion.map((tool) => tool.name), provider: t("toolCybionReports") },
     { names: toolCatalog.worker.map((tool) => tool.name), provider: "Worker" },
     { names: Object.keys(toolCatalog.native), provider: t("toolOpenAi") },
   ]

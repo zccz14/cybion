@@ -1,199 +1,239 @@
 # Daily reports
 
-Daily reports are saved AI summaries of one user's retained activity on a UTC
-calendar date. Open **Usage statistics**, select a calendar day, and explicitly
-choose **Generate / update report**. A day is active when at least one retained
-history record is not a checkpoint; creating or renaming an empty Thread does
-not count.
+Daily reports are versioned AI summaries of one user's retained **work Thread**
+activity on a UTC date. A visible **report Thread** maintains them using four
+Controller tools. It is an ordinary Thread with a restricted purpose and tool
+policy: report buttons and direct conversation use the same execution loop,
+protocol history, reasoning audits, compaction, stop/continue, and recovery.
+Reports are independent saved artifacts; a final chat reply is not a report save.
 
-## Two aggregation levels
+## Start and observe a report
 
-1. **Thread × UTC day**: goal, progress/outcomes, decisions, unfinished work and
-   next steps. The source is that Thread's retained non-checkpoint records on
-   the selected date, including user input, assistant output, tool output and
-   activity records.
-2. **Daily report**: completed work, decisions, work in progress, and
-   blockers/next steps, grouped by topic across current Thread-day summaries.
-   Each daily version identifies the exact child summary versions used.
+Open **Usage statistics**, select a day, then **Generate / update report**.
+Alternatively, explicitly create/open the report Thread and ask it to maintain
+a report for a date. Creating the empty Thread, GET, page load, and polling do
+not invoke a model. Closing the browser does not stop an accepted run.
 
-Deterministic database metrics are displayed separately. An input requesting a
-release is not evidence that the release happened. The latest-input excerpt is
-explicitly labeled as an excerpt, not an AI summary.
+Each account has at most one report Thread. It initially inherits the personal
+default upstream, model, reasoning effort and fast setting, with a 65,536-token
+context budget. Later runs use that Thread's settings, not subsequent changes
+to personal defaults. Stop it before editing generation settings. Generation
+uses English or Simplified Chinese, as requested by the button or conversation.
 
-Today's report is provisional. A later record can make it stale; nothing
-regenerates automatically. Weekly/monthly reports, schedules and notification
-delivery are outside this increment.
+The report card links to the Thread and its filtered reasoning audit page.
+It displays saved versions, staleness, current task progress and reported usage.
+Stop and Continue use the ordinary Thread controls. Polling is every 3 seconds
+while the job or report Thread is running, and every 30 seconds otherwise.
+No schedules, weekly/monthly expansion or Linkit task notifications are enabled.
 
-## Generation and cost
+## Scope and saved documents
 
-- The **personal default upstream and model** are used, never an implicit
-  fallback to an individual Thread's model. Configure defaults in Personal
-  settings before generating. The requested output language is English or
-  Simplified Chinese, matching the UI language at generation time.
-- GET, page load, refresh and polling only read state. POST explicitly starts
-  generation. A detached job continues after the page is closed.
-- At most one report job runs per account. A duplicate active request for the
-  same date, Thread scope and language returns the existing job; a different
-  request receives HTTP 409.
-- Generating the whole day first saves individual Thread summaries, then
-  composes the daily report. A Thread failure does not erase other successes.
-  The daily step requires every active Thread's summary to match its current
-  source snapshot.
-- Retry is manual. Whole-Thread successful results are reused; partial chunk
-  work is not cached. A retry can therefore incur new model charges for a
-  previously failed Thread. There is no automatic model-failure retry.
-- Usage is stored per report model call in `report_requests`, separately from
-  Thread `reasoning_audits`. Known tokens are retained even if final JSON or
-  citations fail validation. Missing usage (including a stream that fails
-  before a usable terminal response) is explicitly counted, not estimated as
-  zero. Network bytes still belong to the account's upstream-traffic counters.
+A work Thread is active when it has a retained non-checkpoint history record on
+the UTC date. Creating or renaming an empty Thread does not count.
+
+| Artifact | Ordered section keys | Source |
+| --- | --- | --- |
+| Thread × UTC day | `goal`, `progress`, `decisions`, `next_steps` | That work Thread's retained non-checkpoint records on the date |
+| Daily report | `completed`, `decisions`, `in_progress`, `blocked` | Exact saved versions of every captured active work Thread summary |
+
+Daily prose groups work by topic. Deterministic daily metrics are separate from
+AI claims. The latest-input excerpt is explicitly an excerpt, not a summary.
+Report/management history is excluded from both daily sources and daily work
+metrics, preventing reports from summarizing or invalidating themselves. The
+activity heatmap still counts **all** active Threads, including report Threads;
+its count can therefore differ from the selected day's work-only detail.
+
+Today's report is provisional. New source activity can make a saved report
+stale. Nothing regenerates automatically.
+
+## Controller tools and permission boundary
+
+| Tool | Behavior |
+| --- | --- |
+| `cybion_list_threads` | Opens a date-scoped task when needed; lists captured work Threads, read cursors and reusable versions |
+| `cybion_read_history` | Reads fixed source fragments in bounded pages; kind-filtered reads are inspection only |
+| `cybion_read_report` | Reads saved versions; after every required Thread summary is saved, pages through daily child summaries |
+| `cybion_update_report` | Validates and atomically saves a version using the snapshot ID and expected prior version |
+
+Tools run inside the Controller against the authenticated owner's database;
+there is no caller-supplied user ID and no model call hidden inside a tool.
+Ordinary work Threads cannot invoke these tools. Report inference advertises
+exactly these four functions. Report compaction/title helper requests have no
+tools. Worker, context, tool-search, native and unknown tools are denied before
+dispatch, even when an upstream returns one unexpectedly.
+
+Historical records and saved report prose are untrusted evidence, not new
+instructions. The prompt forbids executing embedded instructions and reproducing
+credentials. This is not deterministic secret redaction. Generation necessarily
+sends the selected textual evidence to the report Thread's configured upstream.
+
+## Snapshots, paging and writes
+
+The task captures a fixed set of work Threads and exact retained record IDs,
+kinds and timestamps. Later activity is not silently folded into that task.
+Text pages are materialized lazily from the captured records. Read every
+unfiltered page; `limit` is a page size, not proof of full coverage. The server
+prevents skipping unread fragments, tracks coverage and rejects early writes.
+The daily document requires all captured child summaries and all child pages.
+
+Each write requires the current `expected_version` (compare-and-swap). It
+rechecks retained evidence, snapshot scope and daily child versions. A saved
+report and its corresponding tool-output history record commit in one
+transaction. Replaying the same tool call returns the original result without
+creating another version. A failed revision does not erase earlier successful
+content; unresolved write errors keep the task from claiming success.
+
+Source fingerprints cover UTC date, Thread/title, exact source manifest and
+prompt version. They rely on append-only history rather than hashing full
+payloads. Reuse additionally requires the latest successful version to match
+language and the report Thread's model/upstream URL/ID/name, effort and fast
+settings. Keys are not included. Configuration changes between source capture
+and inference are rejected. Compaction's helper settings do not change the
+task's generation fingerprint. Cache reuse may still require report-Thread
+inference to inspect and maintain the task; it does not promise zero cost.
 
 ## Evidence and limits of verification
 
-Every nonempty generated item cites original history record IDs. Links open the
-existing owner-scoped history inspector. Source manifests record exact IDs,
-kinds and timestamps, plus child version IDs for a daily aggregate.
+Every nonempty item cites original history record IDs. Evidence links open the
+owner-scoped history inspector; daily manifests identify child version IDs.
+The server validates section structure, lengths and citation membership, **not
+semantic truth**. A deployment request or an assistant assertion is not itself
+proof of deployment. Inspect claims and their evidence when correctness matters.
 
-The server checks JSON structure, required section keys, item lengths and that
-citations belong to the supplied evidence. It does **not** prove that the prose
-is factually supported by the cited text. AI-generated claims need inspection;
-provenance is not human verification. Historical assistant assertions and tool
-output are not automatically proof of a real-world outcome.
+Up to 4096 characters from the last pre-day user input may appear as background;
+that input cannot be cited as same-day evidence. Binary files/images and
+encrypted reasoning have omission markers. Worker screenshot payloads are
+identified by the call ledger, including Base64 in serialized tool output;
+ordinary stdout is not classified as an image merely by size. Text is fragmented
+rather than silently truncated. Summaries are selective, not exhaustive.
 
-The last pre-day user input can be included as background, up to 4096
-characters, but cannot be cited as same-day evidence or counted as that day's
-accomplishment. Binary images/files and encrypted reasoning have explicit
-omission markers rather than being interpreted as text; inspect the original
-record for those materials. Pasted image data URLs project the same way. Worker screenshots are identified by the call
-ledger, including Base64 carried inside serialized tool output. Ordinary bash
-stdout is not classified as an image by size or appearance. Textual payloads are fragmented rather than
-silently truncated. Summaries remain selective condensations, not a guarantee
-that every source fact is repeated.
+## Audits and cost
 
-The model receives historical material as untrusted evidence. Requests carry
-no tools and `tool_choice: none`; unexpected returned tool items fail the
-summary. Report requests have no Thread audit/identity/turn-state context and
-cannot append Thread history, execute Worker actions or send task
-notifications. The prompt also forbids credential reproduction; this is a
-model instruction, not a deterministic secret-redaction guarantee. Generating
-necessarily sends the selected textual evidence to the configured upstream.
+All new report model requests, including common-runtime retries and compaction,
+use `reasoning_audits`, retained response state and account traffic accounting.
+They appear in the report Thread and unified account Token charts, never in a
+source work Thread's usage. The report audit link filters by executor Thread.
 
-## Versions, cache and deletion
+A task's usage sums audits across its runs. A version's `audit_id` identifies
+only the inference request that issued its write; the version panel explicitly
+labels that request's usage, not the full task cost. Missing usage is not
+estimated as zero. A successful model response can still lead to a failed
+report task if no valid report was saved.
 
-Schema 18 adds `report_jobs`, `report_summaries` and `report_requests` without
-replacing existing Threads or history. Completed and failed summary attempts
-are retained as versions; only an in-flight attempt is updated to its terminal
-state. A newer failure keeps the previous successful content visible.
+Schema-18 standalone generation used `report_requests`. Those historical rows
+remain readable as legacy usage; no new calls are written there and no old
+Thread audits are fabricated. The legacy reader exists for retained pre-upgrade
+artifacts. It can be removed only after every retained database has no legacy
+versions/usage, with migration and backup checks proving that condition.
 
-A fingerprint covers the date, UTC scope, Thread/title, exact source manifest
-and prompt version. Cache matching additionally requires the same model,
-upstream ID and URL, and language. Only the latest completed version is eligible
-for reuse, so an older-language/model version cannot silently replace the
-currently saved version. Credentials are never part of the public report
-metadata; rotating a key alone does not invalidate a successful summary.
+## Stop, continue, restart and retention
 
-Fingerprints rely on the append-only history contract: they identify records
-by ID/kind/timestamp rather than hashing full payloads. Renames, new/deleted
-records, prompt changes and changed child versions cause staleness. Sources
-are read from a captured snapshot; activity arriving during generation is not
-silently folded into it. The result may instead be marked stale.
+- Identical active date/scope/language button requests return the same job and
+  input record. A different request, or an unrelated busy report conversation,
+  receives a conflict rather than being silently replaced.
+- Stop cancels the ordinary run and marks its task failed. Saved reports and
+  the current failed task's read cursors/materialized pages remain available.
+- Continue creates a new ordinary run with fresh budgets and resumes the latest
+  failed task, provided no newer user prompt superseded it and generation
+  settings still match. A changed configuration requires a new task.
+- A new prompt supersedes the previous task. A new task takes fresh snapshots
+  and reuses eligible successful versions. It discards old temporary snapshots.
+- Completed tasks immediately discard their temporary snapshots/pages. Only the
+  latest resumable failed task retains them; there is no time-based expiry.
+  Versions, task metadata, audits and Thread tool history remain retained.
+- Controller restart uses the common Thread supervisor to resume new report
+  tasks, preserving snapshots and idempotent tool replay. Interrupted audits
+  settle through common recovery. Pre-upgrade standalone jobs instead fail and
+  require an explicit retry.
+- Deleting a source Thread removes its linked summaries/snapshots and derived
+  daily reports. **Copies already placed in another Thread's tool history stay
+  in that Thread.** Delete the report Thread to remove its copies and audits.
+- Deleting the report Thread preserves saved report artifacts but removes
+  executor/input/audit links and temporary snapshots. The UI shows unavailable
+  usage rather than claiming those artifacts cost zero. A later explicit action
+  can create a new report Thread.
 
-Deleting a Thread cascades its summaries and deletes daily summaries derived
-from dates with that Thread's summaries. Owner-scoped version and evidence
-endpoints never read another user's database. Controller restart marks running
-jobs, attempts and calls as failed while preserving completed content; retry
-remains explicit.
+Schema 19 adds the Thread purpose, report execution links, `report_runs`,
+`report_snapshots` and `report_source_units`. Existing work Threads, retained
+history and legacy reports are preserved.
 
 ## Bounded work
 
 | Boundary | Limit |
 | --- | --- |
 | Raw retained payloads per Thread day | 16 MiB; larger input fails explicitly |
-| Textual fragment | 16 KiB (UTF-8 boundaries preserved) |
-| Packed evidence per model call | 192 KiB, plus bounded instructions/background |
-| Initial chunks per summary | 64 |
-| Model calls per summary / per job | 128 / 256 |
-| Requested maximum output tokens per call | 16,384 (provider must honor the request) |
-| Validated summary JSON | 16 KiB |
-| Items per section / characters per item | 8 / 500 |
-| Original record citations per item | 1–8 |
-| Request / whole-job deadline | 180 seconds / 30 minutes |
+| Textual fragment | 16 KiB at UTF-8 boundaries |
+| History/child-summary page data | 192 KiB |
+| Listed Threads / history fragments per page | 50 / 100 maximum |
+| Source-page reads per explicit run | 64 MiB |
+| Model calls per explicit run, including helpers/retries | 256 |
+| Model call / explicit run deadline | 180 seconds / 30 minutes |
+| Requested maximum output tokens per call | 16,384; provider must honor the request |
+| Validated document JSON | 16 KiB |
+| Items per section / characters per item / citations per item | 8 / 500 / 1–8 |
 
-Large inputs use bounded chunk summaries and reduction; no source records are
-silently discarded to fit the budget. If a limit is reached, the attempt fails
-clearly and already completed Thread summaries stay reusable. Empty sections
-are allowed when no supported item can be extracted. The UI polls running
-jobs every 3 seconds and idle selected dates every 30 seconds.
+Large tasks use normal Thread compaction while preserving cursors and evidence
+notes. Reaching a limit fails visibly rather than discarding unread evidence.
+Continue or start a new task explicitly to use another bounded run. Model
+context limits and real latency can still prevent a busy day from completing.
 
 ## HTTP API
 
-All routes require browser authentication and operate only on its user's
-SQLite database.
+All routes require browser authentication and use its owner's SQLite database.
 
-- `GET /api/reports/daily?date=YYYY-MM-DD` returns deterministic metrics,
-  per-Thread `daily_summary`, aggregate `summary`, and `generation` state.
+- `POST /api/reports/thread`: create/reuse the visible Thread, without inference.
+- `GET /api/reports/daily?date=YYYY-MM-DD`: work-only metrics, Thread summaries,
+  daily summary and generation/executor state; read-only.
 - `POST /api/reports/daily/{date}/generate` with
-  `{ "thread_id": null, "language": "zh" }` returns HTTP 202 and a job.
-  `null` generates the whole day; a Thread UUID generates only that Thread.
-  Empty days, malformed dates and future generation are rejected.
-- `GET /api/reports/summaries/{id}` returns a retained version and its source
-  manifest, model, prompt version, usage and timestamps.
+  `{ "thread_id": null, "language": "zh" }`: HTTP 202 and the common-Thread
+  job. Null means all work Threads plus daily aggregate; a UUID selects one
+  work Thread. Empty days, invalid dates and future generation are rejected.
+- `GET /api/reports/summaries/{id}`: retained version, manifest, execution links
+  and writer-request or legacy usage.
+- `POST /api/threads/{id}/cancel|continue|compact`: ordinary Thread controls.
 
 `SummaryState` contains `latest`, `saved` (latest successful version), and
-`stale`. The version inspector exposes the child summaries used by a daily
-report. There is no general historical-version picker in this increment.
+`stale`. The version inspector exposes exact daily child summaries. This
+increment does not add a general historical-version picker.
 
 ## Validation record
 
-The automated suite covers isolation/authentication, full UTC-day boundaries,
-additive schema upgrade, read-only GET, duplicate/concurrent requests, source
-changes during generation, persisted versions, independent failures/retries,
-cache configuration changes, invalid citations, binary projection/input
-limits, tool rejection, restart recovery, streamed completion, and account
-traffic attribution. Browser fixtures cover progress/reload, retained
-successful output, evidence navigation, date/account isolation, network
-recovery and bilingual narrow light/dark layouts.
+Automated tests cover schema-18 migration, ownership/authentication, common
+execution/audits/traffic, conversational generation, source exclusion,
+snapshots/paging, citation/CAS failures, atomic replay, cached revisions,
+stop/continue/restart, configuration changes, budgets, deletion and binary
+projection. Browser fixtures cover creation/navigation, audit filtering,
+stop/continue, retained results, evidence links and bilingual narrow layouts.
 
-A bounded synthetic-only trial on 2026-09-28 made three calls to the configured
-real upstream (two Thread summaries and one daily aggregate). The outputs
-passed structural/citation checks and manual inspection: deployment failure
-remained a blocker, planned weekly/monthly work was not presented as completed,
-and the injected instruction was not executed or reproduced as a secret. This
-is a small prompt/transport check, not an evaluation of all real user data.
+On 2026-09-28, a synthetic-only full-runtime trial used the configured
+`deepseek-flash` upstream through a bounded loopback/SSM forwarding adapter.
+Credentials stayed on EC2. Six model requests completed in 26.93 seconds,
+reporting 22,096 input and 2,812 output tokens. Both versions were saved through
+tools and linked to ordinary audits; no Worker call or `report_requests` write
+occurred. Inspection confirmed deployment failure remained unresolved, proposed
+weekly/monthly work was not labeled completed, and the injected fake credential
+was not reproduced. This verifies a small real-model tool workflow, not a
+full production-day sweep. No production user history was sent in the trial.
 
-A local debug-build read/serialization probe included 100 retained Threads,
-20 active Threads and persisted summary manifests. It measured 10k/20k/40k/80k
-retained records (2k/4k/8k/16k daily records) in 66/127/269/624 ms respectively;
-the largest JSON response was 3.35 MB. **Performance gate: PASS** for the tested
-80k-record target with a 3-second budget. The endpoints are short batch reads;
-per-row instrumentation would distort their duration. These four bounded
-samples show roughly linear growth (endpoint power exponent about 1.08); this
-is not a production latency guarantee. Full source manifests make large
-responses costly, so raw-manifest rendering is lazy and idle polling is slower.
+A ~6.6 MB synthetic source under an 8192-token test budget completed in 3.186
+seconds with 77 fake model requests and 37 compactions; the final source tail
+was retained. This tests paging/compaction, **not real-model latency or semantic
+quality after many compactions**.
 
-Run the opt-in probe with:
+The local debug-build read/serialization probe used 100 retained Threads,
+20 daily active Threads and saved manifests. At 10k/20k/40k/80k retained records
+(2k/4k/8k/16k daily records), it measured 68/137/296/698 ms, respectively; the
+largest JSON was 3.36 MB. **Performance gate: PASS** for the tested 80k target
+and 3-second budget, not a production latency guarantee. The endpoint is a
+short batch read; per-row instrumentation would distort it. The endpoint
+power exponent is about 1.12; conservative local-slope scaling remains below
+the budget at this tested size. Manifests remain costly in large responses.
+
+Opt-in probes:
 
 ```sh
 cargo test --locked daily_report_retained_history_probe -- --ignored --nocapture
+cargo test --locked multi_megabyte_report_thread_probe -- --ignored --nocapture
+# Supply an explicitly bounded loopback adapter to the configured real upstream:
+CYBION_REPORT_SMOKE_URL=http://127.0.0.1:PORT cargo test --locked real_report_thread_synthetic_smoke -- --ignored --nocapture
 ```
-
-A read-only production-size probe before release found Thread-day payloads up
-to 5.66 MB and 157 initial chunks at the original 48 KiB request width. That
-initial 32-chunk budget would have rejected useful retained days, so delivery
-was held. The final request width is 192 KiB with 64 initial chunks (128 calls
-per summary, 256 per job), plus explicit Worker screenshot projection. A >6 MB
-text fixture checks that the final source tail reaches a leaf call. Context
-limits still depend on the selected model: a provider can reject a large
-request, in which case the attempt fails visibly rather than dropping evidence.
-
-With the final projection/width, the same read-only probe covered all active
-Threads on 2026-09-26/27/28: maximum initial chunks per Thread were 11/30/33;
-none exceeded 64. Conservative worst-case call counts (including reduction
-and the daily aggregate) were 67/192/69, within the 256-call job budget. A fourth
-synthetic-only real-upstream request used 161,245 bytes of evidence (34,657
-reported input tokens), completed in 12.79 seconds, passed validation, and
-cited the final source record. This checks one large call, not full-day
-inference latency: a busy day can still exceed the 30-minute deadline and
-require a manual retry to reuse already completed Thread summaries. No
-full-history model sweep or real-user-day generation was performed for these
-probes.

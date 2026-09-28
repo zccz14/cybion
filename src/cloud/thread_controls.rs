@@ -10,6 +10,11 @@ pub(super) enum RequestInput {
     /// One complete Responses `input` item: a text message or a message whose
     /// content carries pasted images.
     Prompt(Value),
+    Report {
+        date: NaiveDate,
+        thread_id: Option<String>,
+        language: String,
+    },
     Continue,
     Compact,
 }
@@ -71,8 +76,8 @@ fn record_request(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let thread = load_thread(&transaction, thread_id)?;
     let (record_idx, operation) = match input {
-        RequestInput::Prompt(input) => (
-            persist_history_record(
+        RequestInput::Prompt(input) => {
+            let id = persist_history_record(
                 &transaction,
                 HistoryRecordInsert {
                     thread_id,
@@ -80,9 +85,22 @@ fn record_request(
                     payload: &input,
                     created_at: now(),
                 },
-            )?,
-            RequestOperation::Inference,
-        ),
+            )?;
+            reports::on_prompt(&transaction, &thread, id)?;
+            (id, RequestOperation::Inference)
+        }
+        RequestInput::Report {
+            date,
+            thread_id: scope,
+            language,
+        } => {
+            let id = reports::prepare_task(&transaction, &thread, date, scope, language)?;
+            if thread.status == "running" {
+                transaction.commit()?;
+                return Ok((id, RequestOperation::Inference));
+            }
+            (id, RequestOperation::Inference)
+        }
         control @ (RequestInput::Continue | RequestInput::Compact) => {
             if thread.status == "running" {
                 return Err(ApiError::conflict("stop the current request first"));
@@ -93,7 +111,13 @@ fn record_request(
             } else {
                 ("continue", RequestOperation::Inference)
             };
-            (control_record(&transaction, thread_id, action)?, operation)
+            let id = control_record(&transaction, thread_id, action)?;
+            if action == "continue" {
+                reports::on_continue(&transaction, &thread, id)?;
+            } else if thread.purpose == "reports" {
+                reports::register_run(&transaction, &thread, id)?;
+            }
+            (id, operation)
         }
     };
     transaction.execute(
@@ -118,6 +142,18 @@ pub(super) async fn enqueue(
         record_request(connection, &queued_thread_id, input)
     })
     .await?;
+    if active
+        .get(&request_key(&user, &thread_id))
+        .is_some_and(|request| {
+            request.record_idx == record_idx && request.cancellation.receiver_count() > 0
+        })
+    {
+        return Ok(RequestView {
+            thread_id,
+            record_idx,
+            status: "accepted".to_owned(),
+        });
+    }
     let (cancellation, receiver) = watch::channel(false);
     if let Some(previous) = active.insert(
         request_key(&user, &thread_id),
@@ -156,6 +192,13 @@ pub(super) async fn cancel_for(
         let thread = load_thread(&transaction, &cancelled_thread_id)?;
         if thread.status != "running" {
             return Ok(thread);
+        }
+        if let Some(input) = latest_request_record_id(&transaction, &cancelled_thread_id)? {
+            reports::finish(
+                &transaction,
+                input,
+                Some("Cancelled by user; continue manually to resume the captured report task"),
+            )?;
         }
         control_record(&transaction, &cancelled_thread_id, "cancel")?;
         transaction.execute(

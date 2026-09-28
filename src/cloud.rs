@@ -99,7 +99,7 @@ const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 18;
+const USER_SCHEMA_VERSION: i64 = 19;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -576,6 +576,7 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/title", post(generate_thread_title))
         .route("/api/insights", get(insights))
         .route("/api/reports/daily", get(daily_report))
+        .route("/api/reports/thread", post(reports::ensure_report_thread))
         .route(
             "/api/reports/daily/{date}/generate",
             post(reports::generate),
@@ -1025,6 +1026,7 @@ async fn experimental_header_enabled(
 const THREAD_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
+  purpose TEXT NOT NULL DEFAULT 'work' CHECK(purpose IN ('work','reports')),
   title TEXT NOT NULL,
   model TEXT NOT NULL,
   upstream_id TEXT,
@@ -1188,7 +1190,10 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // There is no supported migration from the discarded pre-release user databases.
         transaction
             .execute_batch(
-                "DROP TABLE IF EXISTS report_requests;
+                "DROP TABLE IF EXISTS report_source_units;
+                 DROP TABLE IF EXISTS report_snapshots;
+                 DROP TABLE IF EXISTS report_runs;
+                 DROP TABLE IF EXISTS report_requests;
                  DROP TABLE IF EXISTS report_summaries;
                  DROP TABLE IF EXISTS report_jobs;
                  DROP TABLE IF EXISTS worker_checks;
@@ -1273,6 +1278,11 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         }
     }
     for (table, name, definition) in [
+        (
+            "threads",
+            "purpose",
+            "TEXT NOT NULL DEFAULT 'work' CHECK(purpose IN ('work','reports'))",
+        ),
         ("reasoning_audits", "reasoning_effort", "TEXT"),
         ("threads", "upstream_id", "TEXT"),
         ("thread_defaults", "upstream_id", "TEXT"),
@@ -1352,6 +1362,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // at schema 16+; retain the migration test.
         migrate_legacy_upstream(&transaction)?;
     }
+    reports::migrate(&transaction)?;
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
@@ -1432,6 +1443,7 @@ fn check_user_foreign_keys(connection: &Connection) -> Result<(), ApiError> {
 #[derive(Clone, Debug, Serialize)]
 struct ThreadView {
     id: String,
+    purpose: String,
     title: String,
     model: String,
     /// Upstream used for inference. `None` marks a thread created before
@@ -2012,6 +2024,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let missing_cache_requests: i64 = row.get(13)?;
     Ok(ThreadView {
         id: row.get(0)?,
+        purpose: row.get(17)?,
         title: row.get(1)?,
         model: row.get(2)?,
         upstream_id: row.get(3)?,
@@ -2378,7 +2391,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        (SELECT ra.input_tokens FROM reasoning_audits ra
          WHERE ra.thread_id=t.id AND ra.request_kind='inference' AND ra.input_tokens IS NOT NULL
          ORDER BY ra.id DESC LIMIT 1),
-       t.minimal_mode
+       t.minimal_mode,t.purpose
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT id FROM history_records WHERE thread_id=t.id
@@ -2434,6 +2447,7 @@ async fn create_thread_for(
         let upstream_id = resolve_thread_upstream(&transaction, upstream_id, defaults.upstream_id)?;
         let thread = ThreadView {
             id: Uuid::now_v7().to_string(),
+            purpose: "work".to_owned(),
             title,
             model: model.unwrap_or(defaults.model),
             upstream_id: Some(upstream_id),
@@ -2845,14 +2859,15 @@ fn load_daily_report(connection: &Connection, date: NaiveDate) -> Result<DailyRe
             "SELECT COUNT(DISTINCT thread_id), COUNT(*),
                     COALESCE(SUM(CASE WHEN kind='input' THEN 1 ELSE 0 END), 0)
              FROM history_records
-             WHERE kind <> 'checkpoint' AND created_at >= ?1 AND created_at < ?2",
+             WHERE kind <> 'checkpoint' AND created_at >= ?1 AND created_at < ?2
+               AND thread_id IN (SELECT id FROM threads WHERE purpose='work')",
             params![start, end],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
     let (requests, total_tokens): (i64, i64) = connection.query_row(
         "SELECT COUNT(*),
                 COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
-         FROM reasoning_audits WHERE started_at >= ?1 AND started_at < ?2",
+         FROM reasoning_audits WHERE started_at >= ?1 AND started_at < ?2 AND thread_id IN (SELECT id FROM threads WHERE purpose='work')",
         params![start, end],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -2877,7 +2892,7 @@ fn load_daily_report(connection: &Connection, date: NaiveDate) -> Result<DailyRe
                    AND h.created_at >= ?1 AND h.created_at < ?2
                  ORDER BY h.created_at DESC, h.id DESC LIMIT 1)
          FROM threads t
-         WHERE EXISTS(
+         WHERE t.purpose='work' AND EXISTS(
              SELECT 1 FROM history_records h
              WHERE h.thread_id=t.id AND h.kind <> 'checkpoint'
                AND h.created_at >= ?1 AND h.created_at < ?2
@@ -3622,6 +3637,12 @@ async fn update_thread(
     }
     let updated_at = now();
     let thread = user_db(&state, &identity.user, true, move |connection| {
+        let current = load_thread(connection, &id)?;
+        if current.purpose == "reports" && current.status == "running"
+            && (model.is_some() || upstream_id.is_some() || reasoning_effort.is_some()
+                || input.service_tier_fast.is_some() || context_budget.is_some()) {
+            return Err(ApiError::conflict("stop the report Thread before changing its generation settings"));
+        }
         if let Some(id) = upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
@@ -4490,28 +4511,37 @@ async fn process_request(
     .await;
     let result = match loaded {
         Ok((thread, Some(upstream))) => {
-            if operation == RequestOperation::Compact {
-                thread_controls::compact_request(
-                    &state,
-                    &user,
-                    &thread,
-                    &upstream,
-                    record_idx,
-                    &mut cancellation,
-                )
-                .await
-                .map(|()| (thread.clone(), String::new()))
-                .map_err(|error| (thread, Box::new(error)))
+            let turn = async {
+                if operation == RequestOperation::Compact {
+                    thread_controls::compact_request(
+                        &state,
+                        &user,
+                        &thread,
+                        &upstream,
+                        record_idx,
+                        &mut cancellation,
+                    )
+                    .await
+                    .map(|()| (thread.clone(), String::new()))
+                    .map_err(|error| (thread.clone(), Box::new(error)))
+                } else {
+                    request_agent(
+                        &state,
+                        &user,
+                        &thread,
+                        &upstream,
+                        record_idx,
+                        &mut cancellation,
+                    )
+                    .await
+                }
+            };
+            if thread.purpose == "reports" {
+                tokio::time::timeout(Duration::from_secs(1800), turn).await.unwrap_or_else(|_| {
+                    Err((thread.clone(), Box::new(ApiError::unavailable("report turn exceeded 30 minutes; continue manually to resume saved progress"))))
+                })
             } else {
-                request_agent(
-                    &state,
-                    &user,
-                    &thread,
-                    &upstream,
-                    record_idx,
-                    &mut cancellation,
-                )
-                .await
+                turn.await
             }
         }
         Ok((thread, None)) => Err((
@@ -4521,6 +4551,7 @@ async fn process_request(
         Err(error) => Err((
             ThreadView {
                 id: thread_id.clone(),
+                purpose: "work".to_owned(),
                 title: "Untitled thread".to_owned(),
                 model: DEFAULT_MODEL.to_owned(),
                 upstream_id: None,
@@ -4555,7 +4586,9 @@ async fn process_request(
     match result {
         Ok((thread, output)) => {
             match finalize_request_success(&state, &user, &thread_id, record_idx).await {
-                Ok(true) if operation == RequestOperation::Inference => {
+                Ok(true)
+                    if operation == RequestOperation::Inference && thread.purpose != "reports" =>
+                {
                     let thread = maybe_name_thread(&state, &user, &thread).await;
                     linkit_notifications::notify(&state, &user, &thread, true, &output).await;
                 }
@@ -4570,7 +4603,7 @@ async fn process_request(
                 let current =
                     finalize_request_failure(&state, &user, &thread, record_idx, &error.message)
                         .await;
-                if current {
+                if current && thread.purpose != "reports" {
                     linkit_notifications::notify(&state, &user, &thread, false, &error.message)
                         .await;
                 }
@@ -4652,6 +4685,24 @@ async fn finalize_request_success(
             transaction.commit()?;
             return Ok(false);
         }
+        reports::finish(&transaction, record_idx, None)?;
+        if let Some(message) = reports::failed_message(&transaction, record_idx)? {
+            transaction.execute(
+                "UPDATE threads SET status='failed',updated_at=? WHERE id=?",
+                params![now(), thread_id],
+            )?;
+            persist_history_record(
+                &transaction,
+                HistoryRecordInsert {
+                    thread_id: &thread_id,
+                    kind: "activity",
+                    payload: &json!({"role":"system","content":message}),
+                    created_at: now(),
+                },
+            )?;
+            transaction.commit()?;
+            return Ok(false);
+        }
         let previous = load_thread(&transaction, &thread_id)?.status;
         let changed = transaction.execute(
             "UPDATE threads SET status='idle',updated_at=? WHERE id=? AND status='running'",
@@ -4688,6 +4739,7 @@ async fn finalize_request_failure(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let latest_request = latest_request_record_id(&transaction, &thread_id)?;
         let current = latest_request == Some(record_idx);
+        reports::finish(&transaction, record_idx, Some(&error_for_db))?;
         persist_history_record(
             &transaction,
             HistoryRecordInsert {
@@ -4965,6 +5017,11 @@ fn load_protocol_items(
            AND h.kind IN ('input','response_output','tool_output','checkpoint')
          ORDER BY h.id",
     )?;
+    let report_thread: bool = connection.query_row(
+        "SELECT purpose='reports' FROM threads WHERE id=?",
+        [thread_id],
+        |row| row.get(0),
+    )?;
     let rows = statement.query_map(params![thread_id, idx_head, idx_tail], |row| {
         let payload: String = row.get(3)?;
         let item =
@@ -4973,7 +5030,11 @@ fn load_protocol_items(
             row.get::<_, i64>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
-            context_protocol_item(&item),
+            if report_thread {
+                item
+            } else {
+                context_protocol_item(&item)
+            },
         ))
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -5299,17 +5360,24 @@ async fn request_agent(
                 continue;
             }
         }
-        let workers = user_db(state, user, false, |connection| {
-            registered_workers(connection)
-        })
-        .await
-        .map_err(|error| (thread.clone(), Box::new(error)))?;
-        let contexts = user_db(state, user, false, |connection| {
-            context_summaries(connection, None)
-        })
-        .await
-        .map_err(|error| (thread.clone(), Box::new(error)))?;
-        let prefix = developer_prefix(&contexts, &workers);
+        let (prefix, has_workers) = if thread.purpose == "reports" {
+            (
+                reports::prefix(state, user, source_record_idx)
+                    .await
+                    .map_err(|error| (thread.clone(), Box::new(error)))?,
+                false,
+            )
+        } else {
+            let (workers, contexts) = user_db(state, user, false, |connection| {
+                Ok((
+                    registered_workers(connection)?,
+                    context_summaries(connection, None)?,
+                ))
+            })
+            .await
+            .map_err(|error| (thread.clone(), Box::new(error)))?;
+            (developer_prefix(&contexts, &workers), !workers.is_empty())
+        };
         let response = match responses_request_with_options(
             state,
             user,
@@ -5323,7 +5391,7 @@ async fn request_agent(
             Some(&thread.reasoning_effort),
             thread.service_tier_fast,
             Value::Array(context.items.clone()),
-            !workers.is_empty(),
+            has_workers,
             // Thread turns always inject the native web search and image tools.
             true,
             true,
@@ -5361,6 +5429,10 @@ async fn request_agent(
             }
             Ok(response) => response,
         };
+        if thread.purpose == "reports" {
+            proactive_compactions = 0;
+            checkpoint_retries = 0;
+        }
         let ResponsesResult {
             value: response,
             output_items,
@@ -5517,14 +5589,18 @@ async fn compact_thread_context(
             "checkpoint source records do not reach its context tail",
         ));
     }
-    let workers = user_db(state, user, false, |connection| {
-        registered_workers(connection)
-    })
-    .await?;
-    let contexts = user_db(state, user, false, |connection| {
-        context_summaries(connection, None)
-    })
-    .await?;
+    let prefix = if thread.purpose == "reports" {
+        reports::prefix(state, user, source_record_idx).await?
+    } else {
+        let (workers, contexts) = user_db(state, user, false, |connection| {
+            Ok((
+                registered_workers(connection)?,
+                context_summaries(connection, None)?,
+            ))
+        })
+        .await?;
+        developer_prefix(&contexts, &workers)
+    };
     let summary = compact_protocol_context(
         state,
         user,
@@ -5537,7 +5613,7 @@ async fn compact_thread_context(
         &context.protocol_items,
         &context.record_metadata,
         cancellation.clone(),
-        developer_prefix(&contexts, &workers),
+        prefix,
     )
     .await?;
     if *cancellation.borrow() {
@@ -6010,6 +6086,7 @@ async fn compact_oversized_record(
 
 #[derive(Clone)]
 struct AuditSpec {
+    report_thread: bool,
     user: User,
     input_record_id: Option<i64>,
     thread_id: String,
@@ -6084,7 +6161,25 @@ async fn responses_request_with_options(
     developer_prefix: Option<Value>,
     cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<ResponsesResult, ApiError> {
+    let id = thread_id.to_owned();
+    let reporting = user_db(state, user, false, move |c| {
+        Ok(load_thread(c, &id)?.purpose == "reports")
+    })
+    .await?;
+    if reporting && let Some(input) = input_record_id {
+        let config = (request_kind == "inference")
+            .then(|| reports::agent_config(model, upstream, reasoning_effort, service_tier_fast));
+        user_db(state, user, false, move |c| {
+            reports::check_budget(c, input)?;
+            if let Some(config) = config {
+                reports::validate_config(c, input, &config)?;
+            }
+            Ok(())
+        })
+        .await?;
+    }
     let audit = AuditSpec {
+        report_thread: reporting,
         user: user.clone(),
         input_record_id,
         thread_id: thread_id.to_owned(),
@@ -6094,7 +6189,7 @@ async fn responses_request_with_options(
         idx_head,
         idx_tail,
     };
-    send_responses_request(
+    let request = send_responses_request(
         state,
         Some(user),
         upstream,
@@ -6109,8 +6204,18 @@ async fn responses_request_with_options(
         max_output_tokens,
         developer_prefix,
         Some((audit, cancellation)),
-    )
-    .await
+    );
+    if reporting {
+        tokio::time::timeout(Duration::from_secs(180), request)
+            .await
+            .unwrap_or_else(|_| {
+                Err(ApiError::unavailable(
+                    "report model call exceeded 180 seconds; continue manually",
+                ))
+            })
+    } else {
+        request.await
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6130,7 +6235,7 @@ async fn send_responses_request(
     developer_prefix: Option<Value>,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
 ) -> Result<ResponsesResult, ApiError> {
-    let payload = responses_payload_with_prefix(
+    let mut payload = responses_payload_with_prefix(
         model,
         reasoning_effort,
         service_tier_fast,
@@ -6142,6 +6247,21 @@ async fn send_responses_request(
         max_output_tokens,
         developer_prefix,
     );
+    if let Some((spec, _)) = &audit
+        && spec.report_thread
+    {
+        payload["max_output_tokens"] = json!(max_output_tokens.unwrap_or(16384).min(16384));
+        if spec.request_kind == "inference" {
+            payload["tools"] = TOOL_CATALOG["cybion"].clone();
+            payload["tool_choice"] = json!("auto");
+        } else {
+            payload
+                .as_object_mut()
+                .expect("Responses payload")
+                .remove("tools");
+            payload["tool_choice"] = json!("none");
+        }
+    }
     let mut request = state
         .client
         .post(format!(
@@ -6933,6 +7053,9 @@ async fn start_response_tool(
     input_id: i64,
     item: &ResponseItem,
 ) -> Result<Option<PendingToolCall>, ApiError> {
+    if thread.purpose == "reports" {
+        return reports::answer_tool(state, user, thread, input_id, item).await;
+    }
     if let ResponseItem::ToolSearchCall(call) = item
         && call.execution == "client"
         && let Some(call_id) = &call.call_id

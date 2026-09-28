@@ -38,7 +38,7 @@ export function ThreadStatusBadge({ status, language }: StatusProps) {
   </span>
 }
 
-export function ThreadLink({ thread, language }: { thread: { id: string; title: string; display_status: ThreadDisplayStatus; usage: ThreadUsage }; language: StatusProps["language"] }) {
+export function ThreadLink({ thread, language }: { thread: { purpose?: "work" | "reports"; id: string; title: string; display_status: ThreadDisplayStatus; usage: ThreadUsage }; language: StatusProps["language"] }) {
   const status = thread.display_status
   const { label, hint } = threadStatusText(status, language)
   return <Tooltip>
@@ -47,6 +47,7 @@ export function ThreadLink({ thread, language }: { thread: { id: string; title: 
         <ThreadStatusIcon status={status} className="mt-0.5" />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate font-medium">{thread.title}</span>
+          {thread.purpose === "reports" && <span className="w-fit rounded border px-1 text-[0.65rem] text-muted-foreground">{language === "zh" ? "报告" : "Reports"}</span>}
           <span className={cn("text-xs", presentation[status].color)}>{label}</span>
           <ThreadUsageSummary usage={thread.usage} language={language} />
         </span>
