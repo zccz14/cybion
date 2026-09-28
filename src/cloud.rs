@@ -37,6 +37,7 @@ mod admin_users;
 mod history;
 mod linkit_notifications;
 mod recovery;
+mod reports;
 mod thread_controls;
 mod traffic;
 mod turn_state;
@@ -90,7 +91,7 @@ const CONTEXT_ESTIMATE_BYTES_PER_TOKEN: i64 = 4;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 17;
+const USER_SCHEMA_VERSION: i64 = 18;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -503,6 +504,7 @@ fn recover_interrupted_requests(data_dir: &Path) -> Result<()> {
         let mut connection = Connection::open(&path)?;
         connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
         ensure_user_schema(&mut connection).map_err(|error| anyhow::anyhow!(error.message))?;
+        reports::recover(&connection).map_err(|error| anyhow::anyhow!(error.message))?;
         let interrupted = {
             let mut statement = connection
                 .prepare("SELECT id FROM threads WHERE status='running' ORDER BY updated_at,id")?;
@@ -566,6 +568,11 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/title", post(generate_thread_title))
         .route("/api/insights", get(insights))
         .route("/api/reports/daily", get(daily_report))
+        .route(
+            "/api/reports/daily/{date}/generate",
+            post(reports::generate),
+        )
+        .route("/api/reports/summaries/{id}", get(reports::read_summary))
         .route("/api/history", get(history::list))
         .route("/api/history/{id}", get(history::read))
         .route("/api/reasoning-audits", get(reasoning_audits))
@@ -1173,7 +1180,10 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // There is no supported migration from the discarded pre-release user databases.
         transaction
             .execute_batch(
-                "DROP TABLE IF EXISTS worker_checks;
+                "DROP TABLE IF EXISTS report_requests;
+                 DROP TABLE IF EXISTS report_summaries;
+                 DROP TABLE IF EXISTS report_jobs;
+                 DROP TABLE IF EXISTS worker_checks;
                  DROP TABLE IF EXISTS thread_turn_states;
                  DROP TABLE IF EXISTS response_states;
                  DROP TABLE IF EXISTS worker_calls;
@@ -1224,6 +1234,7 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
     transaction.execute_batch(linkit_notifications::SCHEMA)?;
+    transaction.execute_batch(reports::SCHEMA)?;
     if version < 14 {
         // COMPATIBILITY: the Cybion schema upgrader preserves notification setup for pre-14 databases
         // with stored Bot credentials. Remove when the supported schema floor
@@ -1551,6 +1562,8 @@ struct DailyReport {
     requests: i64,
     total_tokens: i64,
     threads: Vec<DailyThreadSummary>,
+    summary: reports::SummaryState,
+    generation: reports::GenerationView,
 }
 
 #[derive(Serialize)]
@@ -1563,6 +1576,7 @@ struct DailyThreadSummary {
     request_count: i64,
     total_tokens: i64,
     last_activity_at: i64,
+    daily_summary: Option<reports::SummaryState>,
 }
 
 #[derive(Serialize)]
@@ -2661,7 +2675,7 @@ fn load_insight_activity(
     };
     let (first_day_start, _) = utc_day_bounds(first_day);
     let (_, end) = utc_day_bounds(last_day);
-    let filter_start = started_after.unwrap_or(first_day_start);
+    let filter_start = first_day_start;
     let mut by_date = HashMap::<String, InsightActiveDay>::new();
     let mut history_statement = connection.prepare(
         "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch') AS date,
@@ -2824,11 +2838,14 @@ fn load_daily_report(connection: &Connection, date: NaiveDate) -> Result<DailyRe
             request_count: row.get(4)?,
             total_tokens: row.get(5)?,
             last_activity_at: row.get(6)?,
+            daily_summary: None,
         })
     })?;
     let mut threads = Vec::new();
     for row in rows {
-        threads.push(row?);
+        let mut thread = row?;
+        thread.daily_summary = Some(reports::thread_state(connection, date, &thread.id)?);
+        threads.push(thread);
     }
     Ok(DailyReport {
         date: date.format("%Y-%m-%d").to_string(),
@@ -2840,6 +2857,8 @@ fn load_daily_report(connection: &Connection, date: NaiveDate) -> Result<DailyRe
         requests,
         total_tokens,
         threads,
+        summary: reports::day_state(connection, date)?,
+        generation: reports::view(connection, &date.to_string())?,
     })
 }
 
@@ -5916,6 +5935,7 @@ fn response_usage(response: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
 #[allow(dead_code)]
 async fn responses_request(
     state: &AppState,
+    user: Option<&User>,
     upstream: &Upstream,
     model: &str,
     input: Value,
@@ -5924,6 +5944,7 @@ async fn responses_request(
 ) -> Result<ResponsesResult, ApiError> {
     send_responses_request(
         state,
+        user,
         upstream,
         model,
         None,
@@ -5973,6 +5994,7 @@ async fn responses_request_with_options(
     };
     send_responses_request(
         state,
+        Some(user),
         upstream,
         model,
         reasoning_effort,
@@ -5992,6 +6014,7 @@ async fn responses_request_with_options(
 #[allow(clippy::too_many_arguments)]
 async fn send_responses_request(
     state: &AppState,
+    traffic_user: Option<&User>,
     upstream: &Upstream,
     model: &str,
     reasoning_effort: Option<&str>,
@@ -6060,9 +6083,7 @@ async fn send_responses_request(
         None
     };
     let mut cancellation = audit.as_ref().and_then(|(_, receiver)| receiver.clone());
-    let counters = audit
-        .as_ref()
-        .map(|(spec, _)| state.traffic.for_user(&spec.user.id));
+    let counters = traffic_user.map(|user| state.traffic.for_user(&user.id));
     let response = async {
         let response = send_with_cancellation(request, &mut cancellation, counters.clone()).await?;
         if let (Some((spec, _)), Some(key), Some(value)) = (
@@ -7907,7 +7928,7 @@ mod tests {
                 recent_first_day.activity_records,
                 recent_first_day.input_records
             ),
-            (1, 1, 0)
+            (1, 2, 1)
         );
         assert_eq!(report.date, first_date);
         assert_eq!(
@@ -9407,6 +9428,7 @@ mod tests {
         };
         let result = responses_request(
             &state,
+            None,
             &upstream,
             "test-model",
             json!([{"role":"user","content":"hello"}]),

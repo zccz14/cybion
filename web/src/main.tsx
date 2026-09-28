@@ -70,6 +70,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { WorkerConnections } from "@/components/worker-connections"
+import { DailyReports } from "@/components/daily-reports"
 import { AdminUsers } from "@/components/admin-users"
 import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
@@ -243,27 +244,6 @@ type InsightActiveDay = {
   input_records: number
   requests: number
   total_tokens: number
-}
-type DailyThreadSummary = {
-  id: string
-  title: string
-  summary: string | null
-  activity_count: number
-  input_count: number
-  request_count: number
-  total_tokens: number
-  last_activity_at: number
-}
-type DailyReport = {
-  date: string
-  timezone: string
-  generated_at: number
-  active_thread_count: number
-  activity_records: number
-  input_records: number
-  requests: number
-  total_tokens: number
-  threads: DailyThreadSummary[]
 }
 type Insights = {
   range: "24h" | "7d" | "30d" | "all"
@@ -563,16 +543,10 @@ const copy = {
     statsCheckpoints: "Checkpoints",
     statsLatestRecord: "Latest record",
     statsDailyActivity: "Daily active Threads",
-    statsDailyActivityDescription: "A Thread is active when it has at least one non-checkpoint protocol record. Calendar days use UTC.",
+    statsDailyActivityDescription: "A Thread is active when it has at least one non-checkpoint protocol record. Calendar days use UTC, including the full first calendar day. Model and request filters do not apply.",
     statsActiveThreads: "Active Threads",
     statsActivityRecords: "Activity records",
     statsInputs: "Inputs",
-    statsDailyReport: "Daily report",
-    statsDailyReportDescription: "A deterministic rollup of Threads active on the selected day. This is the source layer for weekly and monthly reports.",
-    statsDailyReportEmpty: "Select a day with activity to inspect its Threads.",
-    statsThreadSummary: "Latest input",
-    statsLatestActivity: "Latest activity",
-    statsNoActiveThreads: "No active Threads on this day.",
     statsCalendarLegend: "Fewer",
     statsCalendarLegendMore: "More",
     statsTimezone: "Timezone",
@@ -870,16 +844,10 @@ const copy = {
     statsCheckpoints: "检查点",
     statsLatestRecord: "最近记录",
     statsDailyActivity: "每日活跃 Thread",
-    statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。日历按 UTC 统计。",
+    statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，包含范围首日的完整数据；不受模型和请求类型筛选影响。",
     statsActiveThreads: "活跃 Thread",
     statsActivityRecords: "活动记录",
     statsInputs: "输入",
-    statsDailyReport: "日报",
-    statsDailyReportDescription: "对所选日期活跃 Thread 的可复现聚合。这一层是后续周报、月报的基础数据。",
-    statsDailyReportEmpty: "请选择有活动的日期查看其中的 Thread。",
-    statsThreadSummary: "最近输入",
-    statsLatestActivity: "最近活动",
-    statsNoActiveThreads: "这一天没有活跃 Thread。",
     statsCalendarLegend: "少",
     statsCalendarLegendMore: "多",
     statsTimezone: "时区",
@@ -2035,7 +2003,7 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
   const [requestKind, setRequestKind] = useState("all")
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const query = useQuery({
-    queryKey: ["insights", range, model, requestKind],
+    queryKey: ["insights", sdk.session.getState().sessionId, range, model, requestKind],
     queryFn: () => {
       const params = new URLSearchParams({ range })
       if (model !== "all") params.set("model", model)
@@ -2051,12 +2019,6 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
       ? current
       : [...activityDays].reverse().find((day) => day.active_threads > 0)?.date ?? activityDays.at(-1)?.date ?? null)
   }, [activityDays, query.data])
-  const dailyReport = useQuery({
-    queryKey: ["daily-report", selectedDate],
-    queryFn: () => api<DailyReport>(sdk, `/api/reports/daily?date=${encodeURIComponent(selectedDate!)}`),
-    enabled: selectedDate !== null,
-    refetchInterval: 10000,
-  })
   const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
   const rate = (value: number | null) => value === null
     ? "—"
@@ -2113,12 +2075,7 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
       selectedDate={selectedDate}
       onSelectDate={setSelectedDate}
     />
-    <DailyReportCard
-      report={dailyReport.data}
-      loading={dailyReport.isLoading}
-      error={dailyReport.error}
-      onRetry={() => void dailyReport.refetch()}
-    />
+    <DailyReports key={`${sdk.session.getState().sessionId}:${selectedDate}`} date={selectedDate} language={language} sessionId={sdk.session.getState().sessionId ?? ""} request={(path, init) => api(sdk, path, init)} />
     <Card>
       <CardHeader><CardTitle>{t("statsTokenUsage")}</CardTitle><CardDescription>{t("statsByModel")}</CardDescription></CardHeader>
       <CardContent>
@@ -2218,43 +2175,6 @@ function DailyActivityCard({
           <p>{selectedDate ? `${t("statsSummary")}: ${dateLabel(selectedDate)}` : t("statsDailyActivity")}</p>
           <div className="flex items-center gap-2" aria-label={t("statsDailyActivity")}><span>{t("statsCalendarLegend")}</span><span className="size-3 rounded-sm bg-muted" /><span className="size-3 rounded-sm bg-primary/20" /><span className="size-3 rounded-sm bg-primary/40" /><span className="size-3 rounded-sm bg-primary/65" /><span className="size-3 rounded-sm bg-primary" /><span>{t("statsCalendarLegendMore")}</span></div>
         </div>
-      </>}
-    </CardContent>
-  </Card>
-}
-
-function DailyReportCard({
-  report,
-  loading,
-  error,
-  onRetry,
-}: {
-  report: DailyReport | undefined
-  loading: boolean
-  error: unknown
-  onRetry: () => void
-}) {
-  const { t, language } = useUi()
-  const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
-  return <Card>
-    <CardHeader><CardTitle>{t("statsDailyReport")}</CardTitle><CardDescription>{t("statsDailyReportDescription")}</CardDescription></CardHeader>
-    <CardContent>
-      {Boolean(error) && <RequestError error={error} onRetry={onRetry} />}
-      {loading && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("statsDailyReport")}</div>}
-      {!loading && !error && !report && <p className="py-6 text-sm text-muted-foreground">{t("statsDailyReportEmpty")}</p>}
-      {report && <>
-        <div className="grid gap-4 border-b pb-5 sm:grid-cols-2 lg:grid-cols-5">
-          <div><dt className="text-xs text-muted-foreground">{t("statsSummary")}</dt><dd className="mt-1 font-medium">{report.date}</dd><p className="mt-1 text-xs text-muted-foreground">{t("statsTimezone")}: {report.timezone}</p></div>
-          <div><dt className="text-xs text-muted-foreground">{t("statsActiveThreads")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.active_thread_count)}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">{t("statsActivityRecords")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.activity_records)}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">{t("statsInputs")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.input_records)}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">{t("statsRequestsCount")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(report.requests)}<span className="ml-2 text-xs font-normal text-muted-foreground">{number(report.total_tokens)} {t("statsTotalTokensShort")}</span></dd></div>
-        </div>
-        {report.threads.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoActiveThreads")}</p> : <div className="divide-y">{report.threads.map((thread) => <div key={thread.id} className="grid gap-3 py-4 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(0,1.6fr)_auto] lg:items-start">
-          <div className="min-w-0"><Link className="font-medium hover:underline" to={`/threads/${thread.id}`}>{thread.title || thread.id}</Link><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{thread.id}</p></div>
-          <div className="min-w-0"><p className="text-xs text-muted-foreground">{t("statsThreadSummary")}</p><p className="mt-1 break-words text-sm">{thread.summary ?? "—"}</p></div>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground"><span>{number(thread.activity_count)} {t("statsActivityRecords")}</span><span>{number(thread.input_count)} {t("statsInputs")}</span><span>{number(thread.request_count)} {t("statsRequestsCount")}</span><span>{number(thread.total_tokens)} {t("statsTotalTokensShort")}</span><span>{t("statsLatestActivity")}: {formattedTime(language, thread.last_activity_at)}</span></div>
-        </div>)}</div>}
       </>}
     </CardContent>
   </Card>

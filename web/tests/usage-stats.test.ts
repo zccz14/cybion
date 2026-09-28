@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+const reportSource = readFileSync(new URL("../src/components/daily-reports.tsx", import.meta.url), "utf8")
 const insightsPage = source.slice(source.indexOf("function InsightsPage("), source.indexOf("function ReasoningAuditPage("))
 
 test("the page and its navigation are titled Usage statistics in both languages", () => {
@@ -48,12 +49,12 @@ test("usage statistics render the daily active-thread calendar and selected dail
   assert.match(insightsPage, /<DailyActivityCard/)
   assert.match(insightsPage, /data\.activity\.days/)
   assert.match(source, /function DailyActivityCard\(/)
-  assert.match(source, /function DailyReportCard\(/)
-  assert.match(source, /`\/api\/reports\/daily\?date=\$\{encodeURIComponent\(selectedDate!\)\}`/)
+  assert.match(insightsPage, /<DailyReports/)
+  assert.match(reportSource, /`\/api\/reports\/daily\?date=\$\{encodeURIComponent\(date!\)\}`/)
 })
 
 test("daily activity defines non-checkpoint protocol records and exposes a UTC label", () => {
   assert.match(source, /A Thread is active when it has at least one non-checkpoint protocol record\./)
-  assert.match(source, /statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。日历按 UTC 统计。"/)
+  assert.match(source, /statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，包含范围首日的完整数据；不受模型和请求类型筛选影响。"/)
   assert.match(source, /<Badge variant="outline">\{t\("statsTimezone"\)\}: \{timezone\}<\/Badge>/)
 })
