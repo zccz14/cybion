@@ -2,14 +2,34 @@
   "context": [
     {
       "type": "function",
+      "name": "cybion_list_contexts",
+      "description": "List top-level Contexts (context_id, name, description) from the controller. Content is intentionally omitted; use read_context to read a context and discover its direct children.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "cybion_list_workers",
+      "description": "List registered Workers (worker_id, label) from the controller. Every Worker tool call must include an exact worker_id from this list; never choose a Worker implicitly. Registered Workers are not necessarily online; availability is checked when a Worker tool is called.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
       "name": "read_context",
-      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller.",
+      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller. Start from a context_id listed by cybion_list_contexts; pass a returned child context_id to explore further levels.",
       "parameters": {
         "type": "object",
         "properties": {
           "context_id": {
             "type": "string",
-            "description": "Exact context ID from the top-level Contexts list or children returned by a previous read_context call."
+            "description": "Exact context_id from cybion_list_contexts or from children returned by a previous read_context call."
           }
         },
         "required": [
@@ -29,7 +49,7 @@
         "properties": {
           "worker_id": {
             "type": "string",
-            "description": "Exact Worker ID from the Workers list."
+            "description": "Exact worker_id from cybion_list_workers."
           },
           "command": {
             "type": "string"
@@ -51,7 +71,7 @@
         "properties": {
           "worker_id": {
             "type": "string",
-            "description": "Exact Worker ID from the Workers list."
+            "description": "Exact worker_id from cybion_list_workers."
           },
           "action": {
             "type": "string"
@@ -82,7 +102,7 @@
         "properties": {
           "worker_id": {
             "type": "string",
-            "description": "Exact Worker ID from the Workers list."
+            "description": "Exact worker_id from cybion_list_workers."
           },
           "action": {
             "type": "string"

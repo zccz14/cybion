@@ -517,18 +517,13 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
             .unwrap()
             .contains("Source record metadata")
     );
-    assert!(
-        request["input"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains(offline_worker)
+    assert_eq!(
+        input_items[0]["content"], "remember this",
+        "compaction must start with the replayed conversation records: {request}"
     );
     assert!(
-        !request["input"][0]["content"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("cybion")
+        !request["input"].to_string().contains(offline_worker),
+        "compaction requests must not replay a registry prefix: {request}"
     );
     assert!(request.get("tools").is_none());
     assert_eq!(request["tool_choice"], "none");
