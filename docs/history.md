@@ -35,8 +35,11 @@ and expanded row. Filtering and sorting still use the stored numeric value.
 
 Conversation history returns the same five fields, with `payload` decoded as
 JSON. The conversation renders inputs, messages, reasoning summaries, tool
-results, and runtime activity directly from `kind` and `payload`. Thread naming
-reads the input text from its payload.
+results, and runtime activity directly from `kind` and `payload`. An input may
+carry pasted images as `input_image` content parts; the conversation shows them
+inside the user message with an open-image dialog, while the History table
+keeps exposing the raw payload. Thread naming reads the input text from its
+payload.
 
 The conversation opens on a bounded window instead of the whole thread. The
 browser-authenticated `GET /api/threads/{id}/history/window` endpoint accepts:

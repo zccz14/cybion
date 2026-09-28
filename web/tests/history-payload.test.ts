@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { bashFunctionCall, historyPayloadText } from "../src/lib/history-payload.ts"
+import { bashFunctionCall, historyPayloadText, userInputView } from "../src/lib/history-payload.ts"
 
 test("conversation text is derived from stored protocol payloads", () => {
   for (const [payload, expected] of [
@@ -37,4 +37,16 @@ test("unrelated events and incomplete or malformed bash arguments retain the gen
   ]) {
     assert.equal(bashFunctionCall(payload), null, JSON.stringify(payload))
   }
+})
+
+test("user input splits typed text from pasted images", () => {
+  assert.deepEqual(userInputView({ role: "user", content: "plain text" }), { text: "plain text", images: [] })
+  const png = "data:image/png;base64,AAAA"
+  const jpeg = "data:image/jpeg;base64,BBBB"
+  assert.deepEqual(
+    userInputView({ role: "user", content: [{ type: "input_text", text: "这个报错怎么回事？" }, { type: "input_image", image_url: png }, { type: "input_image", image_url: jpeg }] }),
+    { text: "这个报错怎么回事？", images: [png, jpeg] },
+  )
+  assert.deepEqual(userInputView({ role: "user", content: [{ type: "input_image", image_url: png }] }), { text: "", images: [png] })
+  assert.deepEqual(userInputView(null), { text: "", images: [] })
 })

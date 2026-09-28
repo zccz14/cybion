@@ -28,6 +28,24 @@ export function historyPayloadText(payload: unknown): string {
   return JSON.stringify(payload, null, 2) ?? String(payload)
 }
 
+export type UserInputView = { text: string; images: string[] }
+
+// A user input payload is either plain text or Responses content parts:
+// `input_text` carries the typed text and `input_image` each pasted data URL.
+export function userInputView(payload: unknown): UserInputView {
+  const object = historyPayloadObject(payload)
+  if (typeof object?.content === "string") return { text: object.content, images: [] }
+  const parts = Array.isArray(object?.content) ? object.content : []
+  const text: string[] = []
+  const images: string[] = []
+  for (const part of parts) {
+    const partObject = historyPayloadObject(part)
+    if (partObject?.type === "input_text" && typeof partObject.text === "string") text.push(partObject.text)
+    if (partObject?.type === "input_image" && typeof partObject.image_url === "string") images.push(partObject.image_url)
+  }
+  return { text: text.join(""), images }
+}
+
 export type BashFunctionCall = { workerId: string; command: string }
 
 export function bashFunctionCall(payload: unknown): BashFunctionCall | null {

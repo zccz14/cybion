@@ -64,7 +64,7 @@ The last pre-day user input can be included as background, up to 4096
 characters, but cannot be cited as same-day evidence or counted as that day's
 accomplishment. Binary images/files and encrypted reasoning have explicit
 omission markers rather than being interpreted as text; inspect the original
-record for those materials. Worker screenshots are identified by the call
+record for those materials. Pasted image data URLs project the same way. Worker screenshots are identified by the call
 ledger, including Base64 carried inside serialized tool output. Ordinary bash
 stdout is not classified as an image by size or appearance. Textual payloads are fragmented rather than
 silently truncated. Summaries remain selective condensations, not a guarantee

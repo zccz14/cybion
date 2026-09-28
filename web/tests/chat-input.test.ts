@@ -46,12 +46,14 @@ test("holding Enter does not submit again or insert a newline", () => {
 })
 
 test("the composer action slot merges send, continue, and stop", () => {
-  assert.equal(composerAction("hello", false), "send")
-  assert.equal(composerAction("hello", true), "send")
-  assert.equal(composerAction("", false), "continue")
-  assert.equal(composerAction("", true), "stop")
-  assert.equal(composerAction("   ", false), "continue")
-  assert.equal(composerAction("   ", true), "stop")
+  assert.equal(composerAction("hello", 0, false), "send")
+  assert.equal(composerAction("hello", 0, true), "send")
+  assert.equal(composerAction("", 0, false), "continue")
+  assert.equal(composerAction("", 0, true), "stop")
+  assert.equal(composerAction("   ", 0, false), "continue")
+  assert.equal(composerAction("   ", 0, true), "stop")
+  assert.equal(composerAction("", 1, false), "send")
+  assert.equal(composerAction("", 1, true), "send")
 })
 
 test("both composers use the shared handler and drop shortcut hint copy", () => {
@@ -59,6 +61,7 @@ test("both composers use the shared handler and drop shortcut hint copy", () => 
   for (const id of ["new-thread-input", "thread-input"]) {
     const composer = source.split("\n").find((line) => line.includes(`<Textarea id="${id}"`))
     assert.ok(composer?.includes("onKeyDown={handleChatInputKeyDown}"))
+    assert.ok(composer?.includes("onPaste={attachments.paste}"))
   }
   assert.doesNotMatch(source, /sendShortcut|startThreadShortcut/)
   assert.doesNotMatch(source, /Shift \+ Enter|⌘ \/ Ctrl \+ Enter/)

@@ -5,6 +5,10 @@ use crate::cloud::tests::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+fn user_text(text: &str) -> Value {
+    input_message(text.to_owned(), Vec::new()).unwrap()
+}
+
 async fn record(state: &AppState, user: &User, thread: &ThreadView, input: RequestInput) -> i64 {
     let id = thread.id.clone();
     user_db(state, user, false, move |connection| {
@@ -156,7 +160,7 @@ async fn browser_controls_accept_empty_posts_and_enforce_authentication_and_owne
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("saved prompt".to_owned()),
+        RequestInput::Prompt(user_text("saved prompt")),
     )
     .await;
     finalize_request_success(&state, &user, &thread.id, first)
@@ -216,6 +220,52 @@ async fn browser_controls_accept_empty_posts_and_enforce_authentication_and_owne
 }
 
 #[tokio::test]
+async fn pasted_image_input_replays_as_an_upstream_input_image_part() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "paste-image-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_json_request(&mut socket).await;
+        reply_completed(&mut socket, "I can see the screenshot").await;
+        request
+    });
+    let image = "data:image/png;base64,UC5ORw==";
+    enqueue(
+        state.clone(),
+        user.clone(),
+        thread.id.clone(),
+        RequestInput::Prompt(
+            input_message("what is wrong".to_owned(), vec![image.to_owned()]).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    wait_finished(&state, &user, &thread).await;
+    let request = server.await.unwrap();
+    let prompt = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["role"] == "user")
+        .unwrap();
+    assert_eq!(
+        prompt["content"],
+        json!([
+            {"type":"input_text","text":"what is wrong"},
+            {"type":"input_image","image_url":image}
+        ])
+    );
+    let stored = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let input = stored.iter().find(|record| record.kind == "input").unwrap();
+    assert_eq!(input.payload["content"][1]["image_url"], image);
+}
+
+#[tokio::test]
 async fn continue_replays_saved_history_without_a_new_prompt() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "continue-user").unwrap();
@@ -224,7 +274,7 @@ async fn continue_replays_saved_history_without_a_new_prompt() {
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("original prompt".to_owned()),
+        RequestInput::Prompt(user_text("original prompt")),
     )
     .await;
     append_tool_output_item(
@@ -337,7 +387,7 @@ async fn cancel_closes_the_in_flight_stream_and_preserves_committed_records() {
         state.clone(),
         user.clone(),
         thread.id.clone(),
-        RequestInput::Prompt("original prompt".to_owned()),
+        RequestInput::Prompt(user_text("original prompt")),
     )
     .await
     .unwrap();
@@ -422,7 +472,7 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("remember this".to_owned()),
+        RequestInput::Prompt(user_text("remember this")),
     )
     .await;
     finalize_request_success(&state, &user, &thread.id, first)
@@ -518,7 +568,7 @@ async fn cancelled_generation_cannot_checkpoint_dispatch_tools_or_clear_its_repl
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("original".to_owned()),
+        RequestInput::Prompt(user_text("original")),
     )
     .await;
     cancel_for(&state, &user, thread.id.clone()).await.unwrap();
@@ -599,7 +649,7 @@ async fn controls_reject_empty_busy_and_other_users_threads_without_appending() 
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("original".to_owned()),
+        RequestInput::Prompt(user_text("original")),
     )
     .await;
     for input in [RequestInput::Continue, RequestInput::Compact] {
@@ -666,7 +716,7 @@ async fn cancel_marks_all_outstanding_worker_calls_and_keeps_late_results_as_act
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("original".to_owned()),
+        RequestInput::Prompt(user_text("original")),
     )
     .await;
     let worker_id = "00000000-0000-4000-8000-000000000001";
@@ -754,7 +804,7 @@ async fn display_status_distinguishes_ready_success_stop_failure_and_compaction(
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("first".to_owned()),
+        RequestInput::Prompt(user_text("first")),
     )
     .await;
     assert_display_status(&state, &user, &thread, "running").await;
@@ -802,7 +852,7 @@ async fn display_status_distinguishes_ready_success_stop_failure_and_compaction(
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("fail".to_owned()),
+        RequestInput::Prompt(user_text("fail")),
     )
     .await;
     assert!(finalize_request_failure(&state, &user, &thread, failed, "upstream error").await);
@@ -825,7 +875,7 @@ async fn display_status_ignores_audits_and_late_output_and_is_scoped_to_the_thre
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("first".to_owned()),
+        RequestInput::Prompt(user_text("first")),
     )
     .await;
     finalize_request_success(&state, &user, &thread.id, initial)
@@ -837,7 +887,7 @@ async fn display_status_ignores_audits_and_late_output_and_is_scoped_to_the_thre
         &state,
         &user,
         &thread,
-        RequestInput::Prompt("new prompt".to_owned()),
+        RequestInput::Prompt(user_text("new prompt")),
     )
     .await;
     assert!(
@@ -1004,7 +1054,7 @@ async fn proactive_compaction_checkpoints_the_context_before_an_oversized_infere
         state.clone(),
         user.clone(),
         thread.id.clone(),
-        RequestInput::Prompt("please continue".to_owned()),
+        RequestInput::Prompt(user_text("please continue")),
     )
     .await
     .unwrap();
@@ -1095,7 +1145,7 @@ async fn disabled_context_budget_skips_proactive_compaction() {
         state.clone(),
         user.clone(),
         thread.id.clone(),
-        RequestInput::Prompt("please continue".to_owned()),
+        RequestInput::Prompt(user_text("please continue")),
     )
     .await
     .unwrap();

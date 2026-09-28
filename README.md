@@ -50,6 +50,10 @@ the first authenticated browser session initializes that key atomically.
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record
   index and the sole context ordering key.
+- The composer accepts pasted images (png/jpeg/webp/gif, at most 4 per input).
+  The browser downsizes larger files, the input record stores each image as an
+  `input_image` data URL next to the typed text, and replay sends it to the
+  model unchanged. Text inputs stay plain strings.
 - Before each Responses request, Cybion reads the same thread's latest
   checkpoint at or before the selected record index, then replays the remaining
   protocol records in index order. A fresh request therefore reconstructs its
@@ -113,8 +117,10 @@ curl -X POST https://cybion.ntnl.io/v1/threads \
 | `GET` | `/v1/threads/{id}/history` | Read every durable record in index order. |
 | `POST` | `/v1/threads/{id}/inputs` | Append input and start inference. |
 
-`POST /v1/threads/{id}/inputs` accepts `{"input":"..."}` and returns the
-new `record_idx`. Poll the thread and history endpoints for the result.
+`POST /v1/threads/{id}/inputs` accepts
+`{"input":"...","images":["data:image/png;base64,..."]}` and returns the new
+`record_idx`; `images` is optional, and each entry must be a png/jpeg/webp/gif
+base64 data URL. Poll the thread and history endpoints for the result.
 
 The [History table](docs/history.md) at `#/history` exposes stored history rows
 with server-side filters, sorting, pagination, and full raw-field inspection.

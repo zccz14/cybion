@@ -135,6 +135,10 @@ See [accounting and persistence](docs/thread-usage-and-drafts.md).
 Composer text is independent for every account, Thread, and the new-thread page.
 Restore it from this browser on navigation/reload. Only server-acknowledged input
 clears the matching submitted draft; newer edits and other drafts remain intact.
+Pasted images are attachments of the live composer, not stored drafts: they show
+as removable thumbnails, are sent with the next message, and clear on success.
+A user message shows its attached images above the text, each opening a preview
+dialog on click.
 Explain local persistence visibly and warn if browser storage cannot save it.
 Existing drafts take precedence over automatic prefills. Draft persistence does
 not imply cross-device synchronization or automatic submission.

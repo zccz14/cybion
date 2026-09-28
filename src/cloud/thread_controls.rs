@@ -7,7 +7,9 @@ pub(super) enum RequestOperation {
 }
 
 pub(super) enum RequestInput {
-    Prompt(String),
+    /// One complete Responses `input` item: a text message or a message whose
+    /// content carries pasted images.
+    Prompt(Value),
     Continue,
     Compact,
 }
@@ -75,7 +77,7 @@ fn record_request(
                 HistoryRecordInsert {
                     thread_id,
                     kind: "input",
-                    payload: &json!({"role":"user","content":input}),
+                    payload: &input,
                     created_at: now(),
                 },
             )?,

@@ -58,8 +58,11 @@ import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
+import { useComposerImages } from "@/hooks/use-composer-images"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
+import { ComposerAttachments } from "@/components/composer-attachments"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
+import { UserInputMessage } from "@/components/user-input-message"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
 import "./styles.css"
@@ -99,7 +102,6 @@ import {
   Message,
   MessageContent,
   MessageFooter,
-  MessageGroup,
 } from "@/components/ui/message"
 import {
   MessageScroller,
@@ -169,7 +171,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & { input: string }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & { input: string; images: string[] }
 type ApiKey = {
   id: string
   label: string
@@ -1330,6 +1332,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
   const location = useLocation()
   const composer = useComposerDraft(userId, null)
   const { input, setInput, seed, clearSubmitted } = composer
+  const attachments = useComposerImages()
   useEffect(() => {
     if (typeof location.state?.initialInput !== "string") return
     const { initialInput, ...state } = location.state
@@ -1341,6 +1344,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
     mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify({ ...payload, input: payload.input.trim() }) }),
     onSuccess: (_request, payload) => {
       clearSubmitted(payload.input)
+      attachments.clear()
       void client.invalidateQueries({ queryKey: ["threads"] })
     },
   })
@@ -1349,9 +1353,8 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
     start.reset()
   }
   const submit = () => {
-    const message = input.trim()
-    if (!value || !message || start.isPending) return
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
+    if (!value || (!input.trim() && attachments.images.length === 0) || start.isPending) return
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1384,7 +1387,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError }: {
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} disabled={!value || start.isPending} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || !input.trim() || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || (!input.trim() && attachments.images.length === 0) || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -1455,6 +1458,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   })
   const composer = useComposerDraft(userId, threadId)
   const { input, setInput, clearSubmitted } = composer
+  const attachments = useComposerImages()
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -1463,12 +1467,13 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
     setEditing(false)
   }, [threadId, thread.data?.title])
   const submit = useMutation({
-    mutationFn: (value: string) => api<RequestAck>(sdk, `/api/threads/${encodeURIComponent(threadId)}/inputs`, {
+    mutationFn: (value: { input: string; images: string[] }) => api<RequestAck>(sdk, `/api/threads/${encodeURIComponent(threadId)}/inputs`, {
       method: "POST",
-      body: JSON.stringify({ input: value.trim() }),
+      body: JSON.stringify({ input: value.input.trim(), images: value.images }),
     }),
     onSuccess: (_request, submitted) => {
-      clearSubmitted(submitted)
+      clearSubmitted(submitted.input)
+      attachments.clear()
       void client.invalidateQueries({ queryKey: ["history", threadId] })
       void client.invalidateQueries({ queryKey: ["thread", threadId] })
       void client.invalidateQueries({ queryKey: ["threads"] })
@@ -1530,7 +1535,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
   const running = current.status === "running"
   const busy = submit.isPending || control.isPending
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
-  const action = composerAction(input, running)
+  const action = composerAction(input, attachments.images.length, running)
   return <main className="flex h-full flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
@@ -1561,7 +1566,7 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
       <ThreadUsagePanel usage={current.usage} language={language} />
-      {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => input.trim() && submit.mutate(input)} /></div>}
+      {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || attachments.images.length > 0) && submit.mutate({ input, images: attachments.images })} /></div>}
       {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
       {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
       <MessageScrollerProvider autoScroll defaultScrollPosition="end">
@@ -1589,8 +1594,8 @@ function ThreadConversation({ sdk, userId, threads, onCreate }: { sdk: AuthMiniA
           <MessageScrollerButton behavior="auto" />
         </MessageScroller>
       </MessageScrollerProvider>
-      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); const value = input.trim(); if (value && !busy) submit.mutate(input) }}>
-        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} disabled={busy} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
+      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || attachments.images.length > 0) && !busy) submit.mutate({ input, images: attachments.images }) }}>
+        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} />
             <div className="flex flex-wrap items-center gap-2">
@@ -1638,18 +1643,15 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
       </MessageContent>
     </Message>
   }
-  const text = historyRecordText(record)
-  const isUserInput = record.kind === "input"
-  if (isUserInput) {
+  if (record.kind === "input") {
     return <Message align="end">
       <MessageContent>
-        <MessageGroup>
-          <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-user-message px-3 py-2 text-sm leading-6 text-user-message-foreground">{text}</div>
-        </MessageGroup>
+        <UserInputMessage language={language} payload={record.payload} />
         <MessageFooter>#{record.id} · {time}</MessageFooter>
       </MessageContent>
     </Message>
   }
+  const text = historyRecordText(record)
 
   if (isReasoningRecord(record)) {
     const summary = reasoningSummary(record)
