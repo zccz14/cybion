@@ -37,8 +37,11 @@ error
 verification recommendations, moderation metadata, safety buffering and turn
 state. `response.failed`, `response.incomplete`, and `error` retain Codex's
 context, quota, usage, policy, overload, rate-limit and retryable categories.
-Unknown event values remain forward-compatible and are consumed without
-terminating the stream.
+An `incomplete` response carrying `max_output_tokens` is Cybion's output-budget
+signal: an inference request retries the sampling turn the way Codex retries a
+disconnected stream, while a compaction request reduces its range. Unknown
+event values remain forward-compatible and are consumed without terminating
+the stream.
 
 `src/responses/items.rs` models the Codex output item enum with field-level
 Rust types. Function and custom tool arguments remain strings on the wire and
