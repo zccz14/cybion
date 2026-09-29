@@ -68,6 +68,7 @@ import { useComposerImages } from "@/hooks/use-composer-images"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
 import { ComposerAttachments } from "@/components/composer-attachments"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
+import { AssistantMessage } from "@/components/assistant-message"
 import { UserInputMessage } from "@/components/user-input-message"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
@@ -88,7 +89,6 @@ import { HistoryTable } from "@/components/history-table"
 import { HistoryRecordPayload } from "@/components/history-record-payload"
 import { BashCommand } from "@/components/bash-command"
 import { CheckpointMessage } from "@/components/checkpoint-message"
-import { CopyReplyButton } from "@/components/copy-reply-button"
 import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
@@ -448,7 +448,6 @@ const copy = {
     loadError: "Could not load this surface",
     retry: "Retry",
     system: "System",
-    assistant: "Cybion",
     user: "You",
     worker: "Worker",
     close: "Close",
@@ -756,7 +755,6 @@ const copy = {
     loadError: "无法加载这个页面",
     retry: "重试",
     system: "系统",
-    assistant: "Cybion",
     user: "你",
     worker: "Worker",
     close: "关闭",
@@ -1788,24 +1786,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
 
   const payload = historyPayloadObject(record.payload)
   if (record.kind === "response_output" && payload?.type === "message") {
-    return <Message className="items-start">
-      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
-        <SparklesIcon className="size-4" />
-      </div>
-      <MessageContent className="gap-1.5">
-        <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
-          <span className="text-sm font-medium text-foreground">{t("assistant")}</span>
-          <span aria-hidden="true">·</span>
-          <time>{time}</time>
-        </div>
-        <div className="max-w-[75ch] rounded-2xl rounded-tl-md bg-card px-4 py-3 shadow-sm ring-1 ring-foreground/10">
-          <div className="prose prose-sm max-w-none break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">
-            <Markdown>{text}</Markdown>
-          </div>
-        </div>
-        <CopyReplyButton text={text} language={language} />
-      </MessageContent>
-    </Message>
+    return <AssistantMessage language={language} text={text} time={time} />
   }
 
   if (record.kind === "tool_output") {
