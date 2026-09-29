@@ -38,6 +38,6 @@ test("persisted and live protocol messages receive Worker updates through memoiz
   assert.match(source, /<ThreadHistory records=\{records\}/)
   assert.match(source, /pendingResponseRecords\(liveResponse.data, durableRecords, threadId\)/)
   assert.match(source, /previous.workers === next.workers/)
-  assert.ok(source.indexOf("const bashCall = bashFunctionCall(payload)") < source.indexOf('if (record.kind === "checkpoint" ||'))
+  assert.ok(source.indexOf("const bashCall = bashFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))
   assert.match(source, /<BashCommand[^>]*>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/BashCommand>/)
 })

@@ -35,11 +35,11 @@ and expanded row. Filtering and sorting still use the stored numeric value.
 
 Conversation history returns the same five fields, with `payload` decoded as
 JSON. The conversation renders inputs, messages, reasoning summaries, tool
-results, and runtime activity directly from `kind` and `payload`. An input may
-carry pasted images as `input_image` content parts; the conversation shows them
-inside the user message with an open-image dialog, while the History table
-keeps exposing the raw payload. Thread naming reads the input text from its
-payload.
+results, checkpoints, and runtime activity directly from `kind` and `payload`.
+An input may carry pasted images as `input_image` content parts; the
+conversation shows them inside the user message with an open-image dialog,
+while the History table keeps exposing the raw payload. Thread naming reads
+the input text from its payload.
 
 The conversation opens on a bounded window instead of the whole thread. The
 browser-authenticated `GET /api/threads/{id}/history/window` endpoint accepts:
@@ -66,7 +66,10 @@ pending response items. Inputs, assistant `response_output` items of type
 `message`, and every `activity` record stay outside process groups and end the
 preceding group. All other consecutive records form a `ThreadProcessGroup`,
 including a single record. Expanding the group renders the original records in
-their original order, with their existing payload inspection controls.
+their original order, with their existing payload inspection controls. A
+`checkpoint` record renders its stored Markdown through the shared Markdown
+renderer, the same rendering assistant replies use, and keeps its raw payload
+behind the existing disclosure.
 
 Each group starts collapsed and shows its record count and the difference
 between its maximum and minimum `created_at` values (Unix seconds). Chinese
