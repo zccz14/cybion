@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
-import { defaultThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
+import { allThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import type { ThreadUsage } from "@/lib/thread-usage"
 
@@ -59,7 +59,7 @@ export function ThreadList({ threads, archivedThreads, archivedTotal, loading, l
         ? <div className="flex flex-col gap-2"><Skeleton className="h-18" /><Skeleton className="h-18" /><Skeleton className="h-18" /></div>
         : <>
           <nav aria-label={t.threads} className="flex flex-col gap-1">
-            {threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(defaultThreadListFilters)} />}
+            {threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(allThreadListFilters)} />}
             {threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
             <ThreadListMore pagination={pagination} language={language} />
           </nav>
