@@ -24,7 +24,7 @@ use axum::{
 };
 use chrono::{NaiveDate, TimeZone, Utc};
 use futures_util::StreamExt;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -2537,24 +2537,73 @@ async fn create_thread_for(
     .await
 }
 
+/// Filters for `GET /api/threads`. Dimensions are independent: an omitted
+/// dimension matches every Thread and every provided dimension must match.
+#[derive(Default)]
+struct ThreadListFilter {
+    /// `true` lists only archived threads; the default lists active ones.
+    archived: bool,
+    /// Persisted execution status: `idle`, `running`, or `failed`.
+    status: Option<String>,
+    /// Creation origin: `web` or `api`.
+    origin: Option<String>,
+    /// Case-insensitive substring matched against the title and `external_ref`.
+    q: Option<String>,
+}
+
+impl ThreadListFilter {
+    #[cfg(test)]
+    fn active() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    fn archived() -> Self {
+        Self {
+            archived: true,
+            ..Self::default()
+        }
+    }
+}
+
 async fn list_threads_for(
     state: &AppState,
     user: &User,
-    archived: bool,
+    filter: ThreadListFilter,
 ) -> Result<Vec<ThreadView>, ApiError> {
     user_db(state, user, true, move |connection| {
-        let archive_scope = if archived {
+        let mut conditions = vec![if filter.archived {
             "t.archived_at IS NOT NULL"
         } else {
             "t.archived_at IS NULL"
-        };
+        }];
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(status) = &filter.status {
+            conditions.push("t.status = ?");
+            values.push(rusqlite::types::Value::Text(status.clone()));
+        }
+        if let Some(origin) = &filter.origin {
+            conditions.push("t.created_by = ?");
+            values.push(rusqlite::types::Value::Text(origin.clone()));
+        }
+        if let Some(q) = &filter.q {
+            // ASSUMPTION: SQLite's lower() folds ASCII case only, so searches
+            // in non-ASCII scripts stay case-sensitive. A missed match only
+            // keeps a Thread out of one view; it is never data loss.
+            conditions.push(
+                "(instr(lower(t.title), lower(?)) > 0 OR instr(lower(COALESCE(t.external_ref, '')), lower(?)) > 0)",
+            );
+            values.push(rusqlite::types::Value::Text(q.clone()));
+            values.push(rusqlite::types::Value::Text(q.clone()));
+        }
         let mut statement = connection.prepare(&format!(
             "{THREAD_VIEW_SELECT}
              LEFT JOIN ({THREAD_USAGE_SELECT} GROUP BY thread_id) usage ON usage.thread_id=t.id
-             WHERE {archive_scope}
-             ORDER BY t.updated_at DESC,t.id DESC"
+             WHERE {}
+             ORDER BY t.updated_at DESC,t.id DESC",
+            conditions.join(" AND ")
         ))?;
-        let rows = statement.query_map([], thread_from_row)?;
+        let rows = statement.query_map(params_from_iter(values), thread_from_row)?;
         let mut threads = Vec::new();
         for row in rows {
             threads.push(row?);
@@ -3622,6 +3671,43 @@ struct ListThreadsQuery {
     /// `true` lists only archived threads; the default lists active ones.
     #[serde(default)]
     archived: bool,
+    /// Persisted execution status filter: `idle`, `running`, or `failed`.
+    status: Option<String>,
+    /// Creation origin filter: `web` or `api`.
+    origin: Option<String>,
+    /// Case-insensitive substring that must appear in the title or `external_ref`.
+    q: Option<String>,
+}
+
+fn thread_list_status(value: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    match value {
+        "idle" | "running" | "failed" => Ok(value.to_owned()),
+        _ => Err(ApiError::bad_request(
+            "status must be one of idle, running, failed",
+        )),
+    }
+}
+
+fn thread_list_origin(value: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    match value {
+        "web" | "api" => Ok(value.to_owned()),
+        _ => Err(ApiError::bad_request("origin must be web or api")),
+    }
+}
+
+fn thread_list_query(value: &str) -> Result<Option<String>, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 200 || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "q must contain at most 200 visible characters",
+        ));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 async fn list_threads(
@@ -3629,8 +3715,27 @@ async fn list_threads(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<Vec<ThreadView>>, ApiError> {
+    let filter = ThreadListFilter {
+        archived: query.archived,
+        status: query
+            .status
+            .as_deref()
+            .map(thread_list_status)
+            .transpose()?,
+        origin: query
+            .origin
+            .as_deref()
+            .map(thread_list_origin)
+            .transpose()?,
+        q: query
+            .q
+            .as_deref()
+            .map(thread_list_query)
+            .transpose()?
+            .flatten(),
+    };
     Ok(Json(
-        list_threads_for(&state, &identity.user, query.archived).await?,
+        list_threads_for(&state, &identity.user, filter).await?,
     ))
 }
 
@@ -8436,11 +8541,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            list_threads_for(&state, &first, false).await.unwrap().len(),
+            list_threads_for(&state, &first, ThreadListFilter::active())
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
-            list_threads_for(&state, &second, false)
+            list_threads_for(&state, &second, ThreadListFilter::active())
                 .await
                 .unwrap()
                 .len(),
@@ -8670,13 +8778,16 @@ mod tests {
         .0;
         assert!(archived.archived_at.is_some());
         assert!(
-            list_threads_for(&state, &user, false)
+            list_threads_for(&state, &user, ThreadListFilter::active())
                 .await
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            list_threads_for(&state, &user, true).await.unwrap().len(),
+            list_threads_for(&state, &user, ThreadListFilter::archived())
+                .await
+                .unwrap()
+                .len(),
             1
         );
 
@@ -8702,11 +8813,14 @@ mod tests {
         .0;
         assert_eq!(restored.archived_at, None);
         assert_eq!(
-            list_threads_for(&state, &user, false).await.unwrap().len(),
+            list_threads_for(&state, &user, ThreadListFilter::active())
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert!(
-            list_threads_for(&state, &user, true)
+            list_threads_for(&state, &user, ThreadListFilter::archived())
                 .await
                 .unwrap()
                 .is_empty()
@@ -8759,6 +8873,159 @@ mod tests {
         assert_eq!(archived_list.len(), 1);
         assert_eq!(archived_list[0]["id"], json!(archived.id));
         assert!(archived_list[0]["archived_at"].as_i64().is_some());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thread_list_filters_by_status_origin_and_query() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "thread-list-filter-user").unwrap();
+        let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+        let input = |title: &str, external_ref: Option<&str>| CreateThreadInput {
+            title: Some(title.to_owned()),
+            external_ref: external_ref.map(str::to_owned),
+            model: Some("test-model".to_owned()),
+            upstream_id: Some(upstream.id.clone()),
+            reasoning_effort: None,
+            service_tier_fast: None,
+        };
+        let mine = create_thread_for(
+            &state,
+            &user,
+            input("Mine running thread", None),
+            ThreadOrigin::Web,
+        )
+        .await
+        .unwrap();
+        let bridge = create_thread_for(
+            &state,
+            &user,
+            input("Bridge room one", Some("mahjong/room-1/seat-1")),
+            ThreadOrigin::Api {
+                key_id: "test-key".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let failing = create_thread_for(
+            &state,
+            &user,
+            input("Failing thread", None),
+            ThreadOrigin::Web,
+        )
+        .await
+        .unwrap();
+        user_db(&state, &user, false, {
+            let mine = mine.id.clone();
+            let failing = failing.id.clone();
+            move |connection| {
+                connection.execute(
+                    "UPDATE threads SET status='running',updated_at=? WHERE id=?",
+                    params![now(), mine],
+                )?;
+                connection.execute(
+                    "UPDATE threads SET status='failed',updated_at=? WHERE id=?",
+                    params![now() + 1, failing],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/api/threads", get(list_threads))
+            .layer(test_identity(&user))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let listed = |query: &str| {
+            let url = format!("http://{address}/api/threads{query}");
+            async move {
+                let threads: Vec<Value> = reqwest::get(url).await.unwrap().json().await.unwrap();
+                threads
+                    .iter()
+                    .map(|thread| thread["id"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let all = listed("").await;
+        assert_eq!(all.len(), 3);
+        for id in [&mine.id, &bridge.id, &failing.id] {
+            assert!(all.contains(id));
+        }
+        assert_eq!(listed("?status=running").await, vec![mine.id.clone()]);
+        assert_eq!(listed("?status=failed").await, vec![failing.id.clone()]);
+        assert_eq!(listed("?origin=api").await, vec![bridge.id.clone()]);
+        assert_eq!(
+            listed("?origin=web&status=failed").await,
+            vec![failing.id.clone()]
+        );
+        assert_eq!(listed("?q=BRIDGE").await, vec![bridge.id.clone()]);
+        assert_eq!(listed("?q=room-1").await, vec![bridge.id.clone()]);
+        assert_eq!(listed("?q=seat").await, vec![bridge.id.clone()]);
+        assert_eq!(listed("?origin=api&q=room").await, vec![bridge.id.clone()]);
+        assert_eq!(listed("?q=%20%20").await.len(), 3);
+
+        let archived = update_thread(
+            State(state.clone()),
+            test_identity(&user),
+            AxumPath(bridge.id.clone()),
+            Json(archived_input(true)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(archived.archived_at.is_some());
+        assert!(listed("?origin=api").await.is_empty());
+        assert_eq!(
+            listed("?archived=true&origin=api").await,
+            vec![bridge.id.clone()]
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thread_list_rejects_invalid_filter_values() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "thread-list-validation-user").unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/api/threads", get(list_threads))
+            .layer(test_identity(&user))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let status = |query: &str| {
+            let url = format!("http://{address}/api/threads{query}");
+            async move { reqwest::get(url).await.unwrap().status() }
+        };
+
+        for query in ["?status=done", "?status=", "?origin=agent", "?origin="] {
+            assert_eq!(
+                status(query).await,
+                reqwest::StatusCode::BAD_REQUEST,
+                "{query}"
+            );
+        }
+        let long = "a".repeat(201);
+        assert_eq!(
+            status(&format!("?q={long}")).await,
+            reqwest::StatusCode::BAD_REQUEST
+        );
+        let boundary = "a".repeat(200);
+        assert_eq!(
+            status(&format!("?q={boundary}")).await,
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(status("?q=").await, reqwest::StatusCode::OK);
 
         server.abort();
     }
