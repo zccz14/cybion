@@ -1,9 +1,9 @@
-import { StrictMode, useState } from "react"
+import { StrictMode, useCallback, useMemo, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { HashRouter } from "react-router-dom"
+import { HashRouter, useSearchParams } from "react-router-dom"
 import { ThreadList, type ThreadListItem } from "../src/components/thread-list"
 import { TooltipProvider } from "../src/components/ui/tooltip"
-import { defaultThreadListFilters, type ThreadListFilters } from "../src/lib/thread-search"
+import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "../src/lib/thread-search"
 import { emptyThreadUsage } from "../src/lib/thread-usage"
 import "../src/styles.css"
 
@@ -22,8 +22,9 @@ const archivedSeed: ThreadListItem[] = [
   { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", usage: emptyThreadUsage },
 ]
 
-// The fixture mirrors the server-side filter and cursor paging semantics so
-// the e2e suite can exercise the shared list chrome without a backend.
+// The fixture mirrors the server-side filter and cursor paging semantics plus
+// the app shell's URL filter wiring, so the e2e suite can exercise the shared
+// list chrome without a backend.
 function fixtureMatches(thread: ThreadListItem, filters: ThreadListFilters) {
   if (filters.view === "mine" && thread.created_by !== "web") return false
   if (filters.view === "api" && thread.created_by !== "api") return false
@@ -42,7 +43,10 @@ function Fixture() {
   const [created, setCreated] = useState(0)
   const [archived, setArchived] = useState(archivedSeed)
   const [restored, setRestored] = useState("")
-  const [filters, setFilters] = useState<ThreadListFilters>(defaultThreadListFilters)
+  // The filter selection lives in the URL, exactly like the app shell.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const filters = useMemo(() => parseThreadListFilters(searchParams), [searchParams])
+  const setFilters = useCallback((next: ThreadListFilters) => setSearchParams(serializeThreadListFilters(next)), [setSearchParams])
   const [pagesLoaded, setPagesLoaded] = useState(1)
   const all = paged ? [...threads, ...olderSeed] : threads
   const matches = all.filter((thread) => fixtureMatches(thread, filters))

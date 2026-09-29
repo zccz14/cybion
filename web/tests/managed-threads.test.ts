@@ -142,7 +142,7 @@ test("narrow screens render a dedicated searchable thread list instead of the si
 
 test("archived threads leave the default list and restore from the collapsed group", () => {
   const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
-  assert.match(source, /threadListUrl\(defaultThreadListFilters, pageParam, true\)/)
+  assert.match(source, /threadListUrl\(allThreadListFilters, pageParam, true\)/)
   assert.match(source, /archived_at !== null/)
   assert.match(source, /archived: false/)
   assert.match(source, /<ArchivedThreadGroup /)
@@ -165,7 +165,10 @@ test("thread lists share one server-side filter control bar", () => {
   const controls = readFileSync(new URL("../src/components/thread-list-controls.tsx", import.meta.url), "utf8")
   const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
   assert.match(source, /import \{ ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination \} from "@\/components\/thread-list-controls"/)
-  assert.match(source, /const \[threadListFilters, setThreadListFilters\] = useState<ThreadListFilters>\(defaultThreadListFilters\)/)
+  assert.match(source, /const \[searchParams, setSearchParams\] = useSearchParams\(\)/)
+  assert.match(source, /const threadListFilters = useMemo\(\(\) => parseThreadListFilters\(searchParams\), \[searchParams\]\)/)
+  assert.match(source, /setSearchParams\(serializeThreadListFilters\(filters\)\)/)
+  assert.doesNotMatch(source, /useState<ThreadListFilters>/)
   assert.match(source, /placeholderData: keepPreviousData/)
   assert.match(source, /threadListUrl\(threadListFilters\)/)
   assert.match(list, /ThreadListControls/)
@@ -189,4 +192,17 @@ test("thread lists paginate with keyset cursors and scroll loading", () => {
   assert.match(controls, /IntersectionObserver/)
   assert.match(search, /mergeThreadPages/)
   assert.match(search, /cursor/)
+})
+
+test("thread list filters live in the URL so views stay shareable and steppable", () => {
+  const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
+  const status = readFileSync(new URL("../src/components/thread-status.tsx", import.meta.url), "utf8")
+  assert.match(search, /export const THREAD_LIST_VIEWS/)
+  assert.match(search, /defaultThreadListFilters: ThreadListFilters = \{ view: "mine", q: "" \}/)
+  assert.match(search, /export function parseThreadListFilters\(params: URLSearchParams\)/)
+  assert.match(search, /export function serializeThreadListFilters\(filters: ThreadListFilters\)/)
+  assert.match(source, /onReset=\{\(\) => onFiltersChange\(allThreadListFilters\)\}/)
+  assert.ok((source.match(/search: location\.search/g) ?? []).length >= 5, "threads navigation carries the list filters")
+  assert.match(status, /useLocation\(\)/)
+  assert.match(status, /search: location\.search/)
 })

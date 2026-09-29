@@ -1,4 +1,4 @@
-import { memo, StrictMode, createContext, useContext, useEffect, useMemo, useState } from "react"
+import { memo, StrictMode, createContext, useContext, useCallback, useEffect, useMemo, useState } from "react"
 import { createRoot } from "react-dom/client"
 import {
   HashRouter,
@@ -58,7 +58,7 @@ import {
 import toolCatalog from "../../tools.json"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
-import { defaultThreadListFilters, mergeThreadPages, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
+import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, serializeThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
@@ -1134,7 +1134,11 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("cybion.language") === "zh" ? "zh" : "en")
   const [dark, setDark] = useState(() => localStorage.getItem("cybion.theme") === "dark" || (!localStorage.getItem("cybion.theme") && matchMedia("(prefers-color-scheme: dark)").matches))
   const labels = copy[language]
-  const [threadListFilters, setThreadListFilters] = useState<ThreadListFilters>(defaultThreadListFilters)
+  // The filter selection lives in the URL so views are shareable, survive
+  // reloads, and step through browser history.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const threadListFilters = useMemo(() => parseThreadListFilters(searchParams), [searchParams])
+  const setThreadListFilters = useCallback((filters: ThreadListFilters) => setSearchParams(serializeThreadListFilters(filters)), [setSearchParams])
   const currentUser = useQuery({
     queryKey: ["me", sdk.session.getState().sessionId],
     queryFn: ({ signal }) => api<CurrentUser>(sdk, "/api/me", { signal }),
@@ -1151,7 +1155,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   })
   const archivedThreads = useInfiniteQuery({
     queryKey: ["threads", sdk.session.getState().sessionId, "archived"],
-    queryFn: ({ pageParam }) => api<ThreadPage>(sdk, threadListUrl(defaultThreadListFilters, pageParam, true)),
+    queryFn: ({ pageParam }) => api<ThreadPage>(sdk, threadListUrl(allThreadListFilters, pageParam, true)),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: 2000,
@@ -1355,7 +1359,7 @@ function WorkspaceShell({
           <Routes>
             <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
-            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate("/threads")} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
+            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate({ pathname: "/threads", search: location.search })} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
@@ -1403,9 +1407,10 @@ function ThreadsHomePage({ sdk, userId, threads, threadsLoading, threadsError, t
 
 function ThreadListPage({ threads, threadsLoading, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { threads: Thread[]; threadsLoading: boolean; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const { language } = useUi()
+  const location = useLocation()
   const navigate = useNavigate()
   return <main className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-    <ThreadList threads={threads} archivedThreads={archivedThreads} archivedTotal={archivedTotal} loading={threadsLoading} language={language} filters={filters} onFiltersChange={onFiltersChange} pagination={threadsPagination} archivedPagination={archivedPagination} onCreate={() => navigate("/threads/new")} onRestore={onRestoreThread} restoringId={restoringThreadId} />
+    <ThreadList threads={threads} archivedThreads={archivedThreads} archivedTotal={archivedTotal} loading={threadsLoading} language={language} filters={filters} onFiltersChange={onFiltersChange} pagination={threadsPagination} archivedPagination={archivedPagination} onCreate={() => navigate({ pathname: "/threads/new", search: location.search })} onRestore={onRestoreThread} restoringId={restoringThreadId} />
   </main>
 }
 
@@ -1442,16 +1447,16 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, thr
   }
   const submit = () => {
     if (!value || (!input.trim() && attachments.images.length === 0) || start.isPending) return
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images }, { onSuccess: (request) => navigate(`/threads/${request.thread_id}`) })
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="pb-2">
-        <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={() => navigate("/threads")} />
+        <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={() => navigate({ pathname: "/threads", search: location.search })} />
       </div>
       <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-12rem)]" aria-label={t("threads")}>
         {threadsLoading && <div className="flex flex-col gap-2 px-2 py-1"><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>}
-        {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(defaultThreadListFilters)} />}
+        {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(allThreadListFilters)} />}
         {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
         <ThreadListMore pagination={threadsPagination} language={language} />
         <ArchivedThreadGroup threads={archivedThreads} total={archivedTotal} pagination={archivedPagination} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
@@ -1485,6 +1490,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, thr
 function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, onCreate, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; onCreate: () => void; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
+  const location = useLocation()
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
@@ -1614,7 +1620,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
       setDeleteOpen(false)
       composer.clear()
       void client.invalidateQueries({ queryKey: ["threads"] })
-      navigate("/threads")
+      navigate({ pathname: "/threads", search: location.search })
     },
   })
   const setArchived = useMutation({
@@ -1622,7 +1628,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     onSuccess: (_thread, archived) => {
       void client.invalidateQueries({ queryKey: ["threads"] })
       void client.invalidateQueries({ queryKey: ["thread", threadId] })
-      if (archived) navigate("/threads")
+      if (archived) navigate({ pathname: "/threads", search: location.search })
     },
   })
   if (thread.isLoading) return <Page title={t("chat")} description=""><div className="flex flex-col gap-3"><Skeleton className="h-8 w-56" /><Skeleton className="h-20" /><Skeleton className="h-20" /></div></Page>
@@ -1644,7 +1650,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
         <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={onCreate} />
       </div>
       <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-12rem)]" aria-label={t("threads")}>
-        {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(defaultThreadListFilters)} />}
+        {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(allThreadListFilters)} />}
         {threads.map((item) => <ThreadLink key={item.id} thread={item.id === current.id ? current : item} language={language} />)}
         <ThreadListMore pagination={threadsPagination} language={language} />
         <ArchivedThreadGroup threads={archivedThreads} total={archivedTotal} pagination={archivedPagination} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
@@ -1652,7 +1658,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     </aside>}
     <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
-        {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={() => navigate("/threads")}><ArrowLeftIcon /></Button>}
+        {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={() => navigate({ pathname: "/threads", search: location.search })}><ArrowLeftIcon /></Button>}
         {editing ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
           <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
           <Button size="sm" disabled={rename.isPending || generateTitle.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>

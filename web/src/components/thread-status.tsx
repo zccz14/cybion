@@ -1,5 +1,5 @@
 import { CheckIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIcon, TriangleAlertIcon } from "lucide-react"
-import { NavLink } from "react-router-dom"
+import { NavLink, useLocation } from "react-router-dom"
 import { threadStatusText, type ThreadDisplayStatus } from "@/lib/thread-status"
 import { cn } from "@/lib/utils"
 import type { ThreadUsage } from "@/lib/thread-usage"
@@ -40,10 +40,11 @@ export function ThreadStatusBadge({ status, language }: StatusProps) {
 
 export function ThreadLink({ thread, language }: { thread: { purpose?: "work" | "reports"; created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; usage: ThreadUsage }; language: StatusProps["language"] }) {
   const status = thread.display_status
+  const location = useLocation()
   const { label, hint } = threadStatusText(status, language)
   return <Tooltip>
     <TooltipTrigger asChild>
-      <NavLink to={`/threads/${thread.id}`} data-thread-status={status} className="flex min-w-0 items-start gap-2.5 rounded-lg px-3 py-2 text-sm ring-1 ring-inset ring-transparent hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:bg-accent aria-[current=page]:ring-border">
+      <NavLink to={{ pathname: `/threads/${thread.id}`, search: location.search }} data-thread-status={status} className="flex min-w-0 items-start gap-2.5 rounded-lg px-3 py-2 text-sm ring-1 ring-inset ring-transparent hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:bg-accent aria-[current=page]:ring-border">
         <ThreadStatusIcon status={status} className="mt-0.5" />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 items-center gap-1.5">

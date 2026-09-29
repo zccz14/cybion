@@ -3,7 +3,7 @@ import { PlusIcon, SearchIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { hasThreadListFilters, type ThreadListFilters, type ThreadListView } from "@/lib/thread-search"
+import { THREAD_LIST_VIEWS, hasThreadListFilters, type ThreadListFilters, type ThreadListView } from "@/lib/thread-search"
 
 type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | "emptyTitle" | "emptyFiltered" | "resetFilters" | "loadMore" | ThreadListView
 
@@ -33,12 +33,12 @@ const copy = {
     failed: "失败",
     emptyTitle: "还没有线程",
     emptyFiltered: "没有匹配的线程",
-    resetFilters: "回到「全部」",
+    resetFilters: "显示全部",
     loadMore: "加载更多",
   },
 } satisfies Record<"en" | "zh", Record<ThreadListControlsCopyKey, string>>
 
-const views: ThreadListView[] = ["all", "mine", "api", "running", "failed"]
+const views: readonly ThreadListView[] = THREAD_LIST_VIEWS
 const searchDebounceMs = 300
 
 export function ThreadListControls({ filters, language, onFiltersChange, onNewThread }: {
@@ -53,9 +53,8 @@ export function ThreadListControls({ filters, language, onFiltersChange, onNewTh
     setDraft(filters.q)
   }, [filters.q])
   useEffect(() => {
-    const query = draft.trim()
-    if (query === filters.q) return
-    const timer = setTimeout(() => onFiltersChange({ ...filters, q: query }), searchDebounceMs)
+    if (draft.trim() === filters.q.trim()) return
+    const timer = setTimeout(() => onFiltersChange({ ...filters, q: draft }), searchDebounceMs)
     return () => clearTimeout(timer)
   }, [draft, filters, onFiltersChange])
   return <div className="flex flex-col gap-2">
