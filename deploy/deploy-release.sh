@@ -10,6 +10,7 @@ data_dir="/root/.cybion"
 installed_binary="$data_dir/bin/cybion"
 release_dir="$data_dir/releases/$tag"
 backup_dir="$data_dir/backups/cybion.before-${tag}-$(date -u +%Y%m%dT%H%M%SZ)"
+backup_keep=5
 temporary_dir="$(mktemp -d)"
 previous_binary="$backup_dir/cybion"
 
@@ -59,6 +60,12 @@ for source in sorted([*root.glob("*.sqlite3"), *root.joinpath("users").glob("*.s
         src.backup(dst)
     os.chmod(target, 0o600)
 PYBACKUP
+# Retention: keep the most recent snapshots; older ones only consume disk.
+ls -1dt "$data_dir"/backups/cybion.before-*/ |
+  tail -n "+$((backup_keep + 1))" |
+  while IFS= read -r old_backup; do
+    rm -rf "$old_backup"
+  done
 install -m 0755 "$new_binary" "$release_dir/cybion"
 install -m 0755 "$release_dir/cybion" "$installed_binary"
 
