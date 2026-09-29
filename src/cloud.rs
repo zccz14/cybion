@@ -99,7 +99,7 @@ const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-const USER_SCHEMA_VERSION: i64 = 20;
+const USER_SCHEMA_VERSION: i64 = 21;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -151,6 +151,7 @@ struct BrowserIdentity {
 #[derive(Clone, Debug)]
 struct ApiIdentity {
     user: User,
+    key_id: String,
 }
 
 #[derive(Debug)]
@@ -1027,6 +1028,9 @@ const THREAD_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
   purpose TEXT NOT NULL DEFAULT 'work' CHECK(purpose IN ('work','reports')),
+  created_by TEXT NOT NULL DEFAULT 'web' CHECK(created_by IN ('web','api')),
+  api_key_id TEXT,
+  external_ref TEXT,
   title TEXT NOT NULL,
   model TEXT NOT NULL,
   upstream_id TEXT,
@@ -1284,6 +1288,13 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             "purpose",
             "TEXT NOT NULL DEFAULT 'work' CHECK(purpose IN ('work','reports'))",
         ),
+        (
+            "threads",
+            "created_by",
+            "TEXT NOT NULL DEFAULT 'web' CHECK(created_by IN ('web','api'))",
+        ),
+        ("threads", "api_key_id", "TEXT"),
+        ("threads", "external_ref", "TEXT"),
         ("reasoning_audits", "reasoning_effort", "TEXT"),
         ("threads", "upstream_id", "TEXT"),
         ("thread_defaults", "upstream_id", "TEXT"),
@@ -1446,6 +1457,12 @@ fn check_user_foreign_keys(connection: &Connection) -> Result<(), ApiError> {
 struct ThreadView {
     id: String,
     purpose: String,
+    /// `web` for browser-created Threads; `api` when an integration API key
+    /// created it (the key id is stored with the Thread for audit).
+    created_by: String,
+    /// Caller-supplied reference recorded at creation; only integration
+    /// clients set it today.
+    external_ref: Option<String>,
     title: String,
     model: String,
     /// Upstream used for inference. `None` marks a thread created before
@@ -1768,6 +1785,10 @@ struct UpdateIntegrationHeadersInput {
 struct CreateThreadInput {
     #[serde(default)]
     title: Option<String>,
+    /// Caller-supplied reference for integration-created Threads
+    /// (1-200 visible characters); browser creation leaves it unset.
+    #[serde(default)]
+    external_ref: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -2033,6 +2054,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
+        created_by: row.get(19)?,
+        external_ref: row.get(20)?,
         title: row.get(1)?,
         model: row.get(2)?,
         upstream_id: row.get(3)?,
@@ -2400,7 +2423,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        (SELECT ra.input_tokens FROM reasoning_audits ra
          WHERE ra.thread_id=t.id AND ra.request_kind='inference' AND ra.input_tokens IS NOT NULL
          ORDER BY ra.id DESC LIMIT 1),
-       t.minimal_mode,t.purpose,t.archived_at
+       t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT id FROM history_records WHERE thread_id=t.id
@@ -2437,10 +2460,19 @@ fn load_thread(connection: &Connection, id: &str) -> Result<ThreadView, ApiError
         .ok_or_else(|| ApiError::not_found("thread not found"))
 }
 
+/// Who asked for a new Thread. Provenance is captured once, at creation:
+/// browser sessions are `web`; integration clients carry their API key id.
+#[derive(Clone, Debug)]
+enum ThreadOrigin {
+    Web,
+    Api { key_id: String },
+}
+
 async fn create_thread_for(
     state: &AppState,
     user: &User,
     input: CreateThreadInput,
+    origin: ThreadOrigin,
 ) -> Result<ThreadView, ApiError> {
     let title = optional_title(input.title)?;
     let model = input.model.map(model_id).transpose()?;
@@ -2450,6 +2482,14 @@ async fn create_thread_for(
         .transpose()?;
     let reasoning_effort = input.reasoning_effort.map(reasoning_effort).transpose()?;
     let service_tier_fast = input.service_tier_fast;
+    let external_ref = input
+        .external_ref
+        .map(|value| label(&value, "external_ref", 200))
+        .transpose()?;
+    let (created_by, api_key_id) = match origin {
+        ThreadOrigin::Web => ("web", None),
+        ThreadOrigin::Api { key_id } => ("api", Some(key_id)),
+    };
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let defaults = load_thread_defaults(&transaction)?;
@@ -2457,6 +2497,8 @@ async fn create_thread_for(
         let thread = ThreadView {
             id: Uuid::now_v7().to_string(),
             purpose: "work".to_owned(),
+            created_by: created_by.to_owned(),
+            external_ref,
             title,
             model: model.unwrap_or(defaults.model),
             upstream_id: Some(upstream_id),
@@ -2473,7 +2515,7 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
@@ -2482,6 +2524,9 @@ async fn create_thread_for(
                 thread.reasoning_effort,
                 thread.service_tier_fast as i64,
                 thread.status,
+                thread.created_by,
+                api_key_id,
+                thread.external_ref,
                 thread.created_at,
                 thread.updated_at
             ],
@@ -3595,7 +3640,7 @@ async fn create_thread(
     Json(input): Json<CreateThreadInput>,
 ) -> Result<Json<ThreadView>, ApiError> {
     Ok(Json(
-        create_thread_for(&state, &identity.user, input).await?,
+        create_thread_for(&state, &identity.user, input, ThreadOrigin::Web).await?,
     ))
 }
 
@@ -3612,11 +3657,13 @@ async fn start_thread(
         &identity.user,
         CreateThreadInput {
             title: None,
+            external_ref: None,
             model: Some(model),
             upstream_id: input.upstream_id,
             reasoning_effort: Some(reasoning_effort),
             service_tier_fast: Some(input.service_tier_fast),
         },
+        ThreadOrigin::Web,
     )
     .await?;
     Ok(Json(
@@ -4588,6 +4635,8 @@ async fn process_request(
             ThreadView {
                 id: thread_id.clone(),
                 purpose: "work".to_owned(),
+                created_by: "web".to_owned(),
+                external_ref: None,
                 title: "Untitled thread".to_owned(),
                 model: DEFAULT_MODEL.to_owned(),
                 upstream_id: None,
@@ -7416,7 +7465,7 @@ async fn api_identity(state: &AppState, headers: &HeaderMap) -> Result<ApiIdenti
     let (user_id, secret) = parse_api_key(&raw_key)?;
     let user = user_from_id(state, user_id)?;
     let secret_hash = hash_secret(&secret);
-    user_db(state, &user, false, move |connection| {
+    let key_id = user_db(state, &user, false, move |connection| {
         let key_id: Option<String> = connection
             .query_row(
                 "SELECT id FROM api_keys WHERE secret_hash=? AND revoked_at IS NULL",
@@ -7429,12 +7478,12 @@ async fn api_identity(state: &AppState, headers: &HeaderMap) -> Result<ApiIdenti
         };
         connection.execute(
             "UPDATE api_keys SET last_used_at=? WHERE id=?",
-            params![now(), key_id],
+            params![now(), &key_id],
         )?;
-        Ok(())
+        Ok(key_id)
     })
     .await?;
-    Ok(ApiIdentity { user })
+    Ok(ApiIdentity { user, key_id })
 }
 
 async fn api_key_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
@@ -7452,8 +7501,9 @@ async fn external_create_thread(
     axum::Extension(identity): axum::Extension<ApiIdentity>,
     Json(input): Json<CreateThreadInput>,
 ) -> Result<Json<ThreadView>, ApiError> {
+    let ApiIdentity { user, key_id } = identity;
     Ok(Json(
-        create_thread_for(&state, &identity.user, input).await?,
+        create_thread_for(&state, &user, input, ThreadOrigin::Api { key_id }).await?,
     ))
 }
 
@@ -7855,11 +7905,13 @@ mod tests {
             user,
             CreateThreadInput {
                 title: Some("Test".to_owned()),
+                external_ref: None,
                 model: Some("test-model".to_owned()),
                 upstream_id: Some(upstream.id),
                 reasoning_effort: None,
                 service_tier_fast: None,
             },
+            ThreadOrigin::Web,
         )
         .await
         .unwrap()
@@ -8025,11 +8077,13 @@ mod tests {
             &user,
             CreateThreadInput {
                 title: Some("Second".to_owned()),
+                external_ref: None,
                 model: Some("second-model".to_owned()),
                 upstream_id: Some(upstream.id),
                 reasoning_effort: None,
                 service_tier_fast: None,
             },
+            ThreadOrigin::Web,
         )
         .await
         .unwrap();
@@ -8705,6 +8759,84 @@ mod tests {
         assert_eq!(archived_list.len(), 1);
         assert_eq!(archived_list[0]["id"], json!(archived.id));
         assert!(archived_list[0]["archived_at"].as_i64().is_some());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn integration_created_threads_record_their_api_key_and_external_reference() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "provenance-user").unwrap();
+        let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+        let created = create_api_key(
+            State(state.clone()),
+            test_identity(&user),
+            Json(CreateApiKeyInput {
+                label: "Mahjong bridge".to_owned(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/v1/threads", post(external_create_thread))
+            .route_layer(from_fn_with_state(state.clone(), api_key_auth))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let created_thread: Value = client
+            .post(format!("http://{address}/v1/threads"))
+            .bearer_auth(&created.secret)
+            .json(&json!({
+                "title": "Mahjong · seat 1",
+                "external_ref": "mahjong/room-1/seat-1",
+                "upstream_id": upstream.id,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created_thread["created_by"], json!("api"));
+        assert_eq!(
+            created_thread["external_ref"],
+            json!("mahjong/room-1/seat-1")
+        );
+
+        let invalid = client
+            .post(format!("http://{address}/v1/threads"))
+            .bearer_auth(&created.secret)
+            .json(&json!({ "external_ref": " " }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let thread_id = created_thread["id"].as_str().unwrap().to_owned();
+        let stored: (String, Option<String>, Option<String>) = user_db(&state, &user, false, {
+            let thread_id = thread_id.clone();
+            move |connection| {
+                Ok(connection.query_row(
+                    "SELECT created_by,api_key_id,external_ref FROM threads WHERE id=?",
+                    [thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(stored.0, "api");
+        assert_eq!(stored.1.as_deref(), Some(created.key.id.as_str()));
+        assert_eq!(stored.2.as_deref(), Some("mahjong/room-1/seat-1"));
+
+        let web = create_test_thread(&state, &user).await;
+        assert_eq!(web.created_by, "web");
+        assert_eq!(web.external_ref, None);
 
         server.abort();
     }

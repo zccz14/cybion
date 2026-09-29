@@ -933,11 +933,13 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
         &user,
         CreateThreadInput {
             title: None,
+            external_ref: None,
             model: Some("test-model".to_owned()),
             upstream_id: Some(upstream.id),
             reasoning_effort: None,
             service_tier_fast: None,
         },
+        ThreadOrigin::Web,
     )
     .await
     .unwrap();

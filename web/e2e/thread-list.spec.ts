@@ -13,6 +13,12 @@ test("search filters thread titles and reports empty results", async ({ page }) 
   await expect(page.getByRole("link")).toHaveCount(3)
 })
 
+test("integration-created rows show their API origin chip", async ({ page }) => {
+  await page.goto("/e2e/thread-list.html")
+  await expect(page.getByRole("link", { name: /修复 Worker 配对与导航/ }).getByText("API", { exact: true })).toBeVisible()
+  await expect(page.getByRole("link", { name: /检查远程服务器连接/ }).getByText("API", { exact: true })).toHaveCount(0)
+})
+
 test("the new thread action stays reachable next to the search field", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
   await page.getByRole("button", { name: "新建线程" }).click()

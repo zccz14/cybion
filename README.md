@@ -25,6 +25,10 @@ the first authenticated browser session initializes that key atomically.
 - Controller restarts automatically resume `running` Threads from committed
   history and original Worker calls. Transient model failures retry within a
   persisted five-attempt budget; stopped/completed Threads stay stopped.
+- Threads record their creation origin: `web` for the browser and `api` for
+  `/v1/threads` calls, where the creating API key id is stored and an optional
+  caller-supplied `external_ref` can map the Thread to the integration's own
+  identifier. The web UI marks API Threads in the thread list and header.
 - Threads are independent. A user can create, rename, inspect, archive, and
   delete them from the web UI. Archiving hides a Thread from the thread list
   without deleting its history; archived Threads stay readable, remain

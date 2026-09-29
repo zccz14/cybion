@@ -219,6 +219,7 @@ async fn thread(f: &Fixture) -> ThreadView {
         &f.user,
         serde_json::from_value(json!({"title":"Notification fixture","upstream_id":f.upstream.id}))
             .unwrap(),
+        ThreadOrigin::Web,
     )
     .await
     .unwrap()

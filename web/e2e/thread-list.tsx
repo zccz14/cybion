@@ -7,13 +7,13 @@ import { emptyThreadUsage } from "../src/lib/thread-usage"
 import "../src/styles.css"
 
 const threads: ThreadListItem[] = [
-  { id: "worker", title: "修复 Worker 配对与导航", display_status: "running", usage: emptyThreadUsage },
-  { id: "search", title: "Mobile thread list search", display_status: "completed", usage: emptyThreadUsage },
-  { id: "remote", title: "检查远程服务器连接", display_status: "failed", usage: emptyThreadUsage },
+  { id: "worker", title: "修复 Worker 配对与导航", created_by: "api", external_ref: "bridge/task-7", display_status: "running", usage: emptyThreadUsage },
+  { id: "search", title: "Mobile thread list search", created_by: "web", external_ref: null, display_status: "completed", usage: emptyThreadUsage },
+  { id: "remote", title: "检查远程服务器连接", created_by: "web", external_ref: null, display_status: "failed", usage: emptyThreadUsage },
 ]
 
 const archivedSeed: ThreadListItem[] = [
-  { id: "legacy", title: "Legacy thread archive", display_status: "stopped", usage: emptyThreadUsage },
+  { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", usage: emptyThreadUsage },
 ]
 
 function Fixture() {

@@ -840,9 +840,13 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     for model in [None, Some("gpt-5.6-sol")] {
         let thread = external_create_thread(
             State(state.clone()),
-            axum::Extension(ApiIdentity { user: user.clone() }),
+            axum::Extension(ApiIdentity {
+                user: user.clone(),
+                key_id: "settings-key".to_owned(),
+            }),
             Json(CreateThreadInput {
                 title: None,
+                external_ref: None,
                 model: model.map(str::to_owned),
                 upstream_id: None,
                 reasoning_effort: None,
@@ -881,9 +885,14 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     )
     .await
     .unwrap();
-    let next = create_thread_for(&state, &user, serde_json::from_value(json!({})).unwrap())
-        .await
-        .unwrap();
+    let next = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
     assert_eq!(next.model, initial.model);
     assert_eq!(next.upstream_id.as_deref(), Some(upstream.id.as_str()));
     assert_eq!(next.reasoning_effort, initial.reasoning_effort);
@@ -1034,6 +1043,16 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
         assert!(thread.service_tier_fast);
         assert_eq!(thread.minimal_mode, None);
         assert_eq!(thread.archived_at, None);
+        assert_eq!(thread.created_by, "web");
+        assert_eq!(thread.external_ref, None);
+        let api_key_id: Option<String> = connection
+            .query_row(
+                "SELECT api_key_id FROM threads WHERE id='existing-thread'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(api_key_id, None);
         assert_eq!(
             load_thread_defaults(&connection).unwrap(),
             ThreadDefaults {
@@ -1165,6 +1184,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
         &state,
         &user,
         serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap(),
+        ThreadOrigin::Web,
     )
     .await
     .unwrap();

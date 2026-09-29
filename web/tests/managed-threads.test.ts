@@ -150,3 +150,12 @@ test("archived threads leave the default list and restore from the collapsed gro
   assert.match(list, /archivedThreads: "已归档"/)
   assert.match(list, /restoreThread: "恢复"/)
 })
+
+test("integration-created threads keep their origin chip and external reference", () => {
+  const status = readFileSync(new URL("../src/components/thread-status.tsx", import.meta.url), "utf8")
+  assert.match(source, /created_by: "web" \| "api"/)
+  assert.match(source, /apiOriginHint/)
+  assert.match(source, /created_by === "api"/)
+  assert.match(status, /created_by === "api"/)
+  assert.match(status, /external_ref/)
+})
