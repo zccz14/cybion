@@ -42,6 +42,16 @@ test("view chips switch between all, mine, api, running, and failed", async ({ p
   await expect(page.getByRole("link")).toHaveCount(3)
 })
 
+test("more threads load when the list footer scrolls into view", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 300 })
+  await page.goto("/e2e/thread-list.html?paged=1")
+  await expect(page.getByRole("link")).toHaveCount(3)
+  await page.getByRole("button", { name: "加载更多" }).scrollIntoViewIfNeeded()
+  await expect(page.getByRole("link")).toHaveCount(5)
+  await expect(page.getByRole("link", { name: /Older thread B/ })).toHaveCount(1)
+  await expect(page.getByRole("button", { name: "加载更多" })).toHaveCount(0)
+})
+
 test("integration-created rows show their API origin chip", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
   await expect(page.getByRole("link", { name: /修复 Worker 配对与导航/ }).getByText("API", { exact: true })).toBeVisible()

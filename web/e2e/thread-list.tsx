@@ -13,12 +13,17 @@ const threads: ThreadListItem[] = [
   { id: "remote", title: "检查远程服务器连接", created_by: "web", external_ref: null, display_status: "failed", usage: emptyThreadUsage },
 ]
 
+const olderSeed: ThreadListItem[] = [
+  { id: "older-a", title: "Older thread A", created_by: "web", external_ref: null, display_status: "completed", usage: emptyThreadUsage },
+  { id: "older-b", title: "Older thread B", created_by: "web", external_ref: null, display_status: "completed", usage: emptyThreadUsage },
+]
+
 const archivedSeed: ThreadListItem[] = [
   { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", usage: emptyThreadUsage },
 ]
 
-// The fixture mirrors the server-side filter semantics so the e2e suite can
-// exercise the shared control bar without a backend.
+// The fixture mirrors the server-side filter and cursor paging semantics so
+// the e2e suite can exercise the shared list chrome without a backend.
 function fixtureMatches(thread: ThreadListItem, filters: ThreadListFilters) {
   if (filters.view === "mine" && thread.created_by !== "web") return false
   if (filters.view === "api" && thread.created_by !== "api") return false
@@ -29,13 +34,21 @@ function fixtureMatches(thread: ThreadListItem, filters: ThreadListFilters) {
   return thread.title.toLowerCase().includes(query) || (thread.external_ref ?? "").toLowerCase().includes(query)
 }
 
+const pageSize = 3
+const paged = new URLSearchParams(window.location.search).has("paged")
+
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")
   const [created, setCreated] = useState(0)
   const [archived, setArchived] = useState(archivedSeed)
   const [restored, setRestored] = useState("")
   const [filters, setFilters] = useState<ThreadListFilters>(defaultThreadListFilters)
-  const visible = threads.filter((thread) => fixtureMatches(thread, filters))
+  const [pagesLoaded, setPagesLoaded] = useState(1)
+  const all = paged ? [...threads, ...olderSeed] : threads
+  const matches = all.filter((thread) => fixtureMatches(thread, filters))
+  const visible = matches.slice(0, pageSize * pagesLoaded)
+  const pagination = { hasMore: visible.length < matches.length, loadingMore: false, onLoadMore: () => setPagesLoaded((count) => count + 1) }
+  const archivedPagination = { hasMore: false, loadingMore: false, onLoadMore: () => {} }
   return <main className="flex h-svh flex-col bg-background text-foreground">
     <header className="flex shrink-0 items-center gap-3 border-b p-3">
       <img src="/cybion-mark.png" alt="" className="size-5 dark:invert" />
@@ -45,7 +58,7 @@ function Fixture() {
       <span data-testid="created">{created}</span>
       <span data-testid="restored">{restored}</span>
     </header>
-    <ThreadList threads={visible} archivedThreads={archived} loading={false} language={language} filters={filters} onFiltersChange={setFilters} onCreate={() => setCreated((value) => value + 1)} onRestore={(id) => { setArchived((items) => items.filter((item) => item.id !== id)); setRestored(id) }} restoringId={null} />
+    <ThreadList threads={visible} archivedThreads={archived} archivedTotal={archived.length} loading={false} language={language} filters={filters} onFiltersChange={setFilters} pagination={pagination} archivedPagination={archivedPagination} onCreate={() => setCreated((value) => value + 1)} onRestore={(id) => { setArchived((items) => items.filter((item) => item.id !== id)); setRestored(id) }} restoringId={null} />
   </main>
 }
 createRoot(document.getElementById("root")!).render(<StrictMode><TooltipProvider delayDuration={0}><HashRouter><Fixture /></HashRouter></TooltipProvider></StrictMode>)

@@ -142,7 +142,7 @@ test("narrow screens render a dedicated searchable thread list instead of the si
 
 test("archived threads leave the default list and restore from the collapsed group", () => {
   const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
-  assert.match(source, /\/api\/threads\?archived=true/)
+  assert.match(source, /threadListUrl\(defaultThreadListFilters, pageParam, true\)/)
   assert.match(source, /archived_at !== null/)
   assert.match(source, /archived: false/)
   assert.match(source, /<ArchivedThreadGroup /)
@@ -164,7 +164,7 @@ test("thread lists share one server-side filter control bar", () => {
   const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
   const controls = readFileSync(new URL("../src/components/thread-list-controls.tsx", import.meta.url), "utf8")
   const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
-  assert.match(source, /import \{ ThreadListControls, ThreadListEmptyState \} from "@\/components\/thread-list-controls"/)
+  assert.match(source, /import \{ ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination \} from "@\/components\/thread-list-controls"/)
   assert.match(source, /const \[threadListFilters, setThreadListFilters\] = useState<ThreadListFilters>\(defaultThreadListFilters\)/)
   assert.match(source, /placeholderData: keepPreviousData/)
   assert.match(source, /threadListUrl\(threadListFilters\)/)
@@ -175,4 +175,18 @@ test("thread lists share one server-side filter control bar", () => {
   assert.match(search, /viewParams/)
   assert.match(search, /origin/)
   assert.match(search, /status/)
+})
+
+test("thread lists paginate with keyset cursors and scroll loading", () => {
+  const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
+  const controls = readFileSync(new URL("../src/components/thread-list-controls.tsx", import.meta.url), "utf8")
+  const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
+  assert.match(source, /useInfiniteQuery/)
+  assert.match(source, /getNextPageParam: \(lastPage\) => lastPage\.next_cursor/)
+  assert.match(source, /mergeThreadPages\(threads\.data\?\.pages/)
+  assert.match(source, /threadsPagination/)
+  assert.match(list, /ThreadListMore/)
+  assert.match(controls, /IntersectionObserver/)
+  assert.match(search, /mergeThreadPages/)
+  assert.match(search, /cursor/)
 })

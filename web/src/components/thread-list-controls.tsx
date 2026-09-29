@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { PlusIcon, SearchIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Spinner } from "@/components/ui/spinner"
 import { hasThreadListFilters, type ThreadListFilters, type ThreadListView } from "@/lib/thread-search"
 
-type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | "emptyTitle" | "emptyFiltered" | "resetFilters" | ThreadListView
+type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | "emptyTitle" | "emptyFiltered" | "resetFilters" | "loadMore" | ThreadListView
 
 const copy = {
   en: {
@@ -19,6 +20,7 @@ const copy = {
     emptyTitle: "No threads yet",
     emptyFiltered: "No threads match your filters",
     resetFilters: "Show all",
+    loadMore: "Load more",
   },
   zh: {
     newThread: "新建线程",
@@ -32,6 +34,7 @@ const copy = {
     emptyTitle: "还没有线程",
     emptyFiltered: "没有匹配的线程",
     resetFilters: "回到「全部」",
+    loadMore: "加载更多",
   },
 } satisfies Record<"en" | "zh", Record<ThreadListControlsCopyKey, string>>
 
@@ -79,5 +82,34 @@ export function ThreadListEmptyState({ filters, language, onReset }: {
   return <div className="flex flex-col items-start gap-2 px-3 py-2">
     <p className="text-sm text-muted-foreground">{t.emptyFiltered}</p>
     <Button type="button" size="xs" variant="outline" onClick={onReset}>{t.resetFilters}</Button>
+  </div>
+}
+
+export type ThreadListPagination = { hasMore: boolean; loadingMore: boolean; onLoadMore: () => void }
+
+export function ThreadListMore({ pagination, language }: { pagination: ThreadListPagination; language: "en" | "zh" }) {
+  const t = copy[language]
+  const container = useRef<HTMLDivElement>(null)
+  const current = useRef(pagination)
+  useEffect(() => {
+    current.current = pagination
+  })
+  useEffect(() => {
+    const node = container.current
+    if (!node || !pagination.hasMore) return
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      const state = current.current
+      if (state.hasMore && !state.loadingMore) state.onLoadMore()
+    })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [pagination.hasMore])
+  if (!pagination.hasMore) return null
+  return <div ref={container} className="flex justify-center py-1">
+    <Button type="button" size="xs" variant="ghost" className="text-muted-foreground" disabled={pagination.loadingMore} onClick={() => pagination.onLoadMore()}>
+      {pagination.loadingMore && <Spinner className="size-3" />}
+      {t.loadMore}
+    </Button>
   </div>
 }

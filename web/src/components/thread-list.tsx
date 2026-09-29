@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { ArchiveRestoreIcon, ChevronRightIcon } from "lucide-react"
 import { ThreadLink } from "@/components/thread-status"
-import { ThreadListControls, ThreadListEmptyState } from "@/components/thread-list-controls"
+import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
@@ -27,14 +27,14 @@ const copy = {
   zh: { threads: "线程", archivedThreads: "已归档", restoreThread: "恢复" },
 } satisfies Record<"en" | "zh", Record<ThreadListCopyKey, string>>
 
-export function ArchivedThreadGroup({ threads, language, onRestore, restoringId }: { threads: ThreadListItem[]; language: "en" | "zh"; onRestore: (id: string) => void; restoringId: string | null }) {
+export function ArchivedThreadGroup({ threads, total, pagination, language, onRestore, restoringId }: { threads: ThreadListItem[]; total: number; pagination: ThreadListPagination; language: "en" | "zh"; onRestore: (id: string) => void; restoringId: string | null }) {
   const t = copy[language]
   const [open, setOpen] = useState(false)
   if (threads.length === 0) return null
   return <div className="mt-3 border-t pt-2">
     <Button type="button" variant="ghost" size="sm" aria-expanded={open} className="w-full justify-start text-muted-foreground" onClick={() => setOpen((value) => !value)}>
       <ChevronRightIcon aria-hidden="true" className={cn("transition-transform motion-reduce:transition-none", open && "rotate-90")} />
-      {t.archivedThreads} ({threads.length})
+      {t.archivedThreads} ({total})
     </Button>
     {open && <nav aria-label={t.archivedThreads} className="mt-1 flex flex-col gap-1">
       {threads.map((thread) => <div key={thread.id} className="flex min-w-0 items-start gap-1">
@@ -43,11 +43,12 @@ export function ArchivedThreadGroup({ threads, language, onRestore, restoringId 
           {restoringId === thread.id ? <Spinner /> : <ArchiveRestoreIcon aria-hidden="true" />}
         </Button>
       </div>)}
+      <ThreadListMore pagination={pagination} language={language} />
     </nav>}
   </div>
 }
 
-export function ThreadList({ threads, archivedThreads, loading, language, filters, onFiltersChange, onCreate, onRestore, restoringId }: { threads: ThreadListItem[]; archivedThreads: ThreadListItem[]; loading: boolean; language: "en" | "zh"; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void; onCreate: () => void; onRestore: (id: string) => void; restoringId: string | null }) {
+export function ThreadList({ threads, archivedThreads, archivedTotal, loading, language, filters, onFiltersChange, pagination, archivedPagination, onCreate, onRestore, restoringId }: { threads: ThreadListItem[]; archivedThreads: ThreadListItem[]; archivedTotal: number; loading: boolean; language: "en" | "zh"; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void; pagination: ThreadListPagination; archivedPagination: ThreadListPagination; onCreate: () => void; onRestore: (id: string) => void; restoringId: string | null }) {
   const t = copy[language]
   return <div className="flex min-h-0 flex-1 flex-col">
     <div className="shrink-0 border-b p-3">
@@ -60,8 +61,9 @@ export function ThreadList({ threads, archivedThreads, loading, language, filter
           <nav aria-label={t.threads} className="flex flex-col gap-1">
             {threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(defaultThreadListFilters)} />}
             {threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
+            <ThreadListMore pagination={pagination} language={language} />
           </nav>
-          <ArchivedThreadGroup threads={archivedThreads} language={language} onRestore={onRestore} restoringId={restoringId} />
+          <ArchivedThreadGroup threads={archivedThreads} total={archivedTotal} pagination={archivedPagination} language={language} onRestore={onRestore} restoringId={restoringId} />
         </>}
     </div>
   </div>
