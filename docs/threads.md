@@ -109,7 +109,7 @@ Creation records these once, and the Thread views return them. The web UI
 marks `api` Threads with an `API` chip in the thread list and the conversation
 header, and shows the external reference in the row tooltip.
 
-## Archive
+## Archive and list filters
 
 Archiving hides a Thread from the thread list without deleting anything.
 `GET /api/threads` returns active Threads only, and
@@ -121,6 +121,23 @@ their normal endpoints; appending input does not restore them. The web UI
 lists archived Threads in a collapsed state under the thread list with a
 per-row restore action, and the conversation header offers Archive and
 Restore.
+
+The list endpoint filters on the server. Every provided parameter must match;
+omitted parameters match anything:
+
+| Parameter | Behavior |
+| --- | --- |
+| `status` | Persisted execution status: `idle`, `running`, or `failed`. `running` covers both the Running and Compacting displays. |
+| `origin` | Creation origin: `web` or `api`. |
+| `q` | Case-insensitive substring of the title or `external_ref`; trimmed; at most 200 characters. |
+
+Invalid `status` or `origin` values and over-long `q` values return HTTP 400.
+The web UI drives these parameters through one shared control bar: a search
+box (300 ms debounce) plus single-select view chips — All / Mine / API /
+Running / Failed. Mine maps to `origin=web`, API to `origin=api`, Running to
+`status=running`, and Failed to `status=failed`; search combines with the
+selected view. The archived group sits outside the filter and keeps showing
+every archived Thread. An empty result offers a one-click reset back to All.
 
 ## Report-purpose Threads
 
