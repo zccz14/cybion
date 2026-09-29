@@ -34,6 +34,12 @@ the first authenticated browser session initializes that key atomically.
   without deleting its history; archived Threads stay readable, remain
   available through the archived group, and can be restored from the list or
   the conversation header.
+- The thread list filters on the server. `GET /api/threads` accepts `status`
+  (`idle`, `running`, `failed`), `origin` (`web`, `api`), and `q`
+  (case-insensitive substring of the title or `external_ref`) next to
+  `archived`. The web UI exposes them through one control bar with
+  single-select All / Mine / API / Running / Failed view chips and a
+  debounced search box; the archived group stays outside the filter.
 - Configuration lets each user save the default model, reasoning effort,
   Fast mode, and the context budget for new threads. These defaults are
   stored in the user's database and apply to both web and API creation. An
