@@ -128,9 +128,14 @@ async fn creating_threads_requires_an_existing_upstream() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "upstream-owner").unwrap();
 
-    let unconfigured = create_thread_for(&state, &user, serde_json::from_value(json!({})).unwrap())
-        .await
-        .unwrap_err();
+    let unconfigured = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(unconfigured.status, StatusCode::CONFLICT);
 
     let unknown = create_thread_for(
@@ -138,6 +143,7 @@ async fn creating_threads_requires_an_existing_upstream() {
         &user,
         serde_json::from_value(json!({"upstream_id":"00000000-0000-4000-8000-000000000001"}))
             .unwrap(),
+        ThreadOrigin::Web,
     )
     .await
     .unwrap_err();
@@ -148,6 +154,7 @@ async fn creating_threads_requires_an_existing_upstream() {
         &state,
         &user,
         serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap(),
+        ThreadOrigin::Web,
     )
     .await
     .unwrap();
@@ -171,9 +178,14 @@ async fn creating_threads_requires_an_existing_upstream() {
         through_defaults.0.upstream_id.as_deref(),
         Some(upstream.id.as_str())
     );
-    let inherited = create_thread_for(&state, &user, serde_json::from_value(json!({})).unwrap())
-        .await
-        .unwrap();
+    let inherited = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
     assert_eq!(inherited.upstream_id.as_deref(), Some(upstream.id.as_str()));
 }
 
@@ -243,6 +255,7 @@ async fn upstream_crud_enforces_unique_names_and_blocks_deletion_in_use() {
         &state,
         &user,
         serde_json::from_value(json!({"upstream_id": alpha.id})).unwrap(),
+        ThreadOrigin::Web,
     )
     .await
     .unwrap();

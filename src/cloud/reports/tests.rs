@@ -1023,15 +1023,16 @@ async fn schema_18_preserves_legacy_reports_and_report_thread_creation_is_idempo
         Ok(id)
     }).await.unwrap();
     let mut c = Connection::open(&user.path).unwrap();
-    c.execute_batch("DROP TRIGGER report_executor_delete; DROP INDEX threads_one_report_thread; DROP TABLE report_source_units; DROP TABLE report_snapshots; DROP TABLE report_runs; ALTER TABLE threads DROP COLUMN purpose; ALTER TABLE report_jobs DROP COLUMN executor_thread_id; ALTER TABLE report_jobs DROP COLUMN input_record_id; ALTER TABLE report_jobs DROP COLUMN source_cutoff; ALTER TABLE report_summaries DROP COLUMN executor_thread_id; ALTER TABLE report_summaries DROP COLUMN input_record_id; ALTER TABLE report_summaries DROP COLUMN audit_id; ALTER TABLE report_summaries DROP COLUMN generator_fingerprint; ALTER TABLE report_summaries DROP COLUMN execution_kind; PRAGMA user_version=18;").unwrap();
+    c.execute_batch("DROP TRIGGER report_executor_delete; DROP INDEX threads_one_report_thread; DROP TABLE report_source_units; DROP TABLE report_snapshots; DROP TABLE report_runs; ALTER TABLE threads DROP COLUMN purpose; ALTER TABLE threads DROP COLUMN created_by; ALTER TABLE threads DROP COLUMN api_key_id; ALTER TABLE threads DROP COLUMN external_ref; ALTER TABLE report_jobs DROP COLUMN executor_thread_id; ALTER TABLE report_jobs DROP COLUMN input_record_id; ALTER TABLE report_jobs DROP COLUMN source_cutoff; ALTER TABLE report_summaries DROP COLUMN executor_thread_id; ALTER TABLE report_summaries DROP COLUMN input_record_id; ALTER TABLE report_summaries DROP COLUMN audit_id; ALTER TABLE report_summaries DROP COLUMN generator_fingerprint; ALTER TABLE report_summaries DROP COLUMN execution_kind; PRAGMA user_version=18;").unwrap();
     ensure_user_schema(&mut c).unwrap();
     ensure_user_schema(&mut c).unwrap();
     assert_eq!(
         c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        20
+        21
     );
     assert_eq!(load_thread(&c, &source).unwrap().purpose, "work");
+    assert_eq!(load_thread(&c, &source).unwrap().created_by, "web");
     let old = summary(&c, legacy).unwrap();
     assert_eq!(old.execution_kind, "legacy");
     assert_eq!(old.input_tokens, 12);

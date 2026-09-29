@@ -3,7 +3,7 @@
 Every conversation is an independent thread owned by one Auth Mini user. A
 thread is identified by a time-ordered UUID v7 and carries a title, model,
 reasoning effort, Fast mode, an optional context-budget override, status,
-timestamps, and an append-only history.
+timestamps, its creation origin, and an append-only history.
 Inference requests always include the provider-native `web_search` and
 `image_generation` tools. Users and API clients can append input to any thread
 they own.
@@ -95,6 +95,19 @@ daily reports are removed too. Copies already read into another Thread's
 history remain in that destination Thread until it is deleted. Deleting the
 report executor Thread preserves independently saved report artifacts but
 removes its audit links. Other users' databases are unaffected.
+
+## Origin and external references
+
+A Thread records where it came from. Browser sessions create `web` Threads.
+`/v1/threads` creates `api` Threads and stores the API key id that created
+them, so integration traffic can be attributed and audited. An integration
+client may also send an optional `external_ref` at creation (1-200 visible
+characters after trimming) mapping the Thread to its own identifier, such as a
+room or task.
+
+Creation records these once, and the Thread views return them. The web UI
+marks `api` Threads with an `API` chip in the thread list and the conversation
+header, and shows the external reference in the row tooltip.
 
 ## Archive
 
