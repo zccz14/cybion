@@ -34,7 +34,7 @@ surfaces, borders, text, selection, and focus colors are achromatic (R = G = B).
 | --- | --- | --- |
 | `background` | `#121212` | Main working surface |
 | `sidebar` | `#161616` | Navigation surface |
-| `card` | `#1C1C1C` | Cards, assistant messages, reasoning panels |
+| `card` | `#1C1C1C` | Cards and reasoning panels |
 | `popover` | `#242424` | Floating menus and selection lists |
 | `secondary`, `muted` | `#262626` | Secondary surfaces and controls |
 | `accent`, `sidebar-accent` | `#303030` | Hover and selected surfaces |
@@ -58,8 +58,12 @@ Surface levels remain distinct through neutral luminance steps.
 User messages use the dedicated `user-message` tokens: in light mode these alias
 `primary` / `primary-foreground`; in dark mode they alias `muted` / `foreground`.
 Near-white primary buttons therefore remain compact action signals while long
-user messages remain dark gray. Assistant messages and reasoning panels use the
-card surface in dark mode. Reasoning-panel boundaries use the neutral border.
+user messages remain dark gray, and the shared copy control sits below each
+user message bubble. Cybion replies and checkpoints render as plain Markdown
+directly on the working surface; replies carry no avatar, name, or bubble, and
+their copy control and timestamp follow the content. Reasoning panels use the
+card surface in dark mode, and reasoning-panel boundaries use the neutral
+border.
 
 Dark Markdown uses the neutral typography palette for body text, headings,
 quotes, links, tables, and code. Light Markdown keeps its existing palette.

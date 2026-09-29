@@ -5,6 +5,8 @@ import test from "node:test"
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const inputMessageSource = readFileSync(new URL("../src/components/user-input-message.tsx", import.meta.url), "utf8")
+const assistantMessageSource = readFileSync(new URL("../src/components/assistant-message.tsx", import.meta.url), "utf8")
+const checkpointMessageSource = readFileSync(new URL("../src/components/checkpoint-message.tsx", import.meta.url), "utf8")
 const design = readFileSync(new URL("../../DESIGN.md", import.meta.url), "utf8")
 const lightBlock = css.match(/:root \{([\s\S]*?)\n\}/)![1]
 const darkBlock = css.match(/\.dark \{([\s\S]*?)\n\}/)![1]
@@ -76,8 +78,9 @@ test("message surfaces are separated from primary actions and Markdown is neutra
   assert.match(css, /--color-user-message: var\(--user-message\)/)
   assert.match(inputMessageSource, /bg-user-message[^"\n]+text-user-message-foreground/)
   assert.match(source, /border-primary\/20 bg-primary\/5[^"\n]+dark:border-border dark:bg-card/)
-  assert.equal(source.match(/dark:prose-neutral dark:prose-invert/g)?.length, 2)
-  assert.doesNotMatch(source, /\sprose-neutral\s/)
+  const markdownSurfaces = [source, assistantMessageSource, checkpointMessageSource]
+  assert.equal(markdownSurfaces.reduce((count, text) => count + (text.match(/dark:prose-neutral dark:prose-invert/g)?.length ?? 0), 0), 3)
+  for (const text of markdownSurfaces) assert.doesNotMatch(text, /\sprose-neutral\s/)
   assert.match(lightBlock, /color-scheme: light;/)
   assert.match(darkBlock, /color-scheme: dark;/)
 })

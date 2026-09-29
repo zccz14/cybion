@@ -3,7 +3,20 @@ import { createRoot } from "react-dom/client"
 import { AssistantMessage } from "../src/components/assistant-message"
 import "../src/styles.css"
 
-const reply = "## 部署状态\n\n- 检查通过\n- 服务健康"
+const reply = `## 部署状态
+
+- **检查通过**：服务健康。
+- 命令：\`git status\`
+
+| 项目 | 状态 |
+| --- | --- |
+| 部署 | 通过 |
+
+\`\`\`bash
+git status
+\`\`\`
+
+更多细节见 [文档](https://example.com/docs)。`
 
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")

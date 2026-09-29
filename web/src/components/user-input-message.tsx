@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { CopyReplyButton } from "@/components/copy-reply-button"
 import { MessageGroup } from "@/components/ui/message"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { userInputView } from "@/lib/history-payload"
@@ -14,7 +15,10 @@ export function UserInputMessage({ language, payload }: { language: "en" | "zh";
     {images.length > 0 && <div className="flex flex-wrap justify-end gap-2">
       {images.map((dataUrl, index) => <UserInputImage key={index} language={language} dataUrl={dataUrl} />)}
     </div>}
-    {text !== "" && <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-user-message px-3 py-2 text-sm leading-6 text-user-message-foreground">{text}</div>}
+    {text !== "" && <div className="flex flex-col items-end gap-1.5">
+      <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-user-message px-3 py-2 text-sm leading-6 text-user-message-foreground">{text}</div>
+      <CopyReplyButton text={text} language={language} />
+    </div>}
   </MessageGroup>
 }
 
