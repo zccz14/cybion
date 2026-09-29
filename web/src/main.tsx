@@ -84,7 +84,9 @@ import { AdminUsers } from "@/components/admin-users"
 import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
+import { HistoryRecordPayload } from "@/components/history-record-payload"
 import { BashCommand } from "@/components/bash-command"
+import { CheckpointMessage } from "@/components/checkpoint-message"
 import { CopyReplyButton } from "@/components/copy-reply-button"
 import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
@@ -447,7 +449,6 @@ const copy = {
     recordToolOutput: "Worker result",
     recordReasoning: "Reasoning",
     recordActivity: "Activity",
-    recordCheckpoint: "Checkpoint",
     recordProtocol: "Protocol event",
     generatedImage: "Generated image",
     recordHidden: "Internal",
@@ -756,7 +757,6 @@ const copy = {
     recordToolOutput: "Worker 结果",
     recordReasoning: "推理 (Reasoning)",
     recordActivity: "活动记录",
-    recordCheckpoint: "上下文检查点",
     recordProtocol: "协议事件",
     generatedImage: "生成的图片",
     recordHidden: "内部记录",
@@ -1812,11 +1812,14 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
     </BashCommand>
   }
 
-  if (record.kind === "checkpoint" || (typeof payload?.type === "string" && (payload.type !== "message" || !text.trim()))) {
-    const Icon = record.kind === "checkpoint" ? DatabaseIcon : ActivityIcon
+  if (record.kind === "checkpoint") {
+    return <CheckpointMessage language={language} record={record} />
+  }
+
+  if (typeof payload?.type === "string" && (payload.type !== "message" || !text.trim())) {
     return <div className="relative flex items-start gap-3 px-1">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border/80">
-        <Icon className="size-4" />
+        <ActivityIcon className="size-4" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -1858,7 +1861,6 @@ function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) 
   if (isReasoningRecord(record)) return t("recordReasoning")
   if (record.kind === "tool_output") return t("recordToolOutput")
   if (record.kind === "activity") return t("recordActivity")
-  if (record.kind === "checkpoint") return t("recordCheckpoint")
   return t("recordProtocol")
 }
 
@@ -1881,20 +1883,6 @@ function historyRecordSummary(text: string) {
   const summary = text.replace(/\s+/g, " ").trim()
   if (!summary) return "—"
   return summary.length > 160 ? `${summary.slice(0, 157)}…` : summary
-}
-
-function HistoryRecordPayload({ language, record }: { language: Language; record: HistoryRecord }) {
-  return <div className="mt-2 overflow-hidden rounded-lg border border-border/70 bg-background/70">
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b bg-muted/50 px-3 py-2 text-[0.68rem] text-muted-foreground">
-      <code className="font-mono">#{record.id}</code>
-      <time>{formattedTime(language, record.created_at)}</time>
-    </div>
-    <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-3 font-mono text-xs leading-5 text-foreground">{historyRecordPayloadText(record)}</pre>
-  </div>
-}
-
-function historyRecordPayloadText(record: HistoryRecord) {
-  return JSON.stringify(record.payload, null, 2) ?? String(record.payload)
 }
 
 function historyRecordText(record: HistoryRecord) {
