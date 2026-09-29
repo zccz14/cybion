@@ -38,10 +38,12 @@ the first authenticated browser session initializes that key atomically.
   accepts `status` (`idle`, `running`, `failed`), `origin` (`web`, `api`),
   and `q` (case-insensitive substring of the title or `external_ref`) next to
   `archived`, plus `limit` (1-100, default 30) and a keyset `cursor` returned
-  as `next_cursor`. The web UI exposes them through one control bar with
-  single-select All / Mine / API / Running / Failed view chips and a
-  debounced search box, and loads more pages when the list footer scrolls
-  into view; the archived group stays outside the filter.
+  as `next_cursor`. The web UI exposes them through one control bar that
+  opens on Mine (the user's own web Threads) with single-select All / Mine /
+  API / Running / Failed view chips and a debounced search box; the selection
+  lives in the page URL, so it is shareable, survives reloads, and steps with
+  browser back/forward. More pages load when the list footer scrolls into
+  view; the archived group stays outside the filter.
 - Configuration lets each user save the default model, reasoning effort,
   Fast mode, and the context budget for new threads. These defaults are
   stored in the user's database and apply to both web and API creation. An

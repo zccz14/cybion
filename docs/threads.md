@@ -141,12 +141,17 @@ return HTTP 400.
 
 The web UI drives these parameters through one shared control bar: a search
 box (300 ms debounce) plus single-select view chips — All / Mine / API /
-Running / Failed. Mine maps to `origin=web`, API to `origin=api`, Running to
-`status=running`, and Failed to `status=failed`; search combines with the
-selected view. More pages load automatically when the list footer scrolls
-into view, and the archived group pages the same way. The archived group
-sits outside the filter and keeps showing every archived Thread. An empty
-result offers a one-click reset back to All.
+Running / Failed. Mine maps to `origin=web` and opens by default; API maps
+to `origin=api`, Running to `status=running`, and Failed to `status=failed`;
+search combines with the selected view. The selection lives in the page URL
+(for example `#/threads?view=api&q=room`), so a thread list link is
+shareable, a reload keeps the selection, and back/forward step through
+filter changes. The default view omits `view`, and `q` stores the raw search
+text while the server request still trims it. More pages load automatically
+when the list footer scrolls into view, and the archived group pages the
+same way. The archived group sits outside the filter and keeps showing every
+archived Thread. An empty result offers a one-click "Show all" reset to the
+widest selection.
 
 ## Report-purpose Threads
 
