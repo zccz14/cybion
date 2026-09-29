@@ -1504,7 +1504,8 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useUpstreamModels(sdk)
   // The conversation opens on the window that starts at the most recent user input instead of
-  // the whole thread; older pages load on demand with the returned `has_older` flag.
+  // the whole thread; older pages load on demand, each one a whole turn that starts at the
+  // previous input record, until `has_older` clears.
   const fetchHistoryWindow = (before?: number) => api<{ records: HistoryRecord[]; has_older: boolean }>(
     sdk,
     `/api/threads/${encodeURIComponent(threadId)}/history/window${before === undefined ? "" : `?before=${before}`}`,

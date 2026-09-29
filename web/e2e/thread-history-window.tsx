@@ -14,7 +14,7 @@ function record(id: number, kind: HistoryRecord["kind"], payload: unknown, secon
 
 const turnCount = 20
 const recordsPerTurn = 4
-const pageSize = recordsPerTurn * 4
+const pageSize = recordsPerTurn
 const all: HistoryRecord[] = []
 for (let turn = 1; turn <= turnCount; turn += 1) {
   const id = turn * 10
