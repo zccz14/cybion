@@ -2566,11 +2566,31 @@ impl ThreadListFilter {
     }
 }
 
+/// Keyset position inside the list ordering (`updated_at DESC, id DESC`).
+struct ThreadCursor {
+    updated_at: i64,
+    id: String,
+}
+
+const DEFAULT_THREAD_LIST_LIMIT: usize = 30;
+const MAX_THREAD_LIST_LIMIT: usize = 100;
+
+#[derive(Serialize)]
+struct ThreadListPage {
+    items: Vec<ThreadView>,
+    /// Pass back as `cursor` to continue; `None` means this is the last page.
+    next_cursor: Option<String>,
+    /// Size of the whole filtered list, independent of the current page.
+    total: i64,
+}
+
 async fn list_threads_for(
     state: &AppState,
     user: &User,
     filter: ThreadListFilter,
-) -> Result<Vec<ThreadView>, ApiError> {
+    limit: usize,
+    cursor: Option<ThreadCursor>,
+) -> Result<ThreadListPage, ApiError> {
     user_db(state, user, true, move |connection| {
         let mut conditions = vec![if filter.archived {
             "t.archived_at IS NOT NULL"
@@ -2596,19 +2616,47 @@ async fn list_threads_for(
             values.push(rusqlite::types::Value::Text(q.clone()));
             values.push(rusqlite::types::Value::Text(q.clone()));
         }
+        let total = connection.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM threads t WHERE {}",
+                conditions.join(" AND ")
+            ),
+            params_from_iter(values.clone()),
+            |row| row.get(0),
+        )?;
+        if let Some(cursor) = &cursor {
+            conditions.push("(t.updated_at < ? OR (t.updated_at = ? AND t.id < ?))");
+            values.push(rusqlite::types::Value::Integer(cursor.updated_at));
+            values.push(rusqlite::types::Value::Integer(cursor.updated_at));
+            values.push(rusqlite::types::Value::Text(cursor.id.clone()));
+        }
+        values.push(rusqlite::types::Value::Integer(limit as i64 + 1));
         let mut statement = connection.prepare(&format!(
             "{THREAD_VIEW_SELECT}
              LEFT JOIN ({THREAD_USAGE_SELECT} GROUP BY thread_id) usage ON usage.thread_id=t.id
              WHERE {}
-             ORDER BY t.updated_at DESC,t.id DESC",
+             ORDER BY t.updated_at DESC,t.id DESC
+             LIMIT ?",
             conditions.join(" AND ")
         ))?;
         let rows = statement.query_map(params_from_iter(values), thread_from_row)?;
-        let mut threads = Vec::new();
+        let mut items = Vec::new();
         for row in rows {
-            threads.push(row?);
+            items.push(row?);
         }
-        Ok(threads)
+        let next_cursor = if items.len() > limit {
+            let boundary = &items[limit - 1];
+            let boundary_cursor = format!("{}:{}", boundary.updated_at, boundary.id);
+            items.truncate(limit);
+            Some(boundary_cursor)
+        } else {
+            None
+        };
+        Ok(ThreadListPage {
+            items,
+            next_cursor,
+            total,
+        })
     })
     .await
 }
@@ -3677,6 +3725,10 @@ struct ListThreadsQuery {
     origin: Option<String>,
     /// Case-insensitive substring that must appear in the title or `external_ref`.
     q: Option<String>,
+    /// Page size, 1-100; the default is 30.
+    limit: Option<i64>,
+    /// `next_cursor` from the previous page.
+    cursor: Option<String>,
 }
 
 fn thread_list_status(value: &str) -> Result<String, ApiError> {
@@ -3710,11 +3762,29 @@ fn thread_list_query(value: &str) -> Result<Option<String>, ApiError> {
     Ok(Some(value.to_owned()))
 }
 
+fn thread_list_limit(value: i64) -> Result<usize, ApiError> {
+    if (1..=MAX_THREAD_LIST_LIMIT as i64).contains(&value) {
+        Ok(value as usize)
+    } else {
+        Err(ApiError::bad_request(format!(
+            "limit must be between 1 and {MAX_THREAD_LIST_LIMIT}"
+        )))
+    }
+}
+
+fn thread_list_cursor(value: &str) -> Result<ThreadCursor, ApiError> {
+    let invalid = || ApiError::bad_request("cursor must be an updated_at:id pair");
+    let (updated_at, id) = value.split_once(':').ok_or_else(invalid)?;
+    let updated_at = updated_at.parse::<i64>().map_err(|_| invalid())?;
+    let id = Uuid::parse_str(id).map_err(|_| invalid())?.to_string();
+    Ok(ThreadCursor { updated_at, id })
+}
+
 async fn list_threads(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Query(query): Query<ListThreadsQuery>,
-) -> Result<Json<Vec<ThreadView>>, ApiError> {
+) -> Result<Json<ThreadListPage>, ApiError> {
     let filter = ThreadListFilter {
         archived: query.archived,
         status: query
@@ -3734,8 +3804,18 @@ async fn list_threads(
             .transpose()?
             .flatten(),
     };
+    let limit = query
+        .limit
+        .map(thread_list_limit)
+        .transpose()?
+        .unwrap_or(DEFAULT_THREAD_LIST_LIMIT);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(thread_list_cursor)
+        .transpose()?;
     Ok(Json(
-        list_threads_for(&state, &identity.user, filter).await?,
+        list_threads_for(&state, &identity.user, filter, limit, cursor).await?,
     ))
 }
 
@@ -8022,6 +8102,17 @@ mod tests {
         .unwrap()
     }
 
+    pub(super) async fn list_all_threads(
+        state: &AppState,
+        user: &User,
+        filter: ThreadListFilter,
+    ) -> Vec<ThreadView> {
+        list_threads_for(state, user, filter, MAX_THREAD_LIST_LIMIT, None)
+            .await
+            .unwrap()
+            .items
+    }
+
     pub(super) fn insert_record(
         connection: &Connection,
         thread_id: &str,
@@ -8541,16 +8632,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            list_threads_for(&state, &first, ThreadListFilter::active())
+            list_all_threads(&state, &first, ThreadListFilter::active())
                 .await
-                .unwrap()
                 .len(),
             1
         );
         assert_eq!(
-            list_threads_for(&state, &second, ThreadListFilter::active())
+            list_all_threads(&state, &second, ThreadListFilter::active())
                 .await
-                .unwrap()
                 .len(),
             1
         );
@@ -8778,15 +8867,13 @@ mod tests {
         .0;
         assert!(archived.archived_at.is_some());
         assert!(
-            list_threads_for(&state, &user, ThreadListFilter::active())
+            list_all_threads(&state, &user, ThreadListFilter::active())
                 .await
-                .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            list_threads_for(&state, &user, ThreadListFilter::archived())
+            list_all_threads(&state, &user, ThreadListFilter::archived())
                 .await
-                .unwrap()
                 .len(),
             1
         );
@@ -8813,16 +8900,14 @@ mod tests {
         .0;
         assert_eq!(restored.archived_at, None);
         assert_eq!(
-            list_threads_for(&state, &user, ThreadListFilter::active())
+            list_all_threads(&state, &user, ThreadListFilter::active())
                 .await
-                .unwrap()
                 .len(),
             1
         );
         assert!(
-            list_threads_for(&state, &user, ThreadListFilter::archived())
+            list_all_threads(&state, &user, ThreadListFilter::archived())
                 .await
-                .unwrap()
                 .is_empty()
         );
     }
@@ -8853,23 +8938,28 @@ mod tests {
             .with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-        let listed: Vec<Value> = reqwest::get(format!("http://{address}/api/threads"))
+        let page: Value = reqwest::get(format!("http://{address}/api/threads"))
             .await
             .unwrap()
             .json()
             .await
             .unwrap();
+        assert_eq!(page["total"], json!(1));
+        assert_eq!(page["next_cursor"], json!(null));
+        let listed = page["items"].as_array().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["id"], json!(active.id));
         assert_eq!(listed[0]["archived_at"], json!(null));
 
-        let archived_list: Vec<Value> =
+        let archived_page: Value =
             reqwest::get(format!("http://{address}/api/threads?archived=true"))
                 .await
                 .unwrap()
                 .json()
                 .await
                 .unwrap();
+        assert_eq!(archived_page["total"], json!(1));
+        let archived_list = archived_page["items"].as_array().unwrap();
         assert_eq!(archived_list.len(), 1);
         assert_eq!(archived_list[0]["id"], json!(archived.id));
         assert!(archived_list[0]["archived_at"].as_i64().is_some());
@@ -8945,8 +9035,10 @@ mod tests {
         let listed = |query: &str| {
             let url = format!("http://{address}/api/threads{query}");
             async move {
-                let threads: Vec<Value> = reqwest::get(url).await.unwrap().json().await.unwrap();
-                threads
+                let page: Value = reqwest::get(url).await.unwrap().json().await.unwrap();
+                page["items"]
+                    .as_array()
+                    .unwrap()
                     .iter()
                     .map(|thread| thread["id"].as_str().unwrap().to_owned())
                     .collect::<Vec<_>>()
@@ -9008,7 +9100,20 @@ mod tests {
             async move { reqwest::get(url).await.unwrap().status() }
         };
 
-        for query in ["?status=done", "?status=", "?origin=agent", "?origin="] {
+        for query in [
+            "?status=done",
+            "?status=",
+            "?origin=agent",
+            "?origin=",
+            "?limit=0",
+            "?limit=101",
+            "?limit=-1",
+            "?limit=abc",
+            "?cursor=",
+            "?cursor=bad",
+            "?cursor=1:not-a-uuid",
+            "?cursor=abc:0193a000-0000-7000-8000-000000000000",
+        ] {
             assert_eq!(
                 status(query).await,
                 reqwest::StatusCode::BAD_REQUEST,
@@ -9026,6 +9131,100 @@ mod tests {
             reqwest::StatusCode::OK
         );
         assert_eq!(status("?q=").await, reqwest::StatusCode::OK);
+        assert_eq!(status("?limit=1").await, reqwest::StatusCode::OK);
+        assert_eq!(status("?limit=100").await, reqwest::StatusCode::OK);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thread_list_paginates_with_a_keyset_cursor() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "thread-list-pagination-user").unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            ids.push(create_test_thread(&state, &user).await.id);
+        }
+        let base = now();
+        user_db(&state, &user, false, {
+            let ids = ids.clone();
+            move |connection| {
+                for (offset, id) in ids.iter().enumerate() {
+                    connection.execute(
+                        "UPDATE threads SET updated_at=? WHERE id=?",
+                        params![base + offset as i64, id],
+                    )?;
+                }
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/api/threads", get(list_threads))
+            .layer(test_identity(&user))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let page = |query: &str| {
+            let url = format!("http://{address}/api/threads{query}");
+            async move {
+                reqwest::get(url)
+                    .await
+                    .unwrap()
+                    .json::<Value>()
+                    .await
+                    .unwrap()
+            }
+        };
+        let item_ids = |page: &Value| {
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|thread| thread["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let first = page("?limit=2").await;
+        assert_eq!(first["total"], json!(5));
+        assert_eq!(item_ids(&first), vec![ids[4].clone(), ids[3].clone()]);
+        let first_cursor = first["next_cursor"].as_str().unwrap();
+        assert_eq!(first_cursor, format!("{}:{}", base + 3, ids[3]));
+
+        let second = page(&format!("?limit=2&cursor={first_cursor}")).await;
+        assert_eq!(second["total"], json!(5));
+        assert_eq!(item_ids(&second), vec![ids[2].clone(), ids[1].clone()]);
+        let second_cursor = second["next_cursor"].as_str().unwrap().to_owned();
+        assert_eq!(second_cursor, format!("{}:{}", base + 1, ids[1]));
+
+        let third = page(&format!("?limit=2&cursor={second_cursor}")).await;
+        assert_eq!(third["total"], json!(5));
+        assert_eq!(item_ids(&third), vec![ids[0].clone()]);
+        assert_eq!(third["next_cursor"], json!(null));
+
+        for id in [&ids[0], &ids[1]] {
+            let _ = update_thread(
+                State(state.clone()),
+                test_identity(&user),
+                AxumPath(id.clone()),
+                Json(archived_input(true)),
+            )
+            .await
+            .unwrap();
+        }
+        let archived_first = page("?archived=true&limit=1").await;
+        assert_eq!(archived_first["total"], json!(2));
+        assert_eq!(archived_first["items"].as_array().unwrap().len(), 1);
+        let archived_cursor = archived_first["next_cursor"].as_str().unwrap().to_owned();
+        let archived_second =
+            page(&format!("?archived=true&limit=1&cursor={archived_cursor}")).await;
+        assert_eq!(archived_second["total"], json!(2));
+        assert_eq!(archived_second["items"].as_array().unwrap().len(), 1);
+        assert_eq!(archived_second["next_cursor"], json!(null));
 
         server.abort();
     }

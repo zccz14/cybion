@@ -22,11 +22,27 @@ export function threadListSearchParams(filters: ThreadListFilters): URLSearchPar
   return params
 }
 
-export function threadListUrl(filters: ThreadListFilters): string {
-  const query = threadListSearchParams(filters).toString()
+export function threadListUrl(filters: ThreadListFilters, cursor?: string | null, archived = false): string {
+  const params = threadListSearchParams(filters)
+  if (archived) params.set("archived", "true")
+  if (cursor) params.set("cursor", cursor)
+  const query = params.toString()
   return query === "" ? "/api/threads" : `/api/threads?${query}`
 }
 
 export function hasThreadListFilters(filters: ThreadListFilters): boolean {
   return filters.view !== "all" || filters.q.trim() !== ""
+}
+
+export function mergeThreadPages<T extends { id: string }>(pages: T[][]): T[] {
+  const seen = new Set<string>()
+  const items: T[] = []
+  for (const page of pages) {
+    for (const item of page) {
+      if (seen.has(item.id)) continue
+      seen.add(item.id)
+      items.push(item)
+    }
+  }
+  return items
 }

@@ -16,6 +16,7 @@ import {
   QueryClient,
   QueryClientProvider,
   keepPreviousData,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -57,7 +58,7 @@ import {
 import toolCatalog from "../../tools.json"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
-import { defaultThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
+import { defaultThreadListFilters, mergeThreadPages, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
 import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
@@ -91,7 +92,7 @@ import { CopyReplyButton } from "@/components/copy-reply-button"
 import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
-import { ThreadListControls, ThreadListEmptyState } from "@/components/thread-list-controls"
+import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
 import { ThreadSettingsPopover, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
@@ -178,6 +179,11 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & {
   usage: ThreadUsage
   created_at: number
   updated_at: number
+}
+type ThreadPage = {
+  items: Thread[]
+  next_cursor: string | null
+  total: number
 }
 type RequestAck = {
   thread_id: string
@@ -1137,17 +1143,34 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
     staleTime: 60_000,
   })
   const threadsRequest = threadListUrl(threadListFilters)
-  const threads = useQuery({
+  const threads = useInfiniteQuery({
     queryKey: ["threads", sdk.session.getState().sessionId, threadsRequest],
-    queryFn: () => api<Thread[]>(sdk, threadsRequest),
+    queryFn: ({ pageParam }) => api<ThreadPage>(sdk, threadListUrl(threadListFilters, pageParam)),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: 2000,
     placeholderData: keepPreviousData,
   })
-  const archivedThreads = useQuery({
+  const archivedThreads = useInfiniteQuery({
     queryKey: ["threads", sdk.session.getState().sessionId, "archived"],
-    queryFn: () => api<Thread[]>(sdk, "/api/threads?archived=true"),
+    queryFn: ({ pageParam }) => api<ThreadPage>(sdk, threadListUrl(defaultThreadListFilters, pageParam, true)),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: 2000,
   })
+  const threadItems = useMemo(() => mergeThreadPages(threads.data?.pages.map((page) => page.items) ?? []), [threads.data])
+  const archivedItems = useMemo(() => mergeThreadPages(archivedThreads.data?.pages.map((page) => page.items) ?? []), [archivedThreads.data])
+  const archivedTotal = archivedThreads.data?.pages[0]?.total ?? 0
+  const threadsPagination: ThreadListPagination = {
+    hasMore: threads.hasNextPage,
+    loadingMore: threads.isFetchingNextPage,
+    onLoadMore: () => { void threads.fetchNextPage() },
+  }
+  const archivedPagination: ThreadListPagination = {
+    hasMore: archivedThreads.hasNextPage,
+    loadingMore: archivedThreads.isFetchingNextPage,
+    onLoadMore: () => { void archivedThreads.fetchNextPage() },
+  }
   const client = useQueryClient()
   const restoreThread = useMutation({
     mutationFn: (threadId: string) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify({ archived: false }) }),
@@ -1188,10 +1211,13 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
           sdk={sdk}
           userId={currentUser.data.user_id}
           isAdmin={currentUser.data.is_admin}
-          threads={threads.data ?? []}
+          threads={threadItems}
           threadsLoading={threads.isLoading}
           threadsError={threads.error}
-          archivedThreads={archivedThreads.data ?? []}
+          threadsPagination={threadsPagination}
+          archivedThreads={archivedItems}
+          archivedTotal={archivedTotal}
+          archivedPagination={archivedPagination}
           onRestoreThread={restoreThread.mutate}
           restoringThreadId={restoreThread.isPending ? restoreThread.variables ?? null : null}
           filters={threadListFilters}
@@ -1227,7 +1253,10 @@ function WorkspaceShell({
   threads,
   threadsLoading,
   threadsError,
+  threadsPagination,
   archivedThreads,
+  archivedTotal,
+  archivedPagination,
   onRestoreThread,
   restoringThreadId,
   filters,
@@ -1239,7 +1268,10 @@ function WorkspaceShell({
   threads: Thread[]
   threadsLoading: boolean
   threadsError: unknown
+  threadsPagination: ThreadListPagination
   archivedThreads: Thread[]
+  archivedTotal: number
+  archivedPagination: ThreadListPagination
   onRestoreThread: (threadId: string) => void
   restoringThreadId: string | null
   filters: ThreadListFilters
@@ -1323,9 +1355,9 @@ function WorkspaceShell({
           />}
         >
           <Routes>
-            <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />} />
-            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />} />
-            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate("/threads")} filters={filters} onFiltersChange={onFiltersChange} />} />
+            <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
+            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
+            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate("/threads")} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
@@ -1365,21 +1397,21 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   return t("threads")
 }
 
-function ThreadsHomePage({ sdk, userId, threads, threadsLoading, threadsError, archivedThreads, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function ThreadsHomePage({ sdk, userId, threads, threadsLoading, threadsError, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const desktop = useIsDesktopLayout()
-  if (desktop) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
-  return <ThreadListPage threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
+  if (desktop) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} threadsPagination={threadsPagination} archivedThreads={archivedThreads} archivedTotal={archivedTotal} archivedPagination={archivedPagination} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
+  return <ThreadListPage threads={threads} threadsLoading={threadsLoading} threadsPagination={threadsPagination} archivedThreads={archivedThreads} archivedTotal={archivedTotal} archivedPagination={archivedPagination} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
 }
 
-function ThreadListPage({ threads, threadsLoading, archivedThreads, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { threads: Thread[]; threadsLoading: boolean; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function ThreadListPage({ threads, threadsLoading, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { threads: Thread[]; threadsLoading: boolean; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const { language } = useUi()
   const navigate = useNavigate()
   return <main className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-    <ThreadList threads={threads} archivedThreads={archivedThreads} loading={threadsLoading} language={language} filters={filters} onFiltersChange={onFiltersChange} onCreate={() => navigate("/threads/new")} onRestore={onRestoreThread} restoringId={restoringThreadId} />
+    <ThreadList threads={threads} archivedThreads={archivedThreads} archivedTotal={archivedTotal} loading={threadsLoading} language={language} filters={filters} onFiltersChange={onFiltersChange} pagination={threadsPagination} archivedPagination={archivedPagination} onCreate={() => navigate("/threads/new")} onRestore={onRestoreThread} restoringId={restoringThreadId} />
   </main>
 }
 
-function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, archivedThreads, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const { t, language } = useUi()
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
@@ -1423,7 +1455,8 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, arc
         {threadsLoading && <div className="flex flex-col gap-2 px-2 py-1"><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>}
         {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(defaultThreadListFilters)} />}
         {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
-        <ArchivedThreadGroup threads={archivedThreads} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
+        <ThreadListMore pagination={threadsPagination} language={language} />
+        <ArchivedThreadGroup threads={archivedThreads} total={archivedTotal} pagination={archivedPagination} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
         {Boolean(threadsError) && <p className="px-3 py-2 text-xs text-destructive">{errorMessage(threadsError)}</p>}
       </nav>
     </aside>}
@@ -1451,7 +1484,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, arc
   </main>
 }
 
-function ThreadConversation({ sdk, userId, threads, threadsLoading, archivedThreads, onRestoreThread, restoringThreadId, onCreate, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; archivedThreads: Thread[]; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; onCreate: () => void; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, onCreate, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; onCreate: () => void; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
   const navigate = useNavigate()
@@ -1614,7 +1647,8 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, archivedThre
       <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-12rem)]" aria-label={t("threads")}>
         {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(defaultThreadListFilters)} />}
         {threads.map((item) => <ThreadLink key={item.id} thread={item.id === current.id ? current : item} language={language} />)}
-        <ArchivedThreadGroup threads={archivedThreads} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
+        <ThreadListMore pagination={threadsPagination} language={language} />
+        <ArchivedThreadGroup threads={archivedThreads} total={archivedTotal} pagination={archivedPagination} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
       </nav>
     </aside>}
     <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">

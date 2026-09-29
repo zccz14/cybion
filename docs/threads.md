@@ -122,22 +122,31 @@ lists archived Threads in a collapsed state under the thread list with a
 per-row restore action, and the conversation header offers Archive and
 Restore.
 
-The list endpoint filters on the server. Every provided parameter must match;
-omitted parameters match anything:
+The list endpoint filters and paginates on the server. Every provided
+parameter must match; omitted parameters match anything:
 
 | Parameter | Behavior |
 | --- | --- |
 | `status` | Persisted execution status: `idle`, `running`, or `failed`. `running` covers both the Running and Compacting displays. |
 | `origin` | Creation origin: `web` or `api`. |
 | `q` | Case-insensitive substring of the title or `external_ref`; trimmed; at most 200 characters. |
+| `limit` | Page size, 1-100; default 30. |
+| `cursor` | `next_cursor` from the previous page; walks the filtered list by keyset (`updated_at DESC, id DESC`). |
 
-Invalid `status` or `origin` values and over-long `q` values return HTTP 400.
+The response is `{"items": [...], "next_cursor": "…", "total": n}`: `items`
+is the page (at most `limit` entries), `next_cursor` continues the walk and
+is `null` on the last page, and `total` counts the whole filtered list.
+Invalid `status`/`origin`/`limit`/`cursor` values and over-long `q` values
+return HTTP 400.
+
 The web UI drives these parameters through one shared control bar: a search
 box (300 ms debounce) plus single-select view chips — All / Mine / API /
 Running / Failed. Mine maps to `origin=web`, API to `origin=api`, Running to
 `status=running`, and Failed to `status=failed`; search combines with the
-selected view. The archived group sits outside the filter and keeps showing
-every archived Thread. An empty result offers a one-click reset back to All.
+selected view. More pages load automatically when the list footer scrolls
+into view, and the archived group pages the same way. The archived group
+sits outside the filter and keeps showing every archived Thread. An empty
+result offers a one-click reset back to All.
 
 ## Report-purpose Threads
 
