@@ -47,17 +47,18 @@ browser-authenticated `GET /api/threads/{id}/history/window` endpoint accepts:
 | Parameter | Behavior |
 | --- | --- |
 | (none) | Tail window: records from the thread's newest `input` record through the newest record, ascending, with `has_older` when earlier rows exist. |
-| `before` | Positive record id cursor. Returns the newest `limit` records older than it, ascending, with its own `has_older` for anything older still. |
-| `limit` | 1–100, default 50. Applies to `before` pages. |
+| `before` | Positive record id cursor. Returns the previous turn: records from the newest `input` record older than the cursor up to the record just below the cursor, ascending, with its own `has_older` for anything older still. |
 
-The window starts at the newest `input` record because Cybion writes that
-record before inference begins, so the first screen always shows the user
-message that started the latest turn and never opens mid-run. The browser
-loads older pages on demand from the window endpoint and keeps using
-`GET /api/threads/{id}/history?after=` as its incremental append channel.
-A thread that somehow held records but no input record — not produced by the
-current protocol — returns every record with `has_older` false instead of
-hiding rows.
+Every window is one whole turn because it starts at an `input` record — Cybion
+writes that record before inference begins. The first screen always shows the
+user message that started the latest turn and never opens mid-run, and each
+load-earlier step reveals exactly one more whole turn starting at the previous
+user input, however long that turn is. The browser loads older pages on demand
+from the window endpoint and keeps using `GET /api/threads/{id}/history?after=`
+as its incremental append channel. A thread that somehow held records but no
+input record — not produced by the current protocol — returns every record
+with `has_older` false instead of hiding rows, and a page that finds no older
+`input` returns everything older than its cursor with `has_older` false.
 
 ## Conversation process groups
 
