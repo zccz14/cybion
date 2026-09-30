@@ -31,3 +31,28 @@ test("every conversation markdown surface renders links through the shared compo
   assert.equal(sources[1].match(/<Markdown>/g)?.length, 1)
   assert.equal(sources[2].match(/<Markdown>/g)?.length, 1)
 })
+
+test("mermaid fenced blocks render through the shared Mermaid component", async () => {
+  const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
+  try {
+    const { Markdown } = await server.ssrLoadModule("/src/components/markdown.tsx")
+    const markdown = "```mermaid\ngraph TD\n  A --> B\n```\n\n```ts\nconst answer = 42\n```\n\n行内 `mermaid` 代码"
+    const html = renderToStaticMarkup(createElement(Markdown, null, markdown))
+    // 服务端渲染只输出源码形态，浏览器渲染后再替换为 SVG 图表
+    assert.match(html, /<pre data-mermaid="source"[^>]*><code class="language-mermaid">graph TD/)
+    assert.ok(!html.includes('data-mermaid="diagram"'))
+    assert.match(html, /<pre><code class="language-ts">const answer = 42/)
+    assert.ok(html.includes("<code>mermaid</code>"))
+  } finally {
+    await server.close()
+  }
+})
+
+test("mermaid rendering stays lazily loaded through the shared markdown renderer", () => {
+  const mermaid = readFileSync(new URL("../src/components/mermaid.tsx", import.meta.url), "utf8")
+  assert.match(mermaid, /await import\("mermaid"\)/)
+  assert.doesNotMatch(mermaid, /from "mermaid"/)
+  const markdown = readFileSync(new URL("../src/components/markdown.tsx", import.meta.url), "utf8")
+  assert.match(markdown, /from "@\/components\/mermaid"/)
+  assert.doesNotMatch(markdown, /from "mermaid"/)
+})

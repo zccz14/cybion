@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   optimizeDeps: {
     entries: ['index.html', 'e2e/*.html'],
-    include: ['@shadcn/react/message-scroller'],
+    include: ['@shadcn/react/message-scroller', 'mermaid'],
   },
   resolve: { alias: { '@': path.resolve(__dirname, './src') } },
   build: {
