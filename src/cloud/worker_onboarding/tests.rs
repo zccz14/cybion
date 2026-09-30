@@ -447,7 +447,7 @@ fn code_and_version_validation() {
     assert!(!supports_checks("garbage"));
     let release: Value =
         serde_json::from_str(include_str!("../../../worker-release.json")).unwrap();
-    assert_eq!(release["version"], "v0.2.2");
+    assert_eq!(release["version"], "v0.2.3");
 }
 
 async fn authenticated_fixture(state: &AppState) -> (String, tokio::task::JoinHandle<()>) {
