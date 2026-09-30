@@ -323,6 +323,99 @@ pub(super) async fn release() -> Json<Value> {
     )
 }
 
+const WORKER_RELEASE_PLATFORMS: [&str; 5] = [
+    "macos-aarch64",
+    "macos-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "windows-x86_64",
+];
+
+fn release_version_ok(version: &str) -> bool {
+    let Some(numbers) = version.strip_prefix('v') else {
+        return false;
+    };
+    let parts: Vec<_> = numbers.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty() && part.len() <= 10 && part.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+fn release_asset_ok(asset: &str) -> bool {
+    WORKER_RELEASE_PLATFORMS.iter().any(|platform| {
+        let base = format!("cybion-worker-{platform}");
+        asset == format!("{base}.tar.gz")
+            || asset == format!("{base}.tar.gz.sha256")
+            || (platform.starts_with("windows")
+                && (asset == format!("{base}.zip") || asset == format!("{base}.zip.sha256")))
+    })
+}
+
+/// Serve official Worker release assets through the Controller so devices on
+/// networks that cannot reach GitHub can still install and upgrade. Only the
+/// five published platform assets and their checksum files are mirrored;
+/// anything else is rejected before any upstream request is made.
+pub(super) async fn release_asset(
+    State(state): State<AppState>,
+    AxumPath((version, asset)): AxumPath<(String, String)>,
+) -> Result<Response, ApiError> {
+    if !release_version_ok(&version) || !release_asset_ok(&asset) {
+        return Err(ApiError::not_found("unknown Worker release asset"));
+    }
+    let mut url = url::Url::parse(&state.worker_release_base).map_err(ApiError::internal)?;
+    url.path_segments_mut()
+        .map_err(|_| ApiError::internal("Worker release base must support path segments"))?
+        .pop_if_empty()
+        .extend([version.as_str(), asset.as_str()]);
+    let upstream = state
+        .client
+        .get(url.clone())
+        .header("accept-encoding", "identity")
+        .timeout(Duration::from_secs(300))
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::unavailable(format!("Worker release download failed for {url}: {error}"))
+        })?;
+    match upstream.status() {
+        StatusCode::OK => {}
+        StatusCode::NOT_FOUND => {
+            return Err(ApiError::not_found("Worker release asset is not published"));
+        }
+        status => {
+            return Err(ApiError::unavailable(format!(
+                "Worker release download failed for {url} (HTTP {})",
+                status.as_u16()
+            )));
+        }
+    }
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let content_length = upstream.content_length();
+    let body = Body::from_stream(
+        upstream
+            .bytes_stream()
+            .map(|item| item.map_err(std::io::Error::other)),
+    );
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(body)
+        .map_err(ApiError::internal)?;
+    if let Some(length) = content_length {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    }
+    Ok(response)
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct CheckView {
     id: String,

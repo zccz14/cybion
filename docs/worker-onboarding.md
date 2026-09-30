@@ -108,6 +108,15 @@ Background mode is labeled honestly as distinct from reboot persistence.
   onboarding smoke after deployment. That smoke never approves a device and
   leaves one short-lived request to expire.
 
+The Controller also serves the downloads themselves: `GET
+/worker-release/{version}/{asset}` streams the official archive or checksum
+file for the five published platforms, so devices on networks that cannot
+reach GitHub can still install and upgrade. The guide's download button and
+install commands use this origin, and Worker 0.2.4+ prefers it for remote
+upgrades with a direct GitHub fallback. The release gate still verifies the
+GitHub-published assets, and the public smoke downloads one asset through the
+production mirror and checks its SHA-256.
+
 The public smoke identifies itself as `cybion-release-smoke/1.0`; default Python
 user agents are rejected by the production edge. A local HTTP regression fixture
 requires this explicit identity on every request. No edge security rule is relaxed.
