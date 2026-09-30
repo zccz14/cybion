@@ -145,8 +145,11 @@ with server-side filters, sorting, pagination, and full raw-field inspection.
 ## Cybion Worker
 
 The standalone Worker is published from `zccz14/cybion-worker` for macOS,
-Linux and Windows. Open **Workers → Connect a device**, select the target
-platform, then download, extract and start Worker:
+Linux and Windows. Downloads and checksums are served through the Controller
+(`/worker-release/…`, a mirror of the official release assets) so devices on
+networks that cannot reach GitHub can still install and upgrade. Open
+**Workers → Connect a device**, select the target platform, then download,
+extract and start Worker:
 
 ```sh
 ./cybion-worker run --background
@@ -161,7 +164,10 @@ Existing configuration is reused. Worker 0.2.x keeps call deduplication and
 result retries in memory across network reconnects, and 0.2.1 adds delivery
 receipts so acknowledged calls are not replayed; Worker restarts may lose
 state. The device page shows the reported version and lets the owner request
-a newer recommended official release after current work drains. A 0.1.x Worker
+a newer recommended official release after current work drains; Worker 0.2.4+
+downloads those upgrades through the same mirror with a direct GitHub fallback,
+so a device that cannot reach GitHub installs 0.2.4 once through the
+Controller-served download and upgrades remotely from then on. A 0.1.x Worker
 needs a one-time manual installation of 0.2.x. Background mode does not install automatic
 startup. `status`, `doctor` and the guide provide diagnostics and recovery.
 

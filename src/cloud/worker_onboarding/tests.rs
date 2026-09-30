@@ -436,6 +436,177 @@ async fn http_pairing_rejects_unauthenticated_approval_and_keeps_secrets_out_of_
     server.abort();
 }
 
+async fn mock_release_mirror(uri: axum::http::Uri) -> Response {
+    let path = uri.path();
+    if path == "/v0.2.4/cybion-worker-linux-x86_64.tar.gz" {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            b"archive-bytes".to_vec(),
+        )
+            .into_response()
+    } else if path == "/v0.2.4/cybion-worker-linux-x86_64.tar.gz.sha256" {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            b"checksum-text".to_vec(),
+        )
+            .into_response()
+    } else if path == "/v0.2.4/cybion-worker-windows-x86_64.zip" {
+        (StatusCode::OK, b"zip-bytes".to_vec()).into_response()
+    } else if path == "/v0.2.4/cybion-worker-linux-aarch64.tar.gz" {
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+#[tokio::test]
+async fn worker_release_downloads_mirror_official_assets_and_validate_requests() {
+    let (_root, mut state) = test_state();
+    let mirror = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.worker_release_base = format!("http://{}", mirror.local_addr().unwrap());
+    let mirror_server = tokio::spawn(async move {
+        axum::serve(mirror, axum::Router::new().fallback(mock_release_mirror))
+            .await
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!(
+            "{base}/worker-release/v0.2.4/cybion-worker-linux-x86_64.tar.gz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+    assert_eq!(
+        &response.bytes().await.unwrap()[..],
+        "archive-bytes".as_bytes()
+    );
+
+    let checksum = client
+        .get(format!(
+            "{base}/worker-release/v0.2.4/cybion-worker-linux-x86_64.tar.gz.sha256"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(checksum.status(), StatusCode::OK);
+    assert_eq!(checksum.text().await.unwrap(), "checksum-text");
+
+    let zip = client
+        .get(format!(
+            "{base}/worker-release/v0.2.4/cybion-worker-windows-x86_64.zip"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zip.status(), StatusCode::OK);
+
+    for path in [
+        "worker-release/v0.2.4/cybion-worker-linux-x86_64.tar.gz.exe",
+        "worker-release/0.2.4/cybion-worker-linux-x86_64.tar.gz",
+        "worker-release/v0.2.4.1/cybion-worker-linux-x86_64.tar.gz",
+        "worker-release/v0.2.4/cybion-worker-plan9-x86_64.tar.gz",
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{base}/{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path} must be rejected"
+        );
+    }
+
+    let unpublished = client
+        .get(format!(
+            "{base}/worker-release/v0.9.9/cybion-worker-linux-x86_64.tar.gz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unpublished.status(), StatusCode::NOT_FOUND);
+
+    server.abort();
+    mirror_server.abort();
+}
+
+#[tokio::test]
+async fn worker_release_downloads_map_mirror_failures_to_unavailable() {
+    let (_root, mut state) = test_state();
+    let mirror = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.worker_release_base = format!("http://{}", mirror.local_addr().unwrap());
+    let mirror_server = tokio::spawn(async move {
+        axum::serve(mirror, axum::Router::new().fallback(mock_release_mirror))
+            .await
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+
+    let upstream_error = client
+        .get(format!(
+            "{base}/worker-release/v0.2.4/cybion-worker-linux-aarch64.tar.gz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upstream_error.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    server.abort();
+    mirror_server.abort();
+
+    let (_root, mut state) = test_state();
+    state.worker_release_base = "http://127.0.0.1:1".to_owned();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let unreachable = client
+        .get(format!(
+            "{base}/worker-release/v0.2.4/cybion-worker-linux-x86_64.tar.gz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unreachable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    server.abort();
+}
+
+#[test]
+fn release_download_validation_rejects_junk_paths() {
+    assert!(release_version_ok("v0.2.4"));
+    assert!(!release_version_ok("0.2.4"));
+    assert!(!release_version_ok("v0.2"));
+    assert!(!release_version_ok("v0.2.4.1"));
+    assert!(!release_version_ok("v0.2.4/../"));
+    assert!(!release_version_ok(".."));
+    assert!(!release_version_ok("v99999999999999999999.0.0"));
+    assert!(release_asset_ok("cybion-worker-linux-x86_64.tar.gz"));
+    assert!(release_asset_ok("cybion-worker-linux-x86_64.tar.gz.sha256"));
+    assert!(release_asset_ok("cybion-worker-windows-x86_64.zip.sha256"));
+    assert!(!release_asset_ok("../secret"));
+    assert!(!release_asset_ok("cybion-worker-linux-x86_64.tar.gz.exe"));
+    assert!(!release_asset_ok("cybion-worker-plan9-x86_64.tar.gz"));
+}
+
 #[test]
 fn code_and_version_validation() {
     assert_eq!(code(" abcd 1234-ef56 ").unwrap(), "ABCD-1234-EF56");
@@ -447,7 +618,7 @@ fn code_and_version_validation() {
     assert!(!supports_checks("garbage"));
     let release: Value =
         serde_json::from_str(include_str!("../../../worker-release.json")).unwrap();
-    assert_eq!(release["version"], "v0.2.3");
+    assert_eq!(release["version"], "v0.2.4");
 }
 
 async fn authenticated_fixture(state: &AppState) -> (String, tokio::task::JoinHandle<()>) {

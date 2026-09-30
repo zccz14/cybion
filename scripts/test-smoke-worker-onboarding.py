@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise public smoke with an HTTP fixture that rejects unidentified clients."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,23 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"version": "fixture"})
         if self.path == "/api/worker-release":
             return self.reply(200, {"version": "v0.1.4", "platforms": [1, 2, 3, 4, 5]})
+        if self.path.startswith("/worker-release/"):
+            asset = "cybion-worker-linux-x86_64.tar.gz"
+            archive = b"fixture-release-archive"
+            if self.path == "/worker-release/v0.1.4/" + asset:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.end_headers()
+                self.wfile.write(archive)
+                return
+            if self.path == "/worker-release/v0.1.4/" + asset + ".sha256":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                digest = hashlib.sha256(archive).hexdigest()
+                self.wfile.write(f"{digest}  {asset}\n".encode())
+                return
+            return self.reply(404, {"error": "unknown release asset"})
         if self.path == "/worker/v1/pairings" and self.command == "POST":
             value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             Handler.device_secret = value["device_secret"]
@@ -41,6 +59,7 @@ try:
     result = subprocess.run([sys.executable, str(Path(__file__).with_name("smoke-worker-onboarding.py")), f"http://127.0.0.1:{server.server_port}"], check=True, text=True, capture_output=True, timeout=15, env=dict(os.environ, NO_PROXY="localhost,127.0.0.1"))
     summary = json.loads(result.stdout)
     assert summary["controller_version"] == "fixture"
+    assert summary["release_download"] == "verified"
     assert summary["unauthorized_approval"] == "rejected"
     assert summary["wrong_device_proof"] == "rejected"
     print("Public smoke regression passed: explicit user agent on every request")

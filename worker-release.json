@@ -1,6 +1,6 @@
 {
-  "version": "v0.2.3",
-  "release_url": "https://github.com/zccz14/cybion-worker/releases/tag/v0.2.3",
+  "version": "v0.2.4",
+  "release_url": "https://github.com/zccz14/cybion-worker/releases/tag/v0.2.4",
   "platforms": [
     {"id":"macos-aarch64","label":"macOS · Apple Silicon"},
     {"id":"macos-x86_64","label":"macOS · Intel"},

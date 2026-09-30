@@ -61,6 +61,7 @@ const AUTH_AUDIENCES: [&str; 3] = ["cybion.ntnl.io", "linkit.ntnl.io", "openai.n
 // endpoint; schema 16 materializes it into an upstream row.
 const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
+const WORKER_RELEASE_BASE_URL: &str = "https://github.com/zccz14/cybion-worker/releases/download";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 // Automatic naming and the rename form share one request path: the compiled
@@ -130,6 +131,7 @@ struct AppState {
     admin_db_path: Arc<PathBuf>,
     client: reqwest::Client,
     linkit_api_url: String,
+    worker_release_base: String,
     auth: Arc<OnceCell<AuthMiniLayer>>,
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     worker_pairing_lock: Arc<Mutex<()>>,
@@ -349,6 +351,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .timeout(Duration::from_secs(600))
             .build()?,
         linkit_api_url: LINKIT_API_URL.to_owned(),
+        worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
         auth: Arc::new(OnceCell::new()),
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
         worker_pairing_lock: Arc::new(Mutex::new(())),
@@ -719,6 +722,10 @@ fn app(state: AppState) -> Router {
                 .layer(axum::middleware::from_fn(worker_onboarding::no_store)),
         )
         .route("/api/worker-release", get(worker_onboarding::release))
+        .route(
+            "/worker-release/{version}/{asset}",
+            get(worker_onboarding::release_asset),
+        )
         .route("/health", get(health))
         .route("/api/config", get(public_config))
         .merge(browser_api)
@@ -8122,6 +8129,7 @@ mod tests {
                 admin_db_path: Arc::new(admin_db_path.clone()),
                 client: reqwest::Client::new(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
+                worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
                 worker_pairing_lock: Arc::new(Mutex::new(())),

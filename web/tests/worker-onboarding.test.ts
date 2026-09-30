@@ -3,15 +3,16 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 import { normalizeCode, validCode, deviceStatus, checkReady, downloadUrl, installCommand, type Device, type Check, type Release } from "../src/lib/worker-onboarding.ts"
 const release: Release = JSON.parse(readFileSync(new URL("../../worker-release.json", import.meta.url), "utf8"))
+const origin = "https://cybion.ntnl.io"
 test("release manifest drives all five platform downloads and checksum commands", () => {
   assert.equal(release.platforms.length, 5)
   for (const p of release.platforms) {
-    assert.ok(downloadUrl(release, p.id).includes(release.version))
-    assert.match(installCommand(release, p.id), /sha256|SHA256/)
-    if (p.id.startsWith("windows")) assert.ok(downloadUrl(release,p.id).endsWith(".zip"))
-    else assert.match(installCommand(release,p.id), /&&\ntar/)
+    assert.ok(downloadUrl(release, p.id, origin).startsWith(`${origin}/worker-release/${release.version}/`))
+    assert.match(installCommand(release, p.id, origin), /sha256|SHA256/)
+    if (p.id.startsWith("windows")) assert.ok(downloadUrl(release, p.id, origin).endsWith(".zip"))
+    else assert.match(installCommand(release, p.id, origin), /&&\ntar/)
   }
-  assert.throws(() => downloadUrl(release, "unknown"))
+  assert.throws(() => downloadUrl(release, "unknown", origin))
 })
 test("normalize pairing codes without accepting partial or non-hex values", () => {
   assert.equal(normalizeCode("abcd 1234-ef56"), "ABCD-1234-EF56")

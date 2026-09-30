@@ -12,13 +12,13 @@ export function checkReady(check: Check | null | undefined, device: Device | und
   return Boolean(device && device.status === "online" && check?.worker_id === device.id && check.status === "completed" && check.result?.shell?.status === "ready")
 }
 export function assetName(platform: string) { return `cybion-worker-${platform}.${platform.startsWith("windows") ? "zip" : "tar.gz"}` }
-export function downloadUrl(release: Release, platform: string) {
+export function downloadUrl(release: Release, platform: string, origin: string) {
   if (!release.platforms.some((item) => item.id === platform) || !/^v\d+\.\d+\.\d+$/.test(release.version)) throw new Error("Invalid Worker release")
-  return `https://github.com/zccz14/cybion-worker/releases/download/${release.version}/${assetName(platform)}`
+  return `${origin.replace(/\/+$/, "")}/worker-release/${release.version}/${assetName(platform)}`
 }
 export function runCommand(platform: string) { return platform.startsWith("windows") ? ".\\cybion-worker.exe run --background" : "./cybion-worker run --background" }
-export function installCommand(release: Release, platform: string) {
-  const url = downloadUrl(release, platform)
+export function installCommand(release: Release, platform: string, origin: string) {
+  const url = downloadUrl(release, platform, origin)
   const asset = assetName(platform)
   const folder = `cybion-worker-${platform}`
   if (platform.startsWith("windows")) return `$ErrorActionPreference = 'Stop'\nInvoke-WebRequest '${url}' -OutFile '${asset}'\nInvoke-WebRequest '${url}.sha256' -OutFile '${asset}.sha256'\n$expected = ((Get-Content '${asset}.sha256') -split '\\s+')[0]\nif ((Get-FileHash '${asset}' -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum mismatch' }\nExpand-Archive '${asset}' -DestinationPath '.'\n& '.\\${folder}\\cybion-worker.exe' run --background`
