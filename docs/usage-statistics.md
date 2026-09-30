@@ -41,8 +41,9 @@ Within a run, three parts partition the wall-clock time:
 2. **Worker calls** — the union of Worker call intervals that lie outside the
    audit intervals.
 3. **Cybion overhead** — the remainder: controller wake-up, tool dispatch and
-   settlement, controller-answered `sleep` waits, retry backoff, and other
-   processing that is neither a model request nor a Worker call.
+   settlement, controller-answered `sleep` waits and worker-tool
+   `delay_seconds` delays, retry backoff, and other processing that is neither
+   a model request nor a Worker call.
 
 The section follows the time range and thread filters only. The model and
 request-kind filters do not apply, because one run can contain compaction and

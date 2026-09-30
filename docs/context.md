@@ -69,6 +69,12 @@ history are preserved as supplied.
 model request. It creates no Worker call, so deliberate waiting never inflates
 Worker call durations; a stop or a newer input cancels the wait.
 
+Worker tools accept an optional `delay_seconds` (1 to 600) for a known
+follow-up: the controller waits before dispatching the call, so
+`sleep 300 && do-something` becomes one `bash` call with
+`delay_seconds = 300` instead of waking the model up in between. The delay is
+controller time; the Worker call duration measures only the command.
+
 ## Progressive Context discovery
 
 `cybion_list_contexts` lists only top-level Context metadata, ordered by name
