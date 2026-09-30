@@ -72,6 +72,12 @@ their original order, with their existing payload inspection controls. A
 renderer, the same rendering assistant replies use, and keeps its raw payload
 behind the existing disclosure.
 
+Every Markdown surface shares one renderer. Fenced code blocks labelled
+`mermaid` are drawn as diagrams instead of code: a definition that parses
+renders inline as SVG in the neutral palette of the current light or dark
+theme, and a definition that fails to parse — for example a diagram still
+streaming in — stays visible as an ordinary code block until it becomes valid.
+
 Each group starts collapsed and shows its record count and the difference
 between its maximum and minimum `created_at` values (Unix seconds). Chinese
 labels use `运行了 hh 小时 mm 分钟 ss 秒`; English labels use
