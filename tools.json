@@ -41,7 +41,7 @@
     {
       "type": "function",
       "name": "sleep",
-      "description": "Wait for the requested number of seconds before your next turn. Prefer this tool over a `sleep` command inside bash whenever you choose to wait: shell sleeps count toward Worker call duration and misreport Worker performance, while this wait is answered by the Cybion controller and is never recorded as a Worker call. Typical uses: waiting for a build, deployment, or remote job to finish.",
+      "description": "Wait for the requested number of seconds before your next turn. Prefer this tool over a `sleep` command inside bash whenever you choose to wait: shell sleeps count toward Worker call duration and misreport Worker performance, while this wait is answered by the Cybion controller and is never recorded as a Worker call. Typical uses: waiting for a build, deployment, or remote job to finish. If you already know the next Worker call, set its delay_seconds instead.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -63,7 +63,7 @@
     {
       "type": "function",
       "name": "bash",
-      "description": "Run a shell command on the user's selected Worker.",
+      "description": "Run a shell command on the user's selected Worker. To wait before the command runs, set delay_seconds instead of embedding a `sleep`: embedded sleeps count toward Worker call duration and misreport Worker performance.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -73,6 +73,12 @@
           },
           "command": {
             "type": "string"
+          },
+          "delay_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600,
+            "description": "Seconds to wait in the controller before this call starts, from 1 to 600. Prefer this over a `sleep` command: a shell sleep counts toward Worker call duration and misreports Worker performance."
           }
         },
         "required": [
@@ -85,7 +91,7 @@
     {
       "type": "function",
       "name": "browser_control",
-      "description": "Control an isolated browser on the user's selected Worker.",
+      "description": "Control an isolated browser on the user's selected Worker. delay_seconds waits in the controller before the action starts.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -104,6 +110,12 @@
           },
           "text": {
             "type": "string"
+          },
+          "delay_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600,
+            "description": "Seconds to wait in the controller before this call starts, from 1 to 600."
           }
         },
         "required": [
@@ -116,7 +128,7 @@
     {
       "type": "function",
       "name": "computer_use",
-      "description": "Perform a user-device computer action through the selected Worker.",
+      "description": "Perform a user-device computer action through the selected Worker. delay_seconds waits in the controller before the action starts.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -135,6 +147,12 @@
           },
           "text": {
             "type": "string"
+          },
+          "delay_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600,
+            "description": "Seconds to wait in the controller before this call starts, from 1 to 600."
           }
         },
         "required": [

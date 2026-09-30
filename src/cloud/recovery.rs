@@ -130,7 +130,7 @@ pub(super) async fn wait_retry(
     Ok(())
 }
 
-pub(super) async fn wait_sleep(
+pub(super) async fn wait_seconds(
     seconds: u64,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(), ApiError> {
@@ -217,12 +217,57 @@ pub(super) async fn settle_tools(
                     .await?;
                 }
             }
+            Some(PendingToolCall::WorkerDelayed {
+                worker_id,
+                name,
+                arguments,
+                call_id,
+                output_type,
+                seconds,
+            }) => {
+                wait_seconds(seconds, cancellation).await?;
+                let id = match enqueue_worker_call(
+                    state,
+                    user,
+                    &worker_id,
+                    &thread.id,
+                    input,
+                    call_id.clone(),
+                    output_type.clone(),
+                    name,
+                    arguments,
+                )
+                .await
+                {
+                    Ok(id) => id,
+                    // Validation and unavailable-Worker errors are answered to
+                    // the model; storage failures still abort the turn.
+                    Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                        let output = json!({"type":output_type, "call_id":call_id, "output":json!({"error":error.message}).to_string()});
+                        append_tool_output_item(state, user, thread, input, &output).await?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let (result, output_id) =
+                    wait_worker_result(state, user, &id, cancellation).await?;
+                if output_id.is_none() {
+                    append_tool_output_item(
+                        state,
+                        user,
+                        thread,
+                        input,
+                        &json!({"type":output_type,"call_id":call_id,"output":result.to_string()}),
+                    )
+                    .await?;
+                }
+            }
             Some(PendingToolCall::Sleep {
                 call_id,
                 output_type,
                 seconds,
             }) => {
-                wait_sleep(seconds, cancellation).await?;
+                wait_seconds(seconds, cancellation).await?;
                 append_tool_output_item(
                     state,
                     user,

@@ -722,6 +722,231 @@ async fn sleep_settlement_stops_when_the_thread_cancels() {
     );
 }
 
+async fn seed_delayed_call(state: &AppState, user: &User, thread: &ThreadView, seconds: u64) {
+    let thread_id = thread.id.clone();
+    user_db(state, user, false, move |connection| {
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            json!({
+                "type":"function_call","id":"fc-delay","call_id":"delay-1","name":"bash",
+                "arguments": json!({"worker_id":"00000000-0000-4000-8000-000000000051","command":"run-after-wait","delay_seconds":seconds}).to_string()
+            }),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn delayed_worker_calls_wait_in_the_controller_before_dispatch() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "delay-stream-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let worker_id = "00000000-0000-4000-8000-000000000051";
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES(?,'fixture',?,?,?,'online')",
+            params![worker_id, hash_secret("fixture-token"), now(), now()],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let spec = AuditSpec {
+        report_thread: false,
+        user: user.clone(),
+        input_record_id: Some(input),
+        thread_id: thread.id.clone(),
+        request_kind: "inference".to_owned(),
+        model: "fixture".to_owned(),
+        reasoning_effort: Some("high".to_owned()),
+        idx_head: input,
+        idx_tail: input,
+    };
+    let audit_id = begin_reasoning_audit(&state, &spec).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let stream: ResponseStream =
+        Box::pin(async_stream::stream! { while let Some(event) = rx.recv().await { yield event } });
+    let task = tokio::spawn({
+        let state = state.clone();
+        async move { consume_response_events(&state, Some(&spec), Some(audit_id), stream).await }
+    });
+    tx.send(Ok(ResponseEvent::Created {
+        response_id: Some("r".to_owned()),
+    }))
+    .await
+    .unwrap();
+    tx.send(Ok(ResponseEvent::OutputItemDone(
+        ResponseItem::from_value(json!({
+            "type":"function_call","id":"fc-delay","call_id":"delay-1","name":"bash",
+            "arguments": json!({"worker_id":worker_id,"command":"run-after-wait","delay_seconds":600}).to_string()
+        }))
+        .unwrap(),
+    )))
+    .await
+    .unwrap();
+    tx.send(Ok(completed("r", true))).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .expect("a delayed Worker call must not block the response stream")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result.tool_calls.as_slice(),
+        [PendingToolCall::WorkerDelayed { seconds: 600, .. }]
+    ));
+    let count: i64 = user_db(&state, &user, false, |connection| {
+        connection
+            .query_row("SELECT COUNT(*) FROM worker_calls", [], |row| row.get(0))
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "a delayed call is not dispatched while the response streams"
+    );
+}
+
+#[tokio::test]
+async fn delayed_worker_call_dispatches_after_the_controller_wait() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "delay-settle-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let worker_id = "00000000-0000-4000-8000-000000000051";
+    user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            connection.execute(
+                "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES(?,'fixture',?,?,?,'online')",
+                params![worker_id, hash_secret("fixture-token"), now(), now()],
+            )?;
+            insert_record(
+                connection,
+                &thread_id,
+                "response_output",
+                json!({
+                    "type":"function_call","id":"fc-delay","call_id":"delay-1","name":"bash",
+                    "arguments": json!({"worker_id":worker_id,"command":"run-after-wait","delay_seconds":1}).to_string()
+                }),
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let start = now();
+    let (_tx, mut cancellation) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn({
+        let state = state.clone();
+        let user = user.clone();
+        let thread = thread.clone();
+        async move { recovery::settle_tools(&state, &user, &thread, input, &mut cancellation).await }
+    });
+    let call_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let id: Option<String> = user_db(&state, &user, false, |connection| {
+                connection
+                    .query_row("SELECT id FROM worker_calls LIMIT 1", [], |row| row.get(0))
+                    .optional()
+                    .map_err(ApiError::from)
+            })
+            .await
+            .unwrap();
+            if let Some(id) = id {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a delayed call must dispatch after the wait");
+    let created_at: i64 = user_db(&state, &user, false, {
+        let id = call_id.clone();
+        move |connection| {
+            connection
+                .query_row(
+                    "SELECT created_at FROM worker_calls WHERE id=?",
+                    [id],
+                    |row| row.get(0),
+                )
+                .map_err(ApiError::from)
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        created_at - start >= 1,
+        "the Worker call is created only after the controller wait"
+    );
+    let _ = worker_result(
+        State(state.clone()),
+        AxumPath((user.id.clone(), worker_id.to_owned(), call_id)),
+        axum::Extension(user.clone()),
+        Json(WorkerResultInput {
+            result: json!({"stdout":"delayed-ok"}),
+            failed: false,
+            error: None,
+        }),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("settlement must finish after the Worker result")
+        .unwrap()
+        .unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let output = history.iter().find(|r| r.kind == "tool_output").unwrap();
+    assert_eq!(output.payload["call_id"], "delay-1");
+    assert_eq!(
+        serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+        json!({"stdout":"delayed-ok"})
+    );
+}
+
+#[tokio::test]
+async fn delayed_worker_calls_stop_when_the_thread_cancels() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "delay-cancel-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    seed_delayed_call(&state, &user, &thread, 600).await;
+    let (tx, mut cancellation) = tokio::sync::watch::channel(false);
+    let cancel = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(true).unwrap();
+    };
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let (result, ()) = tokio::join!(
+            recovery::settle_tools(&state, &user, &thread, input, &mut cancellation),
+            cancel
+        );
+        result
+    })
+    .await
+    .expect("a cancelled delay must stop promptly");
+    assert!(result.unwrap_err().is_cancelled());
+    let count: i64 = user_db(&state, &user, false, |connection| {
+        connection
+            .query_row("SELECT COUNT(*) FROM worker_calls", [], |row| row.get(0))
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "a cancelled delay must not dispatch the Worker call"
+    );
+}
+
 #[tokio::test]
 async fn offline_worker_calls_are_answered_without_queueing_execution() {
     let (_root, state) = test_state();

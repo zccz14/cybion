@@ -104,10 +104,11 @@ const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-// A sleep call is bounded so one tool call cannot hold the turn for an
-// unbounded time; the model chains calls to wait longer.
-const MIN_SLEEP_SECONDS: u64 = 1;
-const MAX_SLEEP_SECONDS: u64 = 600;
+// Controller-served waits (sleep and worker-tool delay_seconds) are bounded
+// so one call cannot hold the turn for an unbounded time; the model chains
+// calls to wait longer.
+const MIN_WAIT_SECONDS: u64 = 1;
+const MAX_WAIT_SECONDS: u64 = 600;
 const USER_SCHEMA_VERSION: i64 = 21;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
@@ -7052,7 +7053,9 @@ async fn consume_response_events(
         && tool_calls.iter().any(|call| {
             matches!(
                 call,
-                PendingToolCall::Worker { .. } | PendingToolCall::Sleep { .. }
+                PendingToolCall::Worker { .. }
+                    | PendingToolCall::WorkerDelayed { .. }
+                    | PendingToolCall::Sleep { .. }
             )
         })
         && error.is_context_overflow()
@@ -7383,6 +7386,14 @@ enum PendingToolCall {
         call_id: String,
         output_type: String,
     },
+    WorkerDelayed {
+        worker_id: String,
+        name: String,
+        arguments: Value,
+        call_id: String,
+        output_type: String,
+        seconds: u64,
+    },
     Sleep {
         call_id: String,
         output_type: String,
@@ -7394,6 +7405,7 @@ enum PendingToolCall {
 #[derive(Deserialize)]
 struct WorkerArguments {
     worker_id: String,
+    delay_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -7414,9 +7426,9 @@ fn sleep_arguments(input: &str) -> Result<u64, ApiError> {
             "sleep arguments must contain an explicit seconds value: {error}"
         ))
     })?;
-    if !(MIN_SLEEP_SECONDS..=MAX_SLEEP_SECONDS).contains(&arguments.seconds) {
+    if !(MIN_WAIT_SECONDS..=MAX_WAIT_SECONDS).contains(&arguments.seconds) {
         return Err(ApiError::bad_request(format!(
-            "sleep seconds must be between {MIN_SLEEP_SECONDS} and {MAX_SLEEP_SECONDS}"
+            "sleep seconds must be between {MIN_WAIT_SECONDS} and {MAX_WAIT_SECONDS}"
         )));
     }
     Ok(arguments.seconds)
@@ -7534,7 +7546,17 @@ async fn start_response_tool(
     }
     let prepared = prepare_worker_arguments(name, namespace.as_deref(), input);
     let result = match prepared {
-        Ok((worker_id, arguments)) => {
+        Ok((worker_id, arguments, Some(seconds))) => {
+            return Ok(Some(PendingToolCall::WorkerDelayed {
+                worker_id,
+                name: name.clone(),
+                arguments,
+                call_id: call_id.clone(),
+                output_type: output_type.to_owned(),
+                seconds,
+            }));
+        }
+        Ok((worker_id, arguments, None)) => {
             enqueue_worker_call(
                 state,
                 user,
@@ -7572,7 +7594,7 @@ fn prepare_worker_arguments(
     name: &str,
     namespace: Option<&str>,
     input: &str,
-) -> Result<(String, Value), String> {
+) -> Result<(String, Value, Option<u64>), String> {
     if namespace.is_some_and(|value| !matches!(value, "functions" | "")) || !is_worker_tool(name) {
         return Err(format!("unsupported Worker tool: {name}"));
     }
@@ -7582,9 +7604,16 @@ fn prepare_worker_arguments(
     if worker.worker_id.trim().is_empty() {
         return Err("Worker tool arguments must include worker_id".to_owned());
     }
+    if let Some(seconds) = worker.delay_seconds
+        && !(MIN_WAIT_SECONDS..=MAX_WAIT_SECONDS).contains(&seconds)
+    {
+        return Err(format!(
+            "Worker delay_seconds must be between {MIN_WAIT_SECONDS} and {MAX_WAIT_SECONDS}"
+        ));
+    }
     let arguments = serde_json::from_str(input)
         .map_err(|error| format!("invalid Worker arguments: {error}"))?;
-    Ok((worker.worker_id, arguments))
+    Ok((worker.worker_id, arguments, worker.delay_seconds))
 }
 
 fn response_text(response: &Value) -> Option<String> {
@@ -7693,11 +7722,15 @@ fn enqueue_output_call(
         })
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Ok((worker, args)) =
+    let Ok((worker, args, delay)) =
         prepare_worker_arguments(name, item.get("namespace").and_then(Value::as_str), raw)
     else {
         return Ok(());
     };
+    // Delayed calls are dispatched during settlement, after the controller wait.
+    if delay.is_some() {
+        return Ok(());
+    }
     let call = item
         .get("call_id")
         .and_then(Value::as_str)
@@ -10439,6 +10472,20 @@ mod tests {
     }
 
     #[test]
+    fn worker_delay_seconds_are_bounded() {
+        let input = json!({"worker_id": "worker", "command": "true"}).to_string();
+        assert!(prepare_worker_arguments("bash", None, &input).is_ok());
+        let input =
+            json!({"worker_id": "worker", "command": "true", "delay_seconds": 600}).to_string();
+        assert!(prepare_worker_arguments("bash", None, &input).is_ok());
+        for seconds in [0_u64, 601] {
+            let input = json!({"worker_id": "worker", "command": "true", "delay_seconds": seconds})
+                .to_string();
+            assert!(prepare_worker_arguments("bash", None, &input).is_err());
+        }
+    }
+
+    #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
         assert_eq!(tools.as_array().unwrap().len(), 6);
@@ -10525,7 +10572,11 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "sleep")
             .unwrap();
-        for fragment in ["Worker call duration", "never recorded as a Worker call"] {
+        for fragment in [
+            "Worker call duration",
+            "never recorded as a Worker call",
+            "set its delay_seconds instead",
+        ] {
             assert!(
                 sleep["description"].as_str().unwrap().contains(fragment),
                 "sleep description must keep the Worker-statistics rationale: {fragment}"
@@ -10534,12 +10585,40 @@ mod tests {
         assert_eq!(sleep["parameters"]["required"], json!(["seconds"]));
         assert_eq!(sleep["parameters"]["properties"]["seconds"]["minimum"], 1);
         assert_eq!(sleep["parameters"]["properties"]["seconds"]["maximum"], 600);
-        for tool in worker_tools().as_array().unwrap() {
+        let workers = worker_tools();
+        for tool in workers.as_array().unwrap() {
             assert_eq!(
                 tool["parameters"]["properties"]["worker_id"]["description"],
                 "Exact worker_id from cybion_list_workers."
             );
+            assert_eq!(
+                tool["parameters"]["properties"]["delay_seconds"]["minimum"],
+                1
+            );
+            assert_eq!(
+                tool["parameters"]["properties"]["delay_seconds"]["maximum"],
+                600
+            );
+            assert!(
+                !tool["parameters"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == "delay_seconds")
+            );
         }
+        let bash = workers
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "bash")
+            .unwrap();
+        assert!(
+            bash["description"]
+                .as_str()
+                .unwrap()
+                .contains("set delay_seconds instead of embedding a `sleep`")
+        );
         assert_eq!(
             TOOL_CATALOG["native"],
             json!({"web_search":{"type":"web_search"},"image_generation":{"type":"image_generation"}})
