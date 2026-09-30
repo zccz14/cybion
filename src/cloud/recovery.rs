@@ -130,6 +130,19 @@ pub(super) async fn wait_retry(
     Ok(())
 }
 
+pub(super) async fn wait_sleep(
+    seconds: u64,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<(), ApiError> {
+    if *cancellation.borrow() {
+        return Err(ApiError::cancelled());
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(seconds)) => Ok(()),
+        _ = cancellation.changed() => Err(ApiError::cancelled()),
+    }
+}
+
 pub(super) async fn retry(
     state: &AppState,
     user: &User,
@@ -185,23 +198,45 @@ pub(super) async fn settle_tools(
         let item =
             ResponseItem::from_value(serde_json::from_str(&item).map_err(ApiError::internal)?)
                 .map_err(ApiError::internal)?;
-        if let Some(PendingToolCall::Worker {
-            id,
-            call_id,
-            output_type,
-        }) = start_response_tool(state, user, thread, input, &item).await?
-        {
-            let (result, output_id) = wait_worker_result(state, user, &id, cancellation).await?;
-            if output_id.is_none() {
+        match start_response_tool(state, user, thread, input, &item).await? {
+            Some(PendingToolCall::Worker {
+                id,
+                call_id,
+                output_type,
+            }) => {
+                let (result, output_id) =
+                    wait_worker_result(state, user, &id, cancellation).await?;
+                if output_id.is_none() {
+                    append_tool_output_item(
+                        state,
+                        user,
+                        thread,
+                        input,
+                        &json!({"type":output_type,"call_id":call_id,"output":result.to_string()}),
+                    )
+                    .await?;
+                }
+            }
+            Some(PendingToolCall::Sleep {
+                call_id,
+                output_type,
+                seconds,
+            }) => {
+                wait_sleep(seconds, cancellation).await?;
                 append_tool_output_item(
                     state,
                     user,
                     thread,
                     input,
-                    &json!({"type":output_type,"call_id":call_id,"output":result.to_string()}),
+                    &json!({
+                        "type": output_type,
+                        "call_id": call_id,
+                        "output": json!({"slept_seconds": seconds}).to_string(),
+                    }),
                 )
                 .await?;
             }
+            Some(PendingToolCall::Answered(_)) | None => {}
         }
     }
     Ok(())

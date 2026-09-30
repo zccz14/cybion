@@ -63,6 +63,12 @@ System-authored prompts and tool descriptions use neutral Context, Worker, and
 conversation terminology. User-authored metadata, content, and conversation
 history are preserved as supplied.
 
+## Controller-answered waiting
+
+`sleep` waits between 1 and 600 seconds in the controller before the next
+model request. It creates no Worker call, so deliberate waiting never inflates
+Worker call durations; a stop or a newer input cancels the wait.
+
 ## Progressive Context discovery
 
 `cybion_list_contexts` lists only top-level Context metadata, ordered by name
