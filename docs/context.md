@@ -109,6 +109,13 @@ Cleanup works on a request copy:
 Within those rules other items keep their stored order. Tool output is bounded
 only in the request copy; the complete output stays in `history_records.payload`.
 
+Screenshots replay as images when the Worker call ledger says so: a `tool_output`
+whose call is `browser_control`/`computer_use` with `action = "screenshot"` and
+whose result carries PNG data replays as a real `input_image` part instead of
+truncated text. Only the newest screenshot in the compiled range is reinjected;
+older ones keep the bounded text form. Size or shape alone never classifies a
+result: bash stdout that happens to contain `{"data": ...}` stays text.
+
 ## Persistence and retry
 
 The user input is appended before inference. Every Responses output item and
