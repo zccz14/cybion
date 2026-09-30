@@ -64,3 +64,25 @@ function parseFunctionArguments(value: string): Record<string, unknown> | null {
     return null
   }
 }
+
+// The Worker writes screenshots as PNG files; its `data` field is that file's base64.
+const PNG_BASE64_PREFIX = "iVBORw0KGgo"
+
+// A ledger-marked screenshot output carries the Worker result as a JSON string
+// in `output`; a successful capture becomes an openable PNG data URL and a
+// failed capture keeps the ordinary tool output rendering.
+export function screenshotImageSource(payload: unknown): string | null {
+  const output = historyPayloadObject(payload)?.output
+  if (typeof output !== "string") return null
+  let result: unknown
+  try {
+    result = JSON.parse(output)
+  } catch {
+    // RECOVERY: a result that is not JSON stays visible as the ordinary tool output.
+    return null
+  }
+  const data = historyPayloadObject(result)?.data
+  return typeof data === "string" && data.startsWith(PNG_BASE64_PREFIX)
+    ? `data:image/png;base64,${data}`
+    : null
+}

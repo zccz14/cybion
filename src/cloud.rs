@@ -1518,6 +1518,14 @@ struct HistoryRecord {
     kind: String,
     payload: Value,
     created_at: i64,
+    // Ledger-confirmed screenshot output; omitted when false so every other
+    // record keeps the five core fields.
+    #[serde(skip_serializing_if = "is_false")]
+    screenshot: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Serialize)]
@@ -2115,6 +2123,7 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> 
         kind: row.get(2)?,
         payload,
         created_at: row.get(4)?,
+        screenshot: false,
     })
 }
 
@@ -4146,6 +4155,7 @@ async fn history_for(
         for row in rows {
             records.push(row?);
         }
+        mark_screenshot_records(connection, &id, &mut records)?;
         Ok(records)
     })
     .await
@@ -4208,6 +4218,7 @@ fn thread_history_tail(connection: &Connection, id: &str) -> Result<ThreadHistor
     for row in rows {
         records.push(row?);
     }
+    mark_screenshot_records(connection, id, &mut records)?;
     let has_older: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM history_records WHERE thread_id=? AND id<?)",
         params![id, anchor],
@@ -4243,6 +4254,7 @@ fn thread_history_older_page(
     for row in rows {
         records.push(row?);
     }
+    mark_screenshot_records(connection, id, &mut records)?;
     let has_older: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM history_records WHERE thread_id=? AND id<?)",
         params![id, start],
@@ -5437,6 +5449,28 @@ fn screenshot_output_record_ids(
     let rows = statement.query_map([thread_id], |row| row.get::<_, i64>(0))?;
     rows.collect::<std::result::Result<HashSet<_>, _>>()
         .map_err(Into::into)
+}
+
+/// Marks the loaded range's ledger screenshot outputs for the viewer, which
+/// renders those carrying PNG data as images and keeps the ordinary tool output
+/// rendering otherwise.
+/// INVARIANT: the ledger is the only classifier; results are never classified
+/// as images by size or content shape.
+fn mark_screenshot_records(
+    connection: &Connection,
+    thread_id: &str,
+    records: &mut [HistoryRecord],
+) -> Result<(), ApiError> {
+    // Screenshots can only live in tool_output records; skip the ledger read
+    // for ranges that cannot contain one.
+    if !records.iter().any(|record| record.kind == "tool_output") {
+        return Ok(());
+    }
+    let screenshots = screenshot_output_record_ids(connection, thread_id)?;
+    for record in records {
+        record.screenshot = screenshots.contains(&record.id);
+    }
+    Ok(())
 }
 
 /// The ledger screenshots that replay as real images: the newest ones in the
@@ -11049,6 +11083,138 @@ mod tests {
                 MAX_CONTEXT_TOOL_OUTPUT_CHARS + TOOL_OUTPUT_TRUNCATED_NOTICE.chars().count()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn thread_history_marks_ledger_screenshot_outputs_for_the_viewer() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "screenshot-history-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let ids = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                connection.execute(
+                    "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES('screenshot-worker','fixture',?,?,?,'online')",
+                    params![hash_secret("fixture-token"), now(), now()],
+                )?;
+                let input = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"look at the screen"}),
+                );
+                let capture = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({
+                        "type":"function_call_output","call_id":"shot-1",
+                        "output":json!({"data":"iVBORw0KGgoAAA"}).to_string(),
+                    }),
+                );
+                connection.execute(
+                    "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id)
+                     VALUES('call-shot','screenshot-worker',?, 'browser_control', ?, 'completed', ?, ?)",
+                    params![thread_id, json!({"action":"screenshot"}).to_string(), now(), capture],
+                )?;
+                let second_input = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"again"}),
+                );
+                let failed = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({
+                        "type":"function_call_output","call_id":"shot-2",
+                        "output":json!({"error":"screenshot failed: no display"}).to_string(),
+                    }),
+                );
+                connection.execute(
+                    "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id)
+                     VALUES('call-failed','screenshot-worker',?, 'computer_use', ?, 'completed', ?, ?)",
+                    params![thread_id, json!({"action":"screenshot"}).to_string(), now(), failed],
+                )?;
+                let stdout = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({
+                        "type":"function_call_output","call_id":"bash-1",
+                        "output":json!({"data":"iVBORw0KGgoAAA"}).to_string(),
+                    }),
+                );
+                connection.execute(
+                    "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id)
+                     VALUES('call-bash','screenshot-worker',?, 'bash', ?, 'completed', ?, ?)",
+                    params![thread_id, json!({"command":"cat screenshot.json"}).to_string(), now(), stdout],
+                )?;
+                Ok(vec![input, capture, second_input, failed, stdout])
+            }
+        })
+        .await
+        .unwrap();
+        let flags = |window: &ThreadHistoryWindow| {
+            window
+                .records
+                .iter()
+                .map(|record| (record.id, record.screenshot))
+                .collect::<Vec<_>>()
+        };
+
+        let tail = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery { before: None },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            flags(&tail),
+            vec![(ids[2], false), (ids[3], true), (ids[4], false)]
+        );
+        assert_eq!(
+            serde_json::to_value(&tail.records[1]).unwrap()["screenshot"],
+            json!(true)
+        );
+        assert!(
+            serde_json::to_value(&tail.records[0])
+                .unwrap()
+                .get("screenshot")
+                .is_none()
+        );
+
+        let older = history_window_for(
+            &state,
+            &user,
+            thread.id.clone(),
+            ThreadHistoryWindowQuery {
+                before: Some(ids[2]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(flags(&older), vec![(ids[0], false), (ids[1], true)]);
+
+        let appended = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            appended
+                .iter()
+                .map(|record| (record.id, record.screenshot))
+                .collect::<Vec<_>>(),
+            vec![
+                (ids[0], false),
+                (ids[1], true),
+                (ids[2], false),
+                (ids[3], true),
+                (ids[4], false)
+            ]
+        );
     }
 
     #[tokio::test]
