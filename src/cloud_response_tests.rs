@@ -571,6 +571,157 @@ async fn registry_tools_list_top_level_contexts_and_registered_workers() {
     );
 }
 
+async fn seed_sleep_call(state: &AppState, user: &User, thread: &ThreadView, seconds: u64) {
+    let thread_id = thread.id.clone();
+    user_db(state, user, false, move |connection| {
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            json!({
+                "type":"function_call","id":"fc-sleep","call_id":"sleep-1","name":"sleep",
+                "arguments": json!({"seconds": seconds}).to_string()
+            }),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn sleep_calls_settle_after_the_response_completes() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "sleep-stream-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let spec = AuditSpec {
+        report_thread: false,
+        user: user.clone(),
+        input_record_id: Some(input),
+        thread_id: thread.id.clone(),
+        request_kind: "inference".to_owned(),
+        model: "fixture".to_owned(),
+        reasoning_effort: Some("high".to_owned()),
+        idx_head: input,
+        idx_tail: input,
+    };
+    let audit_id = begin_reasoning_audit(&state, &spec).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let stream: ResponseStream =
+        Box::pin(async_stream::stream! { while let Some(event) = rx.recv().await { yield event } });
+    let task = tokio::spawn({
+        let state = state.clone();
+        async move { consume_response_events(&state, Some(&spec), Some(audit_id), stream).await }
+    });
+    tx.send(Ok(ResponseEvent::Created {
+        response_id: Some("r".to_owned()),
+    }))
+    .await
+    .unwrap();
+    tx.send(Ok(ResponseEvent::OutputItemDone(
+        ResponseItem::from_value(json!({
+            "type":"function_call","id":"fc-sleep","call_id":"sleep-1","name":"sleep",
+            "arguments": json!({"seconds": 600}).to_string()
+        }))
+        .unwrap(),
+    )))
+    .await
+    .unwrap();
+    tx.send(Ok(completed("r", true))).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .expect("a sleep call must not block the response stream")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result.tool_calls.as_slice(),
+        [PendingToolCall::Sleep { seconds: 600, .. }]
+    ));
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|r| r.kind == "response_output" && r.payload["name"] == "sleep")
+    );
+    assert_eq!(
+        history.iter().filter(|r| r.kind == "tool_output").count(),
+        0,
+        "the sleep answer is appended only when the call settles"
+    );
+    let count: i64 = user_db(&state, &user, false, |connection| {
+        connection
+            .query_row("SELECT COUNT(*) FROM worker_calls", [], |row| row.get(0))
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn settled_sleep_answers_in_the_controller_without_a_worker_call() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "sleep-settle-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    seed_sleep_call(&state, &user, &thread, 1).await;
+    let (_tx, mut cancellation) = tokio::sync::watch::channel(false);
+    recovery::settle_tools(&state, &user, &thread, input, &mut cancellation)
+        .await
+        .unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let output = history.iter().find(|r| r.kind == "tool_output").unwrap();
+    assert_eq!(output.payload["call_id"], "sleep-1");
+    assert_eq!(
+        serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+        json!({"slept_seconds": 1})
+    );
+    let count: i64 = user_db(&state, &user, false, |connection| {
+        connection
+            .query_row("SELECT COUNT(*) FROM worker_calls", [], |row| row.get(0))
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn sleep_settlement_stops_when_the_thread_cancels() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "sleep-cancel-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    seed_sleep_call(&state, &user, &thread, 600).await;
+    let (tx, mut cancellation) = tokio::sync::watch::channel(false);
+    let cancel = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(true).unwrap();
+    };
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let (result, ()) = tokio::join!(
+            recovery::settle_tools(&state, &user, &thread, input, &mut cancellation),
+            cancel
+        );
+        result
+    })
+    .await
+    .expect("a cancelled sleep must stop promptly");
+    assert!(result.unwrap_err().is_cancelled());
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        history.iter().filter(|r| r.kind == "tool_output").count(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn offline_worker_calls_are_answered_without_queueing_execution() {
     let (_root, state) = test_state();
@@ -688,7 +839,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 9);
     let names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -775,6 +926,7 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
             "cybion_list_contexts",
             "cybion_list_workers",
             "read_context",
+            "sleep",
             "bash",
             "browser_control",
             "computer_use"
