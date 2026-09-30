@@ -201,9 +201,7 @@ pub(super) fn units(c: &Connection, source: &Source) -> Result<(Vec<Unit>, Strin
     {
         return Err(ApiError::conflict("source records changed or were deleted"));
     }
-    let screenshots = c.prepare(
-        "SELECT output_record_id FROM worker_calls WHERE thread_id=? AND output_record_id IS NOT NULL AND name IN ('browser_control','computer_use') AND json_extract(arguments_json,'$.action')='screenshot'",
-    )?.query_map([thread], |row| row.get::<_, i64>(0))?.collect::<rusqlite::Result<HashSet<_>>>()?;
+    let screenshots = screenshot_output_record_ids(c, thread)?;
     let mut units = Vec::new();
     for (id, kind, created_at, payload) in records {
         let mut value: Value = serde_json::from_str(&payload).map_err(ApiError::internal)?;

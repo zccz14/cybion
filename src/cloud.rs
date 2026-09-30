@@ -74,6 +74,10 @@ const THREAD_TITLE_MAX_OUTPUT_TOKENS: usize = 1024;
 const WORKER_ONLINE_SECONDS: i64 = 45;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
+// Special-case replay: only ledger-confirmed screenshots become real images,
+// and only the newest few of them; every replayed request then carries at most
+// this many full-size screenshots.
+const REINJECTED_SCREENSHOT_WINDOW: usize = 1;
 // A pasted image is an input record and an upstream `input_image` part, so its
 // base64 data URL must stay bounded for SQLite, the history API and the
 // upstream body. The browser downsizes before sending; these caps reject the rest.
@@ -5205,18 +5209,53 @@ fn estimate_range_bytes(
     idx_to: i64,
 ) -> Result<i64, ApiError> {
     let mut statement = connection.prepare(
-        "SELECT payload FROM history_records
+        "SELECT id,kind,payload FROM history_records
          WHERE thread_id=? AND id>=? AND id<=?
-           AND kind IN ('input','response_output','tool_output','checkpoint')",
+           AND kind IN ('input','response_output','tool_output','checkpoint')
+         ORDER BY id",
     )?;
-    let rows = statement.query_map(params![thread_id, idx_from, idx_to], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = statement
+        .query_map(params![thread_id, idx_from, idx_to], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Screenshots can only live in tool_output records; skip the ledger read
+    // for ranges that cannot contain one.
+    let (screenshots, reinjected) = if rows.iter().any(|row| row.1 == "tool_output") {
+        let ordered_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+        let screenshots = screenshot_output_record_ids(connection, thread_id)?;
+        let reinjected = reinjected_screenshot_ids(&ordered_ids, &screenshots);
+        (screenshots, reinjected)
+    } else {
+        (HashSet::new(), HashSet::new())
+    };
     let mut bytes = 0;
-    for row in rows {
-        bytes += estimated_payload_bytes(&row?);
+    for (id, _, payload) in rows {
+        bytes += if screenshots.contains(&id) {
+            estimated_screenshot_bytes(&payload, reinjected.contains(&id))
+        } else {
+            estimated_payload_bytes(&payload)
+        };
     }
     Ok(bytes)
+}
+
+/// A ledger screenshot prices as what replay sends: the bounded media cost when
+/// it replays as a real image, and its truncated text size otherwise.
+fn estimated_screenshot_bytes(payload: &str, reinjected: bool) -> i64 {
+    let Ok(item) = serde_json::from_str::<Value>(payload) else {
+        return payload.chars().count() as i64;
+    };
+    let item = if reinjected {
+        screenshot_replay_item(&item)
+    } else {
+        context_protocol_item(&item)
+    };
+    estimated_payload_bytes(&item.to_string())
 }
 
 /// One record's estimated replay bytes: its stored character count, except that
@@ -5296,23 +5335,39 @@ fn load_protocol_items(
         [thread_id],
         |row| row.get(0),
     )?;
-    let rows = statement.query_map(params![thread_id, idx_head, idx_tail], |row| {
-        let payload: String = row.get(3)?;
-        let item =
-            serde_json::from_str::<Value>(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            if report_thread {
-                item
-            } else {
-                context_protocol_item(&item)
-            },
-        ))
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let rows = statement
+        .query_map(params![thread_id, idx_head, idx_tail], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Screenshots can only live in tool_output records; skip the ledger read
+    // for ranges that cannot contain one.
+    let reinjected = if report_thread || !rows.iter().any(|row| row.2 == "tool_output") {
+        HashSet::new()
+    } else {
+        let ordered_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+        let screenshots = screenshot_output_record_ids(connection, thread_id)?;
+        reinjected_screenshot_ids(&ordered_ids, &screenshots)
+    };
+    let mut records = Vec::with_capacity(rows.len());
+    for (id, created_at, kind, payload) in rows {
+        let item: Value =
+            serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let item = if report_thread {
+            item
+        } else if reinjected.contains(&id) {
+            screenshot_replay_item(&item)
+        } else {
+            context_protocol_item(&item)
+        };
+        records.push((id, created_at, kind, item));
+    }
+    Ok(records)
 }
 
 fn compile_thread_context(
@@ -5351,6 +5406,65 @@ fn context_tool_output(output: &str) -> String {
         return output.to_owned();
     };
     format!("{}{}", &output[..end], TOOL_OUTPUT_TRUNCATED_NOTICE)
+}
+
+/// Output records of Worker screenshot calls, from the call ledger.
+/// INVARIANT: the ledger is the only classifier; results are never classified
+/// as images by size or content shape, so bash stdout that happens to contain
+/// `{"data": ...}` stays text.
+fn screenshot_output_record_ids(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<HashSet<i64>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT output_record_id FROM worker_calls
+         WHERE thread_id=? AND output_record_id IS NOT NULL
+           AND name IN ('browser_control','computer_use')
+           AND json_extract(arguments_json,'$.action')='screenshot'",
+    )?;
+    let rows = statement.query_map([thread_id], |row| row.get::<_, i64>(0))?;
+    rows.collect::<std::result::Result<HashSet<_>, _>>()
+        .map_err(Into::into)
+}
+
+/// The ledger screenshots that replay as real images: the newest ones in the
+/// loaded range; older screenshots keep the truncated text projection.
+fn reinjected_screenshot_ids(ordered_ids: &[i64], screenshots: &HashSet<i64>) -> HashSet<i64> {
+    ordered_ids
+        .iter()
+        .rev()
+        .filter(|id| screenshots.contains(*id))
+        .take(REINJECTED_SCREENSHOT_WINDOW)
+        .copied()
+        .collect()
+}
+
+/// Special-case replay for a ledger-confirmed screenshot: the Worker result
+/// `{"data": "<base64 png>"}` is carried as a real `input_image` part instead
+/// of truncated base64 text. Results without a PNG payload (a failed capture,
+/// for example) keep the ordinary text projection.
+///
+/// ASSUMPTION: upstreams accept an inline image data URL inside
+/// `function_call_output.output`; a provider that rejects it fails that
+/// request visibly and the turn can be retried, so no record is lost.
+fn screenshot_replay_item(item: &Value) -> Value {
+    let Some(image_url) = screenshot_image_data_url(item) else {
+        return context_tool_output_item(item);
+    };
+    let mut item = item.clone();
+    item["output"] = json!([{"type": "input_image", "image_url": image_url}]);
+    item
+}
+
+fn screenshot_image_data_url(item: &Value) -> Option<String> {
+    let output = item.get("output")?.as_str()?;
+    let result: Value = serde_json::from_str(output).ok()?;
+    let data = result.get("data")?.as_str()?;
+    let base64: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    // The Worker writes PNG screenshots on every platform.
+    base64
+        .starts_with("iVBORw0KGgo")
+        .then(|| format!("data:image/png;base64,{base64}"))
 }
 
 fn tool_pair(item: &Value) -> Option<(&'static str, bool)> {
@@ -10663,6 +10777,168 @@ mod tests {
                 "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS),
                 TOOL_OUTPUT_TRUNCATED_NOTICE
             )
+        );
+    }
+
+    #[test]
+    fn screenshot_replay_embeds_png_payloads_and_keeps_other_results_text() {
+        let png = format!("iVBORw0KGgo{}", "A".repeat(96));
+        let item = json!({"type":"function_call_output","call_id":"c1","output":json!({"data":png}).to_string()});
+        let replayed = screenshot_replay_item(&item);
+        assert_eq!(replayed["output"][0]["type"], "input_image");
+        assert_eq!(
+            replayed["output"][0]["image_url"],
+            json!(format!("data:image/png;base64,{png}"))
+        );
+
+        let wrapped = json!({
+            "type":"function_call_output","call_id":"c2",
+            "output":json!({"data":"iVBORw0KGgoAAAANSUhEUg\n"}).to_string()
+        });
+        assert_eq!(
+            screenshot_replay_item(&wrapped)["output"][0]["image_url"],
+            json!("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg")
+        );
+
+        for output in [
+            "screenshot failed: permission denied",
+            r#"{"data":"bm90IGEgcG5n"}"#,
+        ] {
+            let item = json!({"type":"function_call_output","call_id":"c3","output":output});
+            assert_eq!(screenshot_replay_item(&item)["output"], json!(output));
+        }
+    }
+
+    #[test]
+    fn only_the_newest_ledger_screenshots_replay_as_images() {
+        // REINJECTED_SCREENSHOT_WINDOW keeps the single newest screenshot today.
+        let screenshots = HashSet::from([2_i64, 3, 5]);
+        assert_eq!(
+            reinjected_screenshot_ids(&[1, 2, 3, 4, 5, 6], &screenshots),
+            HashSet::from([5])
+        );
+    }
+
+    #[tokio::test]
+    async fn ledger_screenshots_replay_as_images_while_other_tool_outputs_stay_text() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "screenshot-replay-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let context = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                connection.execute(
+                    "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES('screenshot-worker','fixture',?,?,?,'online')",
+                    params![hash_secret("fixture-token"), now(), now()],
+                )?;
+                insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"look at the screen"}),
+                );
+                let photo = |seed: &str| format!("iVBORw0KGgo{seed}{}", "A".repeat(70_000));
+                let records = [
+                    ("call-shot-1", "browser_control", json!({"action":"screenshot"}), "shot-1", photo("one")),
+                    ("call-shot-2", "computer_use", json!({"action":"screenshot"}), "shot-2", photo("two")),
+                    ("call-bash", "bash", json!({"command":"cat screenshot.json"}), "bash-1", photo("three")),
+                ];
+                let mut tail = 0;
+                for (call_id, name, arguments, record_call_id, data) in records {
+                    let output_record = insert_record(
+                        connection,
+                        &thread_id,
+                        "tool_output",
+                        json!({
+                            "type":"function_call_output",
+                            "call_id":record_call_id,
+                            "output":json!({"data":data}).to_string(),
+                        }),
+                    );
+                    connection.execute(
+                        "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id)
+                         VALUES(?, 'screenshot-worker', ?, ?, ?, 'completed', ?, ?)",
+                        params![call_id, thread_id, name, arguments.to_string(), now(), output_record],
+                    )?;
+                    tail = output_record;
+                }
+                compile_thread_context(connection, &thread_id, tail)
+            }
+        })
+        .await
+        .unwrap();
+        let output = |call_id: &str| {
+            context
+                .items
+                .iter()
+                .find(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
+                .map(|item| item["output"].clone())
+                .unwrap()
+        };
+        let newest = output("shot-2");
+        assert_eq!(newest[0]["type"], "input_image");
+        let image_url = newest[0]["image_url"].as_str().unwrap();
+        assert!(image_url.starts_with("data:image/png;base64,iVBORw0KGgotwo"));
+        assert_eq!(
+            image_url.len(),
+            "data:image/png;base64,".len() + "iVBORw0KGgo".len() + "two".len() + 70_000
+        );
+        for call_id in ["shot-1", "bash-1"] {
+            let text = output(call_id);
+            let text = text.as_str().unwrap();
+            assert!(text.ends_with(TOOL_OUTPUT_TRUNCATED_NOTICE));
+            assert_eq!(
+                text.chars().count(),
+                MAX_CONTEXT_TOOL_OUTPUT_CHARS + TOOL_OUTPUT_TRUNCATED_NOTICE.chars().count()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn screenshot_estimates_price_reinjected_images_at_the_media_cap() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "screenshot-estimate-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let estimate = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                connection.execute(
+                    "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES('screenshot-worker','fixture',?,?,?,'online')",
+                    params![hash_secret("fixture-token"), now(), now()],
+                )?;
+                let head = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"look at the screen"}),
+                );
+                let shot = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({
+                        "type":"function_call_output",
+                        "call_id":"shot-1",
+                        "output":json!({"data":format!("iVBORw0KGgo{}", "A".repeat(70_000))}).to_string(),
+                    }),
+                );
+                connection.execute(
+                    "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id)
+                     VALUES('call-shot', 'screenshot-worker', ?, 'browser_control', ?, 'completed', ?, ?)",
+                    params![thread_id, json!({"action":"screenshot"}).to_string(), now(), shot],
+                )?;
+                estimate_context_tokens(connection, &thread_id, head, shot)
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            estimate >= CONTEXT_MEDIA_ESTIMATE_TOKENS,
+            "the reinjected image keeps its fixed media price: {estimate}"
+        );
+        assert!(
+            estimate < 2_000,
+            "the estimate must not price the raw base64 characters: {estimate}"
         );
     }
 }
