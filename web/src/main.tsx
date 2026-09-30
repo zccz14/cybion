@@ -59,7 +59,7 @@ import toolCatalog from "../../tools.json"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, serializeThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
-import { bashFunctionCall, historyPayloadObject, historyPayloadText } from "@/lib/history-payload"
+import { bashFunctionCall, historyPayloadObject, historyPayloadText, screenshotImageSource } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
@@ -70,6 +70,7 @@ import { ComposerAttachments } from "@/components/composer-attachments"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
 import { AssistantMessage } from "@/components/assistant-message"
 import { UserInputMessage } from "@/components/user-input-message"
+import { ScreenshotOutput } from "@/components/screenshot-output"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
 import "./styles.css"
@@ -1798,6 +1799,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
   }
 
   if (record.kind === "tool_output") {
+    const screenshot = record.screenshot ? screenshotImageSource(record.payload) : null
     return <div className="relative flex items-start gap-3 px-1">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground ring-1 ring-border">
         <TerminalSquareIcon className="size-4" />
@@ -1811,7 +1813,9 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
           </Badge>
           <time className="text-xs text-muted-foreground">{time}</time>
         </div>
-        <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>
+        {screenshot !== null
+          ? <ScreenshotOutput language={language} source={screenshot} />
+          : <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>}
         <details className="group mt-2">
           <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
             <span>{t("recordPayload")}</span>
@@ -1879,7 +1883,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
       </div>
     </div>
   </div>
-}, (previous, next) => previous.workers === next.workers && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at)
+}, (previous, next) => previous.workers === next.workers && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")

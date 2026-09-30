@@ -34,12 +34,16 @@ and displays `created_at` as a local date/time string in both the table
 and expanded row. Filtering and sorting still use the stored numeric value.
 
 Conversation history returns the same five fields, with `payload` decoded as
-JSON. The conversation renders inputs, messages, reasoning summaries, tool
-results, checkpoints, and runtime activity directly from `kind` and `payload`.
-An input may carry pasted images as `input_image` content parts; the
-conversation shows them inside the user message with an open-image dialog,
-while the History table keeps exposing the raw payload. Thread naming reads
-the input text from its payload.
+JSON, plus `screenshot: true` on tool outputs whose Worker call ledger entry is
+a `browser_control`/`computer_use` screenshot. The conversation renders inputs,
+messages, reasoning summaries, tool results, checkpoints, and runtime activity
+directly from `kind` and `payload`. An input may carry pasted images as
+`input_image` content parts; the conversation shows them inside the user message
+with an open-image dialog, while the History table keeps exposing the raw
+payload. A marked screenshot output that carries PNG data renders its capture
+with the same open-image dialog; a capture without PNG data — a failed one, for
+example — keeps the ordinary tool output rendering. Thread naming reads the
+input text from its payload.
 
 The conversation opens on a bounded window instead of the whole thread. The
 browser-authenticated `GET /api/threads/{id}/history/window` endpoint accepts:

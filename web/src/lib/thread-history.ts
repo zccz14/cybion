@@ -4,6 +4,8 @@ export type HistoryRecord = {
   kind: "input" | "response_output" | "tool_output" | "checkpoint" | "activity"
   payload: unknown
   created_at: number
+  // Set by the server for tool outputs the Worker call ledger records as screenshots.
+  screenshot?: boolean
 }
 
 export type ThreadHistoryEntry =
