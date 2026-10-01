@@ -632,7 +632,7 @@ async fn delayed_worker_calls_wait_in_the_controller_before_dispatch() {
     tx.send(Ok(ResponseEvent::OutputItemDone(
         ResponseItem::from_value(json!({
             "type":"function_call","id":"fc-delay","call_id":"delay-1","name":"bash",
-            "arguments": json!({"worker_id":worker_id,"command":"run-after-wait","delay_seconds":600}).to_string()
+            "arguments": json!({"worker_id":worker_id,"command":"run-after-wait","delay_seconds":86400}).to_string()
         }))
         .unwrap(),
     )))
@@ -646,7 +646,10 @@ async fn delayed_worker_calls_wait_in_the_controller_before_dispatch() {
         .unwrap();
     assert!(matches!(
         result.tool_calls.as_slice(),
-        [PendingToolCall::WorkerDelayed { seconds: 600, .. }]
+        [PendingToolCall::WorkerDelayed {
+            seconds: 86_400,
+            ..
+        }]
     ));
     let count: i64 = user_db(&state, &user, false, |connection| {
         connection
@@ -767,7 +770,7 @@ async fn delayed_worker_calls_stop_when_the_thread_cancels() {
     let user = user_for_subject(&state, "delay-cancel-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
-    seed_delayed_call(&state, &user, &thread, 600).await;
+    seed_delayed_call(&state, &user, &thread, 86_400).await;
     let (tx, mut cancellation) = tokio::sync::watch::channel(false);
     let cancel = async {
         tokio::time::sleep(Duration::from_millis(50)).await;
