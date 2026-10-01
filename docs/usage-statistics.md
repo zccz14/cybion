@@ -39,7 +39,8 @@ Within a run, three parts partition the wall-clock time:
    overlaps: a Worker call that starts while the model stream is still open is
    inference time until the model settles.
 2. **Worker calls** — the union of Worker call intervals that lie outside the
-   audit intervals.
+   audit intervals. A `bash` command killed by its `timeout_seconds` ends its
+   Worker call interval at the kill.
 3. **Cybion overhead** — the remainder: controller wake-up, tool dispatch and
    settlement, worker-tool `delay_seconds` delays, retry backoff, and other
    processing that is neither a model request nor a Worker call.

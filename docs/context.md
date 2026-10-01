@@ -65,13 +65,20 @@ history are preserved as supplied.
 
 ## Controller-served delays
 
-Worker tools accept an optional `delay_seconds` (1 to 600) for a known
-follow-up: the controller waits before dispatching the call, so
-`sleep 300 && do-something` becomes one `bash` call with
-`delay_seconds = 300` instead of waking the model up in between. The delay is
-controller time, never part of the Worker call; the Worker call duration
-measures only the command, and a stop or a newer input cancels the wait before
-anything is dispatched.
+Worker tools accept an optional `delay_seconds` for a known follow-up: the
+controller waits before dispatching the call, so `sleep 300 && do-something`
+becomes one `bash` call with `delay_seconds = 300` instead of waking the model
+up in between. The model picks the wait; it must be at least one second and has
+no upper bound. The delay is controller time, never part of the Worker call;
+the Worker call duration measures only the command, and a stop or a newer input
+cancels the wait before anything is dispatched.
+
+## Bash command timeouts
+
+`bash` accepts an optional `timeout_seconds`, measured by the Worker from when
+execution starts, so a `delay_seconds` wait never counts toward it. The model
+picks the limit with no upper bound; it defaults to 600 seconds, and a command
+that exceeds it is killed and the call fails.
 
 ## Progressive Context discovery
 

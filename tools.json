@@ -57,8 +57,12 @@
           "delay_seconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 600,
-            "description": "Seconds to wait in the controller before this call starts, from 1 to 600. Prefer this over a `sleep` command: a shell sleep counts toward Worker call duration and misreports Worker performance."
+            "description": "Seconds to wait in the controller before this call starts. Prefer this over a `sleep` command: a shell sleep counts toward Worker call duration and misreports Worker performance."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Seconds to allow the command to run before the Worker kills it, measured from execution start; the delay_seconds wait does not count. Defaults to 600."
           }
         },
         "required": [
@@ -94,8 +98,7 @@
           "delay_seconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 600,
-            "description": "Seconds to wait in the controller before this call starts, from 1 to 600."
+            "description": "Seconds to wait in the controller before this call starts."
           }
         },
         "required": [
@@ -131,8 +134,7 @@
           "delay_seconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 600,
-            "description": "Seconds to wait in the controller before this call starts, from 1 to 600."
+            "description": "Seconds to wait in the controller before this call starts."
           }
         },
         "required": [

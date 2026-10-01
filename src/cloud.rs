@@ -104,10 +104,9 @@ const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-// The controller-served delay_seconds value is bounded so one call cannot hold
-// the turn for an unbounded time; the model chains calls to wait longer.
+// The controller-served delay_seconds value must be positive; the model picks
+// the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const MAX_WAIT_SECONDS: u64 = 600;
 const USER_SCHEMA_VERSION: i64 = 21;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
@@ -7594,11 +7593,9 @@ fn prepare_worker_arguments(
         return Err("Worker tool arguments must include worker_id".to_owned());
     }
     if let Some(seconds) = worker.delay_seconds
-        && !(MIN_WAIT_SECONDS..=MAX_WAIT_SECONDS).contains(&seconds)
+        && seconds < MIN_WAIT_SECONDS
     {
-        return Err(format!(
-            "Worker delay_seconds must be between {MIN_WAIT_SECONDS} and {MAX_WAIT_SECONDS}"
-        ));
+        return Err("Worker delay_seconds must be a positive number of seconds".to_owned());
     }
     let arguments = serde_json::from_str(input)
         .map_err(|error| format!("invalid Worker arguments: {error}"))?;
@@ -10461,17 +10458,30 @@ mod tests {
     }
 
     #[test]
-    fn worker_delay_seconds_are_bounded() {
+    fn worker_delay_seconds_must_be_positive() {
         let input = json!({"worker_id": "worker", "command": "true"}).to_string();
         assert!(prepare_worker_arguments("bash", None, &input).is_ok());
-        let input =
-            json!({"worker_id": "worker", "command": "true", "delay_seconds": 600}).to_string();
-        assert!(prepare_worker_arguments("bash", None, &input).is_ok());
-        for seconds in [0_u64, 601] {
+        for seconds in [1_u64, 600, 86_400] {
             let input = json!({"worker_id": "worker", "command": "true", "delay_seconds": seconds})
                 .to_string();
-            assert!(prepare_worker_arguments("bash", None, &input).is_err());
+            assert!(
+                prepare_worker_arguments("bash", None, &input).is_ok(),
+                "delay_seconds: {seconds}"
+            );
         }
+        let input =
+            json!({"worker_id": "worker", "command": "true", "delay_seconds": 0}).to_string();
+        assert!(prepare_worker_arguments("bash", None, &input).is_err());
+    }
+
+    #[test]
+    fn worker_arguments_forward_tool_specific_fields() {
+        let input =
+            json!({"worker_id": "worker", "command": "true", "timeout_seconds": 42}).to_string();
+        let (worker_id, arguments, delay) = prepare_worker_arguments("bash", None, &input).unwrap();
+        assert_eq!(worker_id, "worker");
+        assert_eq!(arguments["timeout_seconds"], 42);
+        assert!(delay.is_none());
     }
 
     #[test]
@@ -10560,9 +10570,10 @@ mod tests {
                 tool["parameters"]["properties"]["delay_seconds"]["minimum"],
                 1
             );
-            assert_eq!(
-                tool["parameters"]["properties"]["delay_seconds"]["maximum"],
-                600
+            assert!(
+                tool["parameters"]["properties"]["delay_seconds"]
+                    .get("maximum")
+                    .is_none()
             );
             assert!(
                 !tool["parameters"]["required"]
@@ -10583,6 +10594,22 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("set delay_seconds instead of embedding a `sleep`")
+        );
+        let timeout = &bash["parameters"]["properties"]["timeout_seconds"];
+        assert_eq!(timeout["minimum"], 1);
+        assert!(timeout.get("maximum").is_none());
+        assert!(
+            timeout["description"]
+                .as_str()
+                .unwrap()
+                .contains("measured from execution start")
+        );
+        assert!(
+            !bash["parameters"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "timeout_seconds")
         );
         assert_eq!(
             TOOL_CATALOG["native"],
