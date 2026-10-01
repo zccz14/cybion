@@ -1013,7 +1013,9 @@ function useUi() {
 }
 
 const queryClient = new QueryClient()
-const AUTH_AUDIENCES = ["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io"] as const
+const AUTH_AUDIENCES = Array.from(
+  new Set(["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io", window.location.hostname]),
+)
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Request failed"
