@@ -262,25 +262,6 @@ pub(super) async fn settle_tools(
                     .await?;
                 }
             }
-            Some(PendingToolCall::Sleep {
-                call_id,
-                output_type,
-                seconds,
-            }) => {
-                wait_seconds(seconds, cancellation).await?;
-                append_tool_output_item(
-                    state,
-                    user,
-                    thread,
-                    input,
-                    &json!({
-                        "type": output_type,
-                        "call_id": call_id,
-                        "output": json!({"slept_seconds": seconds}).to_string(),
-                    }),
-                )
-                .await?;
-            }
             Some(PendingToolCall::Answered(_)) | None => {}
         }
     }

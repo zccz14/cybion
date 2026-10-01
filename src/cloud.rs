@@ -104,9 +104,8 @@ const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
 const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
-// Controller-served waits (sleep and worker-tool delay_seconds) are bounded
-// so one call cannot hold the turn for an unbounded time; the model chains
-// calls to wait longer.
+// The controller-served delay_seconds value is bounded so one call cannot hold
+// the turn for an unbounded time; the model chains calls to wait longer.
 const MIN_WAIT_SECONDS: u64 = 1;
 const MAX_WAIT_SECONDS: u64 = 600;
 const USER_SCHEMA_VERSION: i64 = 21;
@@ -7087,9 +7086,7 @@ async fn consume_response_events(
         && tool_calls.iter().any(|call| {
             matches!(
                 call,
-                PendingToolCall::Worker { .. }
-                    | PendingToolCall::WorkerDelayed { .. }
-                    | PendingToolCall::Sleep { .. }
+                PendingToolCall::Worker { .. } | PendingToolCall::WorkerDelayed { .. }
             )
         })
         && error.is_context_overflow()
@@ -7428,11 +7425,6 @@ enum PendingToolCall {
         output_type: String,
         seconds: u64,
     },
-    Sleep {
-        call_id: String,
-        output_type: String,
-        seconds: u64,
-    },
     Answered(i64),
 }
 
@@ -7446,26 +7438,6 @@ struct WorkerArguments {
 #[serde(deny_unknown_fields)]
 struct ReadContextArguments {
     context_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SleepArguments {
-    seconds: u64,
-}
-
-fn sleep_arguments(input: &str) -> Result<u64, ApiError> {
-    let arguments: SleepArguments = serde_json::from_str(input).map_err(|error| {
-        ApiError::bad_request(format!(
-            "sleep arguments must contain an explicit seconds value: {error}"
-        ))
-    })?;
-    if !(MIN_WAIT_SECONDS..=MAX_WAIT_SECONDS).contains(&arguments.seconds) {
-        return Err(ApiError::bad_request(format!(
-            "sleep seconds must be between {MIN_WAIT_SECONDS} and {MAX_WAIT_SECONDS}"
-        )));
-    }
-    Ok(arguments.seconds)
 }
 
 async fn read_context_tool_output(
@@ -7538,23 +7510,6 @@ async fn start_response_tool(
         ),
         _ => return Ok(None),
     };
-    if name.as_str() == "sleep" {
-        let seconds = match sleep_arguments(input) {
-            Ok(seconds) => seconds,
-            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
-                let output = json!({"type":output_type, "call_id":call_id, "output":json!({"error":error.message}).to_string()});
-                return Ok(Some(PendingToolCall::Answered(
-                    append_tool_output_item(state, user, thread, input_id, &output).await?,
-                )));
-            }
-            Err(error) => return Err(error),
-        };
-        return Ok(Some(PendingToolCall::Sleep {
-            call_id: call_id.clone(),
-            output_type: output_type.to_owned(),
-            seconds,
-        }));
-    }
     let controller_output = match name.as_str() {
         "read_context" => Some(read_context_tool_output(state, user, input).await),
         "cybion_list_contexts" => Some(list_contexts_tool_output(state, user).await),
@@ -10106,7 +10061,7 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 9);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 8);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -10522,24 +10477,21 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
-        assert_eq!(tools.as_array().unwrap().len(), 6);
+        assert_eq!(tools.as_array().unwrap().len(), 5);
         assert_eq!(tools[0]["name"], "cybion_list_contexts");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[3]["name"], "sleep");
-        assert_eq!(tools[3]["parameters"]["required"], json!(["seconds"]));
-        assert_eq!(tools[4], json!({"type":"web_search"}));
-        assert_eq!(tools[5], json!({"type":"image_generation"}));
+        assert_eq!(tools[3], json!({"type":"web_search"}));
+        assert_eq!(tools[4], json!({"type":"image_generation"}));
         let worker_and_native = responses_tools(true, true, true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 9);
-        assert_eq!(worker_and_native[3]["name"], "sleep");
-        assert_eq!(worker_and_native[4]["name"], "bash");
-        assert_eq!(worker_and_native[7]["type"], "web_search");
-        assert_eq!(worker_and_native[8]["type"], "image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 8);
+        assert_eq!(worker_and_native[3]["name"], "bash");
+        assert_eq!(worker_and_native[6]["type"], "web_search");
+        assert_eq!(worker_and_native[7]["type"], "image_generation");
         let web_search_only = responses_tools(false, true, true, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 5);
-        assert_eq!(web_search_only[4], json!({"type":"web_search"}));
+        assert_eq!(web_search_only.as_array().unwrap().len(), 4);
+        assert_eq!(web_search_only[3], json!({"type":"web_search"}));
         let context_only = responses_tools(false, true, false, false);
         assert_eq!(
             context_only
@@ -10551,8 +10503,7 @@ mod tests {
             [
                 "cybion_list_contexts",
                 "cybion_list_workers",
-                "read_context",
-                "sleep"
+                "read_context"
             ]
         );
         assert_eq!(responses_tools(false, false, false, false), json!([]));
@@ -10573,8 +10524,7 @@ mod tests {
             [
                 "cybion_list_contexts",
                 "cybion_list_workers",
-                "read_context",
-                "sleep"
+                "read_context"
             ]
         );
         assert_eq!(
@@ -10600,25 +10550,6 @@ mod tests {
                 .unwrap()
                 .contains("children returned by a previous read_context call")
         );
-        let sleep = catalog
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tool| tool["name"] == "sleep")
-            .unwrap();
-        for fragment in [
-            "Worker call duration",
-            "never recorded as a Worker call",
-            "set its delay_seconds instead",
-        ] {
-            assert!(
-                sleep["description"].as_str().unwrap().contains(fragment),
-                "sleep description must keep the Worker-statistics rationale: {fragment}"
-            );
-        }
-        assert_eq!(sleep["parameters"]["required"], json!(["seconds"]));
-        assert_eq!(sleep["parameters"]["properties"]["seconds"]["minimum"], 1);
-        assert_eq!(sleep["parameters"]["properties"]["seconds"]["maximum"], 600);
         let workers = worker_tools();
         for tool in workers.as_array().unwrap() {
             assert_eq!(
@@ -10756,13 +10687,12 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 5);
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
-        assert_eq!(tools[3], TOOL_CATALOG["context"][3]);
-        assert_eq!(tools[4], json!({"type":"web_search"}));
-        assert_eq!(tools[5], json!({"type":"image_generation"}));
+        assert_eq!(tools[3], json!({"type":"web_search"}));
+        assert_eq!(tools[4], json!({"type":"image_generation"}));
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(
