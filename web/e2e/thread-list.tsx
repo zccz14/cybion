@@ -55,7 +55,7 @@ function Fixture() {
   const archivedPagination = { hasMore: false, loadingMore: false, onLoadMore: () => {} }
   return <main className="flex h-svh flex-col bg-background text-foreground">
     <header className="flex shrink-0 items-center gap-3 border-b p-3">
-      <img src="/cybion-mark.png" alt="" className="size-5 dark:invert" />
+      <img src="/cybion-mark.svg" alt="" className="size-5 dark:invert" />
       <h1 className="mr-auto text-sm font-semibold">Cybion · Thread list</h1>
       <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button>
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>

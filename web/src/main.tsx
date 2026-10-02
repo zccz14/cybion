@@ -1319,7 +1319,7 @@ function WorkspaceShell({
     <Sidebar collapsible="icon">
       <SidebarHeader>
         <div className="flex items-center gap-2.5 px-2 py-1 font-heading text-lg font-semibold">
-          <img alt="" aria-hidden="true" className="size-6 shrink-0 dark:invert" src="/cybion-mark.png" />
+          <img alt="" aria-hidden="true" className="size-6 shrink-0 dark:invert" src="/cybion-mark.svg" />
           <span className="group-data-[collapsible=icon]:hidden">Cybion</span>
         </div>
       </SidebarHeader>
