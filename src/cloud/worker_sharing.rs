@@ -684,6 +684,17 @@ fn enqueue_intent(c: &mut Connection, caller: &str, intent: &Intent) -> Result<(
     };
     let args = args.to_string();
     let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing:Option<(String,String,String,String,Option<String>)>=tx.query_row("SELECT id,worker_id,name,arguments_json,grant_id FROM worker_calls WHERE caller_user_id=? AND thread_id=? AND input_record_id=? AND responses_call_id=?",params![caller,intent.thread,intent.input,call],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    if let Some((id, w, n, a, g)) = existing {
+        if id != intent.id || w != worker || n != name || a != args || g != intent.grant {
+            return Err(ApiError::conflict(
+                "repeated tool call ID has different arguments or grant",
+            ));
+        }
+        return Ok(());
+    }
+    // An existing caller-scoped receipt schedules nothing. Revocation blocks
+    // new work, not recovery of an already accepted call and its result.
     authorize(
         &tx,
         &worker,
@@ -693,15 +704,6 @@ fn enqueue_intent(c: &mut Connection, caller: &str, intent: &Intent) -> Result<(
     let b = read_caller(&tx, caller)?;
     if !current(&b, &intent.thread, Some(intent.input))? {
         return Err(ApiError::cancelled());
-    }
-    let existing:Option<(String,String,String,String,Option<String>)>=tx.query_row("SELECT id,worker_id,name,arguments_json,grant_id FROM worker_calls WHERE caller_user_id=? AND thread_id=? AND input_record_id=? AND responses_call_id=?",params![caller,intent.thread,intent.input,call],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-    if let Some((id, w, n, a, g)) = existing {
-        if id != intent.id || w != worker || n != name || a != args || g != intent.grant {
-            return Err(ApiError::conflict(
-                "repeated tool call ID has different arguments or grant",
-            ));
-        }
-        return Ok(());
     }
     let online: bool = tx.query_row(
         "SELECT status='online' AND COALESCE(last_seen_at>=?,0) FROM workers WHERE id=?",

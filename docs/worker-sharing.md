@@ -77,7 +77,10 @@ sharing cannot silently authorize that old intent.
 
 Streaming dispatch commits the item and routing before opening A. Recovery uses
 that same committed item. A inserts calls idempotently on caller, Thread, input,
-and provider call ID and rejects changed arguments or grant cycles. It creates no
+and provider call ID and rejects changed arguments or grant cycles. Retrieving
+an already accepted caller-scoped call is idempotent even after revocation or
+device disconnection; this never schedules the call again. New call creation and
+actual delivery still require current authorization. It creates no
 fake B Thread in A. Final grant validation and `queued -> delivered` occur in one
 A transaction. Claim and replay read B's current Thread/input using a read-only
 connection. A known inactive/deleted Thread or missing/revoked grant is a terminal
@@ -173,3 +176,19 @@ bounded work per pass, not an automatic destructive expiry policy. Large user or
 pending-work populations can increase recovery latency within the existing
 supervisor. Backups/restores should preserve both authoritative revisions and
 recipient tombstones/provenance together.
+
+## Deployment and use
+
+The normal release job takes private SQLite snapshots before upgrading. This is
+one schema 21-to-22 migration; there is no compatibility path for an unreleased
+intermediate schema. Once sharing records exist, do not downgrade to pre-sharing
+Controller binaries: they do not understand foreign caller ownership or grant
+gates. Restoring an older snapshot is a deliberate recovery operation, can lose
+later history, and does not undo commands already executed on devices.
+
+The recipient first signs in and copies **My user ID** from the Workers page. The
+owner opens **Share access** on an owned device, enters that UID and confirms the
+machine-level access warning. The recipient sees **Shared with me** and uses the
+original Worker ID in ordinary tool calls. No Worker upgrade or re-pairing is
+required for this Controller feature. Deployment itself grants no real users
+access to any device.

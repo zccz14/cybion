@@ -177,7 +177,17 @@ fn revoked_claim_and_old_delayed_intents_never_adopt_a_regrant() {
     change_grant(&mut a, "a", W, "b", false).unwrap();
     sync_grants(&a, "a").unwrap();
     assert!(enqueue_intent(&mut a, "b", &delayed).is_err());
-    assert!(enqueue_intent(&mut a, "b", &queued).is_err());
+    enqueue_intent(&mut a, "b", &queued).unwrap();
+    assert_eq!(
+        a.query_row(
+            "SELECT status FROM worker_calls WHERE id=?",
+            [&queued.id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "failed"
+    );
+    assert!(worker_protocol::claim(&mut a, W, None).unwrap().is_none());
     project_output(&a, "a", &queued.id).unwrap();
     let output: String = b
         .query_row(
@@ -1135,4 +1145,56 @@ fn worker_statistics_do_not_associate_foreign_calls_with_colliding_owner_runs() 
     let thread = load_insights(&a, "all".into(), None, Some("thread".into()), None, None).unwrap();
     assert_eq!(thread.worker.calls, 1);
     assert_eq!(thread.attribution.worker_seconds, 2);
+}
+
+#[test]
+fn accepted_result_remains_recoverable_after_revoke_and_offline_without_reexecution() {
+    let (_root, mut a, b, _) = fixture();
+    granted(&mut a);
+    let i = intent(&b, "bash", "completed-before-revoke");
+    enqueue_intent(&mut a, "b", &i).unwrap();
+    assert_eq!(
+        worker_protocol::claim(&mut a, W, None).unwrap().unwrap().id,
+        i.id
+    );
+    save_foreign_result(
+        &a,
+        W,
+        &i.id,
+        "{\"stdout\":\"completed-once\"}",
+        "completed",
+        None,
+    )
+    .unwrap();
+    change_grant(&mut a, "a", W, "b", true).unwrap();
+    a.execute("UPDATE workers SET status='offline' WHERE id=?", [W])
+        .unwrap();
+    // Recover before A's asynchronous output projector has run.
+    enqueue_intent(&mut a, "b", &i).unwrap();
+    assert_eq!(count(&a, "worker_calls"), 1);
+    assert_eq!(
+        a.query_row("SELECT status FROM worker_calls WHERE id=?", [&i.id], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "completed"
+    );
+    assert!(enqueue_intent(&mut a, "c", &i).is_err());
+    let mut changed = i.clone();
+    changed.payload["arguments"] = json!({"worker_id":W,"command":"different"})
+        .to_string()
+        .into();
+    assert!(enqueue_intent(&mut a, "b", &changed).is_err());
+    project_output(&a, "a", &i.id).unwrap();
+    project_output(&a, "a", &i.id).unwrap();
+    let outputs: Vec<String> = b
+        .prepare("SELECT payload FROM history_records WHERE worker_output_phase='primary'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert!(outputs[0].contains("completed-once"));
+    assert!(!outputs[0].contains("revoked"));
+    assert!(worker_protocol::claim(&mut a, W, None).unwrap().is_none());
 }
