@@ -112,3 +112,11 @@ existing payloads.
 
 Both endpoints resolve the database from the authenticated identity. A thread
 filter or record ID cannot select another user's database.
+
+## Shared conversation projection
+
+[Shared Threads](thread-sharing.md) reuse these history windows through a separate
+authorized source read. They receive allowlisted conversation content, not the
+owner's global History table, private sharing audit events, encrypted protocol
+state or upstream response metadata. Screenshot flags retain trusted Controller
+provenance. Owner history and stored protocol payloads remain unchanged.

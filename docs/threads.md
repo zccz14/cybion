@@ -140,8 +140,8 @@ Invalid `status`/`origin`/`limit`/`cursor` values and over-long `q` values
 return HTTP 400.
 
 The web UI drives these parameters through one shared control bar: a search
-box (300 ms debounce) plus single-select view chips — All / Mine / API /
-Running / Failed. Mine maps to `origin=web` and opens by default; API maps
+box (300 ms debounce) plus single-select view chips — All / Web / API /
+Running / Failed. Web (the existing `view=mine` URL) maps to `origin=web` and opens by default; API maps
 to `origin=api`, Running to `status=running`, and Failed to `status=failed`;
 search combines with the selected view. The selection lives in the page URL
 (for example `#/threads?view=api&q=room`), so a thread list link is
@@ -178,3 +178,12 @@ isolated by thread and upstream URL/credential, and deleted with the thread.
 Disabling the feature stops both sending and updating cached values; re-enabling
 it resumes from the saved value. The setting is independent of the Thread ID
 header switch and applies to both browser and API requests.
+
+## Read-only sharing
+
+Owners may authorize existing users to view a live Thread through the separate
+[Thread sharing](thread-sharing.md) endpoints. Ownership, execution, integration
+API keys and model tools retain their existing owner-only scope. Shared browser
+reads authorize against the owner's grant in the same transaction as the read;
+recipient discovery entries do not themselves confer access. Deleting a Thread
+also atomically revokes its grants while keeping synchronization tombstones.

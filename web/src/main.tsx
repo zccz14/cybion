@@ -81,6 +81,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
+import { ThreadSharingButton } from "@/components/thread-sharing"
+import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads"
+import { sharedThreadReturnHash } from "@/lib/thread-sharing"
 import { WorkerAudit } from "@/components/worker-audit"
 import { WorkerConnections } from "@/components/worker-connections"
 import { DailyReports } from "@/components/daily-reports"
@@ -998,11 +1001,12 @@ function errorMessage(error: unknown) {
 }
 
 function callbackUrl() {
-  // Preserve only a validated, non-secret pairing code across hosted sign-in.
+  // Preserve only validated, non-secret pairing/share routes across hosted sign-in.
   const route = new URLSearchParams(location.hash.split("?")[1] ?? "")
   const code = route.get("code")
-  const target = location.hash.startsWith("#/workers") && code && /^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/.test(code)
-    ? `#/workers?code=${code}` : "#/auth/callback"
+  const shared = sharedThreadReturnHash(location.hash)
+  const target = shared ?? (location.hash.startsWith("#/workers") && code && /^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/.test(code)
+    ? `#/workers?code=${code}` : "#/auth/callback")
   return `${location.origin}${location.pathname}${target}`
 }
 
@@ -1042,7 +1046,7 @@ async function api<T>(sdk: AuthMiniApi, path: string, init?: RequestInit): Promi
   const response = first.status === 401 ? await request(await accessToken(sdk)) : first
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText })) as { error?: string }
-    throw new Error(body.error ?? response.statusText)
+    throw Object.assign(new Error(body.error ?? response.statusText), { status: response.status })
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
@@ -1261,9 +1265,10 @@ function WorkspaceShell({
   const { language, dark, toggleTheme, t } = useUi()
   const location = useLocation()
   const navigate = useNavigate()
-  const routeTitle = pageTitle(location.pathname, t)
+  const routeTitle = location.pathname.startsWith("/shared-threads") ? (language === "zh" ? "分享给我" : "Shared with me") : pageTitle(location.pathname, t)
   const workNav = [
-    { to: "/threads", label: t("threads"), icon: TerminalSquareIcon },
+    { to: "/threads", label: language === "zh" ? "我的 Thread" : "My Threads", icon: TerminalSquareIcon },
+    { to: "/shared-threads", label: language === "zh" ? "分享给我" : "Shared with me", icon: UsersIcon },
     { to: "/contexts", label: t("contexts"), icon: NetworkIcon },
     { to: "/workers", label: t("workers"), icon: NetworkIcon },
   ]
@@ -1339,6 +1344,8 @@ function WorkspaceShell({
             <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate({ pathname: "/threads", search: location.search })} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
+            <Route path="/shared-threads" element={<SharedThreadsPage language={language} userId={userId} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />} />
+            <Route path="/shared-threads/:ownerId/:threadId" element={<SharedThreadRoute sdk={sdk} userId={userId} />} />
             <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
@@ -1654,6 +1661,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
             {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
           </div>
         </div>}
+        <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
         <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
@@ -1705,6 +1713,14 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>{remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
     </section>
   </main>
+}
+
+function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
+  const { ownerId = "", threadId = "" } = useParams()
+  const { language } = useUi()
+  const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
+  if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
+  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} />} />
 }
 
 function ResponseMetadata({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {

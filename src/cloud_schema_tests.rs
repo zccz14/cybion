@@ -282,7 +282,12 @@ async fn history_appends_and_restart_recovery_use_only_core_columns() {
 
 // Remove sharing additions when an older test constructs a historical fixture
 // by downgrading a current database. Production migration never uses this.
+pub(super) fn remove_thread_sharing_fixture(c: &Connection) {
+    c.execute_batch("DROP TRIGGER IF EXISTS threads_revoke_shares; DROP TABLE IF EXISTS thread_grants; DROP TABLE IF EXISTS shared_threads;").unwrap();
+}
+
 pub(super) fn remove_sharing_fixture(c: &Connection) {
+    remove_thread_sharing_fixture(c);
     c.execute_batch(
         "DROP TABLE worker_grants; DROP TABLE shared_workers;
         DROP INDEX history_worker_origin; DROP INDEX history_worker_intent;
@@ -376,6 +381,7 @@ async fn cancelled_status_upgrade_rebuilds_worker_calls_and_preserves_rows() {
             [&thread_id],
         )?;
         downgrade_worker_calls_to_pre_cancelled(connection);
+        remove_thread_sharing_fixture(connection);
         connection.execute_batch("PRAGMA user_version=22;")?;
         ensure_user_schema(connection)?;
         assert_eq!(

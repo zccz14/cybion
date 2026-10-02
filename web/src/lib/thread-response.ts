@@ -25,7 +25,7 @@ export function generatedImageSource(payload: unknown): string | null {
   return `data:image/${format};base64,${payload.result}`
 }
 
-export function pendingResponseRecords(view: ThreadResponseView | null | undefined, history: { id: number }[], threadId: string) {
+export function pendingResponseRecords(view: (Pick<ThreadResponseView, "started_at" | "status"> & { response: Pick<ThreadResponseView["response"], "output"> }) | null | undefined, history: { id: number }[], threadId: string) {
   if (!view || view.status === "cancelled") return []
   const durableIds = new Set(history.map((record) => record.id))
   return view.response.output.flatMap((output, index) => {

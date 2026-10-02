@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test"
 
 test("the list opens on my threads and search reports empty results with a reset", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
-  await expect(page.getByRole("button", { name: "我的" })).toHaveAttribute("aria-pressed", "true")
+  await expect(page.getByRole("button", { name: "网页创建" })).toHaveAttribute("aria-pressed", "true")
   await expect(page.getByRole("link")).toHaveCount(2)
   await page.getByRole("button", { name: "全部" }).click()
   await expect(page.getByRole("link")).toHaveCount(3)
@@ -22,7 +22,7 @@ test("the list opens on my threads and search reports empty results with a reset
 
 test("view chips switch between all, mine, api, running, and failed", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
-  await expect(page.getByRole("button", { name: "我的" })).toHaveAttribute("aria-pressed", "true")
+  await expect(page.getByRole("button", { name: "网页创建" })).toHaveAttribute("aria-pressed", "true")
   await expect(page.getByRole("link")).toHaveCount(2)
   await expect(page.getByRole("link", { name: /Worker 配对与导航/ })).toHaveCount(0)
   await page.getByRole("searchbox").fill("search")
@@ -100,7 +100,7 @@ test("archived threads stay hidden until their group expands, then restore in pl
 test("filters live in the URL and survive reload, back, and forward", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
   await expect(page).not.toHaveURL(/view=/)
-  await expect(page.getByRole("button", { name: "我的" })).toHaveAttribute("aria-pressed", "true")
+  await expect(page.getByRole("button", { name: "网页创建" })).toHaveAttribute("aria-pressed", "true")
 
   await page.goto("/e2e/thread-list.html#/?view=api")
   await expect(page.getByRole("button", { name: "API" })).toHaveAttribute("aria-pressed", "true")
@@ -122,7 +122,7 @@ test("filters live in the URL and survive reload, back, and forward", async ({ p
   await expect(page.getByRole("button", { name: "失败" })).toHaveAttribute("aria-pressed", "true")
   await expect(page).toHaveURL(/#\/\?view=failed$/)
 
-  await page.getByRole("button", { name: "我的" }).click()
+  await page.getByRole("button", { name: "网页创建" }).click()
   await expect(page).not.toHaveURL(/view=/)
   await expect(page.getByRole("link")).toHaveCount(2)
 

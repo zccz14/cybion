@@ -154,3 +154,16 @@ to Fast mode. They control whether the inference request to the configured
 provider includes the matching native tool. Personal settings carry the same
 switches as new-thread defaults; each Thread keeps its own switches when
 defaults change. Both start on, matching the requests users already received.
+
+## Thread sharing
+
+Owned Thread headers expose **Share Thread** and an active recipient count. The
+dialog requires an exact user ID and explicit acknowledgement that all existing
+conversation content and future updates will be visible. **Work → Shared with
+me** is independent of the owner's Thread list and its Web/API origin filters.
+
+Shared conversations keep the existing history renderer, status, usage, image
+previews and live updates, but replace all execution controls with a persistent
+read-only/owner notice. Viewer display preferences never write owner settings.
+Revocation removes cached content and stops polling; temporary failures offer
+retry without pretending access was revoked. See [Thread sharing](docs/thread-sharing.md).
