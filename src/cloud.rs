@@ -108,7 +108,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 22;
+const USER_SCHEMA_VERSION: i64 = 23;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1176,7 +1176,7 @@ CREATE TABLE IF NOT EXISTS worker_calls (
   input_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   arguments_json TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('queued','delivered','completed','failed')),
+  status TEXT NOT NULL CHECK(status IN ('queued','delivered','cancelled','completed','failed')),
   result_json TEXT,
   created_at INTEGER NOT NULL,
   started_at INTEGER,
@@ -1370,6 +1370,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
         ("worker_calls", "received_at", "INTEGER"),
+        ("worker_calls", "cancel_notified_at", "INTEGER"),
         ("workers", "upgrade_id", "TEXT"),
         ("workers", "upgrade_version", "TEXT"),
         ("workers", "upgrade_status", "TEXT"),
@@ -1432,6 +1433,12 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     reports::migrate(&transaction)?;
     if version < 22 {
         worker_sharing::migrate(&transaction)?;
+    }
+    if version < 23 {
+        // COMPATIBILITY: databases before 23 reject the cancelled Worker call
+        // status. Retire this rebuild once every user database is audited at
+        // schema 23+; retain the preservation test.
+        worker_sharing::migrate_cancelled(&transaction)?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -7653,7 +7660,7 @@ async fn wait_worker_result(
                     .ok_or_else(|| ApiError::unavailable("Worker returned invalid output"))?;
                 return Ok((result, value.2));
             }
-            "failed" => {
+            "failed" | "cancelled" => {
                 let result = value
                     .1
                     .and_then(|result| serde_json::from_str(&result).ok())
@@ -7689,7 +7696,7 @@ async fn cancel_worker_call(state: &AppState, user: &User, call_id: &str) {
     let result = user_db(state, &owner, false, move |connection| {
         connection.execute(
             "UPDATE worker_calls
-             SET status='failed',error='request superseded by a newer input',completed_at=?
+             SET status='cancelled',error='request superseded by a newer input',completed_at=?
              WHERE id=? AND status IN ('queued','delivered')",
             params![now(), call_id],
         )?;

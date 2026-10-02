@@ -318,3 +318,97 @@ pub(super) fn remove_sharing_fixture(c: &Connection) {
             .unwrap();
     }
 }
+
+/// Restores the pre-23 `worker_calls` status CHECK so the cancelled-status
+/// rebuild has real upgrade work to do. Rows are preserved by the downgrade.
+fn downgrade_worker_calls_to_pre_cancelled(c: &Connection) {
+    let sql: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='worker_calls'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let columns = {
+        let mut q = c.prepare("PRAGMA table_info(worker_calls)").unwrap();
+        q.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(",")
+    };
+    let indexes = {
+        let mut q = c
+            .prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name='worker_calls' AND sql IS NOT NULL")
+            .unwrap();
+        q.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let downgraded = sql
+        .replacen("worker_calls", "worker_calls_pre_cancelled", 1)
+        .replace(
+            "'queued','delivered','cancelled','completed','failed'",
+            "'queued','delivered','completed','failed'",
+        );
+    assert_ne!(downgraded, sql);
+    c.execute_batch(&downgraded).unwrap();
+    c.execute_batch(&format!("INSERT INTO worker_calls_pre_cancelled({columns}) SELECT {columns} FROM worker_calls; DROP TABLE worker_calls; ALTER TABLE worker_calls_pre_cancelled RENAME TO worker_calls;")).unwrap();
+    for sql in indexes {
+        c.execute_batch(&sql).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cancelled_status_upgrade_rebuilds_worker_calls_and_preserves_rows() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "cancelled-upgrade-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO workers(id,label,token_hash,created_at) VALUES('worker','Worker','cancelled-fixture',1)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,result_json) VALUES('kept','worker',?1,'bash','{}','completed',5,'{\"stdout\":\"kept\"}')",
+            [&thread_id],
+        )?;
+        downgrade_worker_calls_to_pre_cancelled(connection);
+        connection.execute_batch("PRAGMA user_version=22;")?;
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        let kept: (String, String, i64) = connection.query_row(
+            "SELECT status,result_json,created_at FROM worker_calls WHERE id='kept'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert_eq!(
+            kept,
+            ("completed".to_owned(), "{\"stdout\":\"kept\"}".to_owned(), 5)
+        );
+        let notice: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='worker_calls_cancel_notice'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(notice, 1);
+        let pending: String = connection.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='worker_calls_pending_output'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(pending.contains("'cancelled'"), "{pending}");
+        connection.execute(
+            "UPDATE worker_calls SET status='cancelled',error='kept-cancellable',completed_at=6 WHERE id='kept'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}

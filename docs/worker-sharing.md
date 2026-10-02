@@ -36,15 +36,19 @@ cannot grant, rename, delete, check, upgrade, or obtain pairing credentials for 
 shared Worker; backend management queries require an owned active Worker.
 
 Schema 22 rebuilds the schema 21 call ledger, preserving IDs, raw payloads,
-snapshots, results, receipt/boot fields and indexes. Thread/history foreign keys
-are removed from the ledger because their references can be foreign. Worker
-references remain local, and Worker deletion is soft deletion. Deleting a Thread
-cannot cascade into another user's ledger. Existing schema migrations remain
-supported; current-version opens check the version without requesting a migration
-write lock. This same migration adds `worker_calls.dispatch_retry_at` and an
-indexed eligibility order for queued calls. Migration double-checks the version
-under the lock, checks foreign keys, restores enforcement even on error, and
-rejects future schema versions.
+snapshots, results, receipt/boot fields and indexes. Schema 23 rebuilds the
+ledger once more to admit the terminal `cancelled` call status and the
+`cancel_notified_at` marker, preserving the same rows, columns and indexes; the
+pending-output index and the recovery predicate also cover `cancelled` so
+foreign callers still receive a terminal activity record. Thread/history
+foreign keys are removed from the ledger because their references can be
+foreign. Worker references remain local, and Worker deletion is soft deletion.
+Deleting a Thread cannot cascade into another user's ledger. Existing schema
+migrations remain supported; current-version opens check the version without
+requesting a migration write lock. The sharing migration adds
+`worker_calls.dispatch_retry_at` and an indexed eligibility order for queued
+calls. Migration double-checks the version under the lock, checks foreign keys,
+restores enforcement even on error, and rejects future schema versions.
 
 ## Discovery and authorization cycles
 
@@ -108,21 +112,39 @@ bash output cannot mark itself as a screenshot.
 
 ## Revocation, cancellation and restart
 
-Revocation immediately fails queued calls. Regrant never revives old queued,
-delayed, recovered, or replayed calls. Cancellation, Thread deletion, and a newer
-input prevent subsequent dispatch/claim/replay. An operation already delivered
-may continue; neither revocation nor cancellation undoes executed shell effects.
-A result that arrives after cancellation is retained as activity rather than
-reexecuted. Deleting a Worker revokes discovery and queued calls while preserving
-audit/history; it disables device authentication and cannot stop an already
-running device side effect.
+The terminal `cancelled` status records every "no longer needed" decision:
+revocation, Worker deletion, a user Thread cancel, and a newer input settle the
+calls they affect as `cancelled` with the reason in `error`.
+A cancelled call is never dispatched, claimed, or replayed. Revocation cancels
+queued calls; regrant never revives old queued, delayed, recovered, or replayed
+calls. Deleting a Worker revokes discovery and cancels queued calls while
+preserving audit/history; it disables device authentication and cannot stop an
+already running device side effect.
+
+Cancellation also reaches the device. When a call delivered to the current
+Worker boot is cancelled, the Controller hands that Worker a `cancel` event
+with the call id. Worker 0.2.7+ terminates the process tree of a running Bash
+or Computer Use call, never starts a queued execution, and answers with a
+cancelled result; Browser Control and diagnostics calls cannot be interrupted.
+Older Workers ignore the event. The Worker is notified at most once per call,
+and the call keeps its terminal `cancelled` state either way. A result that
+arrives after cancellation is retained as activity rather than reexecuted;
+neither revocation nor cancellation undoes executed shell effects.
+
+The recovery supervisor sweeps every pass: it re-checks queued calls and
+delivered calls the Worker never acknowledged through the same authorization
+gate dispatch uses, so calls whose request is no longer current become
+`cancelled` even while no Worker is connected. A delivered call whose request
+is still current stays dispatchable.
 
 A Worker boot change settles delivered calls from the previous boot as failed
 with `code: "worker_restarted"` and `execution_outcome: "unknown"`; B receives that
 outcome. Unknown side effects are never automatically rerun. Same-boot replay is
 subject to current authorization and caller-state checks. A live SSE connection
-retains deferred replay IDs, rotates at most eight per pass, and alternates replay
-and new-claim priority. A temporarily unavailable caller therefore neither loses
+re-seeds its replay rotation from the ledger on every pass, so a delivery frame
+lost on an open connection is re-delivered until the Worker's receipt settles
+it; each pass rotates at most eight replayed calls and alternates replay and
+new-claim priority. A temporarily unavailable caller therefore neither loses
 its replay nor blocks other callers until reconnection. Upgrade draining counts
 all delivered calls in the owner's ledger, including foreign callers.
 
@@ -137,7 +159,9 @@ all delivered calls in the owner's ledger, including foreign callers.
 - `PUT /api/workers/{id}/grants/{grantee_user_id}`: no body; returns the grant.
 - `DELETE /api/workers/{id}/grants/{grantee_user_id}`: owner-only, returns 204.
 - `GET /api/worker-calls`: owner-ledger audit page with SQL filters/count and
-  LIMIT/OFFSET; preserves `items`, `page`, `page_size`, `total`. Summary rows have
+  LIMIT/OFFSET; its status filter accepts `queued`, `delivered`, `cancelled`,
+  `completed`, and `failed`; it preserves `items`, `page`, `page_size`, `total`.
+  Summary rows have
   `arguments: null`, `result: null`, `worker_resource: null`, `has_details: true`,
   and resolved `caller_user_id`. Summary errors are limited to 1024 characters by
   SQL, including legacy errors containing whole failed results. Payload columns
@@ -179,9 +203,10 @@ recipient tombstones/provenance together.
 
 ## Deployment and use
 
-The normal release job takes private SQLite snapshots before upgrading. This is
-one schema 21-to-22 migration; there is no compatibility path for an unreleased
-intermediate schema. Once sharing records exist, do not downgrade to pre-sharing
+The normal release job takes private SQLite snapshots before upgrading. This
+covers both ledger rebuilds, schema 21 to 22 (sharing) and 22 to 23 (cancelled
+call status); there is no compatibility path for an unreleased intermediate
+schema. Once sharing records exist, do not downgrade to pre-sharing
 Controller binaries: they do not understand foreign caller ownership or grant
 gates. Restoring an older snapshot is a deliberate recovery operation, can lose
 later history, and does not undo commands already executed on devices.

@@ -23,6 +23,7 @@ pub(super) async fn resume_running(state: &AppState) -> Result<(), ApiError> {
         let user = user_from_id(state, id.to_owned())?;
         let owner = user.id.clone();
         let ids = user_db(state, &user, false, move |c| {
+            worker_sharing::cancel_stale(c)?;
             worker_sharing::recover(c, &owner)?;
             let mut q =
                 c.prepare("SELECT id FROM threads WHERE status='running' ORDER BY updated_at,id")?;

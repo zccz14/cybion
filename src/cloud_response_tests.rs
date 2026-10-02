@@ -1027,12 +1027,14 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
 }
 
 #[tokio::test]
-async fn failed_worker_result_is_returned_as_a_tool_result_for_continuation() {
+async fn failed_and_cancelled_worker_results_are_returned_for_continuation() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "failed-worker-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let worker_id = "00000000-0000-4000-8000-000000000003";
+    let thread_id = thread.id.clone();
+    let fixture_thread = thread_id.clone();
     user_db(&state, &user, false, move |connection| {
         connection.execute(
             "INSERT INTO workers(id,label,token_hash,created_at,status) VALUES(?,'fixture',?,?, 'online')",
@@ -1047,7 +1049,7 @@ async fn failed_worker_result_is_returned_as_a_tool_result_for_continuation() {
                 "failed-call",
                 "responses-call",
                 worker_id,
-                &thread.id,
+                &fixture_thread,
                 input,
                 "bash",
                 r#"{"worker_id":"worker","command":"false"}"#,
@@ -1068,6 +1070,23 @@ async fn failed_worker_result_is_returned_as_a_tool_result_for_continuation() {
             .await
             .unwrap();
     assert_eq!(result["error"], "command exited with status 1");
+    assert!(output_record_id.is_none());
+    let fixture_thread = thread_id.clone();
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO worker_calls(id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,error)
+             VALUES('cancelled-call',?1,?2,?3,'bash','{}','cancelled',?4,'request superseded by a newer input')",
+            params![worker_id, fixture_thread, input, now()],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (result, output_record_id) =
+        wait_worker_result(&state, &user, "cancelled-call", &mut cancellation)
+            .await
+            .unwrap();
+    assert_eq!(result["error"], "request superseded by a newer input");
     assert!(output_record_id.is_none());
 }
 
@@ -1154,7 +1173,7 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
             [call_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        assert_eq!(status, "failed");
+        assert_eq!(status, "cancelled");
         assert_eq!(output_id, history[2].id);
         let context = compile_thread_context(connection, &thread.id, second)?;
         assert_eq!(context.record_ids, [first, second]);

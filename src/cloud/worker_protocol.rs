@@ -149,13 +149,21 @@ pub(super) fn register(
         )?;
         tx.execute("UPDATE workers SET upgrade_status='completed',upgrade_error=NULL WHERE id=? AND ltrim(upgrade_version,'v')=ltrim(version,'v')",[worker])?;
     }
-    let replay = {
-        let mut q=tx.prepare("SELECT id FROM worker_calls WHERE worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL ORDER BY created_at,id")?;
-        q.query_map(params![worker, boot], |r| r.get(0))?
-            .collect::<rusqlite::Result<VecDeque<String>>>()?
-    };
+    let replay = pending_call_ids(&tx, worker, boot)?;
     tx.commit()?;
     Ok(replay)
+}
+
+/// Delivered calls this Worker boot has not acknowledged. Replay owns them
+/// until a receipt or a terminal state settles them.
+fn pending_call_ids(
+    c: &Connection,
+    worker: &str,
+    boot: Option<&str>,
+) -> Result<VecDeque<String>, ApiError> {
+    let mut q = c.prepare("SELECT id FROM worker_calls WHERE worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL ORDER BY created_at,id")?;
+    Ok(q.query_map(params![worker, boot], |r| r.get(0))?
+        .collect::<rusqlite::Result<VecDeque<String>>>()?)
 }
 
 pub(super) fn replay(
@@ -308,7 +316,15 @@ pub(super) async fn events(
                     allow_report(c,&worker,boot.as_deref())?;
                     let event = if let Some(upgrade)=ready_upgrade(c,&worker,boot.as_deref())? {
                         Some(("upgrade",upgrade))
+                    } else if let Some(cancelled)=cancel_notice(c,&worker,boot.as_deref())? {
+                        Some(("cancel",json!({"id":cancelled})))
                     } else {
+                        // Refresh the rotation every second: calls claimed
+                        // during this connection would otherwise only be
+                        // replayed after the next reconnect.
+                        for id in pending_call_ids(c,&worker,boot.as_deref())? {
+                            if !ids.contains(&id) {ids.push_back(id);}
+                        }
                         next_call(c,&worker,boot.as_deref(),&mut ids,replay_first)?.map(|call|("tool_call",serde_json::to_value(call).expect("Worker call serializes")))
                     };
                     Ok((event,ids))
@@ -423,6 +439,32 @@ fn queue_upgrade(c: &mut Connection, id: &str, target: &str) -> Result<(), ApiEr
     tx.commit()?;
     Ok(())
 }
+/// Hands the Worker the oldest un-notified cancellation among the calls it
+/// received, so a running execution stops on the device. One notification per
+/// call; Workers older than 0.2.7 ignore the event and the settled state is
+/// unaffected.
+fn cancel_notice(
+    c: &Connection,
+    worker: &str,
+    boot: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let Some(boot) = boot else { return Ok(None) };
+    let id: Option<String> = c
+        .query_row(
+            "SELECT id FROM worker_calls INDEXED BY worker_calls_cancel_notice WHERE worker_id=? AND worker_boot_id=? AND status='cancelled' AND cancel_notified_at IS NULL ORDER BY completed_at,id LIMIT 1",
+            params![worker, boot],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = &id {
+        c.execute(
+            "UPDATE worker_calls SET cancel_notified_at=? WHERE id=?",
+            params![now(), id],
+        )?;
+    }
+    Ok(id)
+}
+
 fn ready_upgrade(
     c: &Connection,
     worker: &str,

@@ -163,7 +163,9 @@ delivery, fixed command execution and result upload before reporting readiness.
 Existing configuration is reused. Worker 0.2.x keeps call deduplication and
 result retries in memory across network reconnects, and 0.2.1 adds delivery
 receipts so acknowledged calls are not replayed; Worker restarts may lose
-state. The device page shows the reported version and lets the owner request
+state. Worker 0.2.7 aborts a call the Controller cancels: a running Bash or
+Computer Use process tree is terminated and a queued execution never starts.
+The device page shows the reported version and lets the owner request
 a newer recommended official release after current work drains; Worker 0.2.4+
 downloads those upgrades through the same mirror with a direct GitHub fallback,
 so a device that cannot reach GitHub installs 0.2.4 once through the
@@ -175,8 +177,8 @@ Owners can share a Worker with an existing Cybion user for `bash`,
 `browser_control`, and `computer_use`. Recipients use their own Threads and model
 configuration. Authorization and call audit remain in the owner's database;
 discovery and tool outputs are stored in the recipient's database. See
-[Worker sharing](docs/worker-sharing.md) for the APIs, revocation/in-flight
-semantics, schema migration, recovery, and storage/retention limits.
+[Worker sharing](docs/worker-sharing.md) for the APIs, cancellation and
+revocation semantics, schema migration, recovery, and storage/retention limits.
 
 See [Worker onboarding](docs/worker-onboarding.md) for the protocol, security,
 capability limits, manual configuration and release/test procedures.

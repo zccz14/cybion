@@ -12,7 +12,7 @@ export type WorkerCallAudit = {
   input_record_id: number | null
   name: string
   arguments: Record<string, unknown> | null
-  status: "queued" | "delivered" | "completed" | "failed"
+  status: "queued" | "delivered" | "cancelled" | "completed" | "failed"
   result: unknown
   error: string | null
   created_at: number
