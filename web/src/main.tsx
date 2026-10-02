@@ -69,6 +69,7 @@ import { useIsDesktopLayout } from "@/hooks/use-mobile"
 import { ComposerAttachments } from "@/components/composer-attachments"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
 import { AssistantMessage } from "@/components/assistant-message"
+import { CybionMark } from "@/components/cybion-mark"
 import { UserInputMessage } from "@/components/user-input-message"
 import { ScreenshotOutput } from "@/components/screenshot-output"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
@@ -1319,7 +1320,7 @@ function WorkspaceShell({
     <Sidebar collapsible="icon">
       <SidebarHeader>
         <div className="flex items-center gap-2.5 px-2 py-1 font-heading text-lg font-semibold">
-          <img alt="" aria-hidden="true" className="size-6 shrink-0 dark:invert" src="/cybion-mark.svg" />
+          <CybionMark className="size-6 shrink-0" />
           <span className="group-data-[collapsible=icon]:hidden">Cybion</span>
         </div>
       </SidebarHeader>

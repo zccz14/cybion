@@ -2,6 +2,7 @@ import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
+import { CybionMark } from "../src/components/cybion-mark"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import type { ThreadDisplayStatus } from "../src/lib/thread-status"
 import { emptyThreadUsage } from "../src/lib/thread-usage"
@@ -14,7 +15,7 @@ function Fixture() {
   const [runningStatus, setRunningStatus] = useState<ThreadDisplayStatus>("running")
   return <main className="min-h-screen bg-background p-4 text-foreground">
     <header className="mb-5 flex flex-wrap items-center gap-3 border-b pb-4">
-      <img src="/cybion-mark.svg" alt="" className="size-6 dark:invert" />
+      <CybionMark className="size-6" />
       <h1 className="mr-auto font-semibold">Cybion · Thread status</h1>
       <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button>
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>

@@ -4,6 +4,7 @@ import { HashRouter, useSearchParams } from "react-router-dom"
 import { ThreadList, type ThreadListItem } from "../src/components/thread-list"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "../src/lib/thread-search"
+import { CybionMark } from "../src/components/cybion-mark"
 import { emptyThreadUsage } from "../src/lib/thread-usage"
 import "../src/styles.css"
 
@@ -55,7 +56,7 @@ function Fixture() {
   const archivedPagination = { hasMore: false, loadingMore: false, onLoadMore: () => {} }
   return <main className="flex h-svh flex-col bg-background text-foreground">
     <header className="flex shrink-0 items-center gap-3 border-b p-3">
-      <img src="/cybion-mark.svg" alt="" className="size-5 dark:invert" />
+      <CybionMark className="size-5" />
       <h1 className="mr-auto text-sm font-semibold">Cybion · Thread list</h1>
       <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button>
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>
