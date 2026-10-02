@@ -55,7 +55,7 @@ CREATE UNIQUE INDEX history_worker_origin ON history_records(worker_owner_user_i
 CREATE INDEX history_worker_intent ON history_records(worker_call_id) WHERE worker_call_id IS NOT NULL AND worker_output_phase IS NULL;
 CREATE UNIQUE INDEX worker_calls_foreign_origin ON worker_calls(caller_user_id,thread_id,input_record_id,responses_call_id) WHERE caller_user_id IS NOT NULL;
 CREATE INDEX worker_calls_queued ON worker_calls(worker_id,MAX(created_at,dispatch_retry_at),created_at,id) WHERE status='queued';
-CREATE INDEX worker_calls_pending_output ON worker_calls(delivery_attempted_at,created_at,id) WHERE caller_user_id IS NOT NULL AND status IN ('completed','failed') AND ((output_record_id IS NULL AND output_discarded=0) OR (late_result=1 AND result_json IS NOT NULL AND late_output_record_id IS NULL AND late_output_discarded=0));
+CREATE INDEX worker_calls_pending_output ON worker_calls(delivery_attempted_at,created_at,id) WHERE caller_user_id IS NOT NULL AND status IN ('completed','failed','cancelled') AND ((output_record_id IS NULL AND output_discarded=0) OR (late_result=1 AND result_json IS NOT NULL AND late_output_record_id IS NULL AND late_output_discarded=0));
 CREATE INDEX worker_calls_created ON worker_calls(created_at DESC,id DESC);
 CREATE INDEX worker_calls_status_created ON worker_calls(status,created_at DESC,id DESC);
 CREATE INDEX worker_calls_worker_created ON worker_calls(worker_id,created_at DESC,id DESC);
@@ -72,6 +72,53 @@ CREATE TABLE shared_workers (
  PRIMARY KEY(owner_user_id,worker_id));
 "#)?;
     check_user_foreign_keys(c)
+}
+
+/// Adds the terminal `cancelled` status to `worker_calls`. SQLite cannot alter a
+/// CHECK constraint in place, so the table is rebuilt once, preserving columns
+/// and indexes exactly like the sharing migration does.
+pub(super) fn migrate_cancelled(c: &Connection) -> Result<(), ApiError> {
+    let sql: String = c.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name='worker_calls'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !sql.contains("'cancelled'") {
+        let columns = {
+            let mut q = c.prepare("PRAGMA table_info(worker_calls)")?;
+            q.query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .join(",")
+        };
+        let indexes = {
+            let mut q = c.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name='worker_calls' AND sql IS NOT NULL")?;
+            q.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let rebuilt = sql
+            .replacen("worker_calls", "worker_calls_cancelled", 1)
+            .replace(
+                "status IN ('queued','delivered','completed','failed')",
+                "status IN ('queued','delivered','cancelled','completed','failed')",
+            );
+        // INVARIANT: the deployed CHECK is exactly known. A silent miss would
+        // keep the old constraint and reject later 'cancelled' rows.
+        if rebuilt == sql {
+            return Err(ApiError::internal("worker_calls status CHECK not found"));
+        }
+        c.execute_batch(&rebuilt)?;
+        c.execute_batch(&format!("INSERT INTO worker_calls_cancelled({columns}) SELECT {columns} FROM worker_calls; DROP TABLE worker_calls; ALTER TABLE worker_calls_cancelled RENAME TO worker_calls;"))?;
+        for sql in indexes {
+            c.execute_batch(&sql)?;
+        }
+        check_user_foreign_keys(c)?;
+    }
+    c.execute_batch(
+        "DROP INDEX IF EXISTS worker_calls_pending_output;
+         CREATE INDEX worker_calls_pending_output ON worker_calls(delivery_attempted_at,created_at,id) WHERE caller_user_id IS NOT NULL AND status IN ('completed','failed','cancelled') AND ((output_record_id IS NULL AND output_discarded=0) OR (late_result=1 AND result_json IS NOT NULL AND late_output_record_id IS NULL AND late_output_discarded=0));
+         CREATE INDEX IF NOT EXISTS worker_calls_cancel_notice ON worker_calls(completed_at,id) WHERE status='cancelled' AND cancel_notified_at IS NULL;",
+    )?;
+    Ok(())
 }
 
 fn sibling(c: &Connection, id: &str) -> Result<PathBuf, ApiError> {
@@ -176,7 +223,7 @@ fn change_grant(
     require_owner(&tx, worker)?;
     if revoke {
         tx.execute("UPDATE worker_grants SET revoked_at=?,revision=revision+1,updated_at=? WHERE worker_id=? AND grantee_user_id=? AND revoked_at IS NULL",params![now(),now(),worker,grantee])?;
-        tx.execute("UPDATE worker_calls SET status='failed',error='Worker grant revoked',completed_at=? WHERE worker_id=? AND caller_user_id=? AND status='queued'",params![now(),worker,grantee])?;
+        tx.execute("UPDATE worker_calls SET status='cancelled',error='Worker grant revoked',completed_at=? WHERE worker_id=? AND caller_user_id=? AND status='queued'",params![now(),worker,grantee])?;
     } else {
         tx.execute("INSERT INTO worker_grants(worker_id,grantee_user_id,grant_id,revision,created_at,updated_at) VALUES(?,?,?,1,?,?) ON CONFLICT(worker_id,grantee_user_id) DO UPDATE SET grant_id=excluded.grant_id,revoked_at=NULL,revision=worker_grants.revision+1,updated_at=excluded.updated_at WHERE worker_grants.revoked_at IS NOT NULL",params![worker,grantee,Uuid::new_v4().to_string(),now(),now()])?;
     }
@@ -380,7 +427,7 @@ pub(super) async fn delete_worker(
         let tx=c.transaction_with_behavior(TransactionBehavior::Immediate)?;require_owner(&tx,&id)?;
         tx.execute("UPDATE workers SET deleted_at=?,status='offline' WHERE id=?",params![now(),id])?;
         tx.execute("UPDATE worker_grants SET revoked_at=COALESCE(revoked_at,?),revision=revision+1,updated_at=? WHERE worker_id=?",params![now(),now(),id])?;
-        tx.execute("UPDATE worker_calls SET status='failed',error='Worker deleted',completed_at=? WHERE worker_id=? AND status='queued'",params![now(),id])?;
+        tx.execute("UPDATE worker_calls SET status='cancelled',error='Worker deleted',completed_at=? WHERE worker_id=? AND status='queued'",params![now(),id])?;
         tx.commit()?;sync_grants(c,&owner)
     }).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -478,7 +525,7 @@ fn audit_page(
             if column == "status"
                 && !matches!(
                     value.as_str(),
-                    "queued" | "delivered" | "completed" | "failed"
+                    "queued" | "delivered" | "cancelled" | "completed" | "failed"
                 )
             {
                 return Err(ApiError::bad_request("invalid Worker call status"));
@@ -758,7 +805,7 @@ pub(super) fn gate(c: &Connection, id: &str) -> Result<bool, ApiError> {
         exists && current(c, &thread, input)?
     };
     if !active {
-        c.execute("UPDATE worker_calls SET status='failed',error='Worker authorization or caller request is no longer active',completed_at=? WHERE id=? AND status IN ('queued','delivered')",params![now(),id])?;
+        c.execute("UPDATE worker_calls SET status='cancelled',error='Worker authorization or caller request is no longer active',completed_at=? WHERE id=? AND status IN ('queued','delivered')",params![now(),id])?;
     }
     Ok(active)
 }
@@ -872,7 +919,7 @@ fn failure_output(error: Option<&str>, code: Option<&str>) -> Value {
     value
 }
 fn project_output(c: &Connection, owner: &str, id: &str) -> Result<(), ApiError> {
-    let row=c.query_row("SELECT caller_user_id,thread_id,input_record_id,responses_call_id,responses_output_type,result_json,error,name IN ('browser_control','computer_use') AND json_extract(arguments_json,'$.action')='screenshot',late_result,output_record_id IS NOT NULL OR output_discarded=1,late_output_record_id IS NOT NULL OR late_output_discarded=1,failure_code FROM worker_calls WHERE id=? AND caller_user_id IS NOT NULL AND status IN ('completed','failed')",[id],|r|Ok(Output {caller:r.get(0)?,thread:r.get(1)?,input:r.get(2)?,call:r.get(3)?,output_type:r.get(4)?,result:r.get(5)?,error:r.get(6)?,screenshot:r.get::<_,Option<bool>>(7)?.unwrap_or(false),late:r.get(8)?,primary_done:r.get(9)?,late_done:r.get(10)?,failure_code:r.get(11)?})).optional()?;
+    let row=c.query_row("SELECT caller_user_id,thread_id,input_record_id,responses_call_id,responses_output_type,result_json,error,name IN ('browser_control','computer_use') AND json_extract(arguments_json,'$.action')='screenshot',late_result,output_record_id IS NOT NULL OR output_discarded=1,late_output_record_id IS NOT NULL OR late_output_discarded=1,failure_code FROM worker_calls WHERE id=? AND caller_user_id IS NOT NULL AND status IN ('completed','failed','cancelled')",[id],|r|Ok(Output {caller:r.get(0)?,thread:r.get(1)?,input:r.get(2)?,call:r.get(3)?,output_type:r.get(4)?,result:r.get(5)?,error:r.get(6)?,screenshot:r.get::<_,Option<bool>>(7)?.unwrap_or(false),late:r.get(8)?,primary_done:r.get(9)?,late_done:r.get(10)?,failure_code:r.get(11)?})).optional()?;
     let Some(row) = row else {
         return Ok(());
     };
@@ -940,10 +987,28 @@ fn project_output(c: &Connection, owner: &str, id: &str) -> Result<(), ApiError>
     Ok(())
 }
 
+/// Cancels calls nobody can dispatch or wait for any more: queued calls and
+/// delivered calls the Worker never acknowledged whose caller request is no
+/// longer active. gate() owns that decision so the sweep and the dispatch
+/// paths cannot disagree; deferred checks keep their retry marker.
+pub(super) fn cancel_stale(c: &Connection) -> Result<(), ApiError> {
+    let ids = {
+        let mut q = c.prepare(
+            "SELECT id FROM worker_calls WHERE status='queued' OR (status='delivered' AND received_at IS NULL) ORDER BY created_at,id LIMIT ?",
+        )?;
+        q.query_map([BATCH], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for id in ids {
+        gate(c, &id)?;
+    }
+    Ok(())
+}
+
 pub(super) fn recover(c: &Connection, owner: &str) -> Result<(), ApiError> {
     sync_grants(c, owner)?;
     let ids = {
-        let mut q=c.prepare("SELECT id FROM worker_calls INDEXED BY worker_calls_pending_output WHERE caller_user_id IS NOT NULL AND status IN ('completed','failed') AND ((output_record_id IS NULL AND output_discarded=0) OR (late_result=1 AND result_json IS NOT NULL AND late_output_record_id IS NULL AND late_output_discarded=0)) ORDER BY delivery_attempted_at,created_at,id LIMIT ?")?;
+        let mut q=c.prepare("SELECT id FROM worker_calls INDEXED BY worker_calls_pending_output WHERE caller_user_id IS NOT NULL AND status IN ('completed','failed','cancelled') AND ((output_record_id IS NULL AND output_discarded=0) OR (late_result=1 AND result_json IS NOT NULL AND late_output_record_id IS NULL AND late_output_discarded=0)) ORDER BY delivery_attempted_at,created_at,id LIMIT ?")?;
         q.query_map([BATCH], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };

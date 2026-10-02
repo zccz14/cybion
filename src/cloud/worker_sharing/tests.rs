@@ -14,6 +14,9 @@ fn fixture() -> (tempfile::TempDir, Connection, Connection, Connection) {
     (root, a, b, c)
 }
 fn intent(c: &Connection, name: &str, call: &str) -> Intent {
+    intent_for(c, 1, name, call)
+}
+fn intent_for(c: &Connection, input: i64, name: &str, call: &str) -> Intent {
     let payload = json!({"type":"function_call","call_id":call,"name":name,"arguments":json!({"worker_id":W,"command":"pwd","action":"screenshot"}).to_string()});
     let record = persist_history_record(
         c,
@@ -25,7 +28,7 @@ fn intent(c: &Connection, name: &str, call: &str) -> Intent {
         },
     )
     .unwrap();
-    bind_intent(c, record, "thread", 1, &payload).unwrap();
+    bind_intent(c, record, "thread", input, &payload).unwrap();
     c.query_row(
         &format!("SELECT {INTENT_COLUMNS} FROM history_records WHERE id=?"),
         [record],
@@ -185,7 +188,7 @@ fn revoked_claim_and_old_delayed_intents_never_adopt_a_regrant() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "failed"
+        "cancelled"
     );
     assert!(worker_protocol::claim(&mut a, W, None).unwrap().is_none());
     project_output(&a, "a", &queued.id).unwrap();
@@ -226,7 +229,7 @@ fn caller_cancel_delete_and_supersede_are_terminal() {
         let status: String = a
             .query_row("SELECT status FROM worker_calls", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(status, "failed");
+        assert_eq!(status, "cancelled");
         if scenario == "delete" {
             project_output(&a, "a", &i.id).unwrap();
             assert_eq!(
@@ -240,6 +243,50 @@ fn caller_cancel_delete_and_supersede_are_terminal() {
 }
 
 #[test]
+fn stale_sweep_cancels_orphaned_calls_and_keeps_dispatchable_ones() {
+    let (_root, mut a, b, _) = fixture();
+    granted(&mut a);
+    let orphan = intent(&b, "bash", "orphan");
+    enqueue_intent(&mut a, "b", &orphan).unwrap();
+    worker_protocol::claim(&mut a, W, None).unwrap().unwrap();
+    // A newer input supersedes the delivered call before its receipt arrives.
+    b.execute(
+        "INSERT INTO history_records(id,thread_id,kind,payload,created_at) VALUES(100,'thread','input','{}',2)",
+        [],
+    )
+    .unwrap();
+    let current = intent_for(&b, 100, "bash", "current");
+    enqueue_intent(&mut a, "b", &current).unwrap();
+    worker_protocol::claim(&mut a, W, None).unwrap().unwrap();
+    let queued = intent_for(&b, 100, "bash", "queued");
+    enqueue_intent(&mut a, "b", &queued).unwrap();
+    cancel_stale(&a).unwrap();
+    let status = |id: &str| -> (String, String) {
+        a.query_row(
+            "SELECT status,COALESCE(error,'') FROM worker_calls WHERE id=?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    let (orphan_status, orphan_error) = status(&orphan.id);
+    assert_eq!(orphan_status, "cancelled");
+    assert!(orphan_error.contains("no longer active"), "{orphan_error}");
+    assert_eq!(status(&current.id).0, "delivered");
+    assert_eq!(status(&queued.id).0, "queued");
+    // The cancelled call still projects its marker into the caller history.
+    recover(&a, "a").unwrap();
+    let marker: String = b
+        .query_row(
+            "SELECT payload FROM history_records WHERE worker_call_id=? AND worker_output_phase='primary'",
+            [&orphan.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(marker.contains("no longer active"), "{marker}");
+}
+
+#[test]
 fn outputs_retry_when_caller_unavailable_and_late_results_are_separate() {
     let (_root, mut a, b, _) = fixture();
     granted(&mut a);
@@ -247,7 +294,7 @@ fn outputs_retry_when_caller_unavailable_and_late_results_are_separate() {
     enqueue_intent(&mut a, "b", &i).unwrap();
     worker_protocol::claim(&mut a, W, None).unwrap().unwrap();
     a.execute(
-        "UPDATE worker_calls SET status='failed',error='cancelled',completed_at=2",
+        "UPDATE worker_calls SET status='cancelled',error='cancelled',completed_at=2",
         [],
     )
     .unwrap();
@@ -666,7 +713,7 @@ fn recovery_batches_rotate_failed_recipients_without_scanning_payloads() {
     sync_grants(&a, "a").unwrap();
     assert_eq!(count(&b, "shared_workers"), 1);
     // Exact pending predicate is indexable without fetching result bodies.
-    let plans:Vec<String>=a.prepare("EXPLAIN QUERY PLAN SELECT id FROM worker_calls INDEXED BY worker_calls_pending_output WHERE caller_user_id IS NOT NULL AND status IN ('completed','failed') AND ((output_record_id IS NULL AND output_discarded=0) OR (late_result=1 AND result_json IS NOT NULL AND late_output_record_id IS NULL AND late_output_discarded=0)) ORDER BY delivery_attempted_at,created_at,id LIMIT 32").unwrap().query_map([],|r|r.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    let plans:Vec<String>=a.prepare("EXPLAIN QUERY PLAN SELECT id FROM worker_calls INDEXED BY worker_calls_pending_output WHERE caller_user_id IS NOT NULL AND status IN ('completed','failed','cancelled') AND ((output_record_id IS NULL AND output_discarded=0) OR (late_result=1 AND result_json IS NOT NULL AND late_output_record_id IS NULL AND late_output_discarded=0)) ORDER BY delivery_attempted_at,created_at,id LIMIT 32").unwrap().query_map([],|r|r.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
     assert!(
         plans
             .iter()

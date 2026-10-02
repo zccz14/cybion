@@ -749,7 +749,7 @@ async fn cancel_marks_all_outstanding_worker_calls_and_keeps_late_results_as_act
     })
     .await
     .unwrap();
-    assert_eq!(statuses, ["failed", "failed"]);
+    assert_eq!(statuses, ["cancelled", "cancelled"]);
     let call_id = "00000000-0000-4000-8000-000000000002";
     user_db(&state, &user, false, move |connection| {
         connection.execute(

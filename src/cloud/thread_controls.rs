@@ -211,7 +211,7 @@ pub(super) async fn cancel_for(
             params![now(), &cancelled_thread_id],
         )?;
         transaction.execute(
-            "UPDATE worker_calls SET status='failed',completed_at=?,error='Cancelled by user'
+            "UPDATE worker_calls SET status='cancelled',completed_at=?,error='Cancelled by user'
              WHERE caller_user_id IS NULL AND thread_id=? AND status IN ('queued','delivered')",
             params![now(), &cancelled_thread_id],
         )?;

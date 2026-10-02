@@ -26,6 +26,7 @@ const copy = {
     workerResult: "Result",
     workerQueued: "Queued",
     workerDelivered: "Delivered",
+    workerCancelled: "Cancelled",
     workerCompleted: "Completed",
     workerFailed: "Failed",
     workerAuditRange: "{from}–{to} of {total} calls",
@@ -48,6 +49,7 @@ const copy = {
     workerResult: "结果",
     workerQueued: "排队",
     workerDelivered: "已投递",
+    workerCancelled: "已取消",
     workerCompleted: "已完成",
     workerFailed: "失败",
     workerAuditRange: "第 {from}–{to} 条，共 {total} 次调用",
@@ -90,7 +92,7 @@ function WorkerAuditSession({ language, sessionId, request }: Props) {
         <div className="flex flex-wrap items-center gap-2">
           <Select value={status} onValueChange={(value) => { setStatus(value as WorkerCallAudit["status"] | "all"); setPage(1) }}>
             <SelectTrigger aria-label={t("auditStatus")} size="sm"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectGroup><SelectItem value="all">{t("auditAll")}</SelectItem><SelectItem value="queued">{t("workerQueued")}</SelectItem><SelectItem value="delivered">{t("workerDelivered")}</SelectItem><SelectItem value="completed">{t("workerCompleted")}</SelectItem><SelectItem value="failed">{t("workerFailed")}</SelectItem></SelectGroup></SelectContent>
+            <SelectContent><SelectGroup><SelectItem value="all">{t("auditAll")}</SelectItem><SelectItem value="queued">{t("workerQueued")}</SelectItem><SelectItem value="delivered">{t("workerDelivered")}</SelectItem><SelectItem value="cancelled">{t("workerCancelled")}</SelectItem><SelectItem value="completed">{t("workerCompleted")}</SelectItem><SelectItem value="failed">{t("workerFailed")}</SelectItem></SelectGroup></SelectContent>
           </Select>
           <Select value={workerId} onValueChange={(value) => { setWorkerId(value); setPage(1) }}>
             <SelectTrigger aria-label={t("workers")} size="sm"><SelectValue placeholder={t("workers")} /></SelectTrigger>
@@ -132,7 +134,7 @@ function WorkerAuditRow({ item, language, sessionId, userId, request }: Props & 
     retry: false,
   })
   const own = ownWorkerCall(item, userId)
-  const statusLabel = { queued: t.workerQueued, delivered: t.workerDelivered, completed: t.workerCompleted, failed: t.workerFailed }[item.status]
+  const statusLabel = { queued: t.workerQueued, delivered: t.workerDelivered, cancelled: t.workerCancelled, completed: t.workerCompleted, failed: t.workerFailed }[item.status]
   return <tr className="align-top">
     <td className="px-3 py-3"><code>{item.name}</code><p className="mt-1 text-xs text-muted-foreground">{item.id}</p></td>
     <td className="px-3 py-3"><p>{item.worker_label ?? item.worker_id}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{item.worker_id}</p></td>

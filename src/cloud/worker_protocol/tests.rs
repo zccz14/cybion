@@ -218,6 +218,51 @@ async fn same_boot_replays_same_ids_new_boot_loses_only_delivered_calls() {
 }
 
 #[tokio::test]
+async fn cancelled_deliveries_are_notified_once_to_the_delivering_boot() {
+    let (_root, state, user, thread, worker, input) = fixture().await;
+    let boot = Uuid::new_v4().to_string();
+    let call = queued(&state, &user, &thread, &worker, input, "cancel-notice").await;
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let boot = boot.clone();
+        let call = call.clone();
+        move |c| {
+            register(c, &worker, Some(&boot), Some("0.2.0"))?;
+            assert_eq!(claim(c, &worker, Some(&boot))?.unwrap().id, call);
+            c.execute(
+                "UPDATE worker_calls SET status='cancelled',error='request superseded by a newer input',completed_at=1 WHERE id=?",
+                [&call],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let boot = boot.clone();
+        let call = call.clone();
+        move |c| {
+            assert_eq!(
+                cancel_notice(c, &worker, Some(&boot))?.as_deref(),
+                Some(call.as_str())
+            );
+            assert!(cancel_notice(c, &worker, Some(&boot))?.is_none());
+            assert!(cancel_notice(c, &worker, Some(&Uuid::new_v4().to_string()))?.is_none());
+            let notified: Option<i64> = c.query_row(
+                "SELECT cancel_notified_at FROM worker_calls WHERE id=?",
+                [&call],
+                |r| r.get(0),
+            )?;
+            assert!(notified.is_some());
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn upgrade_drains_tools_blocks_new_delivery_and_confirms_actual_version() {
     let (_root, state, user, thread, worker, input) = fixture().await;
     let boot = Uuid::new_v4().to_string();
