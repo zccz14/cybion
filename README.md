@@ -171,6 +171,13 @@ Controller-served download and upgrades remotely from then on. A 0.1.x Worker
 needs a one-time manual installation of 0.2.x. Background mode does not install automatic
 startup. `status`, `doctor` and the guide provide diagnostics and recovery.
 
+Owners can share a Worker with an existing Cybion user for `bash`,
+`browser_control`, and `computer_use`. Recipients use their own Threads and model
+configuration. Authorization and call audit remain in the owner's database;
+discovery and tool outputs are stored in the recipient's database. See
+[Worker sharing](docs/worker-sharing.md) for the APIs, revocation/in-flight
+semantics, schema migration, recovery, and storage/retention limits.
+
 See [Worker onboarding](docs/worker-onboarding.md) for the protocol, security,
 capability limits, manual configuration and release/test procedures.
 

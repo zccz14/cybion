@@ -429,7 +429,7 @@ pub(super) struct CheckView {
 
 fn latest_check(connection: &Connection, worker_id: &str) -> Result<Option<CheckView>, ApiError> {
     let exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workers WHERE id=?)",
+        "SELECT EXISTS(SELECT 1 FROM workers WHERE deleted_at IS NULL AND id=?)",
         [worker_id],
         |r| r.get(0),
     )?;
@@ -473,7 +473,7 @@ pub(super) async fn check_start(
                 return Ok(Some(check));
             }
             let version: Option<String> =
-                tx.query_row("SELECT version FROM workers WHERE id=?", [&id], |r| {
+                tx.query_row("SELECT version FROM workers WHERE deleted_at IS NULL AND id=?", [&id], |r| {
                     r.get(0)
                 })?;
             // COMPATIBILITY: maintained by Cybion. Pre-0.1.4 Workers cannot dispatch
@@ -511,7 +511,7 @@ pub(super) fn claim_check(
     worker_id: &str,
 ) -> Result<Option<WorkerCall>, ApiError> {
     let exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workers WHERE id=?)",
+        "SELECT EXISTS(SELECT 1 FROM workers WHERE deleted_at IS NULL AND id=?)",
         [worker_id],
         |r| r.get(0),
     )?;

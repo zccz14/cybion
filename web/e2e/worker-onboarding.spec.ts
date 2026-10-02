@@ -6,12 +6,13 @@ async function fixture(page: Page, scenario = "success") {
   let checking = false
   let posts = 0
   const created = Math.floor(Date.now()/1000)
-  const device = { id: "target", label: "Fixture Mac", status: "online", created_at: created, last_seen_at: created }
+  const device = { id: "target", label: "Fixture Mac", owner_user_id: "test-user", access: "owner", status: "online", created_at: created, last_seen_at: created }
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
     let body: unknown = {}
-    if (path === "/api/worker-release") body = release
+    if (path === "/api/me") body = { user_id: "test-user" }
+    else if (path === "/api/worker-release") body = release
     else if (path === "/api/workers") body = approved ? [device] : []
     else if (path.startsWith("/api/worker-pairings/")) {
       if (route.request().method() === "POST") { approved = true; posts++ }
@@ -71,10 +72,11 @@ test("timed-out task channel exposes recovery instead of a success CTA", async (
 test("shows the reported version and confirms an owner-requested remote upgrade", async ({ page }) => {
   let posts=0
   let status="queued"
-  const device={id:"upgradable",label:"Upgrade Mac",created_at:1,last_seen_at:Math.floor(Date.now()/1000),status:"online",version:"0.2.0",can_upgrade:true}
+  const device={id:"upgradable",label:"Upgrade Mac",owner_user_id:"test-user",access:"owner",created_at:1,last_seen_at:Math.floor(Date.now()/1000),status:"online",version:"0.2.0",can_upgrade:true}
   await page.route("**/api/**",async route=>{
     const path=new URL(route.request().url()).pathname
     let body:unknown={}
+    if(path==="/api/me") body={user_id:"test-user"}
     if(path==="/api/worker-release") body={...release,version:"v0.2.1"}
     if(path==="/api/workers") body=[{...device,upgrade:posts ? {version:"v0.2.1",status,error:status==="failed"?"checksum mismatch":null}:null}]
     if(path==="/api/workers/upgradable/upgrade") {posts++;body={ok:true}}

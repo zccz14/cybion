@@ -44,7 +44,7 @@ install -d -m 0755 "$data_dir/bin" "$data_dir/releases" "$backup_dir" "$release_
 if [ -f "$installed_binary" ]; then
   install -m 0755 "$installed_binary" "$previous_binary"
 fi
-# Keep consistent, private SQLite snapshots before an additive schema upgrade.
+# Keep consistent, private SQLite snapshots before a schema upgrade.
 # Binary rollback deliberately does not restore these snapshots or discard newer history.
 python3 - "$data_dir" "$backup_dir/databases" <<'PYBACKUP'
 import os

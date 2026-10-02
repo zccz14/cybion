@@ -388,3 +388,17 @@ async fn doctor_authenticates_without_overwriting_the_live_process_version() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn upgrade_drain_includes_foreign_callers() {
+    let (_root, state, user, _thread, worker, _input) = fixture().await;
+    user_db(&state,&user,false,move|c| {
+        register(c,&worker,Some("fixture-boot"),Some("0.2.0"))?;
+        c.execute("INSERT INTO worker_calls(id,worker_id,thread_id,caller_user_id,grant_id,input_record_id,name,arguments_json,status,created_at,started_at) VALUES('foreign',?,'foreign-thread','recipient','cycle',500,'bash','{}','delivered',1,1)",[&worker])?;
+        queue_upgrade(c,&worker,"0.3.0")?;
+        assert!(ready_upgrade(c,&worker,Some("fixture-boot"))?.is_none());
+        c.execute("UPDATE worker_calls SET status='completed' WHERE id='foreign'",[])?;
+        assert!(ready_upgrade(c,&worker,Some("fixture-boot"))?.is_some());
+        Ok(())
+    }).await.unwrap();
+}

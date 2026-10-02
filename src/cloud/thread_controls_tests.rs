@@ -721,6 +721,7 @@ async fn cancel_marks_all_outstanding_worker_calls_and_keeps_late_results_as_act
         for (id, status) in [("queued", "queued"), ("delivered", "delivered")] {
             connection.execute("INSERT INTO worker_calls(id,responses_call_id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at) VALUES(?,?,?,?,?,'bash','{}',?,0)", params![id,id,worker_id,thread_id,input,status])?;
         }
+        connection.execute("UPDATE worker_calls SET started_at=0 WHERE status='delivered'",[])?;
         insert_record(connection, &thread_id, "response_output", json!({"type":"function_call","call_id":"delivered","name":"bash","arguments":"{}"}));
         Ok(())
     }).await.unwrap();

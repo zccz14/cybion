@@ -146,6 +146,15 @@ async fn restart_waits_for_original_tool_and_replays_its_result_without_creating
     })
     .await
     .unwrap();
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        move |c| {
+            assert!(worker_protocol::claim(c, &worker, None)?.is_some());
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
     let (base, requests, server) = model(vec![]).await;
     bind_mock(&state, &user, &thread, &base).await;
     recover_interrupted_requests(&state.data_dir).unwrap();

@@ -22,10 +22,11 @@ pub(super) fn allow_report(
     worker: &str,
     boot: Option<&str>,
 ) -> Result<(), ApiError> {
-    let current: Option<String> =
-        c.query_row("SELECT boot_id FROM workers WHERE id=?", [worker], |r| {
-            r.get(0)
-        })?;
+    let current: Option<String> = c.query_row(
+        "SELECT boot_id FROM workers WHERE deleted_at IS NULL AND id=?",
+        [worker],
+        |r| r.get(0),
+    )?;
     if current
         .as_deref()
         .is_some_and(|current| Some(current) != boot)
@@ -41,10 +42,11 @@ pub(super) fn liveness_report_is_current(
     worker: &str,
     boot: Option<&str>,
 ) -> Result<bool, ApiError> {
-    let current: Option<String> =
-        c.query_row("SELECT boot_id FROM workers WHERE id=?", [worker], |r| {
-            r.get(0)
-        })?;
+    let current: Option<String> = c.query_row(
+        "SELECT boot_id FROM workers WHERE deleted_at IS NULL AND id=?",
+        [worker],
+        |r| r.get(0),
+    )?;
     if current.is_some() && boot.is_none() {
         return Ok(false);
     }
@@ -52,17 +54,18 @@ pub(super) fn liveness_report_is_current(
     Ok(true)
 }
 
-fn register(
+pub(super) fn register(
     c: &mut Connection,
     worker: &str,
     boot: Option<&str>,
     version: Option<&str>,
 ) -> Result<VecDeque<String>, ApiError> {
     let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let current: Option<String> =
-        tx.query_row("SELECT boot_id FROM workers WHERE id=?", [worker], |r| {
-            r.get(0)
-        })?;
+    let current: Option<String> = tx.query_row(
+        "SELECT boot_id FROM workers WHERE deleted_at IS NULL AND id=?",
+        [worker],
+        |r| r.get(0),
+    )?;
     // COMPATIBILITY: 0.1.x Workers may continue single-delivery operation during
     // the 0.2.0 rollout. Never replay their calls. Remove once the supported
     // minimum is 0.2.0 and all NULL-boot delivered calls have been settled.
@@ -90,6 +93,24 @@ fn register(
             let message = "Worker restarted; its result was lost. The operation may already have happened; verify before repeating side effects.";
             let result =
                 json!({"error":message,"code":"worker_restarted","execution_outcome":"unknown"});
+            let foreign: bool = tx.query_row(
+                "SELECT caller_user_id IS NOT NULL FROM worker_calls WHERE id=?",
+                [&id],
+                |r| r.get(0),
+            )?;
+            if foreign {
+                tx.execute("UPDATE worker_calls SET status='failed',error=?,failure_code='worker_restarted',completed_at=? WHERE id=?",params![message,now(),id])?;
+                continue;
+            }
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?)",
+                [&thread],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                tx.execute("UPDATE worker_calls SET status='failed',error=?,completed_at=?,output_discarded=1 WHERE id=?",params![message,now(),id])?;
+                continue;
+            }
             let superseded = input
                 .map(|input| request_superseded(&tx, &thread, input))
                 .transpose()?
@@ -137,13 +158,20 @@ fn register(
     Ok(replay)
 }
 
-fn replay(
+pub(super) fn replay(
     c: &Connection,
     worker: &str,
     boot: Option<&str>,
     id: &str,
 ) -> Result<Option<WorkerCall>, ApiError> {
-    Ok(c.query_row("SELECT id,thread_id,input_record_id,name,arguments_json FROM worker_calls WHERE id=? AND worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL",params![id,worker,boot],call_row).optional()?)
+    let tx = c.unchecked_transaction()?;
+    let call = tx.query_row("SELECT id,thread_id,input_record_id,name,arguments_json FROM worker_calls WHERE id=? AND worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL AND dispatch_retry_at<=?",params![id,worker,boot,now()],call_row).optional()?;
+    if call.is_some() && !worker_sharing::gate(&tx, id)? {
+        tx.commit()?;
+        return Ok(None);
+    }
+    tx.commit()?;
+    Ok(call)
 }
 fn call_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerCall> {
     let arguments: String = r.get(4)?;
@@ -163,7 +191,7 @@ pub(super) fn claim(
 ) -> Result<Option<WorkerCall>, ApiError> {
     allow_report(c, worker, boot)?;
     let upgrading: bool = c.query_row(
-        "SELECT COALESCE(upgrade_status IN ('queued','installing'),0) FROM workers WHERE id=?",
+        "SELECT COALESCE(upgrade_status IN ('queued','installing'),0) FROM workers WHERE deleted_at IS NULL AND id=?",
         [worker],
         |r| r.get(0),
     )?;
@@ -176,7 +204,7 @@ pub(super) fn claim(
     let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
     allow_report(&tx, worker, boot)?;
     let upgrading: bool = tx.query_row(
-        "SELECT COALESCE(upgrade_status IN ('queued','installing'),0) FROM workers WHERE id=?",
+        "SELECT COALESCE(upgrade_status IN ('queued','installing'),0) FROM workers WHERE deleted_at IS NULL AND id=?",
         [worker],
         |r| r.get(0),
     )?;
@@ -184,15 +212,71 @@ pub(super) fn claim(
         return Ok(None);
     }
 
-    let call=tx.query_row("SELECT id,thread_id,input_record_id,name,arguments_json FROM worker_calls WHERE worker_id=? AND status='queued' ORDER BY created_at,id LIMIT 1",[worker],call_row).optional()?;
-    if let Some(call) = &call {
-        tx.execute(
-            "UPDATE worker_calls SET status='delivered',started_at=?,worker_boot_id=? WHERE id=?",
-            params![now(), boot, call.id],
-        )?;
+    // A bounded pass can skip unavailable callers. Ordering by eligibility
+    // time lets due retries compete ahead of later arrivals, rather than
+    // putting every new (retry_at=0) job ahead of retries forever.
+    for _ in 0..DISPATCH_BATCH {
+        let call=tx.query_row("SELECT id,thread_id,input_record_id,name,arguments_json FROM worker_calls INDEXED BY worker_calls_queued WHERE worker_id=? AND status='queued' AND MAX(created_at,dispatch_retry_at)<=? ORDER BY MAX(created_at,dispatch_retry_at),created_at,id LIMIT 1",params![worker,now()],call_row).optional()?;
+        let Some(call) = call else {
+            break;
+        };
+        if !worker_sharing::gate(&tx, &call.id)? {
+            continue;
+        }
+        tx.execute("UPDATE worker_calls SET status='delivered',started_at=?,worker_boot_id=?,dispatch_retry_at=0 WHERE id=?",params![now(),boot,call.id])?;
+        tx.commit()?;
+        return Ok(Some(call));
     }
     tx.commit()?;
-    Ok(call)
+    Ok(None)
+}
+
+const DISPATCH_BATCH: usize = 8;
+
+fn replay_pending(
+    c: &Connection,
+    worker: &str,
+    boot: Option<&str>,
+    ids: &mut VecDeque<String>,
+) -> Result<Option<WorkerCall>, ApiError> {
+    for _ in 0..ids.len().min(DISPATCH_BATCH) {
+        let id = ids.pop_front().expect("bounded by replay queue length");
+        match replay(c, worker, boot, &id) {
+            Ok(Some(call)) => return Ok(Some(call)),
+            Err(error) => {
+                ids.push_front(id);
+                return Err(error);
+            }
+            Ok(None) => {}
+        }
+        let pending:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM worker_calls WHERE id=? AND worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL)",params![id,worker,boot],|r|r.get(0))?;
+        if pending {
+            ids.push_back(id);
+        }
+    }
+    Ok(None)
+}
+
+// Alternate priorities so replay backlogs and freshly queued jobs each make
+// progress on one live SSE connection. Deferred replay IDs remain in rotation.
+pub(super) fn next_call(
+    c: &mut Connection,
+    worker: &str,
+    boot: Option<&str>,
+    ids: &mut VecDeque<String>,
+    replay_first: bool,
+) -> Result<Option<WorkerCall>, ApiError> {
+    if replay_first {
+        if let Some(call) = replay_pending(c, worker, boot, ids)? {
+            return Ok(Some(call));
+        }
+        claim(c, worker, boot)
+    } else {
+        if let Some(call) = claim(c, worker, boot)? {
+            return Ok(Some(call));
+        }
+        replay_pending(c, worker, boot, ids)
+    }
 }
 
 pub(super) async fn events(
@@ -215,21 +299,27 @@ pub(super) async fn events(
     })
     .await?;
     let stream = async_stream::stream! {
+        let mut replay_first = false;
         loop {
+            replay_first = !replay_first;
             let result=user_db(&state,&user,false,{
-                let worker=worker.clone();let boot=boot.clone();let id=replay_ids.pop_front();
+                let worker=worker.clone();let boot=boot.clone();let mut ids=std::mem::take(&mut replay_ids);
                 move |c| {
                     allow_report(c,&worker,boot.as_deref())?;
-                    if let Some(id)=id {
-                        return Ok(replay(c,&worker,boot.as_deref(),&id)?.map(|call|("tool_call",serde_json::to_value(call).expect("Worker call serializes"))));
-                    }
-                    if let Some(upgrade)=ready_upgrade(c,&worker,boot.as_deref())? {return Ok(Some(("upgrade",upgrade)));}
-                    Ok(claim(c,&worker,boot.as_deref())?.map(|call|("tool_call",serde_json::to_value(call).expect("Worker call serializes"))))
+                    let event = if let Some(upgrade)=ready_upgrade(c,&worker,boot.as_deref())? {
+                        Some(("upgrade",upgrade))
+                    } else {
+                        next_call(c,&worker,boot.as_deref(),&mut ids,replay_first)?.map(|call|("tool_call",serde_json::to_value(call).expect("Worker call serializes")))
+                    };
+                    Ok((event,ids))
                 }
             }).await;
             match result {
-                Ok(Some((name,payload))) => yield Ok(Event::default().event(name).data(payload.to_string())),
-                Ok(None) => yield Ok(Event::default().event("heartbeat").data("{}")),
+                Ok((event,ids)) => {
+                    replay_ids=ids;
+                    if let Some((name,payload))=event {yield Ok(Event::default().event(name).data(payload.to_string()));}
+                    else {yield Ok(Event::default().event("heartbeat").data("{}"));}
+                },
                 Err(error) => {tracing::warn!(error=%error.message,"Worker event stream ended");break;}
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -296,7 +386,7 @@ fn queue_upgrade(c: &mut Connection, id: &str, target: &str) -> Result<(), ApiEr
     type UpgradeEligibility = (Option<String>, Option<String>, Option<String>, Option<i64>);
     let row: Option<UpgradeEligibility> = tx
         .query_row(
-            "SELECT version,boot_id,upgrade_status,last_seen_at FROM workers WHERE id=?",
+            "SELECT version,boot_id,upgrade_status,last_seen_at FROM workers WHERE deleted_at IS NULL AND id=?",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -339,7 +429,7 @@ fn ready_upgrade(
     boot: Option<&str>,
 ) -> Result<Option<Value>, ApiError> {
     let Some(boot) = boot else { return Ok(None) };
-    let pending:Option<(String,String)>=c.query_row("SELECT upgrade_id,upgrade_version FROM workers WHERE id=? AND boot_id=? AND upgrade_status IN ('queued','installing') AND NOT EXISTS(SELECT 1 FROM worker_calls WHERE worker_id=? AND status='delivered') AND NOT EXISTS(SELECT 1 FROM worker_checks WHERE worker_id=? AND delivered_at IS NOT NULL AND completed_at IS NULL AND created_at>?)",params![worker,boot,worker,worker,now()-30],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let pending:Option<(String,String)>=c.query_row("SELECT upgrade_id,upgrade_version FROM workers WHERE deleted_at IS NULL AND id=? AND boot_id=? AND upgrade_status IN ('queued','installing') AND NOT EXISTS(SELECT 1 FROM worker_calls WHERE worker_id=? AND status='delivered') AND NOT EXISTS(SELECT 1 FROM worker_checks WHERE worker_id=? AND delivered_at IS NOT NULL AND completed_at IS NULL AND created_at>?)",params![worker,boot,worker,worker,now()-30],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     Ok(pending.map(|(id, version)| json!({"id":id,"version":version,"boot_id":boot})))
 }
 #[derive(Deserialize)]

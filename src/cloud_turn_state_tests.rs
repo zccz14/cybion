@@ -311,6 +311,7 @@ async fn codex_turn_state_schema_upgrade_preserves_existing_threads_and_history(
             "input",
             json!({"content":"preserve me"}),
         );
+        schema_tests::remove_sharing_fixture(&connection);
         connection
             .execute_batch("DROP TABLE thread_turn_states; PRAGMA user_version=9;")
             .unwrap();
