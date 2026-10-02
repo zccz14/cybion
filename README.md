@@ -34,12 +34,18 @@ the first authenticated browser session initializes that key atomically.
   without deleting its history; archived Threads stay readable, remain
   available through the archived group, and can be restored from the list or
   the conversation header.
+- Owners can grant another existing Cybion user read-only access to a Thread.
+  **Share Thread** authorizes the exact user ID; **Shared with me** shows received
+  live shares. History and future updates are included, without granting model,
+  Worker, Context, account-audit or API-key access. Revocation blocks new source
+  reads independently of discovery sync; already read/copied content cannot be
+  recalled. See [Thread sharing](docs/thread-sharing.md).
 - The thread list filters and paginates on the server. `GET /api/threads`
   accepts `status` (`idle`, `running`, `failed`), `origin` (`web`, `api`),
   and `q` (case-insensitive substring of the title or `external_ref`) next to
   `archived`, plus `limit` (1-100, default 30) and a keyset `cursor` returned
   as `next_cursor`. The web UI exposes them through one control bar that
-  opens on Mine (the user's own web Threads) with single-select All / Mine /
+  opens on Web (the user's own web Threads) with single-select All / Web /
   API / Running / Failed view chips and a debounced search box; the selection
   lives in the page URL, so it is shareable, survives reloads, and steps with
   browser back/forward. More pages load when the list footer scrolls into

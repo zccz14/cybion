@@ -39,6 +39,7 @@ mod linkit_notifications;
 mod recovery;
 mod reports;
 mod thread_controls;
+mod thread_sharing;
 mod traffic;
 mod turn_state;
 mod upstreams;
@@ -108,7 +109,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 23;
+const USER_SCHEMA_VERSION: i64 = 24;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -569,6 +570,7 @@ fn recover_user_requests(path: &Path) -> Result<()> {
 
 fn app(state: AppState) -> Router {
     let browser_api = Router::new()
+        .merge(thread_sharing::routes())
         .route("/api/me", get(me))
         .route(
             "/api/thread-defaults",
@@ -1440,6 +1442,11 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // schema 23+; retain the preservation test.
         worker_sharing::migrate_cancelled(&transaction)?;
     }
+    if version < 24 {
+        // COMPATIBILITY: deployed schema 23 has no Thread grants. Retire this
+        // upgrade only after all retained user databases/backups are schema 24+.
+        thread_sharing::migrate(&transaction)?;
+    }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
@@ -2305,13 +2312,12 @@ async fn ensure_thread_upstream(
     thread_id: &str,
 ) -> Result<(), ApiError> {
     let thread_id = thread_id.to_owned();
-    let bound = user_db(state, user, false, move |connection| {
-        let bound: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM threads t JOIN upstreams u ON u.id=t.upstream_id WHERE t.id=?)",
+    let bound: bool = user_db(state, user, false, move |connection| {
+        connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM upstreams u WHERE u.id=t.upstream_id) FROM threads t WHERE t.id=?",
             [&thread_id],
             |row| row.get(0),
-        )?;
-        Ok(bound)
+        ).optional()?.ok_or_else(|| ApiError::not_found("thread not found"))
     })
     .await?;
     if !bound {
@@ -4016,12 +4022,13 @@ async fn delete_thread(
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = thread_id(&id)?;
+    let owner = identity.user.id.clone();
     user_db(&state, &identity.user, true, move |connection| {
         let changed = connection.execute("DELETE FROM threads WHERE id=?", [id])?;
         if changed == 0 {
             return Err(ApiError::not_found("thread not found"));
         }
-        Ok(())
+        thread_sharing::sync_grants(connection, &owner)
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -4058,38 +4065,45 @@ async fn response_for(
     id: String,
 ) -> Result<Option<ThreadResponseView>, ApiError> {
     user_db(state, user, true, move |connection| {
-        load_thread(connection, &id)?;
-        let request_id = latest_request_record_id(connection, &id)?;
-        connection
-            .query_row(
-                "SELECT a.id,a.input_record_id,a.started_at,a.status,s.snapshot
+        load_thread_response(connection, &id)
+    })
+    .await
+}
+
+fn load_thread_response(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<ThreadResponseView>, ApiError> {
+    load_thread(connection, id)?;
+    let request_id = latest_request_record_id(connection, id)?;
+    connection
+        .query_row(
+            "SELECT a.id,a.input_record_id,a.started_at,a.status,s.snapshot
              FROM reasoning_audits a JOIN response_states s ON s.audit_id=a.id
              WHERE a.thread_id=? AND a.request_kind='inference'
                AND a.input_record_id=?
              ORDER BY a.id DESC LIMIT 1",
-                params![id, request_id],
-                |row| {
-                    let snapshot: String = row.get(4)?;
-                    let response = serde_json::from_str(&snapshot).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?;
-                    Ok(ThreadResponseView {
-                        audit_id: row.get(0)?,
-                        input_record_id: row.get(1)?,
-                        started_at: row.get(2)?,
-                        status: row.get(3)?,
-                        response,
-                    })
-                },
-            )
-            .optional()
-            .map_err(ApiError::from)
-    })
-    .await
+            params![id, request_id],
+            |row| {
+                let snapshot: String = row.get(4)?;
+                let response = serde_json::from_str(&snapshot).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok(ThreadResponseView {
+                    audit_id: row.get(0)?,
+                    input_record_id: row.get(1)?,
+                    started_at: row.get(2)?,
+                    status: row.get(3)?,
+                    response,
+                })
+            },
+        )
+        .optional()
+        .map_err(ApiError::from)
 }
 
 async fn thread_response(
@@ -4119,20 +4133,28 @@ async fn history_for(
     after: i64,
 ) -> Result<Vec<HistoryRecord>, ApiError> {
     user_db(state, user, true, move |connection| {
-        load_thread(connection, &id)?;
-        let mut statement = connection.prepare(
-            "SELECT id,thread_id,kind,payload,created_at
-             FROM history_records WHERE thread_id=? AND id>? ORDER BY id",
-        )?;
-        let rows = statement.query_map(params![id, after], history_from_row)?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-        mark_screenshot_records(connection, &id, &mut records)?;
-        Ok(records)
+        load_history(connection, &id, after)
     })
     .await
+}
+
+fn load_history(
+    connection: &Connection,
+    id: &str,
+    after: i64,
+) -> Result<Vec<HistoryRecord>, ApiError> {
+    load_thread(connection, id)?;
+    let mut statement = connection.prepare(
+        "SELECT id,thread_id,kind,payload,created_at
+             FROM history_records WHERE thread_id=? AND id>? ORDER BY id",
+    )?;
+    let rows = statement.query_map(params![id, after], history_from_row)?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row?);
+    }
+    mark_screenshot_records(connection, id, &mut records)?;
+    Ok(records)
 }
 
 #[derive(Deserialize)]
