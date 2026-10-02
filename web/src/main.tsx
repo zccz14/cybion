@@ -81,6 +81,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
+import { WorkerAudit } from "@/components/worker-audit"
 import { WorkerConnections } from "@/components/worker-connections"
 import { DailyReports } from "@/components/daily-reports"
 import { ReportThreadNotice } from "@/components/report-thread-notice"
@@ -353,32 +354,6 @@ type Context = {
   content: string
   parent_id: string | null
 }
-type WorkerCallAudit = {
-  id: string
-  worker_id: string
-  worker_label: string | null
-  worker_hostname: string | null
-  worker_version: string | null
-  worker_resource: Record<string, unknown> | null
-  thread_id: string
-  thread_title: string
-  input_record_id: number | null
-  name: string
-  arguments: Record<string, unknown>
-  status: "queued" | "delivered" | "completed" | "failed"
-  result: unknown
-  error: string | null
-  created_at: number
-  started_at: number | null
-  completed_at: number | null
-}
-type WorkerCallAuditPage = {
-  items: WorkerCallAudit[]
-  total: number
-  page: number
-  page_size: number
-}
-
 
 const copy = {
   en: {
@@ -508,7 +483,7 @@ const copy = {
     auditCacheRateDescription: "Cached input tokens ÷ input tokens. — when usage is unavailable or input is zero.",
     auditEmpty: "No reasoning requests yet.",
     workerAudit: "Worker call audit",
-    workerAuditDescription: "Every Worker call, including queued and in-flight calls.",
+    workerAuditDescription: "Calls on Workers you own, including calls from people you granted access to. Shared Worker results remain in your Threads.",
     workerAuditEmpty: "No Worker calls yet.",
     workerCall: "Call",
     workerArguments: "Arguments",
@@ -815,7 +790,7 @@ const copy = {
     auditCacheRateDescription: "缓存输入 Token ÷ 输入 Token。用量尚未上报或输入为零时显示 —。",
     auditEmpty: "尚无推理请求。",
     workerAudit: "Worker 调用审计",
-    workerAuditDescription: "展示所有 Worker 调用，包括排队和在途调用。",
+    workerAuditDescription: "展示自有 Worker 上的调用，包括被授权用户发起的任务。使用他人共享设备的结果请在对应 Thread 中查看。",
     workerAuditEmpty: "尚无 Worker 调用。",
     workerCall: "调用",
     workerArguments: "参数",
@@ -1589,7 +1564,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
         client.invalidateQueries({ queryKey: ["thread-response", threadId] }),
         client.invalidateQueries({ queryKey: ["threads"] }),
         client.invalidateQueries({ queryKey: ["reasoning-audits"] }),
-        client.invalidateQueries({ queryKey: ["worker-calls"] }),
+        client.invalidateQueries({ queryKey: ["worker-calls", sdk.session.getState().sessionId] }),
       ])
     },
   })
@@ -2320,58 +2295,7 @@ function usageLabel(item: ReasoningAudit) {
 
 function WorkerAuditPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
-  const [status, setStatus] = useState<WorkerCallAudit["status"] | "all">("all")
-  const [workerId, setWorkerId] = useState("all")
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
-  const workers = useQuery({ queryKey: ["workers"], queryFn: () => api<Worker[]>(sdk, "/api/workers"), refetchInterval: 5000 })
-  const query = useQuery({
-    queryKey: ["worker-calls", status, workerId, page, pageSize],
-    queryFn: () => {
-      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
-      if (status !== "all") params.set("status", status)
-      if (workerId !== "all") params.set("worker_id", workerId)
-      return api<WorkerCallAuditPage>(sdk, `/api/worker-calls?${params}`)
-    },
-    refetchInterval: 2000,
-  })
-  const totalPages = Math.max(1, Math.ceil((query.data?.total ?? 0) / pageSize))
-  useEffect(() => { if (page > totalPages) setPage(totalPages) }, [page, totalPages])
-  const rangeStart = query.data?.total ? (page - 1) * pageSize + 1 : 0
-  const rangeEnd = query.data ? rangeStart + query.data.items.length - 1 : 0
-  const range = t("workerAuditRange").replace("{from}", String(rangeStart)).replace("{to}", String(rangeEnd)).replace("{total}", String(query.data?.total ?? 0))
-  return <Page title={t("workerAudit")} description={t("workerAuditDescription")}>
-    <Card>
-      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div><CardTitle>{t("workerAudit")}</CardTitle><CardDescription>{t("workerAuditDescription")}</CardDescription></div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Select value={status} onValueChange={(value) => { setStatus(value as WorkerCallAudit["status"] | "all"); setPage(1) }}>
-            <SelectTrigger aria-label={t("auditStatus")} size="sm"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="all">{t("auditAll")}</SelectItem><SelectItem value="queued">{t("workerQueued")}</SelectItem><SelectItem value="delivered">{t("workerDelivered")}</SelectItem><SelectItem value="completed">{t("workerCompleted")}</SelectItem><SelectItem value="failed">{t("workerFailed")}</SelectItem></SelectContent>
-          </Select>
-          <Select value={workerId} onValueChange={(value) => { setWorkerId(value); setPage(1) }}>
-            <SelectTrigger aria-label={t("workers")} size="sm"><SelectValue placeholder={t("workers")} /></SelectTrigger>
-            <SelectContent><SelectItem value="all">{t("workers")}</SelectItem>{workers.data?.map((worker) => <SelectItem key={worker.id} value={worker.id}>{worker.label}</SelectItem>)}</SelectContent>
-          </Select>
-          <Select value={String(pageSize)} onValueChange={(value) => { setPageSize(Number(value)); setPage(1) }}>
-            <SelectTrigger aria-label={t("pageSize")} size="sm"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="20">20</SelectItem><SelectItem value="50">50</SelectItem><SelectItem value="100">100</SelectItem></SelectContent>
-          </Select>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
-        {!query.data && !query.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("workerAudit")}</div>}
-        {query.data && query.data.items.length === 0 && <p className="py-8 text-sm text-muted-foreground">{t("workerAuditEmpty")}</p>}
-        {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[58rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("workerCall")}</th><th className="px-3 py-2 font-medium">{t("workers")}</th><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("workerResult")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="px-3 py-3"><code>{item.name}</code><p className="mt-1 text-xs text-muted-foreground">{item.id}</p><details className="mt-2 max-w-64"><summary className="cursor-pointer text-xs text-muted-foreground">{t("workerArguments")}</summary><pre className="mt-1 whitespace-pre-wrap break-words text-xs">{JSON.stringify(item.arguments, null, 2)}</pre></details></td><td className="px-3 py-3"><p>{item.worker_label ?? item.worker_id}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{item.worker_id}</p></td><td className="px-3 py-3"><Link className="hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 font-mono text-xs text-muted-foreground">input #{item.input_record_id ?? "—"}</p></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "completed" ? "outline" : "secondary"}>{workerCallStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.created_at)}{item.completed_at && <><br />{formattedTime(language, item.completed_at)}</>}</td><td className="max-w-72 px-3 py-3"><pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-xs">{item.result === null ? "—" : JSON.stringify(item.result, null, 2)}</pre></td></tr>)}</tbody></table></div>}
-        {query.data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-sm text-muted-foreground">{range}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</Button><Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>{t("next")}</Button></div></div>}
-      </CardContent>
-    </Card>
-  </Page>
-}
-
-function workerCallStatusLabel(status: WorkerCallAudit["status"], t: (key: CopyKey) => string) {
-  return status === "queued" ? t("workerQueued") : status === "delivered" ? t("workerDelivered") : status === "completed" ? t("workerCompleted") : t("workerFailed")
+  return <Page title={t("workerAudit")} description={t("workerAuditDescription")}><WorkerAudit language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
 }
 
 function HistoryPage({ sdk }: { sdk: AuthMiniApi }) {

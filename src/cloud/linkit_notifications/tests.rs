@@ -450,6 +450,7 @@ async fn schema_14_preserves_existing_notification_intent_but_new_users_start_di
     let f = fixture().await;
     assert!(!observed(&f).enabled);
     let connection = open_user(&f.user.path, false).unwrap();
+    schema_tests::remove_sharing_fixture(&connection);
     connection
         .execute_batch("DROP TABLE notification_settings; PRAGMA user_version=13;")
         .unwrap();

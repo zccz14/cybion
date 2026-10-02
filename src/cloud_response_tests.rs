@@ -144,6 +144,12 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
             .count(),
         2
     );
+    user_db(&state, &user, false, move |c| {
+        assert!(worker_protocol::claim(c, worker_id, None)?.is_some());
+        Ok(())
+    })
+    .await
+    .unwrap();
     let _ = worker_result(
         State(state.clone()),
         AxumPath((user.id.clone(), worker_id.to_owned(), worker_call)),
@@ -567,7 +573,7 @@ async fn registry_tools_list_top_level_contexts_and_registered_workers() {
     .await;
     assert_eq!(
         workers,
-        json!({"workers":[{"worker_id":"worker-a","label":"Alpha"},{"worker_id":"worker-z","label":"Zulu"}]})
+        json!({"workers":[{"worker_id":"worker-a","label":"Alpha","owner_user_id":"registry-tool-user","access":"owner"},{"worker_id":"worker-z","label":"Zulu","owner_user_id":"registry-tool-user","access":"owner"}]})
     );
 }
 
@@ -736,6 +742,12 @@ async fn delayed_worker_call_dispatches_after_the_controller_wait() {
         created_at - start >= 1,
         "the Worker call is created only after the controller wait"
     );
+    user_db(&state, &user, false, move |c| {
+        assert!(worker_protocol::claim(c, worker_id, None)?.is_some());
+        Ok(())
+    })
+    .await
+    .unwrap();
     let _ = worker_result(
         State(state.clone()),
         AxumPath((user.id.clone(), worker_id.to_owned(), call_id)),
@@ -1066,7 +1078,8 @@ async fn additive_schema_upgrade_preserves_existing_history() {
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     user_db(&state, &user, false, move |connection| {
-        connection.execute_batch("DROP TABLE response_states; ALTER TABLE worker_calls DROP COLUMN responses_output_type;")?;
+        schema_tests::remove_sharing_fixture(connection);
+        connection.execute_batch("DROP TABLE response_states; ALTER TABLE worker_calls DROP COLUMN responses_output_type; PRAGMA user_version=21;")?;
         ensure_user_schema(connection)?;
         let id: i64 = connection.query_row("SELECT id FROM history_records", [], |row| row.get(0))?;
         assert_eq!(id, input);
@@ -1099,6 +1112,12 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
         "bash".to_owned(),
         json!({"worker_id":worker_id,"command":"pwd"}),
     )
+    .await
+    .unwrap();
+    user_db(&state, &user, false, move |c| {
+        assert!(worker_protocol::claim(c, worker_id, None)?.is_some());
+        Ok(())
+    })
     .await
     .unwrap();
     let second = input_record(&state, &user, &thread).await;

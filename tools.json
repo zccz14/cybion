@@ -13,7 +13,7 @@
     {
       "type": "function",
       "name": "cybion_list_workers",
-      "description": "List registered Workers (worker_id, label) from the controller. Every Worker tool call must include an exact worker_id from this list; never choose a Worker implicitly. Registered Workers are not necessarily online; availability is checked when a Worker tool is called.",
+      "description": "List owned and shared Workers (worker_id, label, owner_user_id, access) from the controller. Every Worker tool call must include an exact worker_id from this list; never choose a Worker implicitly. Registered Workers are not necessarily online; availability is checked when a Worker tool is called.",
       "parameters": {
         "type": "object",
         "properties": {},

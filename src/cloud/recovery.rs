@@ -21,15 +21,26 @@ pub(super) async fn resume_running(state: &AppState) -> Result<(), ApiError> {
             continue;
         };
         let user = user_from_id(state, id.to_owned())?;
-        let ids = user_db(state, &user, false, |c| {
+        let owner = user.id.clone();
+        let ids = user_db(state, &user, false, move |c| {
+            worker_sharing::recover(c, &owner)?;
             let mut q =
                 c.prepare("SELECT id FROM threads WHERE status='running' ORDER BY updated_at,id")?;
             Ok(q.query_map([], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         })
-        .await?;
+        .await;
+        let ids = match ids {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(error=%error.message,"user recovery deferred");
+                continue;
+            }
+        };
         for id in ids {
-            ensure_thread_loop(state, &user, id).await?;
+            if let Err(error) = ensure_thread_loop(state, &user, id).await {
+                tracing::warn!(error=%error.message,"Thread recovery deferred");
+            }
         }
     }
     Ok(())

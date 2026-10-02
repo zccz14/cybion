@@ -44,6 +44,7 @@ mod turn_state;
 mod upstreams;
 mod worker_onboarding;
 mod worker_protocol;
+mod worker_sharing;
 
 use thread_controls::{RequestOperation, latest_request_record_id, request_superseded};
 use upstreams::Upstream;
@@ -107,7 +108,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 21;
+const USER_SCHEMA_VERSION: i64 = 22;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -520,41 +521,49 @@ fn recover_interrupted_requests(data_dir: &Path) -> Result<()> {
         if path.extension().and_then(|extension| extension.to_str()) != Some("sqlite3") {
             continue;
         }
-        let mut connection = Connection::open(&path)?;
-        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
-        ensure_user_schema(&mut connection).map_err(|error| anyhow::anyhow!(error.message))?;
-        reports::recover(&connection).map_err(|error| anyhow::anyhow!(error.message))?;
-        let interrupted = {
-            let mut statement = connection
-                .prepare("SELECT id FROM threads WHERE status='running' ORDER BY updated_at,id")?;
-            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        if interrupted.is_empty() {
-            continue;
+        if let Err(error) = recover_user_requests(&path) {
+            tracing::warn!(error=%error,"user startup recovery deferred");
         }
-        let finished_at = now();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for thread_id in interrupted {
-            let content = "Request interrupted by a Cybion restart";
-            persist_history_record(
-                &transaction,
-                HistoryRecordInsert {
-                    thread_id: &thread_id,
-                    kind: "activity",
-                    payload: &json!({"role":"system","content":content}),
-                    created_at: finished_at,
-                },
-            )
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-            transaction.execute(
-                "UPDATE reasoning_audits SET status='failed',error=?,finished_at=?
-                 WHERE thread_id=? AND status='in_flight'",
-                params![content, finished_at, &thread_id],
-            )?;
-        }
-        transaction.commit()?;
     }
+    Ok(())
+}
+
+fn recover_user_requests(path: &Path) -> Result<()> {
+    let mut connection =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+    ensure_user_schema(&mut connection).map_err(|error| anyhow::anyhow!(error.message))?;
+    reports::recover(&connection).map_err(|error| anyhow::anyhow!(error.message))?;
+    let interrupted = {
+        let mut statement = connection
+            .prepare("SELECT id FROM threads WHERE status='running' ORDER BY updated_at,id")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if interrupted.is_empty() {
+        return Ok(());
+    }
+    let finished_at = now();
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for thread_id in interrupted {
+        let content = "Request interrupted by a Cybion restart";
+        persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id: &thread_id,
+                kind: "activity",
+                payload: &json!({"role":"system","content":content}),
+                created_at: finished_at,
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+        transaction.execute(
+            "UPDATE reasoning_audits SET status='failed',error=?,finished_at=?
+             WHERE thread_id=? AND status='in_flight'",
+            params![content, finished_at, &thread_id],
+        )?;
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -597,6 +606,12 @@ fn app(state: AppState) -> Router {
         .route("/api/history/{id}", get(history::read))
         .route("/api/reasoning-audits", get(reasoning_audits))
         .route("/api/worker-calls", get(worker_call_audits))
+        .route("/api/worker-calls/{id}", get(worker_sharing::call_detail))
+        .route("/api/workers/{id}/grants", get(worker_sharing::list_grants))
+        .route(
+            "/api/workers/{id}/grants/{grantee}",
+            axum::routing::put(worker_sharing::grant).delete(worker_sharing::revoke),
+        )
         .route("/api/contexts", get(list_contexts).post(create_context))
         .route(
             "/api/contexts/{id}",
@@ -873,7 +888,12 @@ fn open_user(path: &Path, create: bool) -> Result<Connection, ApiError> {
         .parent()
         .ok_or_else(|| ApiError::internal("user path has no parent"))?;
     fs::create_dir_all(parent).map_err(ApiError::internal)?;
-    let mut connection = Connection::open(path).map_err(ApiError::internal)?;
+    let flags = if create {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+    } else {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    let mut connection = Connection::open_with_flags(path, flags).map_err(ApiError::internal)?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(ApiError::internal)?;
@@ -1192,9 +1212,23 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_started_at
 "#;
 
 fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version == USER_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if version > USER_SCHEMA_VERSION {
+        return Err(ApiError::internal("unsupported future user schema"));
+    }
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = migrate_user_schema(connection);
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    result
+}
+
+fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     // SQLite requires foreign keys to be disabled outside the transaction when
     // rebuilding a referenced table; that migration checks relationships before commit.
-    connection.pragma_update(None, "foreign_keys", "OFF")?;
     // Serialize first-open/reset work with SQLite's write lock. A user can be opened by
     // several request tasks at once, and both must not observe the old version and reset it
     // concurrently.
@@ -1204,6 +1238,12 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     let version: i64 = transaction
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(ApiError::internal)?;
+    if version == USER_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if version > USER_SCHEMA_VERSION {
+        return Err(ApiError::internal("unsupported future user schema"));
+    }
     if version < RESETTABLE_USER_SCHEMA_VERSION {
         // The hosted schema was intentionally reset after the context model was corrected.
         // There is no supported migration from the discarded pre-release user databases.
@@ -1390,6 +1430,9 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         migrate_legacy_upstream(&transaction)?;
     }
     reports::migrate(&transaction)?;
+    if version < 22 {
+        worker_sharing::migrate(&transaction)?;
+    }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
@@ -1399,7 +1442,6 @@ fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             .map_err(ApiError::internal)?;
     }
     transaction.commit()?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
 }
 
@@ -1737,6 +1779,8 @@ struct InsightDimensions {
 
 #[derive(Clone, Serialize)]
 struct WorkerCallAuditView {
+    caller_user_id: String,
+    has_details: bool,
     id: String,
     worker_id: String,
     worker_label: Option<String>,
@@ -1949,6 +1993,8 @@ struct UpdateWorkerInput {
 
 #[derive(Clone, Serialize)]
 struct WorkerView {
+    owner_user_id: String,
+    access: String,
     version: Option<String>,
     can_upgrade: bool,
     upgrade: Option<worker_protocol::UpgradeView>,
@@ -2028,6 +2074,8 @@ struct WorkerCall {
 
 #[derive(Clone, Debug, Serialize)]
 struct WorkerSummary {
+    owner_user_id: String,
+    access: String,
     id: String,
     label: String,
 }
@@ -3236,17 +3284,18 @@ fn load_insights(
     let worker_where = "(?1 IS NULL OR c.created_at >= ?1)
         AND (?2 IS NULL OR EXISTS (
             SELECT 1 FROM reasoning_audits a
-            WHERE a.thread_id = c.thread_id
+            WHERE c.caller_user_id IS NULL AND a.thread_id = c.thread_id
               AND a.input_record_id = c.input_record_id
               AND a.model = ?2
         ))
         AND (?3 IS NULL OR EXISTS (
             SELECT 1 FROM reasoning_audits a
-            WHERE a.thread_id = c.thread_id
+            WHERE c.caller_user_id IS NULL AND a.thread_id = c.thread_id
               AND a.input_record_id = c.input_record_id
               AND a.request_kind = ?3
-        ))";
-    let worker_params = params![started_after, model, request_kind];
+        ))
+        AND (?4 IS NULL OR (c.caller_user_id IS NULL AND c.thread_id=?4))";
+    let worker_params = params![started_after, model, request_kind, thread_id];
     let duration_sum = "COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN c.completed_at - c.created_at ELSE 0 END), 0)";
     let duration_count = "COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN 1 ELSE 0 END), 0)";
     let (worker_calls, worker_read_bytes, worker_write_bytes, worker_duration, worker_timed): (
@@ -3484,7 +3533,7 @@ fn load_attribution(
     }
     let mut worker_statement = connection.prepare(
         "SELECT input_record_id,created_at,completed_at FROM worker_calls
-         WHERE input_record_id IS NOT NULL AND (?1 IS NULL OR created_at >= ?1)",
+         WHERE caller_user_id IS NULL AND input_record_id IS NOT NULL AND (?1 IS NULL OR created_at >= ?1)",
     )?;
     let rows = worker_statement.query_map(params![started_after], |row| {
         Ok((
@@ -3655,87 +3704,7 @@ async fn reasoning_audits(
     .map(Json)
 }
 
-async fn worker_call_audits(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    Query(query): Query<WorkerCallAuditQuery>,
-) -> Result<Json<WorkerCallAuditPage>, ApiError> {
-    let page = query.page.unwrap_or(1).max(1);
-    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
-    let status = query.status.filter(|value| !value.trim().is_empty());
-    if let Some(value) = status.as_deref()
-        && !matches!(value, "queued" | "delivered" | "completed" | "failed")
-    {
-        return Err(ApiError::bad_request("invalid Worker call status"));
-    }
-    let worker_id = query.worker_id.filter(|value| !value.trim().is_empty());
-    let thread_id = query.thread_id.filter(|value| !value.trim().is_empty());
-    user_db(&state, &identity.user, true, move |connection| {
-        let mut statement = connection.prepare(
-            "SELECT c.id,c.worker_id,c.worker_label,c.worker_hostname,c.worker_version,
-                    c.worker_resource_json,c.thread_id,COALESCE(t.title,''),c.input_record_id,
-                    c.name,c.arguments_json,c.status,c.result_json,c.error,c.created_at,
-                    c.started_at,c.completed_at,c.received_at
-             FROM worker_calls c LEFT JOIN threads t ON t.id=c.thread_id
-             ORDER BY c.created_at DESC,c.id DESC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            let arguments = serde_json::from_str::<Value>(&row.get::<_, String>(10)?)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            let result = row
-                .get::<_, Option<String>>(12)?
-                .and_then(|value| serde_json::from_str(&value).ok());
-            let worker_resource = row
-                .get::<_, Option<String>>(5)?
-                .and_then(|value| serde_json::from_str(&value).ok());
-            Ok(WorkerCallAuditView {
-                id: row.get(0)?,
-                worker_id: row.get(1)?,
-                worker_label: row.get(2)?,
-                worker_hostname: row.get(3)?,
-                worker_version: row.get(4)?,
-                worker_resource,
-                thread_id: row.get(6)?,
-                thread_title: row.get(7)?,
-                input_record_id: row.get(8)?,
-                name: row.get(9)?,
-                arguments,
-                status: row.get(11)?,
-                result,
-                error: row.get(13)?,
-                created_at: row.get(14)?,
-                started_at: row.get(15)?,
-                completed_at: row.get(16)?,
-                received_at: row.get(17)?,
-            })
-        })?;
-        let mut items = Vec::new();
-        for row in rows {
-            let item = row?;
-            if status.as_deref().is_some_and(|value| value != item.status)
-                || worker_id
-                    .as_deref()
-                    .is_some_and(|value| value != item.worker_id)
-                || thread_id
-                    .as_deref()
-                    .is_some_and(|value| value != item.thread_id)
-            {
-                continue;
-            }
-            items.push(item);
-        }
-        let total = items.len();
-        let start = (page - 1).saturating_mul(page_size);
-        Ok(WorkerCallAuditPage {
-            items: items.into_iter().skip(start).take(page_size).collect(),
-            total,
-            page,
-            page_size,
-        })
-    })
-    .await
-    .map(Json)
-}
+use worker_sharing::worker_call_audits;
 
 #[derive(Deserialize)]
 struct ListThreadsQuery {
@@ -4353,39 +4322,7 @@ async fn delete_api_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_workers(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-) -> Result<Json<Vec<WorkerView>>, ApiError> {
-    let workers = user_db(&state, &identity.user, true, |connection| {
-        let mut statement = connection.prepare(
-            "SELECT id,label,created_at,last_seen_at,CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error FROM workers ORDER BY created_at DESC",
-        )?;
-        let rows = statement.query_map([now() - WORKER_ONLINE_SECONDS], |row| {
-            let resource = row
-                .get::<_, Option<String>>(5)?
-                .and_then(|value| serde_json::from_str(&value).ok());
-            Ok(WorkerView {
-                id: row.get(0)?,
-                label: row.get(1)?,
-                created_at: row.get(2)?,
-                last_seen_at: row.get(3)?,
-                status: row.get(4)?,
-                resource,
-                version: row.get(6)?,
-                can_upgrade: row.get::<_,Option<String>>(7)?.is_some(),
-                upgrade: worker_protocol::upgrade_view(row)?,
-            })
-        })?;
-        let mut workers = Vec::new();
-        for row in rows {
-            workers.push(row?);
-        }
-        Ok(workers)
-    })
-    .await?;
-    Ok(Json(workers))
-}
+use worker_sharing::list_workers;
 
 fn validate_context_parent(
     connection: &Connection,
@@ -4612,105 +4549,7 @@ async fn create_worker_pairing(
     }))
 }
 
-async fn read_worker(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<WorkerView>, ApiError> {
-    let id = record_id(&id)?;
-    let worker = user_db(&state, &identity.user, true, move |connection| {
-        connection
-            .query_row(
-                "SELECT id,label,created_at,last_seen_at,
-                        CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error
-                 FROM workers WHERE id=?",
-                params![now() - WORKER_ONLINE_SECONDS, &id],
-                |row| {
-                    let resource = row
-                        .get::<_, Option<String>>(5)?
-                        .and_then(|value| serde_json::from_str(&value).ok());
-                    Ok(WorkerView {
-                        id: row.get(0)?,
-                        label: row.get(1)?,
-                        created_at: row.get(2)?,
-                        last_seen_at: row.get(3)?,
-                        status: row.get(4)?,
-                        resource,
-                        version: row.get(6)?,
-                        can_upgrade: row.get::<_,Option<String>>(7)?.is_some(),
-                        upgrade: worker_protocol::upgrade_view(row)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    })
-    .await?
-    .ok_or_else(|| ApiError::not_found("worker not found"))?;
-    Ok(Json(worker))
-}
-
-async fn update_worker(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    AxumPath(id): AxumPath<String>,
-    Json(input): Json<UpdateWorkerInput>,
-) -> Result<Json<WorkerView>, ApiError> {
-    let id = record_id(&id)?;
-    let label = label(&input.label, "label", 80)?;
-    let worker = user_db(&state, &identity.user, true, move |connection| {
-        let changed =
-            connection.execute("UPDATE workers SET label=? WHERE id=?", params![label, &id])?;
-        if changed == 0 {
-            return Err(ApiError::not_found("worker not found"));
-        }
-        connection
-            .query_row(
-                "SELECT id,label,created_at,last_seen_at,
-                        CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error
-                 FROM workers WHERE id=?",
-                params![now() - WORKER_ONLINE_SECONDS, &id],
-                |row| {
-                    let resource = row
-                        .get::<_, Option<String>>(5)?
-                        .and_then(|value| serde_json::from_str(&value).ok());
-                    Ok(WorkerView {
-                        id: row.get(0)?,
-                        label: row.get(1)?,
-                        created_at: row.get(2)?,
-                        last_seen_at: row.get(3)?,
-                        status: row.get(4)?,
-                        resource,
-                        version: row.get(6)?,
-                        can_upgrade: row.get::<_,Option<String>>(7)?.is_some(),
-                        upgrade: worker_protocol::upgrade_view(row)?,
-                    })
-                },
-            )
-            .map_err(Into::into)
-    })
-    .await?;
-    Ok(Json(worker))
-}
-
-async fn delete_worker(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, ApiError> {
-    let id = record_id(&id)?;
-    let _provisioning = state.worker_pairing_lock.lock().await;
-    worker_onboarding::revoke_pairing(&state, &identity.user.id, &id).await?;
-    user_db(&state, &identity.user, true, move |connection| {
-        let changed = connection.execute("DELETE FROM workers WHERE id=?", [id])?;
-        if changed == 0 {
-            return Err(ApiError::not_found("worker not found"));
-        }
-        Ok(())
-    })
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
+use worker_sharing::{delete_worker, read_worker, update_worker};
 
 fn hash_secret(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
@@ -5430,8 +5269,9 @@ fn context_tool_output(output: &str) -> String {
     format!("{}{}", &output[..end], TOOL_OUTPUT_TRUNCATED_NOTICE)
 }
 
-/// Output records of Worker screenshot calls, from the call ledger.
-/// INVARIANT: the ledger is the only classifier; results are never classified
+/// Output records of Worker screenshot calls, from the local ledger or trusted
+/// controller provenance on shared outputs.
+/// INVARIANT: controller metadata is the classifier; results are never classified
 /// as images by size or content shape, so bash stdout that happens to contain
 /// `{"data": ...}` stays text.
 fn screenshot_output_record_ids(
@@ -5440,9 +5280,9 @@ fn screenshot_output_record_ids(
 ) -> Result<HashSet<i64>, ApiError> {
     let mut statement = connection.prepare(
         "SELECT output_record_id FROM worker_calls
-         WHERE thread_id=? AND output_record_id IS NOT NULL
+         WHERE caller_user_id IS NULL AND thread_id=?1 AND output_record_id IS NOT NULL
            AND name IN ('browser_control','computer_use')
-           AND json_extract(arguments_json,'$.action')='screenshot'",
+           AND json_extract(arguments_json,'$.action')='screenshot' UNION SELECT id FROM history_records WHERE thread_id=?1 AND worker_screenshot=1",
     )?;
     let rows = statement.query_map([thread_id], |row| row.get::<_, i64>(0))?;
     rows.collect::<std::result::Result<HashSet<_>, _>>()
@@ -5452,7 +5292,7 @@ fn screenshot_output_record_ids(
 /// Marks the loaded range's ledger screenshot outputs for the viewer, which
 /// renders those carrying PNG data as images and keeps the ordinary tool output
 /// rendering otherwise.
-/// INVARIANT: the ledger is the only classifier; results are never classified
+/// INVARIANT: controller metadata is the classifier; results are never classified
 /// as images by size or content shape.
 fn mark_screenshot_records(
     connection: &Connection,
@@ -5638,9 +5478,16 @@ fn is_assistant_turn_item(item: &Value) -> bool {
 }
 
 fn registered_workers(connection: &Connection) -> Result<Vec<WorkerSummary>, ApiError> {
-    let mut statement = connection.prepare("SELECT id,label FROM workers ORDER BY label,id")?;
-    let rows = statement.query_map([], |row| {
+    let owner = connection
+        .path()
+        .and_then(|p| Path::new(p).file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let mut statement = connection.prepare("SELECT id,label,?, 'owner' FROM workers WHERE deleted_at IS NULL UNION ALL SELECT worker_id,label,owner_user_id,'shared' FROM shared_workers WHERE revoked_at IS NULL ORDER BY label,id")?;
+    let rows = statement.query_map([owner], |row| {
         Ok(WorkerSummary {
+            owner_user_id: row.get(2)?,
+            access: row.get(3)?,
             id: row.get(0)?,
             label: row.get(1)?,
         })
@@ -5887,7 +5734,7 @@ async fn append_response_output_items(
         .collect::<std::result::Result<Vec<_>, ApiError>>()?;
     let thread_id = thread.id.clone();
     let created_at = now();
-    user_db(state, user, false, move |connection| {
+    let ids = user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
         let kind = if superseded {
@@ -5904,10 +5751,7 @@ async fn append_response_output_items(
                     ids.push(id);continue;
                 }
             }
-            if !superseded {
-                enqueue_output_call(&transaction, &thread_id, input_record_id, &payload)?;
-            }
-            ids.push(persist_history_record(
+            let record = persist_history_record(
                 &transaction,
                 HistoryRecordInsert {
                     thread_id: &thread_id,
@@ -5915,12 +5759,19 @@ async fn append_response_output_items(
                     payload: &payload,
                     created_at,
                 },
-            )?);
+            )?;
+            if !superseded {
+                worker_sharing::bind_intent(&transaction, record, &thread_id, input_record_id, &payload)?;
+                enqueue_output_call(&transaction, &thread_id, input_record_id, &payload)?;
+            }
+            ids.push(record);
         }
         transaction.commit()?;
         Ok(ids)
     })
-    .await
+    .await?;
+    worker_sharing::dispatch_committed(state, user, ids.clone()).await?;
+    Ok(ids)
 }
 
 async fn append_tool_output_item(
@@ -5936,7 +5787,12 @@ async fn append_tool_output_item(
     user_db(state, user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let call=payload.get("call_id").and_then(Value::as_str);
-        let existing:Option<i64>=transaction.query_row("SELECT output_record_id FROM worker_calls WHERE thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NOT NULL",params![thread_id,input_record_id,call],|r|r.get(0)).optional()?;
+        let shared: Option<(String,String)> = transaction.query_row("SELECT worker_owner_user_id,worker_call_id FROM history_records WHERE thread_id=? AND worker_input_id=? AND worker_owner_user_id IS NOT NULL AND worker_owner_user_id<>'' AND worker_output_phase IS NULL AND json_extract(payload,'$.call_id')=? LIMIT 1",params![thread_id,input_record_id,call],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if let Some((owner,id))=&shared {
+            let existing:Option<i64>=transaction.query_row("SELECT id FROM history_records WHERE worker_owner_user_id=? AND worker_call_id=? AND worker_output_phase='primary'",params![owner,id],|r|r.get(0)).optional()?;
+            if let Some(id)=existing {return Ok(id);}
+        }
+        let existing:Option<i64>=transaction.query_row("SELECT output_record_id FROM worker_calls WHERE caller_user_id IS NULL AND thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NOT NULL",params![thread_id,input_record_id,call],|r|r.get(0)).optional()?;
         if let Some(id)=existing {return Ok(id);}
         let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
         let kind = if superseded {
@@ -5953,7 +5809,10 @@ async fn append_tool_output_item(
                 created_at,
             },
         )?;
-        transaction.execute("UPDATE worker_calls SET output_record_id=? WHERE thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NULL",params![id,thread_id,input_record_id,call])?;
+        if let Some((owner,call))=shared {
+            transaction.execute("UPDATE history_records SET worker_owner_user_id=?,worker_call_id=?,worker_output_phase='primary' WHERE id=?",params![owner,call,id])?;
+        }
+        transaction.execute("UPDATE worker_calls SET output_record_id=? WHERE caller_user_id IS NULL AND thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NULL",params![id,thread_id,input_record_id,call])?;
         transaction.commit()?;
         Ok(id)
     })
@@ -7468,7 +7327,7 @@ async fn list_workers_tool_output(state: &AppState, user: &User) -> Result<Value
     .await?;
     let workers = workers
         .iter()
-        .map(|worker| json!({"worker_id": worker.id, "label": worker.label}))
+        .map(|worker| json!({"worker_id": worker.id, "label": worker.label, "owner_user_id":worker.owner_user_id, "access":worker.access}))
         .collect::<Vec<_>>();
     Ok(json!({ "workers": workers }))
 }
@@ -7625,6 +7484,11 @@ async fn enqueue_worker_call(
     name: String,
     arguments: Value,
 ) -> Result<String, ApiError> {
+    if let Some(id) =
+        worker_sharing::enqueue(state, user, thread_id, input_record_id, &responses_call_id).await?
+    {
+        return Ok(id);
+    }
     let worker_id = worker_id.to_owned();
     let thread_id = thread_id.to_owned();
     user_db(state, user, false, move |c| {
@@ -7660,7 +7524,7 @@ fn enqueue_worker_call_tx(
         return Err(ApiError::cancelled());
     }
     let arguments_json = serde_json::to_string(arguments).map_err(ApiError::internal)?;
-    let existing:Option<(String,String,String,String)>=c.query_row("SELECT id,worker_id,name,arguments_json FROM worker_calls WHERE thread_id=? AND input_record_id=? AND responses_call_id=? LIMIT 1",params![thread_id,input_record_id,responses_call_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let existing:Option<(String,String,String,String)>=c.query_row("SELECT id,worker_id,name,arguments_json FROM worker_calls WHERE caller_user_id IS NULL AND thread_id=? AND input_record_id=? AND responses_call_id=? LIMIT 1",params![thread_id,input_record_id,responses_call_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     if let Some((id, previous_worker, previous_name, previous_args)) = existing {
         if previous_worker != worker_id || previous_name != name || previous_args != arguments_json
         {
@@ -7671,7 +7535,7 @@ fn enqueue_worker_call_tx(
         return Ok(id);
     }
     let worker_id = record_id(worker_id)?;
-    let snapshot=c.query_row("SELECT label,hostname,version,resource_json,status,last_seen_at FROM workers WHERE id=?",[&worker_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<i64>>(5)?))).optional()?.ok_or_else(||ApiError::not_found("selected Worker not found"))?;
+    let snapshot=c.query_row("SELECT label,hostname,version,resource_json,status,last_seen_at FROM workers WHERE deleted_at IS NULL AND id=?",[&worker_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<i64>>(5)?))).optional()?.ok_or_else(||ApiError::not_found("selected Worker not found"))?;
     if snapshot.4 != "online"
         || snapshot
             .5
@@ -7713,6 +7577,10 @@ fn enqueue_output_call(
     else {
         return Ok(());
     };
+    let local: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM workers WHERE id=? AND deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM shared_workers WHERE worker_id=? AND revoked_at IS NULL)", params![worker,worker], |r|r.get(0))?;
+    if !local {
+        return Ok(());
+    }
     // Delayed calls are dispatched during settlement, after the controller wait.
     if delay.is_some() {
         return Ok(());
@@ -7749,14 +7617,16 @@ async fn wait_worker_result(
     call_id: &str,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(Value, Option<i64>), ApiError> {
+    let owner = worker_sharing::call_owner(state, user, call_id).await?;
     let call_id = call_id.to_owned();
     loop {
+        worker_sharing::deliver(state, &owner, &call_id).await?;
         if *cancellation.borrow() {
             cancel_worker_call(state, user, &call_id).await;
             return Err(ApiError::cancelled());
         }
         let id = call_id.clone();
-        let value = user_db(state, user, false, move |connection| {
+        let value = user_db(state, &owner, false, move |connection| {
             connection
                 .query_row(
                     "SELECT status,result_json,output_record_id,error FROM worker_calls WHERE id=?",
@@ -7808,8 +7678,15 @@ async fn wait_worker_result(
 }
 
 async fn cancel_worker_call(state: &AppState, user: &User, call_id: &str) {
+    let owner = match worker_sharing::call_owner(state, user, call_id).await {
+        Ok(owner) => owner,
+        Err(error) => {
+            tracing::warn!(error=%error.message,"cannot resolve cancelled call owner");
+            return;
+        }
+    };
     let call_id = call_id.to_owned();
-    let result = user_db(state, user, false, move |connection| {
+    let result = user_db(state, &owner, false, move |connection| {
         connection.execute(
             "UPDATE worker_calls
              SET status='failed',error='request superseded by a newer input',completed_at=?
@@ -7930,7 +7807,7 @@ async fn worker_identity(
     user_db(state, &user, false, move |connection| {
         let valid: Option<i64> = connection
             .query_row(
-                "SELECT 1 FROM workers WHERE id=? AND token_hash=?",
+                "SELECT 1 FROM workers WHERE deleted_at IS NULL AND id=? AND token_hash=?",
                 params![worker_id, token_hash],
                 |row| row.get(0),
             )
@@ -8012,8 +7889,19 @@ async fn worker_result(
         .error
         .clone()
         .or_else(|| input.failed.then(|| input.result.to_string()));
+    let delivery_id = call_id.clone();
     user_db(&state, &user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let started:Option<Option<i64>>=transaction.query_row("SELECT started_at FROM worker_calls WHERE id=? AND worker_id=?",params![call_id,worker_id],|r|r.get(0)).optional()?;
+        match started {
+            None=>return Err(ApiError::not_found("Worker call not found")),
+            Some(None)=>return Err(ApiError::conflict("Worker call has not been delivered")),
+            Some(Some(_))=>{},
+        }
+        if worker_sharing::save_foreign_result(&transaction, &worker_id, &call_id, &result_json, status, error_text.as_deref())? {
+            transaction.commit()?;
+            return Ok(());
+        }
         let call: Option<WorkerCallResultRow> = transaction
             .query_row(
                 "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type FROM worker_calls
@@ -8025,6 +7913,13 @@ async fn worker_result(
         let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id, responses_output_type)) = call else {
             return Err(ApiError::not_found("Worker call not found"));
         };
+        let thread_exists:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM threads WHERE id=?)",[&thread_id],|r|r.get(0))?;
+        if !thread_exists {
+            let saved:Option<String>=transaction.query_row("SELECT result_json FROM worker_calls WHERE id=?",[&call_id],|r|r.get(0))?;
+            if saved.as_deref().is_some_and(|v|v!=result_json) {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
+            transaction.execute("UPDATE worker_calls SET result_json=?,status='failed',error=COALESCE(error,'Thread deleted'),completed_at=COALESCE(completed_at,?),output_discarded=1 WHERE id=?",params![result_json,now(),call_id])?;
+            transaction.commit()?;return Ok(());
+        }
         if existing_output_id.is_some() {
             let saved:Option<String>=transaction.query_row("SELECT result_json FROM worker_calls WHERE id=?",[&call_id],|r|r.get(0))?;
             if let Some(saved)=saved {
@@ -8081,6 +7976,9 @@ async fn worker_result(
         Ok(())
     })
     .await?;
+    if let Err(error) = worker_sharing::deliver(&state, &user, &delivery_id).await {
+        tracing::warn!(error=%error.message,"durable Worker result delivery deferred");
+    }
     Ok(Json(json!({"ok":true})))
 }
 
@@ -8769,9 +8667,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        connection
-            .pragma_update(None, "user_version", USER_SCHEMA_VERSION)
-            .unwrap();
+        connection.pragma_update(None, "user_version", 21).unwrap();
         drop(connection);
 
         let connection = open_user(&path, true).unwrap();

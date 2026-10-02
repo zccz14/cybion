@@ -212,7 +212,7 @@ pub(super) async fn cancel_for(
         )?;
         transaction.execute(
             "UPDATE worker_calls SET status='failed',completed_at=?,error='Cancelled by user'
-             WHERE thread_id=? AND status IN ('queued','delivered')",
+             WHERE caller_user_id IS NULL AND thread_id=? AND status IN ('queued','delivered')",
             params![now(), &cancelled_thread_id],
         )?;
         let thread = load_thread(&transaction, &cancelled_thread_id)?;

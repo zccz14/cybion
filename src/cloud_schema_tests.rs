@@ -78,7 +78,19 @@ fn assert_core_history_schema(connection: &Connection) {
         .unwrap();
     assert_eq!(
         columns,
-        ["id", "thread_id", "kind", "payload", "created_at"]
+        [
+            "id",
+            "thread_id",
+            "kind",
+            "payload",
+            "created_at",
+            "worker_owner_user_id",
+            "worker_grant_id",
+            "worker_call_id",
+            "worker_input_id",
+            "worker_output_phase",
+            "worker_screenshot"
+        ]
     );
     assert_eq!(
         connection
@@ -266,4 +278,43 @@ async fn history_appends_and_restart_recovery_use_only_core_columns() {
     })
     .await
     .unwrap();
+}
+
+// Remove sharing additions when an older test constructs a historical fixture
+// by downgrading a current database. Production migration never uses this.
+pub(super) fn remove_sharing_fixture(c: &Connection) {
+    c.execute_batch(
+        "DROP TABLE worker_grants; DROP TABLE shared_workers;
+        DROP INDEX history_worker_origin; DROP INDEX history_worker_intent;
+        DROP INDEX worker_calls_foreign_origin; DROP INDEX worker_calls_queued;
+        DROP INDEX worker_calls_pending_output; DROP INDEX worker_calls_created;
+        DROP INDEX worker_calls_status_created; DROP INDEX worker_calls_worker_created;
+        ALTER TABLE workers DROP COLUMN deleted_at;",
+    )
+    .unwrap();
+    for column in [
+        "dispatch_retry_at",
+        "caller_user_id",
+        "grant_id",
+        "delivery_attempted_at",
+        "output_discarded",
+        "late_output_record_id",
+        "late_result",
+        "late_output_discarded",
+        "failure_code",
+    ] {
+        c.execute_batch(&format!("ALTER TABLE worker_calls DROP COLUMN {column}"))
+            .unwrap();
+    }
+    for column in [
+        "worker_owner_user_id",
+        "worker_grant_id",
+        "worker_call_id",
+        "worker_input_id",
+        "worker_output_phase",
+        "worker_screenshot",
+    ] {
+        c.execute_batch(&format!("ALTER TABLE history_records DROP COLUMN {column}"))
+            .unwrap();
+    }
 }

@@ -9,13 +9,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { WorkerSharing } from "@/components/worker-sharing"
 import { formattedTime } from "@/lib/time"
-import { checkReady, upgradeAvailable, deviceStatus, downloadUrl, installCommand, normalizeCode, runCommand, validCode, type Check, type Device, type Pairing, type Release } from "@/lib/worker-onboarding"
+import { checkReady, ownedDevice, upgradeAvailable, deviceStatus, downloadUrl, installCommand, normalizeCode, runCommand, validCode, type Check, type Device, type Pairing, type Release } from "@/lib/worker-onboarding"
 
 type Language = "zh" | "en"
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 const copy = {
   zh: {
+    shared: "与我共享", sharedBadge: "共享设备", sharedEmpty: "尚无与我共享的设备。", owner: "所有者", unknown: "状态未知 · 尚未实时查询", sharedHint: "共享设备列表来自本地缓存，在线状态和执行能力尚未验证。可在新 Thread 中按 Worker ID 查询并使用。设备所有者可以审计命令和结果。", share: "共享访问", uid: "我的用户 ID", uidHint: "将此用户 ID 发给设备所有者，即可由对方授予访问权限。",
     workerVersion: "运行版本", versionUnknown: "等待版本上报", upgrade: "升级 Worker", upgradeConfirm: "升级将等待正在执行的任务与结果回传结束，校验官方发布包后重启 Worker，保留现有配置。确认升级此设备？", upgradePending: "正在等待任务结束或安装升级…", upgradeCompleted: "已确认目标版本上线", upgradeFailed: "升级失败，当前版本保留", manualUpgrade: "0.1.x 需要先手动安装 0.2.0，之后可在此远程升级。",
     title: "连接设备", description: "让 Cybion 在你的电脑或服务器上执行任务。从安装到验证，一步步完成连接。",
     add: "连接新设备", devices: "我的设备", empty: "还没有连接的设备。", local: "当前电脑", remote: "另一台电脑或服务器",
@@ -46,6 +48,7 @@ const copy = {
     legacyCreate: "生成手动配置", configDownload: "下载 worker.toml", configSaved: "保存到目标设备配置目录后运行 Worker。页面关闭或刷新后无法重新显示凭证；丢失时移除该设备并重新配对。",
   },
   en: {
+    shared: "Shared with me", sharedBadge: "Shared", sharedEmpty: "No devices shared with you yet.", owner: "Owner", unknown: "Unknown · not queried live", sharedHint: "Shared discovery is cached locally. Online status and execution capabilities are not verified. Start a new Thread to query and use this Worker by ID. The owner can audit commands and results.", share: "Share access", uid: "My user ID", uidHint: "Send this user ID to a device owner so they can grant you access.",
     workerVersion: "Running version", versionUnknown: "Waiting for version report", upgrade: "Upgrade Worker", upgradeConfirm: "Wait for running tasks and result uploads, verify the official release, then restart Worker with its existing configuration. Upgrade this device?", upgradePending: "Waiting for tasks to finish or installing…", upgradeCompleted: "Target version confirmed online", upgradeFailed: "Upgrade failed; current version retained", manualUpgrade: "Install 0.2.0 manually once on a 0.1.x Worker; subsequent upgrades can be requested here.",
     title: "Connect a device", description: "Run Cybion tasks on your computer or server. Follow installation, authorization and verification in one place.",
     add: "Connect a new device", devices: "My devices", empty: "No devices connected yet.", local: "This computer", remote: "Another computer or server",
@@ -113,7 +116,11 @@ function ConnectionCheck({ device, language, request, sessionId, automatic = fal
   </div>
 }
 
-export function WorkerConnections({ language, request, sessionId }: { language: Language; request: Request; sessionId: string | null | undefined }) {
+type WorkerConnectionsProps = { language: Language; request: Request; sessionId: string | null | undefined }
+export function WorkerConnections(props: WorkerConnectionsProps) {
+  return <WorkerConnectionsSession key={props.sessionId} {...props} />
+}
+function WorkerConnectionsSession({ language, request, sessionId }: WorkerConnectionsProps) {
   const t = copy[language]
   const client = useQueryClient()
   const [params, setParams] = useSearchParams()
@@ -125,25 +132,30 @@ export function WorkerConnections({ language, request, sessionId }: { language: 
   const [name, setName] = useState("")
   const [confirmed, setConfirmed] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [sharing, setSharing] = useState<string | null>(null)
+  // Auth Mini sessionId is session_id, not the stable user ID returned by /api/me.
+  const identity = useQuery({ queryKey: ["me", sessionId], queryFn: ({ signal }) => request<{ user_id: string }>("/api/me", { signal }), staleTime: 60000, retry: false })
   const [editing, setEditing] = useState<string | null>(null)
   const [editName, setEditName] = useState("")
-  const workers = useQuery({ queryKey: ["workers", sessionId], queryFn: () => request<Device[]>("/api/workers"), refetchInterval: 3000 })
+  const workers = useQuery({ queryKey: ["workers", sessionId], queryFn: ({ signal }) => request<Device[]>("/api/workers", { signal }), refetchInterval: 3000 })
   const release = useQuery({ queryKey: ["worker-release"], queryFn: () => request<Release>("/api/worker-release"), staleTime: 60000 })
   const pairing = useQuery({ queryKey: ["worker-pairing", sessionId, routeCode], queryFn: () => request<Pairing>(`/api/worker-pairings/${routeCode}`), enabled: validCode(routeCode), retry: false, refetchInterval: (q) => q.state.data && ["pending", "approving"].includes(q.state.data.status) ? 5000 : false })
   useEffect(() => { setInputCode(routeCode); setConfirmed(false); setName(""); if (routeCode) setShow(true) }, [routeCode])
-  const approval = useMutation({ mutationFn: () => request<Pairing>(`/api/worker-pairings/${routeCode}`, { method: "POST", body: JSON.stringify({ label: name.trim() || pairing.data?.hostname }) }), onSuccess: (value) => { client.setQueryData(["worker-pairing", sessionId, value.user_code], value); void client.invalidateQueries({ queryKey: ["workers"] }) } })
+  const approval = useMutation({ mutationFn: () => request<Pairing>(`/api/worker-pairings/${routeCode}`, { method: "POST", body: JSON.stringify({ label: name.trim() || pairing.data?.hostname }) }), onSuccess: (value) => { client.setQueryData(["worker-pairing", sessionId, value.user_code], value); void client.invalidateQueries({ queryKey: ["workers", sessionId] }) } })
   const cancel = useMutation({ mutationFn: () => request(`/api/worker-pairings/${routeCode}`, { method: "DELETE" }), onSuccess: () => { void pairing.refetch() } })
-  const rename = useMutation({ mutationFn: ({ id, label }: { id: string; label: string }) => request(`/api/workers/${id}`, { method: "PATCH", body: JSON.stringify({ label }) }), onSuccess: () => { setEditing(null); void client.invalidateQueries({ queryKey: ["workers"] }) } })
-  const remove = useMutation({ mutationFn: (id: string) => request(`/api/workers/${id}`, { method: "DELETE" }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers"] }) } })
-  const upgrade = useMutation({ mutationFn: (id: string) => request(`/api/workers/${id}/upgrade`, { method: "POST" }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers"] }) } })
-  const pairedDevice = workers.data?.find((device) => device.id === pairing.data?.worker_id)
+  const rename = useMutation({ mutationFn: ({ id, label }: { id: string; label: string }) => request(`/api/workers/${id}`, { method: "PATCH", body: JSON.stringify({ label }) }), onSuccess: () => { setEditing(null); void client.invalidateQueries({ queryKey: ["workers", sessionId] }) } })
+  const remove = useMutation({ mutationFn: (id: string) => request(`/api/workers/${id}`, { method: "DELETE" }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers", sessionId] }) } })
+  const upgrade = useMutation({ mutationFn: (id: string) => request(`/api/workers/${id}/upgrade`, { method: "POST" }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers", sessionId] }) } })
+  const pairedDevice = workers.data?.find((device) => ownedDevice(device) && device.id === pairing.data?.worker_id)
   const wizard = show || workers.data?.length === 0
   const currentStep = pairing.data?.status === "approved" ? 3 : routeCode ? 2 : 1
   const lookup = () => { const code = normalizeCode(inputCode); if (validCode(code)) { approval.reset(); cancel.reset(); setParams({ code }) } }
   const prefix = platform.startsWith("windows") ? ".\\cybion-worker.exe" : "./cybion-worker"
   return <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-4 md:p-6">
     <div className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-2xl font-semibold">{t.title}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{t.description}</p></div><Button onClick={() => { setShow(true); setParams({}); approval.reset(); cancel.reset() }}><PlusIcon />{t.add}</Button></div>
+    <section aria-label={t.uid} className="max-w-xl"><h2 className="text-sm font-medium">{t.uid}</h2><p className="my-2 text-xs text-muted-foreground">{t.uidHint}</p>{identity.data?.user_id && <CopyBlock language={language} text={identity.data.user_id} />}{identity.isPending && <Spinner />}<ErrorNotice error={identity.error} />{identity.error && <Button variant="outline" size="sm" onClick={() => void identity.refetch()}>{t.retry}</Button>}</section>
     <ErrorNotice error={workers.error || release.error} />
+    {workers.error && <Button className="self-start" variant="outline" onClick={() => void workers.refetch()}>{t.retry}</Button>}
     {wizard && <>
       <ol className="grid grid-cols-3 gap-2 text-xs sm:text-sm" aria-label={t.title}>{[t.target, t.approve, t.check].map((step, i) => <li key={step} aria-current={i + 1 === currentStep ? "step" : undefined} className={`rounded-lg border p-3 ${i + 1 === currentStep ? "border-primary bg-primary/5 font-medium" : "text-muted-foreground"}`}>{step}</li>)}</ol>
       <Card><CardHeader><CardTitle>{t.target}</CardTitle><CardDescription>{t.targetHint}</CardDescription></CardHeader><CardContent className="space-y-4">
@@ -166,22 +178,32 @@ export function WorkerConnections({ language, request, sessionId }: { language: 
       </CardContent></Card>
       {pairing.data?.status === "approved" && <Card><CardHeader><CardTitle>{t.check}</CardTitle></CardHeader><CardContent>{pairedDevice ? <ConnectionCheck automatic device={pairedDevice} language={language} request={request} sessionId={sessionId} /> : <div className="space-y-3"><p className="text-sm">{t.deviceMissing}</p><Button variant="outline" onClick={() => void workers.refetch()}>{t.retry}</Button></div>}{pairedDevice && pairedDevice.last_seen_at == null && <p className="mt-3 text-sm text-muted-foreground">{t.waitingHint}</p>}</CardContent></Card>}
       <details className="rounded-xl border p-4"><summary className="cursor-pointer text-sm font-medium">{t.help}</summary><div className="mt-4 space-y-3"><p className="text-sm">{t.helpBody}</p><CopyBlock language={language} text={`${prefix} status\n${prefix} doctor\n${prefix} config-path`} /><p className="text-xs text-muted-foreground">{t.logs}</p><p className="text-xs leading-6 text-muted-foreground">{t.restore}</p></div></details>
-      <ManualPairing language={language} request={request} />
+      <ManualPairing language={language} request={request} sessionId={sessionId} />
       {workers.data && workers.data.length > 0 && <Button className="self-start" variant="ghost" onClick={() => { setShow(false); setParams({}) }}>{t.close}</Button>}
     </>}
     <Card><CardHeader><CardTitle>{t.devices}</CardTitle></CardHeader><CardContent className="space-y-3">
       <ErrorNotice error={rename.error || remove.error || upgrade.error} />
-      {workers.isLoading && <Spinner />}{workers.data?.length === 0 && <p className="text-sm text-muted-foreground">{t.empty}</p>}
-      {workers.data?.map((device) => <div key={device.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-center gap-3"><MonitorIcon className="size-4" /><div className="min-w-0 flex-1">{editing === device.id ? <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (editName.trim()) rename.mutate({ id: device.id, label: editName.trim() }) }}><Input aria-label={t.name} value={editName} maxLength={80} onChange={(e) => setEditName(e.target.value)} /><Button size="sm" disabled={rename.isPending || !editName.trim()}>{t.save}</Button></form> : <p className="font-medium">{device.label}</p>}<p className="mt-1 text-xs text-muted-foreground">{device.last_seen_at ? t.lastSeen : t.created}: {formattedTime(language, device.last_seen_at ?? device.created_at)}</p></div><Badge variant="outline">{t[deviceStatus(device)]}</Badge><Badge variant="outline">{t.workerVersion}: {device.version ?? t.versionUnknown}</Badge><Button size="sm" variant="outline" disabled={upgrade.isPending || !upgradeAvailable(device, release.data)} onClick={() => { if (window.confirm(t.upgradeConfirm)) upgrade.mutate(device.id) }}>{t.upgrade}{release.data ? ` → ${release.data.version}` : ""}</Button><Button size="sm" variant="ghost" onClick={() => setExpanded(expanded === device.id ? null : device.id)}>{t.checkButton}</Button><Button size="sm" variant="ghost" onClick={() => { setEditing(device.id); setEditName(device.label) }}>{t.rename}</Button><Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => { if (window.confirm(t.removeConfirm)) remove.mutate(device.id) }}>{t.remove}</Button></div>{!device.can_upgrade && <p className="mt-2 text-xs text-muted-foreground">{t.manualUpgrade}</p>}{device.upgrade && <p role="status" className="mt-2 text-sm">{device.upgrade.status === "completed" ? t.upgradeCompleted : device.upgrade.status === "failed" ? t.upgradeFailed : t.upgradePending} {device.upgrade.error}</p>}{expanded === device.id && <div className="mt-4 border-t pt-4"><ConnectionCheck device={device} language={language} request={request} sessionId={sessionId} /><p className="mt-4 text-xs text-muted-foreground">{t.logs}</p></div>}</div>)}
+      {workers.isLoading && <Spinner />}{workers.data?.filter(ownedDevice).length === 0 && <p className="text-sm text-muted-foreground">{t.empty}</p>}
+      {workers.data?.filter(ownedDevice).map((device) => <div key={device.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-center gap-3"><MonitorIcon className="size-4" /><div className="min-w-0 flex-1">{editing === device.id ? <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (editName.trim()) rename.mutate({ id: device.id, label: editName.trim() }) }}><Input aria-label={t.name} value={editName} maxLength={80} onChange={(e) => setEditName(e.target.value)} /><Button size="sm" disabled={rename.isPending || !editName.trim()}>{t.save}</Button></form> : <p className="font-medium">{device.label}</p>}<p className="mt-1 text-xs text-muted-foreground">{device.last_seen_at ? t.lastSeen : t.created}: {formattedTime(language, device.last_seen_at ?? device.created_at)}</p></div><Badge variant="outline">{t[deviceStatus(device)]}</Badge><Badge variant="outline">{t.workerVersion}: {device.version ?? t.versionUnknown}</Badge><Button size="sm" variant="outline" disabled={upgrade.isPending || !upgradeAvailable(device, release.data)} onClick={() => { if (window.confirm(t.upgradeConfirm)) upgrade.mutate(device.id) }}>{t.upgrade}{release.data ? ` → ${release.data.version}` : ""}</Button><Button size="sm" variant="ghost" aria-expanded={sharing === device.id} onClick={() => setSharing(sharing === device.id ? null : device.id)}>{t.share}</Button><Button size="sm" variant="ghost" onClick={() => setExpanded(expanded === device.id ? null : device.id)}>{t.checkButton}</Button><Button size="sm" variant="ghost" onClick={() => { setEditing(device.id); setEditName(device.label) }}>{t.rename}</Button><Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => { if (window.confirm(t.removeConfirm)) remove.mutate(device.id) }}>{t.remove}</Button></div>{sharing === device.id && <WorkerSharing key={`${sessionId}:${device.id}`} language={language} request={request} sessionId={sessionId} userId={identity.data?.user_id} workerId={device.id} />}{!device.can_upgrade && <p className="mt-2 text-xs text-muted-foreground">{t.manualUpgrade}</p>}{device.upgrade && <p role="status" className="mt-2 text-sm">{device.upgrade.status === "completed" ? t.upgradeCompleted : device.upgrade.status === "failed" ? t.upgradeFailed : t.upgradePending} {device.upgrade.error}</p>}{expanded === device.id && <div className="mt-4 border-t pt-4"><ConnectionCheck device={device} language={language} request={request} sessionId={sessionId} /><p className="mt-4 text-xs text-muted-foreground">{t.logs}</p></div>}</div>)}
+    </CardContent></Card>
+    <Card><CardHeader><CardTitle>{t.shared}</CardTitle><CardDescription>{t.sharedHint}</CardDescription></CardHeader><CardContent className="flex flex-col gap-3">
+      {workers.isLoading && <Spinner />}
+      {workers.data?.filter((device) => !ownedDevice(device)).length === 0 && <p className="text-sm text-muted-foreground">{t.sharedEmpty}</p>}
+      {workers.data?.filter((device) => !ownedDevice(device)).map((device) => <div key={device.id} className="flex flex-col gap-3 rounded-xl border p-4">
+        <div className="flex flex-wrap items-center gap-2"><p className="min-w-0 flex-1 break-words font-medium">{device.label}</p><Badge variant="secondary">{t.sharedBadge}</Badge><Badge variant="outline">{t[deviceStatus(device)]}</Badge></div>
+        <p className="break-all text-xs text-muted-foreground">{t.owner}: <code>{device.owner_user_id}</code></p>
+        <code className="break-all text-xs text-muted-foreground">{device.id}</code>
+        <Button className="self-start" asChild variant="outline"><Link to="/threads/new" state={{ initialInput: language === "zh" ? `请在共享设备 ${device.label}（worker_id: ${device.id}）上运行一个只输出系统名称的命令，不修改文件。` : `On shared device ${device.label} (worker_id: ${device.id}), run a read-only command that prints the operating system name. Do not modify files.` }}>{t.start}</Link></Button>
+      </div>)}
     </CardContent></Card>
   </main>
 }
 
-function ManualPairing({ language, request }: { language: Language; request: Request }) {
+function ManualPairing({ language, request, sessionId }: WorkerConnectionsProps) {
   const t = copy[language]
   const client = useQueryClient()
   const [name, setName] = useState("")
-  const pairing = useMutation({ mutationFn: () => request<Record<string, string>>("/api/workers", { method: "POST", body: JSON.stringify({ label: name.trim() }) }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers"] }) } })
+  const pairing = useMutation({ mutationFn: () => request<Record<string, string>>("/api/workers", { method: "POST", body: JSON.stringify({ label: name.trim() }) }), onSuccess: () => { void client.invalidateQueries({ queryKey: ["workers", sessionId] }) } })
   const config = pairing.data ? ["controller_url", "user_id", "machine_id", "access_token"].map((key) => `${key} = ${JSON.stringify(pairing.data![key])}`).join("\n") + "\n" : ""
   return <details className="rounded-xl border p-4"><summary className="cursor-pointer text-sm">{t.legacy}</summary><div className="mt-4 space-y-3"><p className="text-xs leading-5 text-muted-foreground">{t.legacyHint}</p><form className="flex flex-wrap gap-3" onSubmit={(e) => { e.preventDefault(); pairing.mutate() }}><Input className="max-w-xs" aria-label={t.name} placeholder={t.name} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} /><Button variant="outline" disabled={!name.trim() || pairing.isPending || pairing.isSuccess}>{t.legacyCreate}</Button></form><ErrorNotice error={pairing.error} />{config && <><Button variant="outline" onClick={() => { const url = URL.createObjectURL(new Blob([config], { type: "application/toml" })); const link = document.createElement("a"); link.href = url; link.download = "worker.toml"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000) }}>{t.configDownload}</Button><CopyBlock text={config} language={language} /><p className="text-xs text-muted-foreground">{t.configSaved}</p><p className="text-xs text-muted-foreground">{t.logs}</p></>}</div></details>
 }
