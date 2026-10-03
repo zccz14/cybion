@@ -64,6 +64,8 @@ const AUTH_AUDIENCES: [&str; 3] = ["cybion.ntnl.io", "linkit.ntnl.io", "openai.n
 const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
 const WORKER_RELEASE_BASE_URL: &str = "https://github.com/zccz14/cybion-worker/releases/download";
+const WORKER_ANDROID_RELEASE_BASE_URL: &str =
+    "https://github.com/zccz14/cybion-worker-for-android/releases/download";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 // Automatic naming and the rename form share one request path: the compiled
@@ -133,6 +135,7 @@ struct AppState {
     client: reqwest::Client,
     linkit_api_url: String,
     worker_release_base: String,
+    worker_android_release_base: String,
     auth: Arc<OnceCell<AuthMiniLayer>>,
     integration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     worker_pairing_lock: Arc<Mutex<()>>,
@@ -353,6 +356,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .build()?,
         linkit_api_url: LINKIT_API_URL.to_owned(),
         worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
+        worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
         auth: Arc::new(OnceCell::new()),
         integration_locks: Arc::new(Mutex::new(HashMap::new())),
         worker_pairing_lock: Arc::new(Mutex::new(())),
@@ -1377,6 +1381,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("workers", "upgrade_version", "TEXT"),
         ("workers", "upgrade_status", "TEXT"),
         ("workers", "upgrade_error", "TEXT"),
+        ("workers", "platform", "TEXT"),
     ] {
         let exists: bool = transaction.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?)"),
@@ -2011,6 +2016,7 @@ struct WorkerView {
     access: String,
     version: Option<String>,
     can_upgrade: bool,
+    upgrade_target: Option<String>,
     upgrade: Option<worker_protocol::UpgradeView>,
     id: String,
     label: String,
@@ -8076,6 +8082,7 @@ mod tests {
                 client: reqwest::Client::new(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
                 worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
+                worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
                 auth: Arc::new(OnceCell::new()),
                 integration_locks: Arc::new(Mutex::new(HashMap::new())),
                 worker_pairing_lock: Arc::new(Mutex::new(())),

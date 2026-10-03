@@ -263,8 +263,9 @@ pub(super) async fn approve(
     .await?;
     if let Some(token_hash) = token_hash {
         let worker_id = pairing.worker_id.clone();
+        let platform = pairing.platform.clone();
         user_db(&state, &identity.user, true, move |connection| {
-            connection.execute("INSERT INTO workers(id,label,token_hash,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING", params![worker_id,label,token_hash,now()])?;
+            connection.execute("INSERT INTO workers(id,label,token_hash,created_at,platform) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING", params![worker_id,label,token_hash,now(),platform])?;
             Ok(())
         }).await?;
         let id = pairing.id.clone();
@@ -323,12 +324,48 @@ pub(super) async fn release() -> Json<Value> {
     )
 }
 
-const WORKER_RELEASE_PLATFORMS: [&str; 5] = [
-    "macos-aarch64",
-    "macos-x86_64",
-    "linux-x86_64",
-    "linux-aarch64",
-    "windows-x86_64",
+/// Official release assets the Controller mirrors. CLI platforms are
+/// archives from `cybion-worker`; the Android APK is published by
+/// `cybion-worker-for-android` from a separate upstream base.
+struct ReleasePlatform {
+    id: &'static str,
+    /// File-name suffixes accepted after `cybion-worker-{id}`.
+    suffixes: &'static [&'static str],
+    /// Android assets download from the app repository, not the CLI release.
+    android: bool,
+}
+
+const WORKER_RELEASE_PLATFORMS: [ReleasePlatform; 6] = [
+    ReleasePlatform {
+        id: "macos-aarch64",
+        suffixes: &[".tar.gz", ".tar.gz.sha256"],
+        android: false,
+    },
+    ReleasePlatform {
+        id: "macos-x86_64",
+        suffixes: &[".tar.gz", ".tar.gz.sha256"],
+        android: false,
+    },
+    ReleasePlatform {
+        id: "linux-x86_64",
+        suffixes: &[".tar.gz", ".tar.gz.sha256"],
+        android: false,
+    },
+    ReleasePlatform {
+        id: "linux-aarch64",
+        suffixes: &[".tar.gz", ".tar.gz.sha256"],
+        android: false,
+    },
+    ReleasePlatform {
+        id: "windows-x86_64",
+        suffixes: &[".tar.gz", ".tar.gz.sha256", ".zip", ".zip.sha256"],
+        android: false,
+    },
+    ReleasePlatform {
+        id: "android-aarch64",
+        suffixes: &[".apk", ".apk.sha256"],
+        android: true,
+    },
 ];
 
 fn release_version_ok(version: &str) -> bool {
@@ -342,28 +379,34 @@ fn release_version_ok(version: &str) -> bool {
         })
 }
 
-fn release_asset_ok(asset: &str) -> bool {
-    WORKER_RELEASE_PLATFORMS.iter().any(|platform| {
-        let base = format!("cybion-worker-{platform}");
-        asset == format!("{base}.tar.gz")
-            || asset == format!("{base}.tar.gz.sha256")
-            || (platform.starts_with("windows")
-                && (asset == format!("{base}.zip") || asset == format!("{base}.zip.sha256")))
+fn release_asset_platform(asset: &str) -> Option<&'static ReleasePlatform> {
+    WORKER_RELEASE_PLATFORMS.iter().find(|platform| {
+        asset
+            .strip_prefix(&format!("cybion-worker-{}", platform.id))
+            .is_some_and(|rest| platform.suffixes.contains(&rest))
     })
 }
 
 /// Serve official Worker release assets through the Controller so devices on
 /// networks that cannot reach GitHub can still install and upgrade. Only the
-/// five published platform assets and their checksum files are mirrored;
-/// anything else is rejected before any upstream request is made.
+/// published CLI archives, the Android APK and their checksum files are
+/// mirrored; anything else is rejected before any upstream request is made.
 pub(super) async fn release_asset(
     State(state): State<AppState>,
     AxumPath((version, asset)): AxumPath<(String, String)>,
 ) -> Result<Response, ApiError> {
-    if !release_version_ok(&version) || !release_asset_ok(&asset) {
+    if !release_version_ok(&version) {
         return Err(ApiError::not_found("unknown Worker release asset"));
     }
-    let mut url = url::Url::parse(&state.worker_release_base).map_err(ApiError::internal)?;
+    let Some(platform) = release_asset_platform(&asset) else {
+        return Err(ApiError::not_found("unknown Worker release asset"));
+    };
+    let base = if platform.android {
+        &state.worker_android_release_base
+    } else {
+        &state.worker_release_base
+    };
+    let mut url = url::Url::parse(base).map_err(ApiError::internal)?;
     url.path_segments_mut()
         .map_err(|_| ApiError::internal("Worker release base must support path segments"))?
         .pop_if_empty()

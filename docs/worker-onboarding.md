@@ -92,30 +92,37 @@ Background mode is labeled honestly as distinct from reboot persistence.
 ## Verification and release
 
 - Rust unit and HTTP tests: ownership, simultaneous approval, token secrecy,
-  authentication, expiry, cancellation, idempotency/revocation, rate limits and
-  actual SSE/result routes.
+  authentication, expiry, cancellation, idempotency/revocation, rate limits,
+  actual SSE/result routes, and the release mirror (CLI archives, the Android
+  APK, upstream separation and per-platform upgrade targets).
 - Worker tests: no-clobber private configuration, exclusive process lock,
   resumable device credentials near expiry, cancellation, safe capability checks,
   delivery receipts for duplicates and reconnects.
-- Frontend tests: manifest/commands, exact-device readiness, consent and no token
-  persistence. Playwright covers approval, refresh, first-task handoff, mobile
-  remote installation in both languages, expiry and timeout recovery.
+- Frontend tests: manifest/commands, exact-device readiness, per-device upgrade
+  targets, consent and no token persistence. Playwright covers approval, refresh,
+  first-task handoff, mobile remote installation in both languages, expiry and
+  timeout recovery.
 - `scripts/test-worker-roundtrip.py /path/to/cybion-worker` runs the real Worker
   against an authenticated disposable controller fixture; checks background
   startup, diagnostic round trip, duplicate process rejection and revocation exit.
 - Publish Worker v0.1.4 before Controller v0.3.55. Controller release checks all
-  recommended Worker assets/checksums before publishing, then runs public
-  onboarding smoke after deployment. That smoke never approves a device and
-  leaves one short-lived request to expire.
+  recommended Worker assets/checksums (CLI platforms and the Android APK) before
+  publishing, then runs public onboarding smoke after deployment. That smoke
+  never approves a device and leaves one short-lived request to expire.
 
 The Controller also serves the downloads themselves: `GET
 /worker-release/{version}/{asset}` streams the official archive or checksum
-file for the five published platforms, so devices on networks that cannot
-reach GitHub can still install and upgrade. The guide's download button and
-install commands use this origin, and Worker 0.2.4+ prefers it for remote
-upgrades with a direct GitHub fallback. The release gate still verifies the
-GitHub-published assets, and the public smoke downloads one asset through the
-production mirror and checks its SHA-256.
+file for the five published CLI platforms and the Android app, so devices on
+networks that cannot reach GitHub can still install and upgrade. The guide's
+download button and install commands use this origin, and Worker 0.2.4+ prefers
+it for remote upgrades with a direct GitHub fallback. Android builds are
+published by `zccz14/cybion-worker-for-android` as
+`cybion-worker-android-aarch64.apk` (plus its `.sha256` checksum) and mirrored
+from that repository; `worker-release.json` carries the Android release under
+`android`, and remote upgrades target it for devices whose pairing platform
+starts with `android`. The release gate verifies the GitHub-published assets of
+every mirrored platform, and the public smoke downloads one CLI asset and the
+APK through the production mirror and checks both SHA-256 checksums.
 
 The public smoke identifies itself as `cybion-release-smoke/1.0`; default Python
 user agents are rejected by the production edge. A local HTTP regression fixture

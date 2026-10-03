@@ -38,6 +38,14 @@ checksum_text = download(f"/worker-release/{release['version']}/{asset}.sha256")
 fields = checksum_text.split()
 assert len(fields) == 2 and fields[1].lstrip("*") == asset, checksum_text
 assert hashlib.sha256(archive).hexdigest() == fields[0], "mirrored release download checksum mismatch"
+android = release.get("android")
+assert android, "release manifest must declare the Android app"
+android_asset = "cybion-worker-android-aarch64.apk"
+apk = download(f"/worker-release/{android['version']}/{android_asset}")
+apk_checksum_text = download(f"/worker-release/{android['version']}/{android_asset}.sha256").decode()
+apk_fields = apk_checksum_text.split()
+assert len(apk_fields) == 2 and apk_fields[1].lstrip("*") == android_asset, apk_checksum_text
+assert hashlib.sha256(apk).hexdigest() == apk_fields[0], "mirrored Android APK checksum mismatch"
 download(f"/worker-release/{release['version']}/cybion-worker-plan9-x86_64.tar.gz", expected=404)
 secret = secrets.token_hex(32)
 started = request("/worker/v1/pairings", data={"device_secret": secret, "token_hash": hashlib.sha256(secrets.token_bytes(32)).hexdigest(), "hostname": "release-smoke-unapproved", "platform": "smoke-test", "version": "0.1.4"})
@@ -46,4 +54,4 @@ poll = request("/worker/v1/pairings/" + started["id"], token=secret)
 assert poll["status"] == "pending" and poll["user_id"] is None
 request("/api/worker-pairings/" + started["user_code"], data={"label": "must-not-be-created"}, expected=401)
 request("/worker/v1/pairings/" + started["id"], token=secrets.token_hex(32), expected=401)
-print(json.dumps({"controller_version": config["version"], "worker_version": release["version"], "release_download": "verified", "platforms": 5, "pairing_status": "pending", "unauthorized_approval": "rejected", "wrong_device_proof": "rejected"}))
+print(json.dumps({"controller_version": config["version"], "worker_version": release["version"], "release_download": "verified", "platforms": 5, "android_version": android["version"], "android_download": "verified", "pairing_status": "pending", "unauthorized_approval": "rejected", "wrong_device_proof": "rejected"}))

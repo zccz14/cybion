@@ -379,6 +379,75 @@ async fn upgrades_require_owner_online_capable_worker_and_browser_authentication
     server.abort();
 }
 
+#[test]
+fn remote_upgrade_targets_follow_the_worker_platform() {
+    let manifest: Value =
+        serde_json::from_str(include_str!("../../../worker-release.json")).unwrap();
+    let android = manifest["android"]["version"].as_str().unwrap();
+    let cli = manifest["version"].as_str().unwrap();
+    assert_eq!(
+        recommended_version_for(Some("android 14 (arm64-v8a)")),
+        android
+    );
+    assert_eq!(recommended_version_for(Some(" Android 14 ")), android);
+    assert_eq!(recommended_version_for(Some("macos / aarch64")), cli);
+    assert_eq!(recommended_version_for(Some("linux / x86_64")), cli);
+    assert_eq!(recommended_version_for(None), cli);
+}
+
+#[tokio::test]
+async fn android_workers_queue_the_android_app_release_for_upgrade() {
+    let (_root, state, user, _thread, worker, _) = fixture().await;
+    let boot = Uuid::new_v4().to_string();
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let boot = boot.clone();
+        move |c| {
+            c.execute(
+                "UPDATE workers SET platform='android 14 (arm64-v8a)',version='0.1.6' WHERE id=?",
+                [&worker],
+            )?;
+            register(c, &worker, Some(&boot), Some("0.1.6"))?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let _ = request_upgrade(
+        State(state.clone()),
+        axum::Extension(BrowserIdentity {
+            user: user.clone(),
+            bearer: "fixture".into(),
+        }),
+        AxumPath(worker.clone()),
+    )
+    .await
+    .unwrap();
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let boot = boot.clone();
+        move |c| {
+            let manifest: Value =
+                serde_json::from_str(include_str!("../../../worker-release.json")).unwrap();
+            let android = manifest["android"]["version"].as_str().unwrap();
+            assert_eq!(
+                c.query_row(
+                    "SELECT upgrade_version FROM workers WHERE id=?",
+                    [&worker],
+                    |r| r.get::<_, String>(0)
+                )?,
+                android
+            );
+            let event = ready_upgrade(c, &worker, Some(&boot))?.unwrap();
+            assert_eq!(event["version"], android);
+            assert_eq!(event["boot_id"], boot);
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn legacy_workers_are_not_replayed_or_silently_assigned_new_boots() {
     let (_root, state, user, thread, worker, input) = fixture().await;
