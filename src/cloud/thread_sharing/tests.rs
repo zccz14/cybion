@@ -400,7 +400,7 @@ fn schema_23_upgrade_preserves_data_and_does_not_grant_existing_users() {
     assert_eq!(
         a.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        24
+        USER_SCHEMA_VERSION
     );
     check_user_foreign_keys(&a).unwrap();
 }
