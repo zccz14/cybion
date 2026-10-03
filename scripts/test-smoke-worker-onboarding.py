@@ -24,7 +24,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/config":
             return self.reply(200, {"version": "fixture"})
         if self.path == "/api/worker-release":
-            return self.reply(200, {"version": "v0.1.4", "platforms": [1, 2, 3, 4, 5]})
+            return self.reply(200, {"version": "v0.1.4", "platforms": [1, 2, 3, 4, 5], "android": {"version": "v0.3.1", "release_url": "https://github.com/zccz14/cybion-worker-for-android/releases/tag/v0.3.1"}})
         if self.path.startswith("/worker-release/"):
             asset = "cybion-worker-linux-x86_64.tar.gz"
             archive = b"fixture-release-archive"
@@ -40,6 +40,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 digest = hashlib.sha256(archive).hexdigest()
                 self.wfile.write(f"{digest}  {asset}\n".encode())
+                return
+            android_asset = "cybion-worker-android-aarch64.apk"
+            apk = b"fixture-android-apk"
+            if self.path == "/worker-release/v0.3.1/" + android_asset:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.android.package-archive")
+                self.end_headers()
+                self.wfile.write(apk)
+                return
+            if self.path == "/worker-release/v0.3.1/" + android_asset + ".sha256":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                digest = hashlib.sha256(apk).hexdigest()
+                self.wfile.write(f"{digest}  {android_asset}\n".encode())
                 return
             return self.reply(404, {"error": "unknown release asset"})
         if self.path == "/worker/v1/pairings" and self.command == "POST":
@@ -60,6 +75,8 @@ try:
     summary = json.loads(result.stdout)
     assert summary["controller_version"] == "fixture"
     assert summary["release_download"] == "verified"
+    assert summary["android_download"] == "verified"
+    assert summary["android_version"] == "v0.3.1"
     assert summary["unauthorized_approval"] == "rejected"
     assert summary["wrong_device_proof"] == "rejected"
     print("Public smoke regression passed: explicit user agent on every request")

@@ -456,6 +456,23 @@ async fn mock_release_mirror(uri: axum::http::Uri) -> Response {
         (StatusCode::OK, b"zip-bytes".to_vec()).into_response()
     } else if path == "/v0.2.4/cybion-worker-linux-aarch64.tar.gz" {
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    } else if path == "/v0.1.7/cybion-worker-android-aarch64.apk" {
+        (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                "application/vnd.android.package-archive",
+            )],
+            b"apk-bytes".to_vec(),
+        )
+            .into_response()
+    } else if path == "/v0.1.7/cybion-worker-android-aarch64.apk.sha256" {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            b"apk-checksum".to_vec(),
+        )
+            .into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
@@ -548,6 +565,78 @@ async fn worker_release_downloads_mirror_official_assets_and_validate_requests()
 }
 
 #[tokio::test]
+async fn worker_release_serves_the_android_apk_from_the_android_mirror() {
+    let (_root, mut state) = test_state();
+    let mirror = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.worker_android_release_base = format!("http://{}", mirror.local_addr().unwrap());
+    state.worker_release_base = "http://127.0.0.1:1".to_owned();
+    let mirror_server = tokio::spawn(async move {
+        axum::serve(mirror, axum::Router::new().fallback(mock_release_mirror))
+            .await
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+
+    let apk = client
+        .get(format!(
+            "{base}/worker-release/v0.1.7/cybion-worker-android-aarch64.apk"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(apk.status(), StatusCode::OK);
+    assert_eq!(
+        apk.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/vnd.android.package-archive"
+    );
+    assert_eq!(&apk.bytes().await.unwrap()[..], "apk-bytes".as_bytes());
+
+    let checksum = client
+        .get(format!(
+            "{base}/worker-release/v0.1.7/cybion-worker-android-aarch64.apk.sha256"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(checksum.status(), StatusCode::OK);
+    assert_eq!(checksum.text().await.unwrap(), "apk-checksum");
+
+    // The CLI base is unreachable in this fixture, so a desktop asset must
+    // fail: proof that the Android asset used the Android upstream base.
+    let desktop = client
+        .get(format!(
+            "{base}/worker-release/v0.2.4/cybion-worker-linux-x86_64.tar.gz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desktop.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    for path in [
+        "worker-release/v0.1.7/cybion-worker-android-aarch64.tar.gz",
+        "worker-release/v0.1.7/cybion-worker-android-aarch64.apk.zip",
+        "worker-release/v0.1.7/cybion-worker-linux-x86_64.apk",
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{base}/{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path} must be rejected"
+        );
+    }
+
+    server.abort();
+    mirror_server.abort();
+}
+
+#[tokio::test]
 async fn worker_release_downloads_map_mirror_failures_to_unavailable() {
     let (_root, mut state) = test_state();
     let mirror = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -599,12 +688,16 @@ fn release_download_validation_rejects_junk_paths() {
     assert!(!release_version_ok("v0.2.4/../"));
     assert!(!release_version_ok(".."));
     assert!(!release_version_ok("v99999999999999999999.0.0"));
-    assert!(release_asset_ok("cybion-worker-linux-x86_64.tar.gz"));
-    assert!(release_asset_ok("cybion-worker-linux-x86_64.tar.gz.sha256"));
-    assert!(release_asset_ok("cybion-worker-windows-x86_64.zip.sha256"));
-    assert!(!release_asset_ok("../secret"));
-    assert!(!release_asset_ok("cybion-worker-linux-x86_64.tar.gz.exe"));
-    assert!(!release_asset_ok("cybion-worker-plan9-x86_64.tar.gz"));
+    assert!(release_asset_platform("cybion-worker-linux-x86_64.tar.gz").is_some());
+    assert!(release_asset_platform("cybion-worker-linux-x86_64.tar.gz.sha256").is_some());
+    assert!(release_asset_platform("cybion-worker-windows-x86_64.zip.sha256").is_some());
+    assert!(release_asset_platform("cybion-worker-android-aarch64.apk").is_some());
+    assert!(release_asset_platform("cybion-worker-android-aarch64.apk.sha256").is_some());
+    assert!(release_asset_platform("../secret").is_none());
+    assert!(release_asset_platform("cybion-worker-linux-x86_64.tar.gz.exe").is_none());
+    assert!(release_asset_platform("cybion-worker-linux-x86_64.apk").is_none());
+    assert!(release_asset_platform("cybion-worker-android-aarch64.tar.gz").is_none());
+    assert!(release_asset_platform("cybion-worker-plan9-x86_64.tar.gz").is_none());
 }
 
 #[test]
@@ -619,6 +712,16 @@ fn code_and_version_validation() {
     let release: Value =
         serde_json::from_str(include_str!("../../../worker-release.json")).unwrap();
     assert_eq!(release["version"], "v0.2.7");
+    assert_eq!(release["platforms"].as_array().unwrap().len(), 5);
+    let android = &release["android"];
+    let android_version = android["version"].as_str().unwrap();
+    assert!(release_version_ok(android_version));
+    assert_eq!(
+        android["release_url"].as_str().unwrap(),
+        format!(
+            "https://github.com/zccz14/cybion-worker-for-android/releases/tag/{android_version}"
+        )
+    );
 }
 
 async fn authenticated_fixture(state: &AppState) -> (String, tokio::task::JoinHandle<()>) {

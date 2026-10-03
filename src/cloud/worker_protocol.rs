@@ -364,9 +364,18 @@ pub(super) fn upgrade_view(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<U
         })
         .transpose()
 }
-fn recommended_version() -> String {
-    serde_json::from_str::<Value>(include_str!("../../worker-release.json"))
-        .expect("embedded release JSON")["version"]
+/// Recommended release per Worker platform: Android devices follow the app
+/// release published and mirrored as the arm64 APK; every other platform
+/// follows the shared CLI release.
+pub(super) fn recommended_version_for(platform: Option<&str>) -> String {
+    let manifest = serde_json::from_str::<Value>(include_str!("../../worker-release.json"))
+        .expect("embedded release JSON");
+    if platform.is_some_and(|platform| platform.trim().to_ascii_lowercase().starts_with("android"))
+        && let Some(version) = manifest["android"]["version"].as_str()
+    {
+        return version.to_owned();
+    }
+    manifest["version"]
         .as_str()
         .expect("release version")
         .to_owned()
@@ -390,8 +399,16 @@ pub(super) async fn request_upgrade(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let id = record_id(&id)?;
-    let target = recommended_version();
     user_db(&state, &identity.user, false, move |c| {
+        let platform: Option<String> = c
+            .query_row(
+                "SELECT platform FROM workers WHERE deleted_at IS NULL AND id=?",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let target = recommended_version_for(platform.as_deref());
         queue_upgrade(c, &id, &target)
     })
     .await?;

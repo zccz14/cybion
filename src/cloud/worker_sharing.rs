@@ -310,7 +310,7 @@ pub(super) async fn revoke(
 }
 
 fn views(c: &Connection, owner: &str) -> Result<Vec<WorkerView>, ApiError> {
-    let mut q=c.prepare("SELECT id,label,created_at,last_seen_at,CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error FROM workers WHERE deleted_at IS NULL ORDER BY created_at DESC")?;
+    let mut q=c.prepare("SELECT id,label,created_at,last_seen_at,CASE WHEN last_seen_at>=? THEN 'online' ELSE 'offline' END,resource_json,version,boot_id,upgrade_version,upgrade_status,upgrade_error,platform FROM workers WHERE deleted_at IS NULL ORDER BY created_at DESC")?;
     let mut rows = q
         .query_map([now() - WORKER_ONLINE_SECONDS], |r| {
             Ok(WorkerView {
@@ -326,6 +326,9 @@ fn views(c: &Connection, owner: &str) -> Result<Vec<WorkerView>, ApiError> {
                     .and_then(|v| serde_json::from_str(&v).ok()),
                 version: r.get(6)?,
                 can_upgrade: r.get::<_, Option<String>>(7)?.is_some(),
+                upgrade_target: Some(worker_protocol::recommended_version_for(
+                    r.get::<_, Option<String>>(11)?.as_deref(),
+                )),
                 upgrade: worker_protocol::upgrade_view(r)?,
             })
         })?
@@ -344,6 +347,7 @@ fn views(c: &Connection, owner: &str) -> Result<Vec<WorkerView>, ApiError> {
                 resource: None,
                 version: None,
                 can_upgrade: false,
+                upgrade_target: None,
                 upgrade: None,
             })
         })?

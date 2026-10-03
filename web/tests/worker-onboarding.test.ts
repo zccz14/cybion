@@ -53,3 +53,24 @@ test("remote upgrade requires capability, a newer recommendation, an online devi
   assert.equal(upgradeAvailable(device, { ...release, version: "v0.1.99" }), false)
   assert.equal(upgradeAvailable({ ...device, upgrade: { version: "v0.2.1", status: "installing", error: null } }, release), false)
 })
+
+test("device-specific upgrade targets follow the android app release", async () => {
+  const { upgradeAvailable, upgradeTargetVersion } = await import("../src/lib/worker-onboarding.ts")
+  const android = release.android
+  assert.ok(android, "worker-release.json declares the android app release")
+  assert.match(android.version, /^v\d+\.\d+\.\d+$/)
+  assert.ok(android.release_url.includes("zccz14/cybion-worker-for-android"))
+  assert.ok(android.release_url.endsWith(`/releases/tag/${android.version}`))
+  const device: Device = { id: "android", label: "Phone", created_at: 0, status: "online", version: "0.1.6", can_upgrade: true, upgrade_target: android.version }
+  assert.equal(upgradeTargetVersion(device, release), android.version)
+  assert.equal(upgradeAvailable(device, release), true)
+  assert.equal(upgradeAvailable({ ...device, version: android.version.replace(/^v/, "") }, release), false)
+  assert.equal(upgradeTargetVersion({ ...device, upgrade_target: null }, release), release.version)
+  assert.equal(upgradeAvailable({ ...device, upgrade_target: null, version: "0.1.0" }, release), true)
+  assert.equal(upgradeAvailable({ ...device, upgrade_target: null, version: "0.1.0" }, undefined), false)
+})
+
+test("the upgrade button shows the device-specific target version", () => {
+  const source = readFileSync(new URL("../src/components/worker-connections.tsx", import.meta.url), "utf8")
+  assert.match(source, /upgradeTargetVersion\(device, release\.data\)/)
+})
