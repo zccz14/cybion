@@ -21,7 +21,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query"
-import { AuthMiniProvider, useAuthMini } from "auth-mini-react-components"
+import { AuthMiniProvider, useAuthMini, type AuthMiniVerificationFailure } from "auth-mini-react-components"
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitMyInfo, LinkitProvider, useLinkit } from "linkit-react-components"
 import {
@@ -665,6 +665,14 @@ const copy = {
     errorDetails: "Error details",
     tryAgain: "Try again",
     reload: "Reload",
+    loadingFailureTitle: "Cybion could not verify this session",
+    loadingFailureCode: "Code",
+    loadingFailureClockOffset: "Clock offset",
+    loadingFailureDeviceTime: "Device time",
+    loadingFailureAdjustedTime: "Adjusted time",
+    loadingFailureFailedAt: "Failed at",
+    loadingFailureBrowser: "Browser",
+    loadingFailureCopy: "Copy details",
   },
   zh: {
     threads: "线程",
@@ -972,6 +980,14 @@ const copy = {
     errorDetails: "错误详情",
     tryAgain: "重试",
     reload: "重新加载",
+    loadingFailureTitle: "Cybion 无法校验当前会话",
+    loadingFailureCode: "错误代码",
+    loadingFailureClockOffset: "时钟偏差",
+    loadingFailureDeviceTime: "设备时间",
+    loadingFailureAdjustedTime: "校正后时间",
+    loadingFailureFailedAt: "失败时间",
+    loadingFailureBrowser: "浏览器",
+    loadingFailureCopy: "复制详情",
   },
 } as const
 
@@ -1075,15 +1091,53 @@ function App() {
 }
 
 function AuthenticatedApp() {
-  const { isReady, isAuthenticated, sdk } = useAuthMini()
-  if (!isReady || !isAuthenticated || !sdk) return <LoadingScreen />
+  const { isReady, isAuthenticated, sdk, verificationFailure } = useAuthMini()
+  if (!isReady || !isAuthenticated || !sdk) return <LoadingScreen verificationFailure={verificationFailure} />
   return <Workspace sdk={sdk} />
 }
 
-function LoadingScreen() {
-  return <main className="flex min-h-svh items-center justify-center bg-background">
-    <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />Cybion</div>
+function LoadingScreen({ verificationFailure }: { verificationFailure?: AuthMiniVerificationFailure | null }) {
+  return <main className="flex min-h-svh items-center justify-center bg-background p-6">
+    <div className="flex w-full max-w-xl flex-col items-center gap-4">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />Cybion</div>
+      {verificationFailure && <SessionVerificationFailureCard failure={verificationFailure} />}
+    </div>
   </main>
+}
+
+// Surfaces the local session verification failure so a stuck loading screen is diagnosable.
+function SessionVerificationFailureCard({ failure }: { failure: AuthMiniVerificationFailure }) {
+  const [copied, setCopied] = useState(false)
+  const language: Language = localStorage.getItem("cybion.language") === "zh" ? "zh" : "en"
+  const labels = copy[language]
+  const details: Array<[string, string]> = [
+    [labels.loadingFailureCode, failure.code ?? "—"],
+    [labels.loadingFailureClockOffset, failure.clockOffsetMs === null ? "—" : `${failure.clockOffsetMs} ms`],
+    [labels.loadingFailureDeviceTime, failure.localTime],
+    [labels.loadingFailureAdjustedTime, failure.adjustedTime ?? "—"],
+    [labels.loadingFailureFailedAt, failure.failedAt],
+    [labels.loadingFailureBrowser, navigator.userAgent],
+  ]
+  const copyDetails = () => {
+    void navigator.clipboard.writeText([labels.loadingFailureTitle, failure.reason, ...details.map(([label, value]) => `${label}: ${value}`)].join("\n"))
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
+  return <Card role="alert" className="w-full">
+    <CardHeader>
+      <CardTitle>{labels.loadingFailureTitle}</CardTitle>
+      <CardDescription className="break-words">{failure.reason}</CardDescription>
+    </CardHeader>
+    <CardContent className="flex flex-col gap-3">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+        {details.map(([label, value]) => <div key={label} className="contents">
+          <dt className="text-muted-foreground">{label}</dt>
+          <dd className="break-all font-mono">{value}</dd>
+        </div>)}
+      </dl>
+      <Button size="sm" variant="outline" className="self-start" onClick={copyDetails}>{copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}{labels.loadingFailureCopy}</Button>
+    </CardContent>
+  </Card>
 }
 
 type WorkspaceNavItem = { to: string; label: string; icon: typeof TerminalSquareIcon }
