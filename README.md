@@ -35,8 +35,8 @@ the first authenticated browser session initializes that key atomically.
   available through the archived group, and can be restored from the list or
   the conversation header.
 - Owners can grant another existing Cybion user read-only access to a Thread.
-  **Share Thread** authorizes the exact user ID; **Shared with me** shows received
-  live shares. History and future updates are included, without granting model,
+  **Share Thread** picks the recipient from the Linkit directory; **Shared with
+  me** shows received live shares. History and future updates are included, without granting model,
   Worker, Context, account-audit or API-key access. Revocation blocks new source
   reads independently of discovery sync; already read/copied content cannot be
   recalled. See [Thread sharing](docs/thread-sharing.md).

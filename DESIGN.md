@@ -158,8 +158,9 @@ defaults change. Both start on, matching the requests users already received.
 ## Thread sharing
 
 Owned Thread headers expose **Share Thread** and an active recipient count. The
-dialog requires an exact user ID and explicit acknowledgement that all existing
-conversation content and future updates will be visible. **Work → Shared with
+dialog picks the recipient through the Linkit user picker and requires explicit
+acknowledgement that all existing conversation content and future updates will
+be visible. **Work → Shared with
 me** is independent of the owner's Thread list and its Web/API origin filters.
 
 Shared conversations keep the existing history renderer, status, usage, image

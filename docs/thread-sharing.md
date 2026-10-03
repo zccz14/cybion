@@ -9,12 +9,14 @@ Integration API keys and Controller/model tools keep their existing owner scope.
 
 ## User experience
 
-B copies **My user ID** from **Work → Shared with me** (also available on the
-Workers page). A opens **Share Thread** in the conversation header, enters that
-exact ID, acknowledges the content boundary, and chooses **Authorize viewing**.
-The dialog lists active/revoked recipients and pending discovery propagation.
+A opens **Share Thread** in the conversation header, picks the recipient
+through the Linkit user picker — search by username or UUID — acknowledges the
+content boundary, and chooses **Authorize viewing**. B can copy **My user ID**
+from **Work → Shared with me** (also available on the Workers page) when A needs
+the exact ID. The dialog lists active/revoked recipients and pending discovery
+propagation.
 A header chip keeps the active share count visible even when the dialog closes.
-An active grant's repeated PUT is idempotent. Self-grants and unknown users fail.
+An active grant's repeated PUT is idempotent. Self-grants and recipients who have never signed in to Cybion fail.
 No invitation, email lookup, public user directory or anonymous capability link is
 created. Deployment itself grants nobody access to a Thread.
 

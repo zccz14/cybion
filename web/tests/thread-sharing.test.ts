@@ -20,6 +20,16 @@ test("only authentication and authorization failures end the reader, temporary f
   for (const status of [400, 409, 429, 500, 503]) assert.equal(sharingAccessLost(Object.assign(new Error("retry"), { status })), false)
   assert.equal(sharingAccessLost(new Error("offline")), false)
 })
+test("both sharing surfaces pick recipients through the package-owned Linkit user picker", () => {
+  for (const file of ["../src/components/worker-sharing.tsx", "../src/components/thread-sharing.tsx"]) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8")
+    assert.match(source, /import \{ LinkitUserPicker \} from "linkit-react-components"/)
+    assert.match(source, /<LinkitUserPicker lang=\{language === "zh" \? "zh-CN" : "en-US"\} label=\{t\.recipient\} value=\{recipient\} onValueChange=\{\(next\) => \{ setRecipient\(next\); setConsent\(false\); grant\.reset\(\) \}\} \/>/)
+    assert.doesNotMatch(source, /Recipient user ID/)
+    assert.doesNotMatch(source, /aria-invalid/)
+  }
+})
+
 test("production integration keeps the shared reader separate from owner execution and configuration", () => {
   const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   const shared = readFileSync(new URL("../src/components/shared-threads.tsx", import.meta.url), "utf8")

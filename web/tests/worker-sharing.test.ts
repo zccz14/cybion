@@ -4,13 +4,11 @@ import { recipientError } from "../src/lib/worker-sharing.ts"
 import { ownedDevice, deviceStatus, checkReady, upgradeAvailable, type Device } from "../src/lib/worker-onboarding.ts"
 import { ownWorkerCall, type WorkerCallAudit } from "../src/lib/worker-audit.ts"
 
-test("recipient UID must be nonempty, exact and different from stable identity", () => {
-  assert.equal(recipientError("", "owner"), "required")
-  assert.equal(recipientError("   ", "owner"), "required")
-  assert.equal(recipientError("owner", "owner"), "self")
-  assert.equal(recipientError("recipient ", "owner"), "exact")
-  assert.equal(recipientError("recipient\nuid", "owner"), "exact")
+test("recipient selection rejects only the signed-in identity", () => {
+  assert.equal(recipientError("", "owner"), null)
   assert.equal(recipientError("uid-with.Exact_Case", "owner"), null)
+  assert.equal(recipientError("owner", "owner"), "self")
+  assert.equal(recipientError("owner", undefined), null)
 })
 
 test("shared cached discovery never implies first connection, verified health or upgrade permission", () => {

@@ -1,9 +1,14 @@
 import { test, expect, type Page, type Route } from "@playwright/test"
 import type { ThreadGrant } from "../src/lib/thread-sharing"
+import { linkitFixtureResponse, type LinkitFixtureUser } from "./linkit-fixture"
 const id = "00000000-0000-4000-8000-000000000001"
 const apiPath = `/api/shared-threads/remote-owner/${id}`
 const routePath = `/shared-threads/remote-owner/${id}`
 const shot = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6OZ0AAAAASUVORK5CYII="
+const directory: LinkitFixtureUser[] = [
+  { user_id: "recipient", username: "recipient", avatar_url: null },
+  { user_id: "user-1", username: "user-1", avatar_url: null },
+]
 function record(n: number, kind: string, payload: unknown) { return { id: n, thread_id: id, kind, payload, created_at: 1_800_000_000 + n } }
 async function fixture(page: Page) {
   const calls: { path: string; method: string; session: string; body: string | null }[] = []
@@ -13,6 +18,8 @@ async function fixture(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request()
     const url = new URL(request.url())
+    const linkit = linkitFixtureResponse(request, directory)
+    if (linkit) return route.fulfill(linkit)
     const path = url.pathname
     const session = request.headers()["x-fixture-session"]
     calls.push({ path: url.pathname + url.search, method: request.method(), session, body: request.postData() })
@@ -55,12 +62,14 @@ test("owner explicitly consents, copies identity link, tracks sync and revokes",
   await page.getByRole("button", { name: "Share Thread", exact: true }).click()
   const dialog = page.getByRole("dialog")
   const grant = dialog.getByRole("button", { name: "Authorize viewing" })
+  const search = dialog.getByRole("combobox", { name: "Recipient" })
   await expect(grant).toBeDisabled()
-  await dialog.getByRole("textbox").fill("user-1")
+  await search.fill("user-1")
+  await dialog.getByRole("option", { name: /user-1/ }).click()
   await expect(dialog).toContainText("You already own this Thread")
-  await dialog.getByRole("textbox").fill(" recipient ")
-  await expect(dialog).toContainText("without spaces")
-  await dialog.getByRole("textbox").fill("recipient")
+  await expect(grant).toBeDisabled()
+  await search.fill("recipient")
+  await dialog.getByRole("option", { name: /recipient/ }).click()
   await expect(grant).toBeDisabled()
   await dialog.getByRole("checkbox").check()
   await expect(dialog).toContainText("future updates")
@@ -170,7 +179,9 @@ test("sharing surfaces fit mobile, dark mode and both languages", async ({ page 
   await page.screenshot({ path: "test-results/thread-sharing-viewer-mobile-dark.png", fullPage: true })
   await page.goto("/e2e/thread-sharing.html#/owner")
   await page.getByRole("button", { name: "分享 Thread", exact: true }).click()
-  await expect(page.getByRole("dialog")).toBeVisible()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole("combobox", { name: "接收者" })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: "test-results/thread-sharing-owner-mobile.png", fullPage: true })
 })

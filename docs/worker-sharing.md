@@ -211,9 +211,9 @@ Controller binaries: they do not understand foreign caller ownership or grant
 gates. Restoring an older snapshot is a deliberate recovery operation, can lose
 later history, and does not undo commands already executed on devices.
 
-The recipient first signs in and copies **My user ID** from the Workers page. The
-owner opens **Share access** on an owned device, enters that UID and confirms the
-machine-level access warning. The recipient sees **Shared with me** and uses the
-original Worker ID in ordinary tool calls. No Worker upgrade or re-pairing is
+The recipient signs in to Cybion first. The owner opens **Share access** on an
+owned device, picks the recipient through the Linkit user picker — search by
+username or UUID — and confirms the machine-level access warning. The recipient
+sees **Shared with me** and uses the original Worker ID in ordinary tool calls. No Worker upgrade or re-pairing is
 required for this Controller feature. Deployment itself grants no real users
 access to any device.
