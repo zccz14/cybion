@@ -1,12 +1,15 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { createElement } from "react"
+import { createElement, type ReactElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter } from "react-router-dom"
+import { AuthMiniProvider } from "auth-mini-react-components"
+import { LinkitProvider } from "linkit-react-components"
 import { createTestServer } from "./vite-server.ts"
 
 const sessionId = "session-not-uid"
+const withLinkit = (children: ReactElement) => createElement(AuthMiniProvider, { authMiniBaseUrl: "https://auth.test", autoRedirectToLogin: false }, createElement(LinkitProvider, { linkitBaseUrl: "https://linkit.test" }, children))
 const owner = { id: "owned", label: "Owner device", owner_user_id: "stable-owner", access: "owner", status: "online", created_at: 1 }
 const shared = { id: "shared", label: "Shared device", owner_user_id: "remote-owner", access: "shared", status: "unknown", created_at: 1 }
 
@@ -35,20 +38,26 @@ test("real WorkerConnections separates access roles and exposes the stable UID w
   } finally { client.clear(); await server.close() }
 })
 
-test("real grant panel renders active, revoked and unsynced recipients with explicit consent in both languages", async () => {
+test("real grant panel picks recipients through the Linkit user picker and renders active, revoked and unsynced recipients with explicit consent in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" })
   const client = new QueryClient()
   try {
     const { WorkerSharing } = await server.ssrLoadModule("/src/components/worker-sharing.tsx")
     const grant = { grantee_user_id: "recipient", grant_id: "g1", revoked_at: null, revision: 2, synced_revision: 1, created_at: 1, updated_at: 1 }
     client.setQueryData(["worker-grants", sessionId, "owned"], [grant, { ...grant, grant_id: "g2", grantee_user_id: "revoked-user", revoked_at: 2, synced_revision: 2 }])
-    const render = (language: string) => renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(WorkerSharing, { sessionId, userId: "stable-owner", workerId: "owned", language, request: () => { throw new Error("Unexpected request") } })))
+    const render = (language: string) => renderToStaticMarkup(createElement(QueryClientProvider, { client }, withLinkit(createElement(WorkerSharing, { sessionId, userId: "stable-owner", workerId: "owned", language, request: () => { throw new Error("Unexpected request") } }))))
     const html = render("en")
-    for (const text of ["recipient", "revoked-user", "Active", "Revoked", "Propagation pending", "Synced", "without a sandbox", "OS account", "audit commands and results"]) assert.ok(html.includes(text), text)
+    for (const text of ["recipient", "revoked-user", "Active", "Revoked", "Propagation pending", "Synced", "without a sandbox", "OS account", "audit commands and results", "Search the Linkit directory by username or UUID", "The recipient must have signed in to Cybion before"]) assert.ok(html.includes(text), text)
+    assert.match(html, /class="linkit-user-picker linkit-user-picker--single"/)
+    assert.match(html, /role="combobox"/)
+    assert.match(html, /placeholder="Search username or UUID"/)
     assert.equal(html.match(/>Revoke access</g)?.length, 1)
     assert.match(html, /type="checkbox"/)
     assert.match(html, /disabled=""[^>]*>Grant access</)
-    assert.match(render("zh"), /没有沙箱/)
+    const zh = render("zh")
+    assert.match(zh, /没有沙箱/)
+    assert.match(zh, /在 Linkit 目录中按用户名或 UUID 搜索/)
+    assert.match(zh, /placeholder="搜索用户名或 UUID"/)
   } finally { client.clear(); await server.close() }
 })
 

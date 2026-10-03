@@ -11,7 +11,9 @@ import { ScreenshotOutput } from "../src/components/screenshot-output"
 import { historyPayloadText, screenshotImageSource } from "../src/lib/history-payload"
 import type { HistoryRecord } from "../src/lib/thread-history"
 import type { SharingRequest } from "../src/lib/thread-sharing"
+import { adoptLinkitFixtureSession, LinkitFixtureProviders } from "./linkit-fixture"
 import "../src/styles.css"
+import "linkit-react-components/styles.css"
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 Object.assign(window, { sharingFixtureCache: () => client.getQueryCache().getAll().map((q) => ({ key: q.queryKey, data: q.state.data })) })
 function Reader({ language, sessionId, userId, request }: { language: "en" | "zh"; sessionId: string; userId: string; request: SharingRequest }) {
@@ -33,10 +35,11 @@ function Fixture() {
     if (!response.ok) throw Object.assign(new Error((await response.json()).error), { status: response.status })
     return response.status === 204 ? undefined as T : response.json()
   }, [sessionId])
-  return <><header className="flex h-14 items-center gap-4 border-b"><button onClick={() => setLanguage(language === "en" ? "zh" : "en")}>Language</button><button onClick={() => setSession(sessionId === "session-1" ? "session-2" : "session-1")}>Switch account</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button></header><Routes>
+  return <><header className="flex h-14 items-center gap-4 border-b"><button onClick={() => setLanguage(language === "en" ? "zh" : "en")}>Language</button><button onClick={() => setSession(sessionId === "session-1" ? "session-2" : "session-1")}>Switch account</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button></header><LinkitFixtureProviders lang={language === "zh" ? "zh-CN" : "en-US"}><Routes>
     <Route path="/owner" element={<div className="p-4"><ThreadSharingButton language={language} sessionId={sessionId} userId={userId} threadId="00000000-0000-4000-8000-000000000001" request={request} /></div>} />
     <Route path="/shared-threads" element={<SharedThreadsPage language={language} sessionId={sessionId} userId={userId} request={request} />} />
     <Route path="/shared-threads/:ownerId/:threadId" element={<Reader language={language} sessionId={sessionId} userId={userId} request={request} />} />
-  </Routes></>
+  </Routes></LinkitFixtureProviders></>
 }
+await adoptLinkitFixtureSession()
 createRoot(document.getElementById("root")!).render(<StrictMode><QueryClientProvider client={client}><TooltipProvider><HashRouter><Fixture /></HashRouter></TooltipProvider></QueryClientProvider></StrictMode>)

@@ -1,8 +1,13 @@
-import { test, expect, type Page } from "@playwright/test"
+import { test, expect, type Locator, type Page } from "@playwright/test"
 import type { WorkerGrant } from "../src/lib/worker-sharing"
+import { linkitFixtureResponse, type LinkitFixtureUser } from "./linkit-fixture"
 
 const owner = { id: "owner-worker", label: "Owner Mac", owner_user_id: "stable-owner", access: "owner", status: "online", created_at: 1, last_seen_at: 2, version: "0.2.0" }
 const shared = { id: "shared-worker", label: "Shared Linux", owner_user_id: "remote-owner", access: "shared", status: "unknown", created_at: 1 }
+const directory: LinkitFixtureUser[] = [
+  { user_id: "recipient", username: "recipient", avatar_url: null },
+  { user_id: "stable-owner", username: "stable-owner", avatar_url: null },
+]
 async function fixture(page: Page, sharedOnly = false) {
   const calls: { path: string; method: string; body: string | null; session: string }[] = []
   let grants: WorkerGrant[] = []
@@ -10,7 +15,10 @@ async function fixture(page: Page, sharedOnly = false) {
   let sync = false
   await page.route("**/api/**", async (route) => {
     const request = route.request()
-    const path = new URL(request.url()).pathname
+    const url = new URL(request.url())
+    const linkit = linkitFixtureResponse(request, directory)
+    if (linkit) return route.fulfill(linkit)
+    const path = url.pathname
     const session = request.headers()["x-fixture-session"]
     calls.push({ path, method: request.method(), body: request.postData(), session })
     if (fail && path.includes(fail)) return route.fulfill({ status: 503, json: { error: "Sharing service unavailable" } })
@@ -34,11 +42,15 @@ async function fixture(page: Page, sharedOnly = false) {
   return { calls, fail: (path: string | null) => { fail = path }, sync: () => { sync = true } }
 }
 async function openEnglish(page: Page) {
-  await page.goto("/e2e/fixture.html#/workers")
+  await page.goto("/e2e/worker-sharing.html#/workers")
   await page.getByRole("button", { name: "Language", exact: true }).click()
 }
+async function pick(scope: Page | Locator, query: string, name: RegExp) {
+  await scope.getByRole("combobox", { name: "Recipient" }).fill(query)
+  await scope.getByRole("option", { name }).click()
+}
 
-test("stable UID, exact-recipient validation, explicit grant consent, sync and revoke", async ({ page, context }) => {
+test("stable UID, user-picker recipient selection, explicit grant consent, sync and revoke", async ({ page, context }) => {
   const state = await fixture(page)
   await context.grantPermissions(["clipboard-read", "clipboard-write"])
   await openEnglish(page)
@@ -53,13 +65,10 @@ test("stable UID, exact-recipient validation, explicit grant consent, sync and r
   const grant = panel.getByRole("button", { name: "Grant access" })
   await expect(panel.getByText("No access granted yet.")).toBeVisible()
   await expect(grant).toBeDisabled()
-  const input = panel.getByRole("textbox", { name: "Recipient user ID" })
-  await input.fill("stable-owner")
-  await expect(panel.getByText("You already own this device. Enter another user's ID.")).toBeVisible()
+  await pick(panel, "stable-owner", /stable-owner/)
+  await expect(panel.getByText("You already own this device. Choose another user.")).toBeVisible()
   await expect(grant).toBeDisabled()
-  await input.fill(" recipient ")
-  await expect(panel.getByText("Paste the exact user ID without spaces.")).toBeVisible()
-  await input.fill("recipient")
+  await pick(panel, "recipient", /recipient/)
   await expect(grant).toBeDisabled()
   await panel.getByRole("checkbox").check()
   await expect(panel).toContainText("without a sandbox")
@@ -108,7 +117,7 @@ test("grant errors, list retry, account switching and mobile bilingual theme", a
   state.fail(null)
   await panel.getByRole("button", { name: "Retry" }).click()
   await expect(panel.getByText("No access granted yet.")).toBeVisible()
-  await panel.getByRole("textbox").fill("recipient")
+  await pick(panel, "recipient", /recipient/)
   await panel.getByRole("checkbox").check()
   state.fail("/grants/recipient")
   await panel.getByRole("button", { name: "Grant access" }).click()
@@ -116,6 +125,7 @@ test("grant errors, list retry, account switching and mobile bilingual theme", a
   await page.getByRole("button", { name: "Theme", exact: true }).click()
   await page.getByRole("button", { name: "Language", exact: true }).click()
   await expect(page.getByRole("region", { name: "共享访问" })).toBeVisible()
+  await expect(page.getByRole("combobox", { name: "接收者" })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: "test-results/worker-sharing-mobile-dark.png", fullPage: true })
   await page.getByRole("button", { name: "Switch account" }).click()

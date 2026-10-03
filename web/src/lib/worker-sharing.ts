@@ -9,8 +9,6 @@ export type WorkerGrant = {
 }
 
 export function recipientError(value: string, userId: string | undefined) {
-  if (!value.trim()) return "required"
-  if (value !== value.trim() || /\s/.test(value)) return "exact"
-  if (value === userId) return "self"
-  return null
+  if (!value || value !== userId) return null
+  return "self"
 }
