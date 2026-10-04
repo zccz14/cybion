@@ -9,7 +9,7 @@
     {"id":"windows-x86_64","label":"Windows · x86_64"}
   ],
   "android": {
-    "version": "v0.1.7",
-    "release_url": "https://github.com/zccz14/cybion-worker-for-android/releases/tag/v0.1.7"
+    "version": "v0.1.9",
+    "release_url": "https://github.com/zccz14/cybion-worker-for-android/releases/tag/v0.1.9"
   }
 }
