@@ -421,7 +421,7 @@ async fn http_browser_auth_readonly_isolation_live_response_revocation_and_api_k
     user_db(&state,&a,false,move |db|{
         let input=insert_record(db,&id,"input",json!({"role":"user","content":"visible original input"}));
         let mut snapshot=ResponseState::default();
-        snapshot.request_id=Some("SECRET_REQUEST_ID".into());snapshot.turn_state=Some("SECRET_TURN_STATE".into());
+        snapshot.request_id=Some("SECRET_REQUEST_ID".into());
         snapshot.output=serde_json::from_value(json!([{"item":{"id":"live","type":"message","role":"assistant","content":[{"type":"output_text","text":"visible live output","private":"SECRET_EXTRA"}],"private":"SECRET_EXTRA"},"done":false,"record_id":null}])).unwrap();
         db.execute("INSERT INTO reasoning_audits(thread_id,input_record_id,model,status,started_at) VALUES(?,?,'m','in_flight',1)",params![id,input])?;
         db.execute("INSERT INTO response_states VALUES(?,?)",params![db.last_insert_rowid(),serde_json::to_string(&snapshot).unwrap()])?;

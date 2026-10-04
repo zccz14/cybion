@@ -44,5 +44,5 @@ test("system editors mount only after verified administrator access and scope ca
   assert.match(system, /const value = draft \?\? headers\.data/)
   assert.match(system, /save\.mutate\(\{ user_agent: value\.user_agent, originator: value\.originator \}\)/)
   assert.doesNotMatch(system, /useEffect|queryKey: \["integrations"\]/)
-  for (const key of ["thread_id_header", "session_id_header", "codex_turn_state_header", "user_agent", "originator"]) assert.ok(system.includes(key))
+  for (const key of ["thread_id_header", "session_id_header", "user_agent", "originator"]) assert.ok(system.includes(key))
 })

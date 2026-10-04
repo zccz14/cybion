@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test"
 async function fixture(page: Page) {
   const state = {
     headers: { user_agent: "Existing/1.0", originator: "desktop" },
-    features: { thread_id_header: false, session_id_header: false, codex_turn_state_header: false },
+    features: { thread_id_header: false, session_id_header: false },
     accessGate: Promise.resolve(),
     headersGate: Promise.resolve(),
     saveGate: Promise.resolve(),
@@ -70,7 +70,7 @@ test("admin headers and all experimental controls save independently and survive
   let release!: () => void
   state.headersGate = new Promise<void>((resolve) => { release = resolve })
   await page.goto(url)
-  await expect(page.getByRole("switch")).toHaveCount(3)
+  await expect(page.getByRole("switch")).toHaveCount(2)
   await expect(page.getByRole("button", { name: "保存请求头", exact: true })).toHaveCount(0)
   release()
   const userAgent = page.getByLabel("User-Agent", { exact: true })
@@ -90,7 +90,7 @@ test("admin headers and all experimental controls save independently and survive
   await expect(userAgent).toHaveValue("Updated/2.0")
   await expect(save).toBeDisabled()
   expect(state.calls.find((call) => call.method === "PUT" && call.path === "/api/integrations")?.body).toEqual({ user_agent: "  Updated/2.0  ", originator: "new-client" })
-  const labels = ["发送 Thread ID 请求头", "发送 Session ID 请求头", "回传 x-codex-turn-state 请求头"]
+  const labels = ["发送 Thread ID 请求头", "发送 Session ID 请求头"]
   for (const label of labels) {
     const control = page.getByRole("switch", { name: label, exact: true })
     await control.click()
@@ -157,7 +157,7 @@ test("switching accounts cannot display cached administrator controls or carry a
 test("bilingual system controls remain usable in dark mode and narrow layouts", async ({ page }) => {
   await fixture(page)
   await page.goto(url)
-  await expect(page.getByRole("switch")).toHaveCount(3)
+  await expect(page.getByRole("switch")).toHaveCount(2)
   await page.getByRole("button", { name: "Theme", exact: true }).click()
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 })

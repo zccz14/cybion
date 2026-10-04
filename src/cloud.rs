@@ -43,7 +43,6 @@ mod reports;
 mod thread_controls;
 mod thread_sharing;
 mod traffic;
-mod turn_state;
 mod upstreams;
 mod worker_onboarding;
 mod worker_protocol;
@@ -121,14 +120,12 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 27;
+const USER_SCHEMA_VERSION: i64 = 28;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
-const EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY: &str = "experimental_codex_turn_state_header";
 const THREAD_ID_HEADER: &str = "thread-id";
 const SESSION_ID_HEADER: &str = "session-id";
-const CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const GLOBAL_REQUEST_HEADERS_MIGRATED_KEY: &str = "global_request_headers_migrated";
 const GLOBAL_USER_AGENT_KEY: &str = "openai_user_agent";
 const GLOBAL_ORIGINATOR_KEY: &str = "openai_originator";
@@ -1112,11 +1109,6 @@ CREATE TABLE IF NOT EXISTS threads (
 "#;
 
 const USER_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS thread_turn_states (
-  thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
-  upstream_key TEXT NOT NULL,
-  value BLOB NOT NULL
-);
 CREATE TABLE IF NOT EXISTS thread_defaults (
   id INTEGER PRIMARY KEY CHECK(id=1),
   model TEXT NOT NULL,
@@ -1307,7 +1299,6 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                  DROP TABLE IF EXISTS report_summaries;
                  DROP TABLE IF EXISTS report_jobs;
                  DROP TABLE IF EXISTS worker_checks;
-                 DROP TABLE IF EXISTS thread_turn_states;
                  DROP TABLE IF EXISTS response_states;
                  DROP TABLE IF EXISTS worker_calls;
                  DROP TABLE IF EXISTS workers;
@@ -1498,6 +1489,12 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // COMPATIBILITY: deployed schema 23 has no Thread grants. Retire this
         // upgrade only after all retained user databases/backups are schema 24+.
         thread_sharing::migrate(&transaction)?;
+    }
+    if version < 28 {
+        // COMPATIBILITY: schema 27 stored the experimental x-codex-turn-state
+        // value per Thread; the feature was removed. Retire this drop once
+        // every retained user database is schema 28+; retain the test.
+        transaction.execute_batch("DROP TABLE IF EXISTS thread_turn_states;")?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -1900,7 +1897,6 @@ struct IntegrationStatusView {
 struct ExperimentalFeaturesView {
     thread_id_header: bool,
     session_id_header: bool,
-    codex_turn_state_header: bool,
 }
 
 #[derive(Deserialize)]
@@ -1908,7 +1904,6 @@ struct ExperimentalFeaturesView {
 struct UpdateExperimentalFeaturesInput {
     thread_id_header: Option<bool>,
     session_id_header: Option<bool>,
-    codex_turn_state_header: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2852,11 +2847,6 @@ async fn experimental_features(
             .await?,
         session_id_header: experimental_header_enabled(&state, EXPERIMENTAL_SESSION_ID_HEADER_KEY)
             .await?,
-        codex_turn_state_header: experimental_header_enabled(
-            &state,
-            EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY,
-        )
-        .await?,
     }))
 }
 
@@ -2873,10 +2863,6 @@ async fn update_experimental_features(
         for (key, enabled) in [
             (EXPERIMENTAL_THREAD_ID_HEADER_KEY, input.thread_id_header),
             (EXPERIMENTAL_SESSION_ID_HEADER_KEY, input.session_id_header),
-            (
-                EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY,
-                input.codex_turn_state_header,
-            ),
         ] {
             if let Some(enabled) = enabled {
                 set_admin_meta_bool_sync(&path, key, enabled)?;
@@ -6638,17 +6624,6 @@ async fn send_responses_request(
             }
         }
     }
-    let turn_state_key = if let Some((spec, _)) = audit.as_ref()
-        && experimental_header_enabled(state, EXPERIMENTAL_CODEX_TURN_STATE_HEADER_KEY).await?
-    {
-        let key = turn_state::upstream_key(upstream);
-        if let Some(value) = turn_state::load(state, spec, &key).await? {
-            request = request.header(CODEX_TURN_STATE_HEADER, value);
-        }
-        Some(key)
-    } else {
-        None
-    };
     let audit_id = if let Some((spec, _)) = audit.as_ref() {
         Some(begin_reasoning_audit(state, spec).await?)
     } else {
@@ -6656,19 +6631,8 @@ async fn send_responses_request(
     };
     let mut cancellation = audit.as_ref().and_then(|(_, receiver)| receiver.clone());
     let counters = traffic_user.map(|user| state.traffic.for_user(&user.id));
-    let response = async {
-        let response = send_with_cancellation(request, &mut cancellation, counters.clone()).await?;
-        if let (Some((spec, _)), Some(key), Some(value)) = (
-            audit.as_ref(),
-            turn_state_key.as_ref(),
-            response.headers().get(CODEX_TURN_STATE_HEADER),
-        ) {
-            turn_state::save(state, spec, key, value).await?;
-        }
-        Ok::<_, ApiError>(response)
-    }
-    .await;
-    let response = match response {
+    let response = match send_with_cancellation(request, &mut cancellation, counters.clone()).await
+    {
         Ok(response) => response,
         Err(error) => {
             if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
@@ -8159,10 +8123,6 @@ mod ctx_tests;
 #[cfg(test)]
 #[path = "cloud_normai_tests.rs"]
 mod normai_tests;
-
-#[cfg(test)]
-#[path = "cloud_turn_state_tests.rs"]
-mod turn_state_tests;
 
 #[cfg(test)]
 mod tests {

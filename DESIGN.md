@@ -111,7 +111,7 @@ conversation controls do. Machine identity is always visible near the action.
   administrators and ordinary users.
 
 System configuration owns the global experimental request switches (`thread-id`,
-`session-id`, `x-codex-turn-state`) and global `User-Agent` / `originator` headers.
+`session-id`) and global `User-Agent` / `originator` headers.
 The page explains that these affect all users' upstream requests. It checks the
 current session's administrator identity before mounting or fetching the editors;
 loading, failed access checks, and non-administrator access are distinct states.

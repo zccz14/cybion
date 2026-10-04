@@ -34,8 +34,8 @@ error
 ```
 
 `response.metadata` is processed before ordinary dispatch for model routing,
-verification recommendations, moderation metadata, safety buffering and turn
-state. `response.failed`, `response.incomplete`, and `error` retain Codex's
+verification recommendations, moderation metadata and safety buffering.
+`response.failed`, `response.incomplete`, and `error` retain Codex's
 context, quota, usage, policy, overload, rate-limit and retryable categories.
 An `incomplete` response carrying `max_output_tokens` is Cybion's output-budget
 signal: an inference request retries the sampling turn the way Codex retries a
