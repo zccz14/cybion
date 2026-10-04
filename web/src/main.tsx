@@ -1824,8 +1824,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
   if (record.kind === "input") {
     return <Message align="end">
       <MessageContent>
-        <UserInputMessage language={language} payload={record.payload} />
-        <MessageFooter>#{record.id} · {time}</MessageFooter>
+        <UserInputMessage language={language} payload={record.payload} footer={`#${record.id} · ${time}`} />
       </MessageContent>
     </Message>
   }
