@@ -42,6 +42,7 @@ async fn mock_normai(State(remote): State<Arc<Mutex<MockNormai>>>, request: Requ
     }
     if path == "/api/consumers" && method == reqwest::Method::POST {
         assert_eq!(body["name"], json!("Cybion"));
+        assert_eq!(body["request_archive"], json!(false));
         remote.created += 1;
         let created = remote.created;
         let consumer_id = format!("consumer-{created}");
