@@ -172,7 +172,9 @@ async fn create_consumer(state: &AppState, bearer: &str, name: &str) -> Result<S
     let credential = checked(
         send(
             request(state, bearer, reqwest::Method::POST, &["api", "consumers"])?
-                .json(&json!({ "name": name })),
+                // Never archive request/response bodies for keys Cybion issues:
+                // archived bodies are what filled the NormAI disk on 2026-10-04.
+                .json(&json!({ "name": name, "request_archive": false })),
             "create consumer",
         )
         .await?,
