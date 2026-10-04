@@ -916,8 +916,8 @@ struct Output {
 }
 fn failure_output(error: Option<&str>, code: Option<&str>) -> Value {
     let mut value = json!({"error":error.unwrap_or("Worker call failed")});
-    if code == Some("worker_restarted") {
-        value["code"] = "worker_restarted".into();
+    if let Some(code @ ("worker_restarted" | "timeout_cancel_unconfirmed")) = code {
+        value["code"] = code.into();
         value["execution_outcome"] = "unknown".into();
     }
     value

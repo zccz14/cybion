@@ -86,6 +86,16 @@ const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a 
 // report an incomplete response before emitting the title when the cap is small.
 const THREAD_TITLE_MAX_OUTPUT_TOKENS: usize = 1024;
 const WORKER_ONLINE_SECONDS: i64 = 45;
+// A delivered Worker call that outlives its own timeout by this grace before
+// the Controller requests cancellation; the grace absorbs clock skew and the
+// Worker's own timeout enforcement plus the result upload.
+const WORKER_CALL_TIMEOUT_GRACE_SECONDS: i64 = 30;
+// After requesting cancellation the Controller waits this long for the Worker
+// to confirm by answering the call before the Controller answers it itself.
+const WORKER_CALL_CANCEL_FEEDBACK_SECONDS: i64 = 30;
+// Calls without a tool timeout (`bash` without `timeout_seconds`, every other
+// Worker tool) follow the Worker's own default execution limit.
+const DEFAULT_WORKER_CALL_TIMEOUT_SECONDS: i64 = 600;
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 65_536;
 const TOOL_OUTPUT_TRUNCATED_NOTICE: &str = "\n内容过长已经截断";
 // Special-case replay: only ledger-confirmed screenshots become real images,
@@ -120,7 +130,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 28;
+const USER_SCHEMA_VERSION: i64 = 29;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1415,6 +1425,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("worker_calls", "worker_boot_id", "TEXT"),
         ("worker_calls", "received_at", "INTEGER"),
         ("worker_calls", "cancel_notified_at", "INTEGER"),
+        ("worker_calls", "cancel_requested_at", "INTEGER"),
         ("workers", "upgrade_id", "TEXT"),
         ("workers", "upgrade_version", "TEXT"),
         ("workers", "upgrade_status", "TEXT"),
@@ -1495,6 +1506,14 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // value per Thread; the feature was removed. Retire this drop once
         // every retained user database is schema 28+; retain the test.
         transaction.execute_batch("DROP TABLE IF EXISTS thread_turn_states;")?;
+    }
+    if version < 29 {
+        // The cancellation notice now also covers calls the Controller timed
+        // out and could not confirm cancelling; rebuild its partial index.
+        transaction.execute_batch(
+            "DROP INDEX IF EXISTS worker_calls_cancel_notice;
+             CREATE INDEX worker_calls_cancel_notice ON worker_calls(worker_id,worker_boot_id,completed_at,id) WHERE cancel_notified_at IS NULL AND (status='cancelled' OR cancel_requested_at IS NOT NULL);",
+        )?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -7718,55 +7737,144 @@ async fn wait_worker_result(
             return Err(ApiError::cancelled());
         }
         let id = call_id.clone();
-        let value = user_db(state, &owner, false, move |connection| {
-            connection
-                .query_row(
-                    "SELECT status,result_json,output_record_id,error FROM worker_calls WHERE id=?",
-                    [id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(Into::into)
+        let call = user_db(state, &owner, false, move |connection| {
+            worker_call_wait(connection, &id)
         })
         .await?
         .ok_or_else(|| ApiError::not_found("Worker call not found"))?;
-        match value.0.as_str() {
-            "completed" => {
-                let result = value
-                    .1
-                    .and_then(|result| serde_json::from_str(&result).ok())
-                    .ok_or_else(|| ApiError::unavailable("Worker returned invalid output"))?;
-                return Ok((result, value.2));
-            }
-            "failed" | "cancelled" => {
-                let result = value
-                    .1
-                    .and_then(|result| serde_json::from_str(&result).ok())
-                    .unwrap_or_else(|| {
-                        json!({
-                            "error": value.3.as_deref().unwrap_or("Worker tool call failed")
-                        })
-                    });
-                return Ok((result, value.2));
-            }
-            _ => {
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                    _ = cancellation.changed() => {
-                        cancel_worker_call(state, user, &call_id).await;
-                        return Err(ApiError::cancelled());
-                    }
-                }
+        if let Some(settled) = settled_worker_result(&call)? {
+            return Ok(settled);
+        }
+        if let Some(settled) = advance_worker_call_timeout(state, &owner, &call).await? {
+            return Ok(settled);
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = cancellation.changed() => {
+                cancel_worker_call(state, user, &call_id).await;
+                return Err(ApiError::cancelled());
             }
         }
     }
+}
+
+struct WorkerCallWait {
+    id: String,
+    status: String,
+    result_json: Option<String>,
+    output_record_id: Option<i64>,
+    error: Option<String>,
+    started_at: Option<i64>,
+    cancel_requested_at: Option<i64>,
+    timeout_seconds: i64,
+}
+
+fn worker_call_wait(c: &Connection, id: &str) -> Result<Option<WorkerCallWait>, ApiError> {
+    c.query_row(
+        "SELECT id,status,result_json,output_record_id,error,started_at,cancel_requested_at,CAST(json_extract(arguments_json,'$.timeout_seconds') AS INTEGER) FROM worker_calls WHERE id=?",
+        [id],
+        |row| {
+            Ok(WorkerCallWait {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                result_json: row.get(2)?,
+                output_record_id: row.get(3)?,
+                error: row.get(4)?,
+                started_at: row.get(5)?,
+                cancel_requested_at: row.get(6)?,
+                timeout_seconds: row
+                    .get::<_, Option<i64>>(7)?
+                    .filter(|seconds| *seconds >= 1)
+                    .unwrap_or(DEFAULT_WORKER_CALL_TIMEOUT_SECONDS),
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn settled_worker_result(call: &WorkerCallWait) -> Result<Option<(Value, Option<i64>)>, ApiError> {
+    let result = match call.status.as_str() {
+        "completed" => call
+            .result_json
+            .as_deref()
+            .and_then(|result| serde_json::from_str(result).ok())
+            .ok_or_else(|| ApiError::unavailable("Worker returned invalid output"))?,
+        "failed" | "cancelled" => call
+            .result_json
+            .as_deref()
+            .and_then(|result| serde_json::from_str(result).ok())
+            .unwrap_or_else(
+                || json!({"error": call.error.as_deref().unwrap_or("Worker tool call failed")}),
+            ),
+        _ => return Ok(None),
+    };
+    Ok(Some((result, call.output_record_id)))
+}
+
+/// Timeout phases of one delivered call: before the deadline nothing changes;
+/// after it the Controller asks the bound Worker process to cancel; once the
+/// confirmation window passes it answers the call itself so the turn can
+/// continue. Returns Some when the call was answered by the fallback.
+async fn advance_worker_call_timeout(
+    state: &AppState,
+    owner: &User,
+    call: &WorkerCallWait,
+) -> Result<Option<(Value, Option<i64>)>, ApiError> {
+    let expired = call.started_at.is_some_and(|started_at| {
+        now() >= started_at + call.timeout_seconds + WORKER_CALL_TIMEOUT_GRACE_SECONDS
+    });
+    if !expired {
+        return Ok(None);
+    }
+    match call.cancel_requested_at {
+        None => {
+            let id = call.id.clone();
+            user_db(state, owner, false, move |connection| {
+                connection.execute(
+                    "UPDATE worker_calls SET cancel_requested_at=? WHERE id=? AND status='delivered' AND cancel_requested_at IS NULL",
+                    params![now(), id],
+                )?;
+                Ok(())
+            })
+            .await?;
+            Ok(None)
+        }
+        Some(requested_at) if now() < requested_at + WORKER_CALL_CANCEL_FEEDBACK_SECONDS => {
+            Ok(None)
+        }
+        Some(_) => answer_unconfirmed_timeout(state, owner, call).await,
+    }
+}
+
+/// Answers a call whose cancellation the Worker never confirmed. The pending
+/// cancellation stays on the row, so a Worker reconnecting with the same
+/// process still receives it; the answer tells the model the outcome is
+/// unknown and a leaked execution may need cleanup.
+async fn answer_unconfirmed_timeout(
+    state: &AppState,
+    owner: &User,
+    call: &WorkerCallWait,
+) -> Result<Option<(Value, Option<i64>)>, ApiError> {
+    let message = format!(
+        "Worker call timed out after {}s and its cancellation was not confirmed; the execution outcome is unknown. The previous call may still be running on the device and leak a process or handle; clean it up before continuing.",
+        call.timeout_seconds
+    );
+    let result = json!({
+        "error": message.clone(),
+        "code": "timeout_cancel_unconfirmed",
+        "execution_outcome": "unknown",
+    });
+    let id = call.id.clone();
+    let changed = user_db(state, owner, false, move |connection| {
+        Ok(connection.execute(
+            "UPDATE worker_calls SET status='failed',error=?,failure_code='timeout_cancel_unconfirmed',completed_at=? WHERE id=? AND status='delivered'",
+            params![message, now(), id],
+        )?)
+    })
+    .await?;
+    // A Worker answer racing the fallback settles the call first; the loop reads it next.
+    Ok((changed > 0).then_some((result, None)))
 }
 
 async fn cancel_worker_call(state: &AppState, user: &User, call_id: &str) {

@@ -457,10 +457,10 @@ fn queue_upgrade(c: &mut Connection, id: &str, target: &str) -> Result<(), ApiEr
     Ok(())
 }
 /// Hands the Worker the oldest un-notified cancellation among the calls it
-/// received, so a running execution stops on the device. One notification per
-/// call; Workers older than 0.2.7 ignore the event and the settled state is
-/// unaffected.
-fn cancel_notice(
+/// received — a user stop or a Controller timeout awaiting confirmation — so a
+/// running execution stops on the device. One notification per call; Workers
+/// older than 0.2.7 ignore the event and the settled state is unaffected.
+pub(super) fn cancel_notice(
     c: &Connection,
     worker: &str,
     boot: Option<&str>,
@@ -468,7 +468,7 @@ fn cancel_notice(
     let Some(boot) = boot else { return Ok(None) };
     let id: Option<String> = c
         .query_row(
-            "SELECT id FROM worker_calls INDEXED BY worker_calls_cancel_notice WHERE worker_id=? AND worker_boot_id=? AND status='cancelled' AND cancel_notified_at IS NULL ORDER BY completed_at,id LIMIT 1",
+            "SELECT id FROM worker_calls INDEXED BY worker_calls_cancel_notice WHERE worker_id=? AND worker_boot_id=? AND cancel_notified_at IS NULL AND (status='cancelled' OR cancel_requested_at IS NOT NULL) ORDER BY completed_at,id LIMIT 1",
             params![worker, boot],
             |r| r.get(0),
         )

@@ -82,6 +82,12 @@ execution starts, so a `delay_seconds` wait never counts toward it. The model
 picks the limit with no upper bound; it defaults to 600 seconds, and a command
 that exceeds it is killed and the call fails.
 
+The Controller enforces the same limit as a backstop: a delivered call that
+outlives its timeout by a 30-second grace is cancelled on the Worker, and when
+no confirmation arrives within another 30 seconds the Controller answers the
+call itself with a `timeout_cancel_unconfirmed` failure whose outcome is
+unknown, so the model can clean up before continuing.
+
 ## Progressive Context discovery
 
 `cybion_list_contexts` lists only top-level Context metadata, ordered by name
