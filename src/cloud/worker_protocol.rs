@@ -77,7 +77,7 @@ pub(super) fn register(
     }
     if current.as_deref() != boot {
         let lost = {
-            let mut q=tx.prepare("SELECT id,thread_id,input_record_id,responses_call_id,responses_output_type FROM worker_calls WHERE worker_id=? AND status='delivered' AND worker_boot_id IS NOT ?")?;
+            let mut q=tx.prepare("SELECT id,thread_id,input_record_id,responses_call_id,responses_output_type FROM worker_calls INDEXED BY worker_calls_delivered WHERE worker_id=? AND status='delivered' AND worker_boot_id IS NOT ?")?;
             q.query_map(params![worker, boot], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -161,7 +161,7 @@ fn pending_call_ids(
     worker: &str,
     boot: Option<&str>,
 ) -> Result<VecDeque<String>, ApiError> {
-    let mut q = c.prepare("SELECT id FROM worker_calls WHERE worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL ORDER BY created_at,id")?;
+    let mut q = c.prepare("SELECT id FROM worker_calls INDEXED BY worker_calls_delivered WHERE worker_id=? AND status='delivered' AND worker_boot_id=? AND received_at IS NULL ORDER BY created_at,id")?;
     Ok(q.query_map(params![worker, boot], |r| r.get(0))?
         .collect::<rusqlite::Result<VecDeque<String>>>()?)
 }
@@ -488,7 +488,7 @@ fn ready_upgrade(
     boot: Option<&str>,
 ) -> Result<Option<Value>, ApiError> {
     let Some(boot) = boot else { return Ok(None) };
-    let pending:Option<(String,String)>=c.query_row("SELECT upgrade_id,upgrade_version FROM workers WHERE deleted_at IS NULL AND id=? AND boot_id=? AND upgrade_status IN ('queued','installing') AND NOT EXISTS(SELECT 1 FROM worker_calls WHERE worker_id=? AND status='delivered') AND NOT EXISTS(SELECT 1 FROM worker_checks WHERE worker_id=? AND delivered_at IS NOT NULL AND completed_at IS NULL AND created_at>?)",params![worker,boot,worker,worker,now()-30],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let pending:Option<(String,String)>=c.query_row("SELECT upgrade_id,upgrade_version FROM workers WHERE deleted_at IS NULL AND id=? AND boot_id=? AND upgrade_status IN ('queued','installing') AND NOT EXISTS(SELECT 1 FROM worker_calls INDEXED BY worker_calls_delivered WHERE worker_id=? AND status='delivered') AND NOT EXISTS(SELECT 1 FROM worker_checks WHERE worker_id=? AND delivered_at IS NOT NULL AND completed_at IS NULL AND created_at>?)",params![worker,boot,worker,worker,now()-30],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     Ok(pending.map(|(id, version)| json!({"id":id,"version":version,"boot_id":boot})))
 }
 #[derive(Deserialize)]

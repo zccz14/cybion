@@ -121,7 +121,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 26;
+const USER_SCHEMA_VERSION: i64 = 27;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1245,6 +1245,23 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_started_at
   ON reasoning_audits(started_at);
 "#;
 
+// The Worker event stream re-checks each connected Worker's delivered set
+// every second; without this partial index that check walks the Worker's
+// whole call history with a table lookup per call. Delivered rows are few,
+// so the index stays small.
+const USER_WORKER_DISPATCH_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS worker_calls_delivered
+  ON worker_calls(worker_id,worker_boot_id,created_at,id) WHERE status='delivered';
+"#;
+
+// Thread list and detail rows look up each Thread's latest inference
+// input_tokens; an id-ordered index lets that ORDER BY ... LIMIT 1 scan the
+// Thread's audits directly instead of scanning and sorting all of them.
+const USER_LATEST_AUDIT_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS reasoning_audits_thread_id
+  ON reasoning_audits(thread_id,id);
+"#;
+
 fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -1484,6 +1501,12 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
+        .map_err(ApiError::internal)?;
+    transaction
+        .execute_batch(USER_WORKER_DISPATCH_INDEXES)
+        .map_err(ApiError::internal)?;
+    transaction
+        .execute_batch(USER_LATEST_AUDIT_INDEXES)
         .map_err(ApiError::internal)?;
     if version < USER_SCHEMA_VERSION {
         transaction
@@ -2548,10 +2571,14 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
-  SELECT id FROM history_records WHERE thread_id=t.id
-    AND (kind='input' OR (kind='activity' AND
-      CASE WHEN json_valid(payload) THEN json_extract(payload,'$.type') END='thread_control'))
-  ORDER BY id DESC LIMIT 1
+  SELECT MAX(id) FROM (
+    SELECT MAX(id) AS id FROM history_records INDEXED BY history_records_thread_kind_created
+      WHERE thread_id=t.id AND kind='input'
+    UNION ALL
+    SELECT MAX(id) FROM history_records INDEXED BY history_records_thread_kind_created
+      WHERE thread_id=t.id AND kind='activity'
+        AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.type') END='thread_control'
+  )
 )
 "#;
 

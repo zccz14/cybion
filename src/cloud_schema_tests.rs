@@ -418,3 +418,32 @@ async fn cancelled_status_upgrade_rebuilds_worker_calls_and_preserves_rows() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn schema_26_upgrade_adds_dispatch_and_latest_audit_indexes() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "index-upgrade-user").unwrap();
+    user_db(&state, &user, true, move |connection| {
+        connection.execute_batch(
+            "DROP INDEX worker_calls_delivered;
+             DROP INDEX reasoning_audits_thread_id;
+             PRAGMA user_version=26;",
+        )?;
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        for index in ["worker_calls_delivered", "reasoning_audits_thread_id"] {
+            let exists: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=?",
+                [index],
+                |r| r.get(0),
+            )?;
+            assert_eq!(exists, 1, "{index}");
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
