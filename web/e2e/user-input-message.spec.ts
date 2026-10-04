@@ -41,3 +41,25 @@ test("user input exposes the shared copy control beneath its bubble", async ({ p
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("看看这张图。")
   await expect(groups.nth(2).getByRole("button", { name: "复制", exact: true })).toHaveCount(0)
 })
+
+test("the copy control and the record meta render on one footer row", async ({ page }) => {
+  await page.goto("/e2e/user-input-message.html")
+  const first = page.locator('[data-slot="message-group"]').first()
+  await expect(first.locator('[data-slot="user-footer"]')).toBeVisible()
+  await expect(first.locator('[data-slot="user-meta"]')).toHaveText("#12 · 2026-01-02 12:34:56")
+  expect(await first.evaluate((node) => {
+    const control = node.querySelector('button[aria-label="复制"]')
+    const meta = node.querySelector('[data-slot="user-meta"]')
+    if (control === null || meta === null) return false
+    const a = control.getBoundingClientRect()
+    const b = meta.getBoundingClientRect()
+    return a.bottom > b.top && b.bottom > a.top && (a.left + a.right) / 2 < (b.left + b.right) / 2
+  })).toBe(true)
+})
+
+test("image-only inputs keep the record meta row without a copy control", async ({ page }) => {
+  await page.goto("/e2e/user-input-message.html")
+  const imageOnly = page.locator('[data-slot="message-group"]').nth(2)
+  await expect(imageOnly.locator('[data-slot="user-meta"]')).toHaveText("#14 · 2026-01-02 12:34:56")
+  await expect(imageOnly.getByRole("button", { name: "复制", exact: true })).toHaveCount(0)
+})

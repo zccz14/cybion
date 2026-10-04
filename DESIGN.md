@@ -58,10 +58,11 @@ Surface levels remain distinct through neutral luminance steps.
 User messages use the dedicated `user-message` tokens: in light mode these alias
 `primary` / `primary-foreground`; in dark mode they alias `muted` / `foreground`.
 Near-white primary buttons therefore remain compact action signals while long
-user messages remain dark gray, and the shared copy control sits below each
-user message bubble. Cybion replies and checkpoints render as plain Markdown
-directly on the working surface; replies carry no avatar, name, or bubble, and
-their copy control and timestamp follow the content. Reasoning panels use the
+user messages remain dark gray, and one footer row below each user message
+bubble carries the shared copy control and the record id with its timestamp.
+Cybion replies and checkpoints render as plain Markdown directly on the working
+surface; replies carry no avatar, name, or bubble, and their copy control and
+timestamp follow the content the same way. Reasoning panels use the
 card surface in dark mode, and reasoning-panel boundaries use the neutral
 border.
 

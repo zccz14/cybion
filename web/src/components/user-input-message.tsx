@@ -9,16 +9,19 @@ const copy = {
   zh: { image: "粘贴的图片", open: "查看图片" },
 } as const
 
-export function UserInputMessage({ language, payload }: { language: "en" | "zh"; payload: unknown }) {
+export function UserInputMessage({ language, payload, footer }: { language: "en" | "zh"; payload: unknown; footer: string }) {
   const { text, images } = userInputView(payload)
   return <MessageGroup>
     {images.length > 0 && <div className="flex flex-wrap justify-end gap-2">
       {images.map((dataUrl, index) => <UserInputImage key={index} language={language} dataUrl={dataUrl} />)}
     </div>}
-    {text !== "" && <div className="flex flex-col items-end gap-1.5">
-      <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-user-message px-3 py-2 text-sm leading-6 text-user-message-foreground">{text}</div>
-      <CopyReplyButton text={text} language={language} />
-    </div>}
+    <div className="flex flex-col items-end gap-1.5">
+      {text !== "" && <div className="max-w-[75ch] whitespace-pre-wrap break-words rounded-lg bg-user-message px-3 py-2 text-sm leading-6 text-user-message-foreground">{text}</div>}
+      <div data-slot="user-footer" className="flex flex-wrap items-center gap-2 px-1">
+        {text !== "" && <CopyReplyButton text={text} language={language} />}
+        <span data-slot="user-meta" className="text-xs text-muted-foreground">{footer}</span>
+      </div>
+    </div>
   </MessageGroup>
 }
 
