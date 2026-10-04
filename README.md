@@ -110,8 +110,10 @@ the first authenticated browser session initializes that key atomically.
   `GET {base_url}/models` per upstream, and the Configuration page lists every
   catalog while the new-thread, thread, and defaults model pickers group the
   catalogs by upstream name. A Thread keeps its own upstream and model
-  selectable even after a catalog stops reporting it, and an upstream that
-  Threads or defaults still reference cannot be deleted. Schema 16 converts the
+  selectable even after a catalog stops reporting it, and an upstream can be
+  deleted even while Threads or defaults still reference it — those Threads
+  fail at their next use until the owner points them at another upstream.
+  Schema 16 converts the
   single legacy configuration (an explicit key, or an OpenAI-LB consumer
   credential) into one upstream and binds existing Threads to it.
 - Linkit task notifications are optional and configured separately. They do not

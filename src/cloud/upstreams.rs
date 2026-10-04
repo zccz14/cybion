@@ -284,17 +284,9 @@ pub(super) async fn delete(
         if !exists(&transaction, &id)? {
             return Err(ApiError::not_found("upstream not found"));
         }
-        let used: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM threads WHERE upstream_id=?1)
-                     OR EXISTS(SELECT 1 FROM thread_defaults WHERE upstream_id=?1)",
-            [&id],
-            |row| row.get(0),
-        )?;
-        if used {
-            return Err(ApiError::conflict(
-                "upstream is used by existing threads or thread defaults",
-            ));
-        }
+        // Deleting under live references is intentional: the Threads and
+        // defaults left behind fail at their next use until the owner points
+        // them at another upstream.
         transaction.execute("DELETE FROM upstreams WHERE id=?", [&id])?;
         transaction.commit()?;
         Ok(())

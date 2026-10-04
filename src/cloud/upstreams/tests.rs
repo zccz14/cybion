@@ -190,7 +190,7 @@ async fn creating_threads_requires_an_existing_upstream() {
 }
 
 #[tokio::test]
-async fn upstream_crud_enforces_unique_names_and_blocks_deletion_in_use() {
+async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "crud-owner").unwrap();
 
@@ -250,7 +250,8 @@ async fn upstream_crud_enforces_unique_names_and_blocks_deletion_in_use() {
     .unwrap_err();
     assert_eq!(conflict.status, StatusCode::CONFLICT);
 
-    // A thread pins the upstream, so deletion fails until nothing uses it.
+    // Deleting an upstream that a Thread still runs on is allowed; the Thread
+    // fails at its next use until it is pointed at another upstream.
     let thread = create_thread_for(
         &state,
         &user,
@@ -259,14 +260,24 @@ async fn upstream_crud_enforces_unique_names_and_blocks_deletion_in_use() {
     )
     .await
     .unwrap();
-    let in_use = super::delete(
-        State(state.clone()),
-        identity(&user),
-        AxumPath(alpha.id.clone()),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(in_use.status, StatusCode::CONFLICT);
+    assert_eq!(
+        super::delete(
+            State(state.clone()),
+            identity(&user),
+            AxumPath(alpha.id.clone())
+        )
+        .await
+        .unwrap(),
+        StatusCode::NO_CONTENT
+    );
+    let unbound = ensure_thread_upstream(&state, &user, &thread.id)
+        .await
+        .unwrap_err();
+    assert_eq!(unbound.status, StatusCode::CONFLICT);
+    assert_eq!(unbound.message, "configure an upstream for this thread");
+
+    // The default upstream is deletable as well; new Threads fail until the
+    // default is adjusted.
     let defaults_use = update_thread_defaults(
         State(state.clone()),
         identity(&user),
@@ -281,31 +292,75 @@ async fn upstream_crud_enforces_unique_names_and_blocks_deletion_in_use() {
     )
     .await
     .unwrap();
-    assert!(defaults_use.0.upstream_id.is_some());
-    let defaults_block = super::delete(
-        State(state.clone()),
-        identity(&user),
-        AxumPath(beta.id.clone()),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(defaults_block.status, StatusCode::CONFLICT);
-
-    // Rebinding frees both upstreams for deletion.
-    bind_thread_to(&state, &user, &thread.id, &beta.id).await;
+    assert_eq!(
+        defaults_use.0.upstream_id.as_deref(),
+        Some(beta.id.as_str())
+    );
     assert_eq!(
         super::delete(
             State(state.clone()),
             identity(&user),
-            AxumPath(alpha.id.clone())
+            AxumPath(beta.id.clone())
         )
         .await
         .unwrap(),
         StatusCode::NO_CONTENT
     );
+    let unresolved = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unresolved.status, StatusCode::NOT_FOUND);
+    assert_eq!(unresolved.message, "upstream not found");
+
+    // Pointing Thread and defaults at a fresh upstream restores both.
+    let gamma = super::create(
+        State(state.clone()),
+        identity(&user),
+        create(upstreams_input("gamma", "http://127.0.0.1:12/v1", None)),
+    )
+    .await
+    .unwrap()
+    .0;
+    bind_thread_to(&state, &user, &thread.id, &gamma.id).await;
+    ensure_thread_upstream(&state, &user, &thread.id)
+        .await
+        .unwrap();
+    let restored_defaults = update_thread_defaults(
+        State(state.clone()),
+        identity(&user),
+        Json(ThreadDefaults {
+            model: "gpt-6-astra".to_owned(),
+            upstream_id: Some(gamma.id.clone()),
+            reasoning_effort: "medium".to_owned(),
+            service_tier_fast: false,
+            context_budget_tokens: 200_000,
+            minimal_mode: false,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        restored_defaults.0.upstream_id.as_deref(),
+        Some(gamma.id.as_str())
+    );
+    let recovered = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.upstream_id.as_deref(), Some(gamma.id.as_str()));
+
     let listed = super::list(State(state), identity(&user)).await.unwrap().0;
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].id, beta.id);
+    assert_eq!(listed[0].id, gamma.id);
 }
 
 #[tokio::test]
