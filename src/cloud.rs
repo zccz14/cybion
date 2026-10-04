@@ -34,6 +34,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod admin_users;
+mod ctx_contexts;
 mod history;
 mod linkit_notifications;
 mod recovery;
@@ -58,11 +59,17 @@ use crate::responses::{
 
 const AUTH_ISSUER: &str = "https://auth.ntnl.io";
 const AUTH_AUDIENCE: &str = "cybion.ntnl.io";
-const AUTH_AUDIENCES: [&str; 3] = ["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io"];
+const AUTH_AUDIENCES: [&str; 4] = [
+    "cybion.ntnl.io",
+    "linkit.ntnl.io",
+    "openai.ntnl.io",
+    "ctx.ntnl.io",
+];
 // Legacy single-upstream installations without an explicit base URL used this
 // endpoint; schema 16 materializes it into an upstream row.
 const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
+const CTX_API_URL: &str = "https://ctx.ntnl.io";
 const WORKER_RELEASE_BASE_URL: &str = "https://github.com/zccz14/cybion-worker/releases/download";
 const WORKER_ANDROID_RELEASE_BASE_URL: &str =
     "https://github.com/zccz14/cybion-worker-for-android/releases/download";
@@ -111,7 +118,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 25;
+const USER_SCHEMA_VERSION: i64 = 26;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -124,7 +131,7 @@ const GLOBAL_USER_AGENT_KEY: &str = "openai_user_agent";
 const GLOBAL_ORIGINATOR_KEY: &str = "openai_originator";
 const INSIGHT_TIMEZONE: &str = "UTC";
 
-// The browser bearer is minted for all three resource hosts. Cybion forwards
+// The browser bearer is minted for all four resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
 // downstream service receives Cybion-specific context.
 
@@ -134,6 +141,7 @@ struct AppState {
     admin_db_path: Arc<PathBuf>,
     client: reqwest::Client,
     linkit_api_url: String,
+    ctx_api_url: String,
     worker_release_base: String,
     worker_android_release_base: String,
     auth: Arc<OnceCell<AuthMiniLayer>>,
@@ -355,6 +363,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .timeout(Duration::from_secs(600))
             .build()?,
         linkit_api_url: LINKIT_API_URL.to_owned(),
+        ctx_api_url: CTX_API_URL.to_owned(),
         worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
         worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
         auth: Arc::new(OnceCell::new()),
@@ -624,6 +633,16 @@ fn app(state: AppState) -> Router {
             get(read_context_api)
                 .patch(update_context)
                 .delete(delete_context),
+        )
+        .route(
+            "/api/integrations/ctx",
+            get(ctx_contexts::status)
+                .post(ctx_contexts::connect)
+                .delete(ctx_contexts::disconnect),
+        )
+        .route(
+            "/api/integrations/ctx/documents",
+            get(ctx_contexts::documents),
         )
         .route("/api/admin/users", get(admin_users::list))
         .route("/api/system/resources", get(system_resources))
@@ -1152,6 +1171,8 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   linkit_bot_id TEXT NOT NULL DEFAULT '',
   linkit_bot_token TEXT NOT NULL DEFAULT '',
   linkit_username TEXT NOT NULL DEFAULT '',
+  ctx_api_key TEXT NOT NULL DEFAULT '',
+  ctx_api_key_id TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS upstreams (
@@ -1327,6 +1348,8 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("api_key", "TEXT NOT NULL DEFAULT ''"),
         ("user_agent", "TEXT NOT NULL DEFAULT ''"),
         ("originator", "TEXT NOT NULL DEFAULT ''"),
+        ("ctx_api_key", "TEXT NOT NULL DEFAULT ''"),
+        ("ctx_api_key_id", "TEXT NOT NULL DEFAULT ''"),
     ] {
         let exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
@@ -2130,6 +2153,8 @@ struct IntegrationSettings {
     linkit_bot_id: String,
     linkit_bot_token: String,
     linkit_username: String,
+    ctx_api_key: String,
+    ctx_api_key_id: String,
 }
 
 fn now() -> i64 {
@@ -4466,6 +4491,16 @@ async fn read_context_for(
     id: String,
 ) -> Result<ContextReadView, ApiError> {
     let id = context_id(&id)?;
+    local_context(state, user, id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("context not found"))
+}
+
+async fn local_context(
+    state: &AppState,
+    user: &User,
+    id: String,
+) -> Result<Option<ContextReadView>, ApiError> {
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction()?;
         let context = transaction
@@ -4474,11 +4509,13 @@ async fn read_context_for(
                 [&id],
                 context_from_row,
             )
-            .optional()?
-            .ok_or_else(|| ApiError::not_found("context not found"))?;
+            .optional()?;
+        let Some(context) = context else {
+            return Ok(None);
+        };
         let children = context_summaries(&transaction, Some(&id))?;
         transaction.commit()?;
-        Ok(ContextReadView { context, children })
+        Ok(Some(ContextReadView { context, children }))
     })
     .await
 }
@@ -4593,13 +4630,15 @@ fn hash_secret(value: &str) -> String {
 fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, ApiError> {
     let settings = connection
         .query_row(
-            "SELECT linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
+            "SELECT linkit_bot_id,linkit_bot_token,linkit_username,ctx_api_key,ctx_api_key_id FROM integration_settings WHERE id=1",
             [],
             |row| {
                 Ok(IntegrationSettings {
                     linkit_bot_id: row.get(0)?,
                     linkit_bot_token: row.get(1)?,
                     linkit_username: row.get(2)?,
+                    ctx_api_key: row.get(3)?,
+                    ctx_api_key_id: row.get(4)?,
                 })
             },
         )
@@ -4608,6 +4647,8 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
+            ctx_api_key: String::new(),
+            ctx_api_key_id: String::new(),
         });
     Ok(settings)
 }
@@ -7343,16 +7384,34 @@ async fn read_context_tool_output(
             "read_context arguments must contain an explicit context_id: {error}"
         ))
     })?;
-    let context = read_context_for(state, user, arguments.context_id).await?;
-    serde_json::to_value(context).map_err(ApiError::internal)
+    let id = context_id(&arguments.context_id)?;
+    if let Some(context) = local_context(state, user, id.clone()).await? {
+        return serde_json::to_value(context).map_err(ApiError::internal);
+    }
+    match ctx_contexts::read_context(state, user, &id).await {
+        ctx_contexts::ReadOutcome::Found(context) => {
+            serde_json::to_value(context).map_err(ApiError::internal)
+        }
+        ctx_contexts::ReadOutcome::NotConnected => Ok(json!({
+            "error": "context not found (the CTX integration is not connected)"
+        })),
+        ctx_contexts::ReadOutcome::NotFound => Ok(json!({ "error": "context not found" })),
+        ctx_contexts::ReadOutcome::Unavailable(message) => Ok(json!({ "error": message })),
+    }
 }
 
 async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
-    let contexts = user_db(state, user, false, |connection| {
+    let mut contexts = user_db(state, user, false, |connection| {
         context_summaries(connection, None)
     })
     .await?;
-    Ok(json!({ "contexts": contexts }))
+    let (ctx_items, notice) = ctx_contexts::top_level_summaries(state, user).await;
+    contexts.extend(ctx_items);
+    let mut output = json!({ "contexts": contexts });
+    if let Some(notice) = notice {
+        output["notice"] = Value::String(notice);
+    }
+    Ok(output)
 }
 
 async fn list_workers_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
@@ -8060,6 +8119,10 @@ mod settings_tests;
 mod schema_tests;
 
 #[cfg(test)]
+#[path = "cloud_ctx_tests.rs"]
+mod ctx_tests;
+
+#[cfg(test)]
 #[path = "cloud_turn_state_tests.rs"]
 mod turn_state_tests;
 
@@ -8081,6 +8144,7 @@ mod tests {
                 admin_db_path: Arc::new(admin_db_path.clone()),
                 client: reqwest::Client::new(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
+                ctx_api_url: CTX_API_URL.to_owned(),
                 worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
                 worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
                 auth: Arc::new(OnceCell::new()),

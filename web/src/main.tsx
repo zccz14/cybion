@@ -609,6 +609,17 @@ const copy = {
     minimalMode: "Minimal mode",
     minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
     integrationDescription: "Configure one or more Responses-compatible upstreams. Threads pick a model from any upstream; notification settings are independent.",
+    ctxIntegrationTitle: "CTX documents",
+    ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) so threads can read your top-level CTX documents as contexts. Cybion stores a dedicated API key you can revoke anytime.",
+    ctxConnected: "Connected",
+    ctxNotConnected: "Not connected",
+    ctxConnect: "Connect CTX",
+    ctxDisconnect: "Disconnect",
+    ctxDisconnectConfirm: "Disconnect CTX? Cybion stops reading your CTX documents until you reconnect.",
+    ctxRequestError: "CTX request failed",
+    ctxDocumentsTitle: "Top-level CTX documents",
+    ctxDocumentsEmpty: "No top-level documents in CTX yet.",
+    ctxOpenDocument: "Open in CTX",
     integration: "Integrations",
     openai: "Responses-compatible upstreams",
     apiBaseUrl: "Base URL",
@@ -925,6 +936,17 @@ const copy = {
     minimalMode: "极简模式",
     minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
     integrationDescription: "配置一个或多个用于模型推理的 Responses-compatible 上游；线程可以从任意上游选择模型。通知配置与此独立。",
+    ctxIntegrationTitle: "CTX 文档",
+    ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，线程可以把你的一级 CTX 文档当作上下文读取。Cybion 会保存一把专用 API 密钥，可随时吊销。",
+    ctxConnected: "已连接",
+    ctxNotConnected: "未连接",
+    ctxConnect: "连接 CTX",
+    ctxDisconnect: "断开连接",
+    ctxDisconnectConfirm: "断开 CTX？重新连接之前，Cybion 将不再读取你的 CTX 文档。",
+    ctxRequestError: "CTX 请求失败",
+    ctxDocumentsTitle: "CTX 一级文档",
+    ctxDocumentsEmpty: "CTX 里还没有一级文档。",
+    ctxOpenDocument: "在 CTX 打开",
     integration: "集成",
     openai: "Responses-compatible 上游",
     apiBaseUrl: "基础地址",
@@ -1011,7 +1033,7 @@ function useUi() {
 
 const queryClient = new QueryClient()
 const AUTH_AUDIENCES = Array.from(
-  new Set(["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io", window.location.hostname]),
+  new Set(["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io", "ctx.ntnl.io", window.location.hostname]),
 )
 
 function errorMessage(error: unknown) {
@@ -2524,10 +2546,51 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
     <UpstreamsCard key={session?.sessionId} sdk={sdk} />
+    <CtxIntegrationCard key={session?.sessionId} sdk={sdk} />
     <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
     <Card><CardHeader><CardTitle>{t("workers")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/workers">{t("workers")}</Link></Button></CardContent></Card>
   </Page>
+}
+
+type CtxIntegrationStatus = { connected: boolean; key_id: string | null }
+type CtxIntegrationDocuments = { connected: boolean; documents: { context_id: string; name: string; description: string }[]; notice: string | null }
+
+function CtxIntegrationCard({ sdk }: { sdk: AuthMiniApi }) {
+  const { t } = useUi()
+  const client = useQueryClient()
+  const status = useQuery({ queryKey: ["ctx-integration"], queryFn: ({ signal }) => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { signal }) })
+  const connected = status.data?.connected === true
+  const documents = useQuery({ queryKey: ["ctx-documents"], queryFn: ({ signal }) => api<CtxIntegrationDocuments>(sdk, "/api/integrations/ctx/documents", { signal }), enabled: connected })
+  const refresh = () => { void client.invalidateQueries({ queryKey: ["ctx-integration"] }); void client.invalidateQueries({ queryKey: ["ctx-documents"] }) }
+  const connect = useMutation({ mutationFn: () => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { method: "POST" }), onSuccess: refresh })
+  const disconnect = useMutation({ mutationFn: () => api<unknown>(sdk, "/api/integrations/ctx", { method: "DELETE" }), onSuccess: refresh })
+  return <Card>
+    <CardHeader><CardTitle>{t("ctxIntegrationTitle")}</CardTitle><CardDescription>{t("ctxIntegrationDescription")}</CardDescription></CardHeader>
+    <CardContent className="flex flex-col gap-4">
+      {status.error && <RequestError error={status.error} onRetry={() => void status.refetch()} />}
+      {status.isLoading && <Skeleton className="h-10" />}
+      {status.data && <div className="flex flex-wrap items-center gap-3">
+        <Badge variant={connected ? "secondary" : "outline"}>{connected ? t("ctxConnected") : t("ctxNotConnected")}</Badge>
+        {connected && status.data.key_id && <span className="font-mono text-xs text-muted-foreground">{status.data.key_id}</span>}
+        {connected
+          ? <Button size="sm" variant="outline" disabled={disconnect.isPending} onClick={() => { if (window.confirm(t("ctxDisconnectConfirm"))) disconnect.mutate() }}>{disconnect.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("ctxDisconnect")}</Button>
+          : <Button size="sm" disabled={connect.isPending} onClick={() => connect.mutate()}>{connect.isPending ? <Spinner /> : <FileKey2Icon data-icon="inline-start" />}{t("ctxConnect")}</Button>}
+      </div>}
+      {(connect.error || disconnect.error) && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("ctxRequestError")}</AlertTitle><AlertDescription>{errorMessage(connect.error ?? disconnect.error)}</AlertDescription></Alert>}
+      {connected && <div className="flex flex-col gap-2">
+        <p className="text-sm font-medium">{t("ctxDocumentsTitle")}</p>
+        {documents.isLoading && <Skeleton className="h-16" />}
+        {documents.error && <RequestError error={documents.error} onRetry={() => void documents.refetch()} />}
+        {documents.data?.notice && <p className="text-sm text-destructive">{documents.data.notice}</p>}
+        {documents.data && !documents.data.notice && documents.data.documents.length === 0 && <p className="text-sm text-muted-foreground">{t("ctxDocumentsEmpty")}</p>}
+        {documents.data?.documents.map((document) => <div key={document.context_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2">
+          <div className="min-w-0"><p className="truncate text-sm font-medium">{document.name}</p>{document.description && <p className="truncate text-xs text-muted-foreground">{document.description}</p>}</div>
+          <Button asChild size="sm" variant="outline"><a href={`https://ctx.ntnl.io/#/documents/${document.context_id}`} target="_blank" rel="noreferrer"><ExternalLinkIcon data-icon="inline-start" />{t("ctxOpenDocument")}</a></Button>
+        </div>)}
+      </div>}
+    </CardContent>
+  </Card>
 }
 
 function UpstreamsCard({ sdk }: { sdk: AuthMiniApi }) {

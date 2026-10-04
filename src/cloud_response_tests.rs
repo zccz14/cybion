@@ -491,7 +491,10 @@ async fn read_context_cannot_disclose_another_users_nodes() {
             json!({"context_id": id}),
         )
         .await;
-        assert_eq!(output, json!({"error":"context not found"}));
+        assert_eq!(
+            output,
+            json!({"error":"context not found (the CTX integration is not connected)"})
+        );
     }
     let output = tool_output(
         &state,

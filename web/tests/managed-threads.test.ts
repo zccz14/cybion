@@ -6,7 +6,7 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 
 test("hosted UI requests one Auth Mini token for every downstream service", () => {
   assert.match(source, /authMiniBaseUrl="https:\/\/auth\.ntnl\.io"/)
-  assert.match(source, /new Set\(\["cybion\.ntnl\.io", "linkit\.ntnl\.io", "openai\.ntnl\.io", window\.location\.hostname\]\)/)
+  assert.match(source, /new Set\(\["cybion\.ntnl\.io", "linkit\.ntnl\.io", "openai\.ntnl\.io", "ctx\.ntnl\.io", window\.location\.hostname\]\)/)
   assert.match(source, /audiences=\{AUTH_AUDIENCES\}/)
   assert.doesNotMatch(source, /audience="cybion\.ntnl\.io"/)
   assert.match(source, /autoRedirectToLogin/)
@@ -28,6 +28,12 @@ test("new thread preparation waits for the first message before creating a threa
   assert.match(source, /function NewThreadPage\(/)
   assert.match(source, /\/api\/threads\/start/)
   assert.match(source, /newThreadPrompt/)
+})
+
+test("CTX documents join threads through a user-scoped API key", () => {
+  assert.match(source, /ctxIntegrationTitle/)
+  assert.match(source, /\/api\/integrations\/ctx/)
+  assert.match(source, /https:\/\/ctx\.ntnl\.io\/#\/documents\//)
 })
 
 test("contexts are managed through a progressive disclosure tree", () => {
