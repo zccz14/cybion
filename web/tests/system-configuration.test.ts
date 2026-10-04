@@ -9,9 +9,15 @@ const personal = main.slice(main.indexOf("function ConfigurationPage("), main.in
 test("personal configuration contains only personal controls, even for administrators", () => {
   assert.match(personal, /function ConfigurationPage\(\{ sdk \}/)
   assert.doesNotMatch(personal, /isAdmin|ExperimentalFeatures|RequestHeaders|user_agent|originator|saveHeaders|SystemConfiguration/)
-  for (const feature of ["ThreadDefaultsCard", "UpstreamsCard", "/api/integrations/upstreams", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
+  for (const feature of ["ThreadDefaultsCard", "NormaiUpstreamCard", "CtxIntegrationCard", "LinkitNotifications", "/api/integrations/upstreams", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
   assert.match(main, /path="\/configuration" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
   assert.match(main, /path="\/settings" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
+})
+
+test("the personal page reaches manual upstreams only through the NormAI card", () => {
+  const page = personal.slice(0, personal.indexOf("function CtxIntegrationCard("))
+  assert.match(page, /<NormaiUpstreamCard key=\{session\?\.sessionId\} sdk=\{sdk\} \/>/)
+  assert.doesNotMatch(page, /UpstreamsCard|UpstreamsManager/)
 })
 
 test("system configuration has a dedicated route, bilingual title, and admin navigation entry", () => {

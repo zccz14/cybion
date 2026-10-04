@@ -109,21 +109,21 @@ the first authenticated browser session initializes that key atomically.
   upstream, and binds it as the default upstream while no other default was
   chosen. Upstream providers and billing live on NormAI; the Configuration
   page links there and can reissue the credential (normai.ntnl.io/#/providers).
-- **Configuration → Responses-compatible upstreams** lets each user manage
-  several named upstreams, each with its own `base_url` and `api_key`. Keys are
-  stored in that user's SQLite database and are never returned to the browser.
-  Cybion sends model requests to `{base_url}/responses` of the upstream a Thread
-  selected, preserving the existing streaming, tool-call, context replay, and
-  audit behavior. Each upstream owns its model catalog: Cybion reads
-  `GET {base_url}/models` per upstream, and the Configuration page lists every
-  catalog while the new-thread, thread, and defaults model pickers group the
-  catalogs by upstream name. A Thread keeps its own upstream and model
-  selectable even after a catalog stops reporting it, and an upstream can be
-  deleted even while Threads or defaults still reference it — those Threads
-  fail at their next use until the owner points them at another upstream.
-  Schema 16 converts the
-  single legacy configuration (an explicit key, or an OpenAI-LB consumer
-  credential) into one upstream and binds existing Threads to it.
+- The NormAI card keeps the manual fallback surface: **Fallback upstreams**
+  opens a dialog — only needed while NormAI is unavailable — where each user
+  manages several named Responses-compatible upstreams, each with its own
+  `base_url` and `api_key`. Keys are stored in that user's SQLite database and
+  are never returned to the browser. Cybion sends model requests to
+  `{base_url}/responses` of the upstream a Thread selected, preserving the
+  existing streaming, tool-call, context replay, and audit behavior. Each
+  upstream owns its model catalog: Cybion reads `GET {base_url}/models` per
+  upstream, and the model pickers group the catalogs by upstream name. A
+  Thread keeps its own upstream and model selectable even after a catalog
+  stops reporting it, and an upstream can be deleted even while Threads or
+  defaults still reference it — those Threads fail at their next use until
+  the owner points them at another upstream. Schema 16 converts the single
+  legacy configuration (an explicit key, or an OpenAI-LB consumer credential)
+  into one upstream and binds existing Threads to it.
 - Linkit task notifications are optional and configured separately. They do not
   gate model inference, external API requests, or API-key creation.
 - **Configuration → Linkit task notifications** lets the owner enable/repair,
