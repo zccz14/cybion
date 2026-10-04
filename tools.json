@@ -3,7 +3,7 @@
     {
       "type": "function",
       "name": "cybion_list_contexts",
-      "description": "List top-level Contexts (context_id, name, description) from the controller. Content is intentionally omitted; use read_context to read a context and discover its direct children.",
+      "description": "List top-level Contexts (context_id, name, description) from the controller, including the user's top-level CTX (ctx.ntnl.io) documents when that integration is connected. Content is intentionally omitted; use read_context to read a context and discover its direct children.",
       "parameters": {
         "type": "object",
         "properties": {},

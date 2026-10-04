@@ -47,7 +47,9 @@ the durable conversation remains the record range above. The compiler uses
 
 Registered Contexts and Workers are disclosed through controller-answered
 tools instead of a replayed prefix. `cybion_list_contexts` returns only
-top-level Context metadata, ordered by name and ID. `cybion_list_workers`
+top-level Context metadata, ordered by name and ID; when the CTX integration
+is connected, the user's top-level CTX documents are appended after the local
+Contexts. `cybion_list_workers`
 returns the registered Worker identities (`worker_id`, `label`), ordered by
 label and ID; runtime state such as online status, heartbeat timestamps, and
 resource reports is not listed.
@@ -109,6 +111,21 @@ ordered by name and ID. A leaf always returns `children: []`. The current node a
 its child metadata are read in one transaction from the requesting user's database.
 The model can pass a child's `context_id` to `read_context` to discover the next
 level. Child content and deeper descendants are disclosed only when read.
+
+## CTX documents
+
+A user can connect CTX (ctx.ntnl.io) from Configuration → Integrations. Cybion
+mints a labeled API key inside CTX with the browser session and stores it in
+the user's database; every later CTX call uses that key, so the tools work
+while a Thread runs without the browser. `cybion_list_contexts` appends the
+user's top-level CTX documents (kind `article`, no parent) to the local
+top-level Contexts; `read_context` reads any id that is not a local Context
+from CTX, returning the document's current revision plus its direct
+sub-documents. The integration is optional: without it, both tools keep
+serving local Contexts only, and reads of unknown ids answer
+`context not found`. A connected but failing CTX call degrades the list to
+`{"contexts":[<local contexts>],"notice":"..."}` and answers reads with an
+`{"error":"..."}` tool result instead of failing the turn.
 
 ## Replay cleanup
 

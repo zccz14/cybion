@@ -173,6 +173,8 @@ async fn fixture() -> Fixture {
         linkit_bot_id: "bot-1".into(),
         linkit_bot_token: "sk-bot-token".into(),
         linkit_username: "owner".into(),
+        ctx_api_key: String::new(),
+        ctx_api_key_id: String::new(),
     };
     save_settings(&state, &user, &settings).await.unwrap();
     let upstream = insert_upstream(&state, &user, "fixture", &format!("{base}/v1")).await;

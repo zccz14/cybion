@@ -40,6 +40,13 @@ the first authenticated browser session initializes that key atomically.
   Worker, Context, account-audit or API-key access. Revocation blocks new source
   reads independently of discovery sync; already read/copied content cannot be
   recalled. See [Thread sharing](docs/thread-sharing.md).
+- The optional CTX integration (Configuration → Integrations) mints a labeled
+  API key inside CTX (ctx.ntnl.io) with the browser session and stores it in
+  the user's database. While connected, `cybion_list_contexts` appends the
+  user's top-level CTX documents to the top-level Context list and
+  `read_context` reads those documents (current revision plus direct
+  sub-documents); a failing CTX call degrades the list with a `notice` and
+  answers reads with a tool `error` instead of failing the turn.
 - The thread list filters and paginates on the server. `GET /api/threads`
   accepts `status` (`idle`, `running`, `failed`), `origin` (`web`, `api`),
   and `q` (case-insensitive substring of the title or `external_ref`) next to
