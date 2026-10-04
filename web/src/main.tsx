@@ -673,6 +673,7 @@ const copy = {
     loadingFailureFailedAt: "Failed at",
     loadingFailureBrowser: "Browser",
     loadingFailureCopy: "Copy details",
+    loadingFailureClearData: "Clear cache & app data",
   },
   zh: {
     threads: "线程",
@@ -988,6 +989,7 @@ const copy = {
     loadingFailureFailedAt: "失败时间",
     loadingFailureBrowser: "浏览器",
     loadingFailureCopy: "复制详情",
+    loadingFailureClearData: "清理缓存和应用数据",
   },
 } as const
 
@@ -1135,9 +1137,22 @@ function SessionVerificationFailureCard({ failure }: { failure: AuthMiniVerifica
           <dd className="break-all font-mono">{value}</dd>
         </div>)}
       </dl>
-      <Button size="sm" variant="outline" className="self-start" onClick={copyDetails}>{copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}{labels.loadingFailureCopy}</Button>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={copyDetails}>{copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}{labels.loadingFailureCopy}</Button>
+        <Button size="sm" variant="outline" onClick={() => { void clearLocalAppData() }}><Trash2Icon data-icon="inline-start" />{labels.loadingFailureClearData}</Button>
+      </div>
     </CardContent>
   </Card>
+}
+
+// Manual recovery for a stuck session: wipe this origin's local data — the
+// SDK session lives in localStorage — and reload into a fresh sign-in.
+async function clearLocalAppData() {
+  localStorage.clear()
+  sessionStorage.clear()
+  for (const key of await caches.keys()) await caches.delete(key)
+  for (const registration of await navigator.serviceWorker.getRegistrations()) await registration.unregister()
+  window.location.reload()
 }
 
 type WorkspaceNavItem = { to: string; label: string; icon: typeof TerminalSquareIcon }

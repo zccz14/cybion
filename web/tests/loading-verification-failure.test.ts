@@ -20,6 +20,12 @@ test("the verification failure card shows the reason, diagnostics and a copy act
     "failure.failedAt",
     "navigator.userAgent",
     "navigator.clipboard.writeText",
+    "void clearLocalAppData()",
+    "localStorage.clear()",
+    "sessionStorage.clear()",
+    "caches.keys()",
+    "navigator.serviceWorker.getRegistrations()",
+    "window.location.reload()",
   ]) assert.ok(card.includes(fragment), fragment)
 })
 
@@ -33,5 +39,6 @@ test("both language maps define every loading failure copy key", () => {
     "loadingFailureFailedAt",
     "loadingFailureBrowser",
     "loadingFailureCopy",
+    "loadingFailureClearData",
   ]) assert.equal(main.match(new RegExp(`${key}:`, "g"))?.length, 2, key)
 })
