@@ -151,6 +151,43 @@ fn history_schema_upgrade_preserves_payloads_ids_sequence_and_foreign_keys() {
 }
 
 #[test]
+fn schema_28_upgrade_drops_the_removed_turn_state_table_and_preserves_history() {
+    // A deployed schema 27 database: current tables plus the removed
+    // per-Thread x-codex-turn-state cache.
+    let mut connection = Connection::open_in_memory().unwrap();
+    ensure_user_schema(&mut connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('a','Alpha','model','idle',1,1);
+             INSERT INTO history_records(id,thread_id,kind,payload,created_at) VALUES(1,'a','input','{\"role\":\"user\",\"content\":\"keep\"}',101);
+             CREATE TABLE thread_turn_states (
+               thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+               upstream_key TEXT NOT NULL,
+               value BLOB NOT NULL
+             );
+             INSERT INTO thread_turn_states(thread_id,upstream_key,value) VALUES('a','key',x'00');
+             PRAGMA user_version=27;",
+        )
+        .unwrap();
+    let original = history_snapshot(&connection);
+    for _ in 0..2 {
+        ensure_user_schema(&mut connection).unwrap();
+        assert_core_history_schema(&connection);
+        assert_eq!(history_snapshot(&connection), original);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='thread_turn_states'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
 fn failed_history_schema_upgrade_rolls_back_columns_index_version_and_data() {
     let mut connection = legacy_database(8);
     let original = history_snapshot(&connection);

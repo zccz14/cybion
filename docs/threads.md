@@ -165,20 +165,6 @@ notifications. Daily sources/metrics exclude it; general account usage and the
 activity heatmap include it. See [Daily reports](daily-reports.md) for its
 snapshot-aware continue/restart behavior and retention boundaries.
 
-Administrators can enable **Return x-codex-turn-state header** under
-Configuration → Experimental features. It is disabled by default. When enabled,
-each thread saves the latest upstream `x-codex-turn-state` response header and
-returns it unchanged on subsequent Responses requests, including inference,
-title generation, and context compaction. A response without the header retains
-the previous value. Both JSON and streaming responses update the cache as soon
-as their headers arrive, including HTTP error responses.
-
-The cache persists in the owning user's database across service restarts. It is
-isolated by thread and upstream URL/credential, and deleted with the thread.
-Disabling the feature stops both sending and updating cached values; re-enabling
-it resumes from the saved value. The setting is independent of the Thread ID
-header switch and applies to both browser and API requests.
-
 ## Read-only sharing
 
 Owners may authorize existing users to view a live Thread through the separate

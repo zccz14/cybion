@@ -116,7 +116,7 @@ fn metadata_is_processed_even_on_otherwise_ignored_events() {
         faster_model: Some("fast".to_owned()),
         ..Default::default()
     };
-    let wire = json!({"type":"response.metadata","headers":{"X-OpenAI-Model":["routed"],"X-Codex-Turn-State":"sticky"},"metadata":{"openai_verification_recommendation":["unknown","trusted_access_for_cyber","trusted_access_for_cyber"],"openai_chatgpt_moderation_metadata":{"flag":true}},"safety_buffering":{"use_cases":["code"],"reasons":["review"]}});
+    let wire = json!({"type":"response.metadata","headers":{"X-OpenAI-Model":["routed"]},"metadata":{"openai_verification_recommendation":["unknown","trusted_access_for_cyber","trusted_access_for_cyber"],"openai_chatgpt_moderation_metadata":{"flag":true}},"safety_buffering":{"use_cases":["code"],"reasons":["review"]}});
     let (events, error) = decoder.decode(&wire.to_string()).unwrap();
     assert!(error.is_none());
     let mut state = ResponseState::default();
@@ -124,7 +124,6 @@ fn metadata_is_processed_even_on_otherwise_ignored_events() {
         state.apply(event).unwrap();
     }
     assert_eq!(state.server_model.as_deref(), Some("routed"));
-    assert_eq!(state.turn_state.as_deref(), Some("sticky"));
     assert_eq!(
         state.model_verifications,
         vec![ModelVerification::TrustedAccessForCyber]
@@ -201,7 +200,6 @@ fn all_header_notifications_reach_thread_state() {
         ("openai-model", "routed"),
         ("x-models-etag", "etag"),
         ("x-request-id", "request"),
-        ("x-codex-turn-state", "sticky"),
         ("x-reasoning-included", "true"),
         ("x-codex-primary-used-percent", "20"),
         ("x-codex-primary-window-minutes", "60"),

@@ -53,8 +53,8 @@ execution settings. History uses an allowlist of conversation fields; encrypted
 reasoning/replay state and extra provider fields are omitted. Tool result bodies
 remain the recorded content. Sharing audit events are not exposed to recipients.
 Live response projection contains only lifecycle timing/status, completion, and
-allowlisted output items with their durable IDs. Provider request IDs, turn state,
-rate limits, raw errors and other upstream response metadata are not returned.
+allowlisted output items with their durable IDs. Provider request IDs, rate
+limits, raw errors and other upstream response metadata are not returned.
 
 The browser uses the existing inline/data-URL images, not a new public attachment
 endpoint. Existing links inside message content do not confer permission to their

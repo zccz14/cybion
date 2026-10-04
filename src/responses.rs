@@ -74,7 +74,6 @@ pub(crate) enum ResponseEvent {
     SafetyBuffering(SafetyBuffering),
     RateLimits(RateLimitSnapshot),
     ModelsEtag(String),
-    TurnState(String),
     RequestId(String),
     // Cybion's provider can omit the final argument/text in item.done. These
     // typed updates retain the existing provider contract alongside Codex events.
@@ -354,27 +353,24 @@ impl EventDecoder {
             self.last_model = Some(model.clone());
             events.push(ResponseEvent::ServerModel(model));
         }
-        if event.kind == WireEventType::Metadata {
-            if let Some(state) = json_header(event.headers.as_ref(), &["x-codex-turn-state"]) {
-                events.push(ResponseEvent::TurnState(state));
+        if event.kind == WireEventType::Metadata
+            && let Some(metadata) = event.metadata.as_ref()
+        {
+            if metadata
+                .get("openai_verification_recommendation")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values
+                        .iter()
+                        .any(|v| v.as_str() == Some("trusted_access_for_cyber"))
+                })
+            {
+                events.push(ResponseEvent::ModelVerifications(vec![
+                    ModelVerification::TrustedAccessForCyber,
+                ]));
             }
-            if let Some(metadata) = event.metadata.as_ref() {
-                if metadata
-                    .get("openai_verification_recommendation")
-                    .and_then(Value::as_array)
-                    .is_some_and(|values| {
-                        values
-                            .iter()
-                            .any(|v| v.as_str() == Some("trusted_access_for_cyber"))
-                    })
-                {
-                    events.push(ResponseEvent::ModelVerifications(vec![
-                        ModelVerification::TrustedAccessForCyber,
-                    ]));
-                }
-                if let Some(moderation) = metadata.get("openai_chatgpt_moderation_metadata") {
-                    events.push(ResponseEvent::TurnModerationMetadata(moderation.clone()));
-                }
+            if let Some(moderation) = metadata.get("openai_chatgpt_moderation_metadata") {
+                events.push(ResponseEvent::TurnModerationMetadata(moderation.clone()));
             }
         }
         let safety = event.safety_buffering.as_ref().or_else(|| {
@@ -561,7 +557,6 @@ fn header_events(headers: &HeaderMap) -> Vec<ResponseEvent> {
         ),
         ("x-models-etag", ResponseEvent::ModelsEtag),
         ("x-request-id", ResponseEvent::RequestId),
-        ("x-codex-turn-state", ResponseEvent::TurnState),
     ] {
         if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
             events.push(make(value.to_owned()));

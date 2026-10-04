@@ -23,7 +23,6 @@ pub(crate) struct ResponseState {
     pub(crate) safety_buffering: Option<SafetyBuffering>,
     pub(crate) rate_limits: Vec<RateLimitSnapshot>,
     pub(crate) models_etag: Option<String>,
-    pub(crate) turn_state: Option<String>,
     pub(crate) request_id: Option<String>,
     pub(crate) usage: Option<Usage>,
     pub(crate) usage_metadata: Option<UsageMetadata>,
@@ -132,7 +131,6 @@ impl ResponseState {
                 }
             }
             ResponseEvent::ModelsEtag(value) => self.models_etag = Some(value.clone()),
-            ResponseEvent::TurnState(value) => self.turn_state = Some(value.clone()),
             ResponseEvent::RequestId(value) => self.request_id = Some(value.clone()),
             ResponseEvent::OutputTextDelta { .. }
             | ResponseEvent::ToolCallInputDelta { .. }
