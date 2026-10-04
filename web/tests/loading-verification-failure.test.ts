@@ -5,8 +5,16 @@ import test from "node:test"
 const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 
 test("the loading screen forwards the provider's verification failure", () => {
-  assert.match(main, /const \{ isReady, isAuthenticated, sdk, verificationFailure \} = useAuthMini\(\)/)
+  assert.match(main, /const \{ isReady, isAuthenticated, sdk, session, signOut, verificationFailure \} = useAuthMini\(\)/)
   assert.equal(main.match(/<LoadingScreen verificationFailure=\{verificationFailure\} \/>/g)?.length, 1)
+})
+
+test("audience-stale sessions sign out immediately so login re-mints them", () => {
+  assert.match(main, /const AUDIENCE_RELOGIN_KEY = "cybion\.audience-relogin"/)
+  assert.match(main, /missingAudiences\(accessToken, AUTH_AUDIENCES\)\.length === 0/)
+  assert.match(main, /window\.sessionStorage\.getItem\(AUDIENCE_RELOGIN_KEY\)/)
+  assert.match(main, /window\.sessionStorage\.setItem\(AUDIENCE_RELOGIN_KEY, "1"\)/)
+  assert.match(main, /void signOut\(\)/)
 })
 
 test("the verification failure card shows the reason, diagnostics and a copy action", () => {

@@ -21,7 +21,10 @@ the first authenticated browser session initializes that key atomically.
 
 - Auth is fixed to `https://auth.ntnl.io`. The browser obtains one token for
   `cybion.ntnl.io`, `linkit.ntnl.io`, `openai.ntnl.io`, `ctx.ntnl.io`, and
-  `normai.ntnl.io`; each service checks its own audience.
+  `normai.ntnl.io`; each service checks its own audience. A session whose
+  token does not cover every audience signs out immediately — a login mints
+  audiences once and refresh keeps them — so the login flow re-mints a
+  complete session before the automatic NormAI connect runs.
 - Controller restarts automatically resume `running` Threads from committed
   history and original Worker calls. Transient model failures retry within a
   persisted five-attempt budget; stopped/completed Threads stay stopped.
