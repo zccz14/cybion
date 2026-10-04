@@ -26,6 +26,10 @@ test("the verification failure card shows the reason, diagnostics and a copy act
     "caches.keys()",
     "navigator.serviceWorker.getRegistrations()",
     "window.location.reload()",
+    "browserSupportsEd25519()",
+    "importKey",
+    "{browserUnsupported && <Alert>",
+    "labels.loadingFailureUpgradeBrowser",
   ]) assert.ok(card.includes(fragment), fragment)
 })
 
@@ -40,5 +44,6 @@ test("both language maps define every loading failure copy key", () => {
     "loadingFailureBrowser",
     "loadingFailureCopy",
     "loadingFailureClearData",
+    "loadingFailureUpgradeBrowser",
   ]) assert.equal(main.match(new RegExp(`${key}:`, "g"))?.length, 2, key)
 })
