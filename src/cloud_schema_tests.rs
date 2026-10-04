@@ -484,3 +484,38 @@ async fn schema_26_upgrade_adds_dispatch_and_latest_audit_indexes() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn schema_29_upgrade_adds_cancel_requested_at_and_rebuilds_the_cancel_notice_index() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "timeout-upgrade-user").unwrap();
+    user_db(&state, &user, true, move |connection| {
+        connection.execute_batch(
+            "DROP INDEX worker_calls_cancel_notice;
+             ALTER TABLE worker_calls DROP COLUMN cancel_requested_at;
+             CREATE INDEX worker_calls_cancel_notice ON worker_calls(completed_at,id) WHERE status='cancelled' AND cancel_notified_at IS NULL;
+             PRAGMA user_version=28;",
+        )?;
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        let column: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('worker_calls') WHERE name='cancel_requested_at'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(column, 1);
+        let sql: String = connection.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='worker_calls_cancel_notice'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(sql.contains("cancel_requested_at"), "{sql}");
+        assert!(sql.contains("worker_boot_id"), "{sql}");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}

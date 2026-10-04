@@ -27,7 +27,12 @@ the first authenticated browser session initializes that key atomically.
   flow re-mints a complete session before the automatic NormAI connect runs.
 - Controller restarts automatically resume `running` Threads from committed
   history and original Worker calls. Transient model failures retry within a
-  persisted five-attempt budget; stopped/completed Threads stay stopped.
+  persisted five-attempt budget; stopped/completed Threads stay stopped. A
+  delivered Worker call that outlives its own timeout is cancelled on the
+  Worker; when no confirmation arrives within 30 seconds the Controller
+  answers the call itself with an outcome-unknown
+  `timeout_cancel_unconfirmed` failure that asks the model to clean up a
+  possibly leaked execution before continuing.
 - Threads record their creation origin: `web` for the browser and `api` for
   `/v1/threads` calls, where the creating API key id is stored and an optional
   caller-supplied `external_ref` can map the Thread to the integration's own

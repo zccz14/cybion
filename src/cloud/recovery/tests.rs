@@ -519,3 +519,335 @@ async fn repeated_committed_call_id_is_not_appended_or_enqueued_twice() {
         1
     );
 }
+
+async fn seed_delivered_call(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input: i64,
+    call_id: &str,
+    command: &str,
+) -> (String, String) {
+    let worker = seed_worker(state, user).await;
+    let item = ResponseItem::from_value(json!({
+        "type":"function_call","id":"tool","call_id":call_id,"name":"bash",
+        "arguments":json!({"worker_id":worker,"command":command,"timeout_seconds":1}).to_string()
+    }))
+    .unwrap();
+    append_response_output_items(state, user, thread, input, &[item])
+        .await
+        .unwrap();
+    let id = user_db(state, user, false, {
+        let call_id = call_id.to_owned();
+        move |c| {
+            Ok(c.query_row(
+                "SELECT id FROM worker_calls WHERE responses_call_id=?",
+                [call_id],
+                |r| r.get::<_, String>(0),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    user_db(state, user, false, {
+        let worker = worker.clone();
+        move |c| {
+            assert!(worker_protocol::claim(c, &worker, None)?.is_some());
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    (worker, id)
+}
+
+#[tokio::test]
+async fn worker_call_timeout_requests_cancellation_and_leaves_it_pending() {
+    let (_root, state, user, thread, input) = fixture().await;
+    let (_worker, call) = seed_delivered_call(
+        &state,
+        &user,
+        &thread,
+        input,
+        "timeout-request",
+        "sleep 999",
+    )
+    .await;
+    user_db(&state, &user, false, {
+        let call = call.clone();
+        move |c| {
+            c.execute(
+                "UPDATE worker_calls SET started_at=? WHERE id=?",
+                params![now() - 1000, call],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    recover_interrupted_requests(&state.data_dir).unwrap();
+    resume_running(&state).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let requested: i64 = user_db(&state, &user, false, {
+                let call = call.clone();
+                move |c| {
+                    Ok(c.query_row(
+                        "SELECT COALESCE(cancel_requested_at,0) FROM worker_calls WHERE id=?",
+                        [call],
+                        |r| r.get(0),
+                    )?)
+                }
+            })
+            .await
+            .unwrap();
+            if requested > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    user_db(&state, &user, false, {
+        let call = call.clone();
+        move |c| {
+            let (status, notified): (String, Option<i64>) = c.query_row(
+                "SELECT status,cancel_notified_at FROM worker_calls WHERE id=?",
+                [call],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(status, "delivered", "the call keeps waiting for the Worker");
+            assert_eq!(
+                notified, None,
+                "an unbound Worker process cannot be notified"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    if let Some(request) = state
+        .active_requests
+        .lock()
+        .await
+        .remove(&request_key(&user, &thread.id))
+    {
+        let _ = request.cancellation.send(true);
+    }
+}
+
+#[tokio::test]
+async fn unconfirmed_timeout_answers_the_call_with_a_cleanup_instruction() {
+    let (_root, state, user, thread, input) = fixture().await;
+    let (_worker, call) = seed_delivered_call(
+        &state,
+        &user,
+        &thread,
+        input,
+        "timeout-fallback",
+        "sleep 999",
+    )
+    .await;
+    user_db(&state, &user, false, {
+        let call = call.clone();
+        move |c| {
+            c.execute(
+                "UPDATE worker_calls SET started_at=?,cancel_requested_at=? WHERE id=?",
+                params![now() - 1000, now() - 1000, call],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let (base, requests, server) = model(vec![]).await;
+    bind_mock(&state, &user, &thread, &base).await;
+    recover_interrupted_requests(&state.data_dir).unwrap();
+    resume_running(&state).await.unwrap();
+    wait_finished(&state, &user, &thread).await;
+    user_db(&state, &user, false, {
+        let call = call.clone();
+        move |c| {
+            let (status, code, completed, output, notified): (
+                String,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+            ) = c.query_row(
+                "SELECT status,failure_code,completed_at,output_record_id,cancel_notified_at FROM worker_calls WHERE id=?",
+                [call],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            assert_eq!(status, "failed");
+            assert_eq!(code.as_deref(), Some("timeout_cancel_unconfirmed"));
+            assert!(completed.is_some());
+            assert!(output.is_some());
+            assert_eq!(
+                notified, None,
+                "the pending cancellation must still reach a returning Worker"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let outputs = history
+        .iter()
+        .filter(|record| record.kind == "tool_output")
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 1);
+    let output = outputs[0].payload["output"].as_str().unwrap();
+    assert!(output.contains("timeout_cancel_unconfirmed"), "{output}");
+    assert!(output.contains("clean it up"), "{output}");
+    assert_eq!(outputs[0].payload["call_id"], "timeout-fallback");
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]["input"]
+            .to_string()
+            .contains("timeout_cancel_unconfirmed")
+    );
+    drop(requests);
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_worker_answer_confirms_the_cancellation_without_the_fallback() {
+    let (_root, state, user, thread, input) = fixture().await;
+    let (worker, call) = seed_delivered_call(
+        &state,
+        &user,
+        &thread,
+        input,
+        "timeout-confirmed",
+        "sleep 999",
+    )
+    .await;
+    user_db(&state, &user, false, {
+        let call = call.clone();
+        move |c| {
+            c.execute(
+                "UPDATE worker_calls SET started_at=?,cancel_requested_at=? WHERE id=?",
+                params![now() - 1000, now() - 2, call],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let (base, requests, server) = model(vec![]).await;
+    bind_mock(&state, &user, &thread, &base).await;
+    recover_interrupted_requests(&state.data_dir).unwrap();
+    resume_running(&state).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let _ = worker_result(
+        State(state.clone()),
+        AxumPath((user.id.clone(), worker.clone(), call.clone())),
+        axum::Extension(user.clone()),
+        Json(WorkerResultInput {
+            result: json!({"error":"Bash command cancelled by the Controller"}),
+            failed: true,
+            error: None,
+        }),
+    )
+    .await
+    .unwrap();
+    wait_finished(&state, &user, &thread).await;
+    user_db(&state, &user, false, {
+        let call = call.clone();
+        move |c| {
+            let (status, code, error): (String, Option<String>, Option<String>) = c.query_row(
+                "SELECT status,failure_code,error FROM worker_calls WHERE id=?",
+                [call],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            assert_eq!(status, "failed");
+            assert_eq!(code, None, "the Worker confirmed the cancellation");
+            assert!(
+                error.as_deref().unwrap_or_default().contains("cancelled"),
+                "{error:?}"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let outputs = history
+        .iter()
+        .filter(|record| record.kind == "tool_output")
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 1);
+    let output = outputs[0].payload["output"].as_str().unwrap();
+    assert!(output.contains("cancelled"), "{output}");
+    assert!(history.iter().all(|record| {
+        !record
+            .payload
+            .to_string()
+            .contains("timeout_cancel_unconfirmed")
+    }));
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]["input"].to_string().contains("cancelled"));
+    drop(requests);
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancellation_notices_cover_user_stops_and_unconfirmed_timeouts() {
+    let (_root, state, user, thread, _) = fixture().await;
+    let worker = seed_worker(&state, &user).await;
+    user_db(&state, &user, false, {
+        let worker = worker.clone();
+        let thread = thread.id.clone();
+        move |c| {
+            c.execute("UPDATE workers SET boot_id='boot' WHERE id=?", [&worker])?;
+            for (id, status, requested, notified, completed) in [
+                ("stopped", "cancelled", None, None, 1_i64),
+                ("timed", "failed", Some(2_i64), None, 2_i64),
+                ("notified", "cancelled", None, Some(3_i64), 3_i64),
+                ("plain", "failed", None, None, 4_i64),
+            ] {
+                c.execute(
+                    "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,worker_boot_id,cancel_requested_at,cancel_notified_at,completed_at) VALUES(?,?,?,'bash','{}',?,10,'boot',?,?,?)",
+                    params![id, worker, thread, status, requested, notified, completed],
+                )?;
+            }
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    user_db(&state, &user, false, move |c| {
+        assert_eq!(
+            worker_protocol::cancel_notice(c, &worker, Some("boot"))?.as_deref(),
+            Some("stopped")
+        );
+        assert_eq!(
+            worker_protocol::cancel_notice(c, &worker, Some("boot"))?.as_deref(),
+            Some("timed")
+        );
+        assert_eq!(
+            worker_protocol::cancel_notice(c, &worker, Some("boot"))?,
+            None
+        );
+        let notified = {
+            let mut q = c.prepare(
+                "SELECT id FROM worker_calls WHERE cancel_notified_at IS NOT NULL ORDER BY id",
+            )?;
+            q.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        assert_eq!(notified, ["notified", "stopped", "timed"]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+}

@@ -35,8 +35,15 @@ replay delivered calls. A new boot fails only the old boot's unresolved delivere
 calls with `worker_restarted` / `execution_outcome: unknown`; previously queued
 calls may be assigned to the new boot. Lost results never imply that side effects
 did not occur. Late actual results are audit activity and cannot rewrite a tool
-output already passed to the model. A still-offline Worker is waited for rather
-than guessed dead after a network timeout; users can stop the Thread.
+output already passed to the model. A delivered call that outlives its own
+timeout — `bash`'s `timeout_seconds`, or 600 seconds by default — by a
+30-second grace is cancelled: the Controller sends the bound Worker process a
+`cancel` event and waits 30 seconds for the Worker to confirm by answering the
+call. Without that confirmation the Controller fails the call itself with
+`timeout_cancel_unconfirmed` / `execution_outcome: unknown`, tells the model to
+clean up the possibly leaked execution, and keeps the cancellation pending so a
+Worker reconnecting with the same process still receives it; users can stop the
+Thread at any time.
 
 0.1.x Workers temporarily retain single-delivery behavior during rollout. Their
 unbound delivered calls must not be replayed into a fresh 0.2.0 process. Remove
