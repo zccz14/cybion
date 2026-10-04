@@ -685,6 +685,7 @@ const copy = {
     loadingFailureBrowser: "Browser",
     loadingFailureCopy: "Copy details",
     loadingFailureClearData: "Clear cache & app data",
+    loadingFailureUpgradeBrowser: "Your browser is too old to complete the session security check. Please upgrade it to the latest version, or switch to the latest Chrome / Edge / Firefox / Safari, then reload this page.",
   },
   zh: {
     threads: "线程",
@@ -1012,6 +1013,7 @@ const copy = {
     loadingFailureBrowser: "浏览器",
     loadingFailureCopy: "复制详情",
     loadingFailureClearData: "清理缓存和应用数据",
+    loadingFailureUpgradeBrowser: "当前浏览器版本过旧，无法完成会话安全校验。请升级浏览器到最新版本，或改用最新版 Chrome / Edge / Firefox / Safari，然后刷新本页。",
   },
 } as const
 
@@ -1132,6 +1134,10 @@ function LoadingScreen({ verificationFailure }: { verificationFailure?: AuthMini
 // Surfaces the local session verification failure so a stuck loading screen is diagnosable.
 function SessionVerificationFailureCard({ failure }: { failure: AuthMiniVerificationFailure }) {
   const [copied, setCopied] = useState(false)
+  const [browserUnsupported, setBrowserUnsupported] = useState(false)
+  useEffect(() => {
+    void browserSupportsEd25519().then((supported) => { if (!supported) setBrowserUnsupported(true) })
+  }, [])
   const language: Language = localStorage.getItem("cybion.language") === "zh" ? "zh" : "en"
   const labels = copy[language]
   const details: Array<[string, string]> = [
@@ -1153,6 +1159,10 @@ function SessionVerificationFailureCard({ failure }: { failure: AuthMiniVerifica
       <CardDescription className="break-words">{failure.reason}</CardDescription>
     </CardHeader>
     <CardContent className="flex flex-col gap-3">
+      {browserUnsupported && <Alert>
+        <CircleAlertIcon />
+        <AlertDescription>{labels.loadingFailureUpgradeBrowser}</AlertDescription>
+      </Alert>}
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
         {details.map(([label, value]) => <div key={label} className="contents">
           <dt className="text-muted-foreground">{label}</dt>
@@ -1175,6 +1185,17 @@ async function clearLocalAppData() {
   for (const key of await caches.keys()) await caches.delete(key)
   for (const registration of await navigator.serviceWorker.getRegistrations()) await registration.unregister()
   window.location.reload()
+}
+
+// jose verifies EdDSA sessions by importing the JWKS key as an Ed25519
+// WebCrypto key; engines without it (Chromium <113, some shells) can never pass.
+async function browserSupportsEd25519() {
+  try {
+    await crypto.subtle.importKey("jwk", { kty: "OKP", crv: "Ed25519", x: "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo" }, { name: "Ed25519" }, false, ["verify"])
+    return true
+  } catch {
+    return false
+  }
 }
 
 type WorkspaceNavItem = { to: string; label: string; icon: typeof TerminalSquareIcon }
