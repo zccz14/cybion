@@ -6,7 +6,7 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 
 test("hosted UI requests one Auth Mini token for every downstream service", () => {
   assert.match(source, /authMiniBaseUrl="https:\/\/auth\.ntnl\.io"/)
-  assert.match(source, /new Set\(\["cybion\.ntnl\.io", "linkit\.ntnl\.io", "openai\.ntnl\.io", "ctx\.ntnl\.io", window\.location\.hostname\]\)/)
+  assert.match(source, /new Set\(\["cybion\.ntnl\.io", "linkit\.ntnl\.io", "openai\.ntnl\.io", "ctx\.ntnl\.io", "normai\.ntnl\.io", window\.location\.hostname\]\)/)
   assert.match(source, /audiences=\{AUTH_AUDIENCES\}/)
   assert.doesNotMatch(source, /audience="cybion\.ntnl\.io"/)
   assert.match(source, /autoRedirectToLogin/)
