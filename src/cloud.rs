@@ -680,11 +680,9 @@ fn app(state: AppState) -> Router {
         .route("/api/integrations/normai/rotate", post(normai::rotate))
         .route(
             "/api/integrations/linkit",
-            get(linkit_notifications::read).delete(linkit_notifications::disable),
-        )
-        .route(
-            "/api/integrations/linkit/refresh",
-            post(linkit_notifications::configure),
+            get(linkit_notifications::read)
+                .post(linkit_notifications::ensure)
+                .put(linkit_notifications::set_notifications),
         )
         .route(
             "/api/integrations/linkit/test",

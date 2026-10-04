@@ -134,12 +134,20 @@ async fn set_enabled(state: &AppState, user: &User, enabled: bool) -> Result<(),
     .await
 }
 
-pub(super) async fn disable(
+#[derive(Deserialize)]
+pub(super) struct NotificationSwitch {
+    enabled: bool,
+}
+
+/// The notification switch: the only user-controlled part of this integration.
+/// The Bot connection itself is maintained by `ensure` independently.
+pub(super) async fn set_notifications(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<NotificationSwitch>,
 ) -> Result<Json<NotificationStatus>, ApiError> {
     let _guard = lock_integrations(&state, format!("linkit:{}", identity.user.id)).await;
-    set_enabled(&state, &identity.user, false).await?;
+    set_enabled(&state, &identity.user, input.enabled).await?;
     read(State(state), axum::Extension(identity)).await
 }
 
@@ -251,7 +259,11 @@ async fn repair_bot(
     Ok(())
 }
 
-pub(super) async fn configure(
+/// Idempotent: brings the user's Linkit connection to a complete, working
+/// state — the owner's username, an owned Bot, and a valid token — and never
+/// touches the notification switch. Workspace load calls this silently so the
+/// channel is always ready and self-repairing.
+pub(super) async fn ensure(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<NotificationStatus>, ApiError> {
@@ -283,16 +295,15 @@ pub(super) async fn configure(
         .map(|profile| profile.username)
         .filter(|username| !username.trim().is_empty())
         .ok_or_else(|| {
-            ApiError::conflict("Set your Linkit username before enabling notifications")
+            ApiError::conflict("Set your Linkit username before notifications can be connected")
         })?;
     repair_bot(&state, &identity.user, &identity.bearer, &mut settings).await?;
     save_settings(&state, &identity.user, &settings).await?;
     if !token_matches(&state, &settings).await? {
         return Err(ApiError::unavailable(
-            "Linkit Bot credential changed during configuration; repair notifications again",
+            "Linkit Bot credential changed during setup; repair the connection again",
         ));
     }
-    set_enabled(&state, &identity.user, true).await?;
     read(State(state), axum::Extension(identity)).await
 }
 

@@ -124,12 +124,17 @@ the first authenticated browser session initializes that key atomically.
   the owner points them at another upstream. Schema 16 converts the single
   legacy configuration (an explicit key, or an OpenAI-LB consumer credential)
   into one upstream and binds existing Threads to it.
-- Linkit task notifications are optional and configured separately. They do not
-  gate model inference, external API requests, or API-key creation.
-- **Configuration → Linkit task notifications** lets the owner enable/repair,
-  pause, and test notifications. Bot credentials are checked using Linkit's
-  current user APIs; stale Bot tokens can be rotated without replacing a healthy
-  Bot. Notifications use `POST /api/conversations/direct/{username}` followed by
+- Linkit task notifications ride on an automatically maintained Linkit
+  connection — the owner's username, an owned `Cybion` Bot, and a valid Bot
+  token — and stay independent of model inference, external API requests, and
+  API-key creation. Every workspace load silently ensures that connection,
+  repairing stale credentials to completion without replacing a healthy Bot.
+- **Configuration → Linkit task notifications** exposes the notification
+  switch, the recipient and delivery status, and **Send test notification**. A
+  **Repair connection** button appears only while the connection is incomplete
+  (for example, before the owner sets a Linkit username). Bot credentials are
+  checked using Linkit's current user APIs. Notifications use
+  `POST /api/conversations/direct/{username}` followed by
   `POST /api/conversations/{id}/messages`. The stable recipient UUID is verified
   before sending Thread content. The removed `/bot/v1/messages` route is not used.
 - Delivery results persist per user, including the last error and successful
@@ -138,9 +143,11 @@ the first authenticated browser session initializes that key atomically.
   because message creation is not idempotent. A receipt means stored in Linkit,
   not device push or human read confirmation. Successful inference and terminal
   failures notify; cancelled/superseded requests and successful compaction do not.
-- New users start with notifications off. Schema 14 preserves notification
-  intent for existing users with saved Bot credentials. Pausing retains those
-  credentials and the remote Bot; a manual test does not turn notifications on.
+- New users start with notifications off; the switch is the only notification
+  control and never triggers the connection ensure. Schema 14 preserves
+  notification intent for existing users with saved Bot credentials. Switching
+  notifications off retains those credentials and the remote Bot; a manual test
+  does not turn notifications on.
 - A paired Worker performs Bash, Browser Control, and Computer Use on the
   user's device. It keeps no model credential or SQLite database.
 
