@@ -15,10 +15,11 @@ Cybion sends each model request to the selected upstream's
 `{base_url}/models`; keys stay in the user's SQLite database and are never
 returned to the browser. The model pickers group the catalogs by upstream name,
 and upgrading an older database converts its single legacy configuration
-(explicit key or OpenAI-LB consumer credential) into one upstream. Optional
-completion and failure notifications use a user-owned Linkit Bot and that same
-subject's private conversation. Notification setup and delivery are independent
-of model inference.
+(explicit key or OpenAI-LB consumer credential) into one upstream. Completion
+and failure notifications use a user-owned Linkit Bot and that same subject's
+private conversation; the connection is ensured automatically on workspace
+load and a switch in Configuration controls delivery. Notification delivery is
+independent of model inference.
 
 The service is deployed at `cybion.ntnl.io` in Tokyo. Its deployment artifact is
 a single Linux x86_64 Rust binary with the React web application embedded.

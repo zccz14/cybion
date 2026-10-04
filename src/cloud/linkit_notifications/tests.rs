@@ -212,8 +212,19 @@ fn observed(f: &Fixture) -> NotificationStatus {
 async fn test_message(f: &Fixture) -> Result<Json<DeliveryReceipt>, ApiError> {
     super::test(State(f.state.clone()), identity(f)).await
 }
-async fn configure_notifications(f: &Fixture) -> Result<Json<NotificationStatus>, ApiError> {
-    configure(State(f.state.clone()), identity(f)).await
+async fn ensure_connection(f: &Fixture) -> Result<Json<NotificationStatus>, ApiError> {
+    ensure(State(f.state.clone()), identity(f)).await
+}
+async fn switch_notifications(
+    f: &Fixture,
+    enabled: bool,
+) -> Result<Json<NotificationStatus>, ApiError> {
+    set_notifications(
+        State(f.state.clone()),
+        identity(f),
+        Json(NotificationSwitch { enabled }),
+    )
+    .await
 }
 async fn thread(f: &Fixture) -> ThreadView {
     create_thread_for(
@@ -278,7 +289,8 @@ async fn successful_and_failed_task_notifications_preserve_thread_link_after_lon
 }
 
 #[tokio::test]
-async fn notifications_use_fresh_credentials_and_pausing_keeps_credentials_without_network_calls() {
+async fn notifications_use_fresh_credentials_and_switching_off_keeps_credentials_without_network_calls()
+ {
     let f = fixture().await;
     let t = thread(&f).await;
     set_enabled(&f.state, &f.user, true).await.unwrap();
@@ -288,13 +300,7 @@ async fn notifications_use_fresh_credentials_and_pausing_keeps_credentials_witho
     save_settings(&f.state, &f.user, &settings).await.unwrap();
     notify(&f.state, &f.user, &t, true, "ok").await;
     assert_eq!(f.remote.lock().await.messages.len(), 1);
-    assert!(
-        !disable(State(f.state.clone()), identity(&f))
-            .await
-            .unwrap()
-            .0
-            .enabled
-    );
+    assert!(!switch_notifications(&f, false).await.unwrap().0.enabled);
     let before = f.remote.lock().await.calls.len();
     notify(&f.state, &f.user, &t, true, "paused").await;
     assert_eq!(f.remote.lock().await.calls.len(), before);
@@ -363,7 +369,7 @@ async fn malformed_or_mismatched_receipts_are_not_reported_as_delivered() {
 }
 
 #[tokio::test]
-async fn configure_is_owner_scoped_repairs_stale_bot_token_and_preserves_upstreams() {
+async fn ensure_is_owner_scoped_repairs_stale_bot_token_and_preserves_upstreams() {
     for stale in [false, true] {
         let f = fixture().await;
         let mut settings = saved(&f);
@@ -372,8 +378,8 @@ async fn configure_is_owner_scoped_repairs_stale_bot_token_and_preserves_upstrea
             settings.linkit_bot_token = "sk-stale".into();
         }
         save_settings(&f.state, &f.user, &settings).await.unwrap();
-        let view = configure_notifications(&f).await.unwrap().0;
-        assert!(view.enabled && view.configured);
+        let view = ensure_connection(&f).await.unwrap().0;
+        assert!(view.configured && !view.enabled);
         assert!(view.last_success_at.is_none());
         let after = saved(&f);
         assert_eq!(after.linkit_username, "owner");
@@ -388,19 +394,32 @@ async fn configure_is_owner_scoped_repairs_stale_bot_token_and_preserves_upstrea
     let f = fixture().await;
     f.remote.lock().await.owner = "different-owner".into();
     assert_eq!(
-        configure_notifications(&f).await.unwrap_err().status,
+        ensure_connection(&f).await.unwrap_err().status,
         StatusCode::FORBIDDEN
     );
     assert_eq!(f.remote.lock().await.calls.len(), 1);
 }
 
 #[tokio::test]
-async fn deleted_bot_recreation_and_parallel_configuration_create_only_one_bot() {
+async fn ensure_recreates_a_deleted_bot_without_touching_the_notification_switch() {
+    let f = fixture().await;
+    assert!(switch_notifications(&f, true).await.unwrap().0.enabled);
+    f.remote.lock().await.bot = None;
+    let view = ensure_connection(&f).await.unwrap().0;
+    assert!(view.configured && view.enabled);
+    assert_eq!(f.remote.lock().await.created, 1);
+    assert!(!switch_notifications(&f, false).await.unwrap().0.enabled);
+    let view = ensure_connection(&f).await.unwrap().0;
+    assert!(view.configured && !view.enabled);
+}
+
+#[tokio::test]
+async fn deleted_bot_recreation_and_parallel_ensure_create_only_one_bot() {
     let f = fixture().await;
     f.remote.lock().await.bot = None;
-    let (a, b) = tokio::join!(configure_notifications(&f), configure_notifications(&f));
-    assert!(a.unwrap().0.enabled);
-    assert!(b.unwrap().0.enabled);
+    let (a, b) = tokio::join!(ensure_connection(&f), ensure_connection(&f));
+    assert!(a.unwrap().0.configured);
+    assert!(b.unwrap().0.configured);
     assert_eq!(f.remote.lock().await.created, 1);
     assert_eq!(f.remote.lock().await.rotated, 0);
     assert_eq!(saved(&f).linkit_bot_id, "created-1");
@@ -414,10 +433,10 @@ async fn new_bot_token_is_saved_before_final_validation_failure_and_reused_on_re
         remote.bot = None;
         remote.fault = Some((4, StatusCode::SERVICE_UNAVAILABLE, json!({})));
     }
-    assert!(configure_notifications(&f).await.is_err());
+    assert!(ensure_connection(&f).await.is_err());
     assert_eq!(saved(&f).linkit_bot_token, "sk-created-1");
     assert!(!observed(&f).enabled);
-    assert!(configure_notifications(&f).await.unwrap().0.enabled);
+    assert!(ensure_connection(&f).await.unwrap().0.configured);
     assert_eq!(f.remote.lock().await.created, 1);
 }
 
@@ -425,7 +444,7 @@ async fn new_bot_token_is_saved_before_final_validation_failure_and_reused_on_re
 async fn linkit_setup_failure_does_not_touch_upstreams() {
     let f = fixture().await;
     f.remote.lock().await.username = None;
-    assert!(configure_notifications(&f).await.is_err());
+    assert!(ensure_connection(&f).await.is_err());
     assert_eq!(saved(&f).linkit_bot_token, "sk-bot-token");
     let upstream = upstream_of(&f).await;
     assert_eq!(upstream.base_url, f.upstream.base_url);
@@ -459,7 +478,7 @@ async fn schema_14_preserves_existing_notification_intent_but_new_users_start_di
     drop(connection);
     assert!(observed(&f).enabled);
     assert_eq!(saved(&f).linkit_bot_token, "sk-bot-token");
-    let _ = disable(State(f.state.clone()), identity(&f)).await.unwrap();
+    let _ = switch_notifications(&f, false).await.unwrap();
     assert!(!observed(&f).enabled);
     assert!(!observed(&f).enabled);
     let other = user_for_subject(&f.state, "new-notification-user").unwrap();
@@ -534,8 +553,8 @@ async fn notification_management_routes_reject_missing_browser_authentication() 
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     for (method, path) in [
         (reqwest::Method::GET, "/api/integrations/linkit"),
-        (reqwest::Method::DELETE, "/api/integrations/linkit"),
-        (reqwest::Method::POST, "/api/integrations/linkit/refresh"),
+        (reqwest::Method::POST, "/api/integrations/linkit"),
+        (reqwest::Method::PUT, "/api/integrations/linkit"),
         (reqwest::Method::POST, "/api/integrations/linkit/test"),
     ] {
         let response = reqwest::Client::new()

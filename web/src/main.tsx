@@ -1313,6 +1313,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   return <LinkitProvider linkitBaseUrl="https://linkit.ntnl.io" lang={language === "zh" ? "zh-CN" : "en-US"}>
     <LinkitLanguageSync setLanguage={setLanguage} />
     <NormaiAutoConnect sdk={sdk} />
+    <LinkitAutoEnsure sdk={sdk} />
     <UiContext.Provider value={ui}>
       <ErrorBoundary fallback={({ error, reset }) => <ErrorBoundaryFallback
         error={error}
@@ -2702,6 +2703,24 @@ function NormaiAutoConnect({ sdk }: { sdk: AuthMiniApi }) {
     void client.invalidateQueries({ queryKey: ["upstream-models"] })
     void client.invalidateQueries({ queryKey: ["thread-defaults"] })
   }, [client, connect.isSuccess])
+  return null
+}
+
+// The controller keeps one Linkit Bot per user; this silent call provisions or
+// repairs the connection on every workspace load, so notifications never need a
+// setup step and the switch stays the only notification control.
+function LinkitAutoEnsure({ sdk }: { sdk: AuthMiniApi }) {
+  const client = useQueryClient()
+  const ensure = useQuery({
+    queryKey: ["linkit-ensure", sdk.session.getState().sessionId],
+    queryFn: () => api<unknown>(sdk, "/api/integrations/linkit", { method: "POST" }),
+    retry: false,
+    staleTime: Infinity,
+  })
+  useEffect(() => {
+    if (!ensure.isSuccess) return
+    void client.invalidateQueries({ queryKey: ["linkit-notifications"] })
+  }, [client, ensure.isSuccess])
   return null
 }
 
