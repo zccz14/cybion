@@ -111,6 +111,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog"
 import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
@@ -608,7 +609,6 @@ const copy = {
     contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
     minimalMode: "Minimal mode",
     minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
-    integrationDescription: "Configure one or more Responses-compatible upstreams. Threads pick a model from any upstream; notification settings are independent.",
     ctxIntegrationTitle: "CTX documents",
     ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) so threads can read your top-level CTX documents as contexts. Cybion stores a dedicated API key you can revoke anytime.",
     ctxConnected: "Connected",
@@ -629,8 +629,9 @@ const copy = {
     normaiReissueConfirm: "Reissue the NormAI key? The current credential stops working immediately.",
     normaiOpenProviders: "Configure providers on NormAI",
     normaiRequestError: "NormAI request failed",
+    normaiFallbackUpstreams: "Fallback upstreams",
+    normaiFallbackDescription: "Only needed when NormAI is unavailable. Add a Responses-compatible upstream and point threads at it to keep running.",
     integration: "Integrations",
-    openai: "Responses-compatible upstreams",
     apiBaseUrl: "Base URL",
     apiBaseUrlDescription: "Cybion sends model requests to this URL with /responses appended.",
     apiKey: "API key",
@@ -646,7 +647,7 @@ const copy = {
     upstreamDelete: "Delete",
     upstreamDeleteError: "Could not delete the upstream",
     upstreamDeleteConfirm: "Delete this upstream? Threads and defaults that still reference it fail until you point them at another upstream.",
-    upstreamsEmpty: "No upstreams yet. Add one to run threads.",
+    upstreamsEmpty: "No fallback upstreams yet.",
     upstreamKeyPlaceholder: "Enter a new API key to replace the stored key",
     upstreamNewKeyPlaceholder: "Optional API key",
     availableModels: "Available models",
@@ -945,7 +946,6 @@ const copy = {
     contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为 checkpoint；0 表示关闭，内置默认 200000。",
     minimalMode: "极简模式",
     minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
-    integrationDescription: "配置一个或多个用于模型推理的 Responses-compatible 上游；线程可以从任意上游选择模型。通知配置与此独立。",
     ctxIntegrationTitle: "CTX 文档",
     ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，线程可以把你的一级 CTX 文档当作上下文读取。Cybion 会保存一把专用 API 密钥，可随时吊销。",
     ctxConnected: "已连接",
@@ -966,8 +966,9 @@ const copy = {
     normaiReissueConfirm: "重新签发 NormAI 密钥？当前密钥将立即失效。",
     normaiOpenProviders: "在 NormAI 配置上游提供商",
     normaiRequestError: "NormAI 请求失败",
+    normaiFallbackUpstreams: "备用上游",
+    normaiFallbackDescription: "仅在 NormAI 不可用时需要。添加 Responses-compatible 上游，把线程指向它即可继续运行。",
     integration: "集成",
-    openai: "Responses-compatible 上游",
     apiBaseUrl: "基础地址",
     apiBaseUrlDescription: "Cybion 会在这个地址后追加 /responses 发送模型请求。",
     apiKey: "API Key",
@@ -983,7 +984,7 @@ const copy = {
     upstreamDelete: "删除",
     upstreamDeleteError: "无法删除上游",
     upstreamDeleteConfirm: "删除该上游？仍在引用它的线程与默认设置会运行失败，重新选择上游后即可恢复。",
-    upstreamsEmpty: "还没有配置上游。添加一个即可开始运行线程。",
+    upstreamsEmpty: "还没有备用上游。",
     upstreamKeyPlaceholder: "输入新的 API Key 以替换已保存的值",
     upstreamNewKeyPlaceholder: "可选 API Key",
     availableModels: "可用模型",
@@ -2586,7 +2587,6 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
     <NormaiUpstreamCard key={session?.sessionId} sdk={sdk} />
-    <UpstreamsCard key={session?.sessionId} sdk={sdk} />
     <CtxIntegrationCard key={session?.sessionId} sdk={sdk} />
     <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
@@ -2671,6 +2671,17 @@ function NormaiUpstreamCard({ sdk }: { sdk: AuthMiniApi }) {
         <Button asChild size="sm" variant="outline"><a href="https://normai.ntnl.io/#/providers" target="_blank" rel="noreferrer"><ExternalLinkIcon data-icon="inline-start" />{t("normaiOpenProviders")}</a></Button>
       </div>}
       {failed && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("normaiRequestError")}</AlertTitle><AlertDescription>{errorMessage(failed)}</AlertDescription></Alert>}
+      <div className="border-t pt-4">
+        <Dialog>
+          <DialogTrigger asChild>
+            <Button size="sm" variant="outline"><Settings2Icon data-icon="inline-start" />{t("normaiFallbackUpstreams")}</Button>
+          </DialogTrigger>
+          <DialogContent className="max-h-[85svh] overflow-y-auto sm:max-w-xl">
+            <DialogHeader><DialogTitle>{t("normaiFallbackUpstreams")}</DialogTitle><DialogDescription>{t("normaiFallbackDescription")}</DialogDescription></DialogHeader>
+            <UpstreamsManager sdk={sdk} />
+          </DialogContent>
+        </Dialog>
+      </div>
     </CardContent>
   </Card>
 }
@@ -2694,7 +2705,7 @@ function NormaiAutoConnect({ sdk }: { sdk: AuthMiniApi }) {
   return null
 }
 
-function UpstreamsCard({ sdk }: { sdk: AuthMiniApi }) {
+function UpstreamsManager({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
   const client = useQueryClient()
   const upstreams = useQuery({ queryKey: ["upstreams"], queryFn: ({ signal }) => api<Upstream[]>(sdk, "/api/integrations/upstreams", { signal }) })
@@ -2704,20 +2715,17 @@ function UpstreamsCard({ sdk }: { sdk: AuthMiniApi }) {
     void client.invalidateQueries({ queryKey: ["upstreams"] })
     void client.invalidateQueries({ queryKey: ["upstream-models"] })
   }
-  return <Card>
-    <CardHeader><CardTitle>{t("openai")}</CardTitle><CardDescription>{t("integrationDescription")}</CardDescription></CardHeader>
-    <CardContent className="flex flex-col gap-5">
-      {upstreams.error && <RequestError error={upstreams.error} onRetry={() => void upstreams.refetch()} />}
-      {upstreams.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-36" /><Skeleton className="h-36" /></div>}
-      {upstreams.data && upstreams.data.length === 0 && <p className="text-sm text-muted-foreground">{t("upstreamsEmpty")}</p>}
-      {upstreams.data && upstreams.data.length > 0 && <div className="flex max-w-xl flex-wrap items-center gap-3">
-        <p className="mr-auto text-sm font-medium">{t("availableModels")}</p>
-        <Button type="button" size="sm" variant="outline" disabled={models.isFetching} onClick={() => void models.refetch()}>{models.isFetching ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{t("refreshModels")}</Button>
-      </div>}
-      {others.map((upstream) => <UpstreamRow key={upstream.id} sdk={sdk} upstream={upstream} catalog={models.data?.upstreams.find((entry) => entry.id === upstream.id)} catalogLoading={models.isLoading} catalogDescription={t("availableModelsDescription")} onChanged={refresh} />)}
-      {upstreams.data && <AddUpstreamForm sdk={sdk} onAdded={refresh} />}
-    </CardContent>
-  </Card>
+  return <div className="flex flex-col gap-5">
+    {upstreams.error && <RequestError error={upstreams.error} onRetry={() => void upstreams.refetch()} />}
+    {upstreams.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-36" /><Skeleton className="h-36" /></div>}
+    {upstreams.data && others.length === 0 && <p className="text-sm text-muted-foreground">{t("upstreamsEmpty")}</p>}
+    {others.length > 0 && <div className="flex max-w-xl flex-wrap items-center gap-3">
+      <p className="mr-auto text-sm font-medium">{t("availableModels")}</p>
+      <Button type="button" size="sm" variant="outline" disabled={models.isFetching} onClick={() => void models.refetch()}>{models.isFetching ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{t("refreshModels")}</Button>
+    </div>}
+    {others.map((upstream) => <UpstreamRow key={upstream.id} sdk={sdk} upstream={upstream} catalog={models.data?.upstreams.find((entry) => entry.id === upstream.id)} catalogLoading={models.isLoading} catalogDescription={t("availableModelsDescription")} onChanged={refresh} />)}
+    {upstreams.data && <AddUpstreamForm sdk={sdk} onAdded={refresh} />}
+  </div>
 }
 
 function UpstreamRow({ sdk, upstream, catalog, catalogLoading, catalogDescription, onChanged }: { sdk: AuthMiniApi; upstream: Upstream; catalog: UpstreamCatalog | undefined; catalogLoading: boolean; catalogDescription: string; onChanged: () => void }) {

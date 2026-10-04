@@ -11,6 +11,7 @@ test("personal configuration manages multiple Responses-compatible upstreams wit
   assert.match(source, /apiBaseUrlDescription: "Cybion 会在这个地址后追加 \/responses 发送模型请求。/)
   assert.match(source, /apiKeyDescription: "按用户保存，永远不会返回到浏览器。/)
   assert.match(source, /"\/api\/integrations\/upstreams"/)
+  assert.match(source, /<UpstreamsManager sdk=\{sdk\} \/>/)
   assert.match(source, /api_key: apiKey/)
   assert.match(source, /type="password" autoComplete="new-password"/)
   assert.match(source, /function AddUpstreamForm/)

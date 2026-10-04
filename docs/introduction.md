@@ -6,9 +6,11 @@ browser-managed thread, an integration API, and a personal-device Worker.
 Users authenticate with Auth Mini using one access token whose audiences are
 `cybion.ntnl.io`, `linkit.ntnl.io`, and `openai.ntnl.io`, plus the hostname of
 the web entry being used (so reverse-proxied domains such as `cybion.ntnl.top`
-work). Each service verifies only its own audience. The Configuration page manages named upstreams for
-OpenAI Responses-compatible providers, each with a per-user `base_url` and
-`api_key`. Cybion sends each model request to the selected upstream's
+work). Each service verifies only its own audience. Every user gets a NormAI upstream
+automatically; the same card keeps **Fallback upstreams** — a dialog only
+needed while NormAI is unavailable — that manages named upstreams for OpenAI
+Responses-compatible providers, each with a per-user `base_url` and `api_key`.
+Cybion sends each model request to the selected upstream's
 `{base_url}/responses` and reads every provider's model catalog from
 `{base_url}/models`; keys stay in the user's SQLite database and are never
 returned to the browser. The model pickers group the catalogs by upstream name,
