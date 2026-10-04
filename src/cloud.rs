@@ -37,6 +37,7 @@ mod admin_users;
 mod ctx_contexts;
 mod history;
 mod linkit_notifications;
+mod normai;
 mod recovery;
 mod reports;
 mod thread_controls;
@@ -59,17 +60,19 @@ use crate::responses::{
 
 const AUTH_ISSUER: &str = "https://auth.ntnl.io";
 const AUTH_AUDIENCE: &str = "cybion.ntnl.io";
-const AUTH_AUDIENCES: [&str; 4] = [
+const AUTH_AUDIENCES: [&str; 5] = [
     "cybion.ntnl.io",
     "linkit.ntnl.io",
     "openai.ntnl.io",
     "ctx.ntnl.io",
+    "normai.ntnl.io",
 ];
 // Legacy single-upstream installations without an explicit base URL used this
 // endpoint; schema 16 materializes it into an upstream row.
 const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
 const CTX_API_URL: &str = "https://ctx.ntnl.io";
+const NORMAI_API_URL: &str = "https://normai.ntnl.io";
 const WORKER_RELEASE_BASE_URL: &str = "https://github.com/zccz14/cybion-worker/releases/download";
 const WORKER_ANDROID_RELEASE_BASE_URL: &str =
     "https://github.com/zccz14/cybion-worker-for-android/releases/download";
@@ -131,7 +134,7 @@ const GLOBAL_USER_AGENT_KEY: &str = "openai_user_agent";
 const GLOBAL_ORIGINATOR_KEY: &str = "openai_originator";
 const INSIGHT_TIMEZONE: &str = "UTC";
 
-// The browser bearer is minted for all four resource hosts. Cybion forwards
+// The browser bearer is minted for all five resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
 // downstream service receives Cybion-specific context.
 
@@ -142,6 +145,7 @@ struct AppState {
     client: reqwest::Client,
     linkit_api_url: String,
     ctx_api_url: String,
+    normai_api_url: String,
     worker_release_base: String,
     worker_android_release_base: String,
     auth: Arc<OnceCell<AuthMiniLayer>>,
@@ -364,6 +368,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .build()?,
         linkit_api_url: LINKIT_API_URL.to_owned(),
         ctx_api_url: CTX_API_URL.to_owned(),
+        normai_api_url: NORMAI_API_URL.to_owned(),
         worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
         worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
         auth: Arc::new(OnceCell::new()),
@@ -664,6 +669,8 @@ fn app(state: AppState) -> Router {
             put(upstreams::update).delete(upstreams::delete),
         )
         .route("/api/integrations/upstreams/models", get(upstreams::models))
+        .route("/api/integrations/normai", post(normai::connect))
+        .route("/api/integrations/normai/rotate", post(normai::rotate))
         .route(
             "/api/integrations/linkit",
             get(linkit_notifications::read).delete(linkit_notifications::disable),
@@ -8123,6 +8130,10 @@ mod schema_tests;
 mod ctx_tests;
 
 #[cfg(test)]
+#[path = "cloud_normai_tests.rs"]
+mod normai_tests;
+
+#[cfg(test)]
 #[path = "cloud_turn_state_tests.rs"]
 mod turn_state_tests;
 
@@ -8145,6 +8156,7 @@ mod tests {
                 client: reqwest::Client::new(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
                 ctx_api_url: CTX_API_URL.to_owned(),
+                normai_api_url: NORMAI_API_URL.to_owned(),
                 worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
                 worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
                 auth: Arc::new(OnceCell::new()),

@@ -620,6 +620,15 @@ const copy = {
     ctxDocumentsTitle: "Top-level CTX documents",
     ctxDocumentsEmpty: "No top-level documents in CTX yet.",
     ctxOpenDocument: "Open in CTX",
+    normaiTitle: "NormAI upstream",
+    normaiDescription: "Model inference runs through NormAI. Configure upstream providers and billing on NormAI; Cybion automatically issues and stores a dedicated consumer credential.",
+    normaiConnected: "Connected",
+    normaiNotConnected: "Not connected",
+    normaiConnect: "Connect NormAI",
+    normaiReissue: "Reissue key",
+    normaiReissueConfirm: "Reissue the NormAI key? The current credential stops working immediately.",
+    normaiOpenProviders: "Configure providers on NormAI",
+    normaiRequestError: "NormAI request failed",
     integration: "Integrations",
     openai: "Responses-compatible upstreams",
     apiBaseUrl: "Base URL",
@@ -948,6 +957,15 @@ const copy = {
     ctxDocumentsTitle: "CTX 一级文档",
     ctxDocumentsEmpty: "CTX 里还没有一级文档。",
     ctxOpenDocument: "在 CTX 打开",
+    normaiTitle: "NormAI 上游",
+    normaiDescription: "模型推理经由 NormAI 完成；上游提供商与计费都在 NormAI 配置，Cybion 会自动签发并保存专用消费者密钥。",
+    normaiConnected: "已连接",
+    normaiNotConnected: "未连接",
+    normaiConnect: "连接 NormAI",
+    normaiReissue: "重新签发密钥",
+    normaiReissueConfirm: "重新签发 NormAI 密钥？当前密钥将立即失效。",
+    normaiOpenProviders: "在 NormAI 配置上游提供商",
+    normaiRequestError: "NormAI 请求失败",
     integration: "集成",
     openai: "Responses-compatible 上游",
     apiBaseUrl: "基础地址",
@@ -1035,7 +1053,7 @@ function useUi() {
 
 const queryClient = new QueryClient()
 const AUTH_AUDIENCES = Array.from(
-  new Set(["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io", "ctx.ntnl.io", window.location.hostname]),
+  new Set(["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io", "ctx.ntnl.io", "normai.ntnl.io", window.location.hostname]),
 )
 
 function errorMessage(error: unknown) {
@@ -1293,6 +1311,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   }), [dark, language])
   return <LinkitProvider linkitBaseUrl="https://linkit.ntnl.io" lang={language === "zh" ? "zh-CN" : "en-US"}>
     <LinkitLanguageSync setLanguage={setLanguage} />
+    <NormaiAutoConnect sdk={sdk} />
     <UiContext.Provider value={ui}>
       <ErrorBoundary fallback={({ error, reset }) => <ErrorBoundaryFallback
         error={error}
@@ -2566,6 +2585,7 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   const { session } = useAuthMini()
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
+    <NormaiUpstreamCard key={session?.sessionId} sdk={sdk} />
     <UpstreamsCard key={session?.sessionId} sdk={sdk} />
     <CtxIntegrationCard key={session?.sessionId} sdk={sdk} />
     <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
@@ -2614,11 +2634,72 @@ function CtxIntegrationCard({ sdk }: { sdk: AuthMiniApi }) {
   </Card>
 }
 
+const NORMAI_HOST = "normai.ntnl.io"
+
+function isNormaiUpstream(upstream: Upstream) {
+  try {
+    return new URL(upstream.base_url).hostname === NORMAI_HOST
+  } catch {
+    return false
+  }
+}
+
+function NormaiUpstreamCard({ sdk }: { sdk: AuthMiniApi }) {
+  const { t } = useUi()
+  const client = useQueryClient()
+  const upstreams = useQuery({ queryKey: ["upstreams"], queryFn: ({ signal }) => api<Upstream[]>(sdk, "/api/integrations/upstreams", { signal }) })
+  const connected = upstreams.data?.some((upstream) => isNormaiUpstream(upstream) && upstream.api_key_configured) === true
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: ["upstreams"] })
+    void client.invalidateQueries({ queryKey: ["upstream-models"] })
+    void client.invalidateQueries({ queryKey: ["thread-defaults"] })
+  }
+  const connect = useMutation({ mutationFn: () => api<Upstream>(sdk, "/api/integrations/normai", { method: "POST" }), onSuccess: refresh })
+  const reissue = useMutation({ mutationFn: () => api<Upstream>(sdk, "/api/integrations/normai/rotate", { method: "POST" }), onSuccess: refresh })
+  const failed = connect.error ?? reissue.error
+  return <Card>
+    <CardHeader><CardTitle>{t("normaiTitle")}</CardTitle><CardDescription>{t("normaiDescription")}</CardDescription></CardHeader>
+    <CardContent className="flex flex-col gap-4">
+      {upstreams.error && <RequestError error={upstreams.error} onRetry={() => void upstreams.refetch()} />}
+      {upstreams.isLoading && <Skeleton className="h-10" />}
+      {upstreams.data && <div className="flex flex-wrap items-center gap-3">
+        <Badge variant={connected ? "secondary" : "outline"}>{connected ? t("normaiConnected") : t("normaiNotConnected")}</Badge>
+        <span className="font-mono text-xs text-muted-foreground">{NORMAI_HOST}</span>
+        {connected
+          ? <Button size="sm" variant="outline" disabled={reissue.isPending} onClick={() => { if (window.confirm(t("normaiReissueConfirm"))) reissue.mutate() }}>{reissue.isPending ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{t("normaiReissue")}</Button>
+          : <Button size="sm" disabled={connect.isPending} onClick={() => connect.mutate()}>{connect.isPending ? <Spinner /> : <FileKey2Icon data-icon="inline-start" />}{t("normaiConnect")}</Button>}
+        <Button asChild size="sm" variant="outline"><a href="https://normai.ntnl.io/#/providers" target="_blank" rel="noreferrer"><ExternalLinkIcon data-icon="inline-start" />{t("normaiOpenProviders")}</a></Button>
+      </div>}
+      {failed && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("normaiRequestError")}</AlertTitle><AlertDescription>{errorMessage(failed)}</AlertDescription></Alert>}
+    </CardContent>
+  </Card>
+}
+
+// The controller keeps one NormAI upstream per user; this silent call adds it
+// on first load and reissues the credential only while none is stored.
+function NormaiAutoConnect({ sdk }: { sdk: AuthMiniApi }) {
+  const client = useQueryClient()
+  const connect = useQuery({
+    queryKey: ["normai-connect", sdk.session.getState().sessionId],
+    queryFn: () => api<Upstream>(sdk, "/api/integrations/normai", { method: "POST" }),
+    retry: false,
+    staleTime: Infinity,
+  })
+  useEffect(() => {
+    if (!connect.isSuccess) return
+    void client.invalidateQueries({ queryKey: ["upstreams"] })
+    void client.invalidateQueries({ queryKey: ["upstream-models"] })
+    void client.invalidateQueries({ queryKey: ["thread-defaults"] })
+  }, [client, connect.isSuccess])
+  return null
+}
+
 function UpstreamsCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
   const client = useQueryClient()
   const upstreams = useQuery({ queryKey: ["upstreams"], queryFn: ({ signal }) => api<Upstream[]>(sdk, "/api/integrations/upstreams", { signal }) })
   const models = useUpstreamModels(sdk)
+  const others = upstreams.data?.filter((upstream) => !isNormaiUpstream(upstream)) ?? []
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["upstreams"] })
     void client.invalidateQueries({ queryKey: ["upstream-models"] })
@@ -2633,7 +2714,7 @@ function UpstreamsCard({ sdk }: { sdk: AuthMiniApi }) {
         <p className="mr-auto text-sm font-medium">{t("availableModels")}</p>
         <Button type="button" size="sm" variant="outline" disabled={models.isFetching} onClick={() => void models.refetch()}>{models.isFetching ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}{t("refreshModels")}</Button>
       </div>}
-      {upstreams.data?.map((upstream) => <UpstreamRow key={upstream.id} sdk={sdk} upstream={upstream} catalog={models.data?.upstreams.find((entry) => entry.id === upstream.id)} catalogLoading={models.isLoading} catalogDescription={t("availableModelsDescription")} onChanged={refresh} />)}
+      {others.map((upstream) => <UpstreamRow key={upstream.id} sdk={sdk} upstream={upstream} catalog={models.data?.upstreams.find((entry) => entry.id === upstream.id)} catalogLoading={models.isLoading} catalogDescription={t("availableModelsDescription")} onChanged={refresh} />)}
       {upstreams.data && <AddUpstreamForm sdk={sdk} onAdded={refresh} />}
     </CardContent>
   </Card>

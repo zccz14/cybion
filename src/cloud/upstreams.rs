@@ -68,7 +68,7 @@ fn upstream_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Upstream> {
     })
 }
 
-fn view(upstream: &Upstream) -> UpstreamView {
+pub(super) fn view(upstream: &Upstream) -> UpstreamView {
     UpstreamView {
         id: upstream.id.clone(),
         name: upstream.name.clone(),

@@ -20,8 +20,8 @@ the first authenticated browser session initializes that key atomically.
 ## Product boundary
 
 - Auth is fixed to `https://auth.ntnl.io`. The browser obtains one token for
-  `cybion.ntnl.io`, `linkit.ntnl.io`, and `openai.ntnl.io`; each service checks
-  its own audience.
+  `cybion.ntnl.io`, `linkit.ntnl.io`, `openai.ntnl.io`, `ctx.ntnl.io`, and
+  `normai.ntnl.io`; each service checks its own audience.
 - Controller restarts automatically resume `running` Threads from committed
   history and original Worker calls. Transient model failures retry within a
   persisted five-attempt budget; stopped/completed Threads stay stopped.
@@ -94,6 +94,13 @@ the first authenticated browser session initializes that key atomically.
   long threads never reach the upstream window before compacting. The
   conversation header shows the latest inference context size against that
   budget.
+- Every user gets a **NormAI** upstream (normai.ntnl.io) automatically. On
+  the first workspace load the controller issues — or rotates, when the user
+  already owns a `Cybion` consumer — a consumer credential through NormAI's
+  user API with the browser session, stores the key as the user's `NormAI`
+  upstream, and binds it as the default upstream while no other default was
+  chosen. Upstream providers and billing live on NormAI; the Configuration
+  page links there and can reissue the credential (normai.ntnl.io/#/providers).
 - **Configuration → Responses-compatible upstreams** lets each user manage
   several named upstreams, each with its own `base_url` and `api_key`. Keys are
   stored in that user's SQLite database and are never returned to the browser.
