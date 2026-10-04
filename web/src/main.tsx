@@ -73,7 +73,6 @@ import { CybionMark } from "@/components/cybion-mark"
 import { UserInputMessage } from "@/components/user-input-message"
 import { ScreenshotOutput } from "@/components/screenshot-output"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
-import { missingAudiences } from "@/lib/auth-audiences"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -1056,8 +1055,6 @@ const queryClient = new QueryClient()
 const AUTH_AUDIENCES = Array.from(
   new Set(["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io", "ctx.ntnl.io", "normai.ntnl.io", window.location.hostname]),
 )
-// Marks a tab that already signed out for an audience-stale session.
-const AUDIENCE_RELOGIN_KEY = "cybion.audience-relogin"
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Request failed"
@@ -1138,23 +1135,7 @@ function App() {
 }
 
 function AuthenticatedApp() {
-  const { isReady, isAuthenticated, sdk, session, signOut, verificationFailure } = useAuthMini()
-  // A session's audiences are fixed at login — refresh keeps them — so one
-  // that no longer covers every configured audience can never work again.
-  // Sign it out once so the login flow re-mints a complete session before the
-  // silent NormAI connect runs; the marker keeps a login that still cannot
-  // mint one from looping between sign-out and sign-in.
-  const accessToken = session?.accessToken ?? null
-  useEffect(() => {
-    if (!accessToken) return
-    if (missingAudiences(accessToken, AUTH_AUDIENCES).length === 0) {
-      window.sessionStorage.removeItem(AUDIENCE_RELOGIN_KEY)
-      return
-    }
-    if (window.sessionStorage.getItem(AUDIENCE_RELOGIN_KEY)) return
-    window.sessionStorage.setItem(AUDIENCE_RELOGIN_KEY, "1")
-    void signOut()
-  }, [accessToken, signOut])
+  const { isReady, isAuthenticated, sdk, verificationFailure } = useAuthMini()
   if (!isReady || !isAuthenticated || !sdk) return <LoadingScreen verificationFailure={verificationFailure} />
   return <Workspace sdk={sdk} />
 }
