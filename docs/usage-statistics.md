@@ -25,10 +25,12 @@ The data flows through these layers inside each user database:
    after its call folded) enqueues that hour in `stats_dirty_hour`, and the
    patrol recomputes the hour.
 3. **totals and days** — `stats_total_*` accumulates hour closures so the
-   all-time range stays O(1); deleting a Thread subtracts its folded
-   contribution in the same transaction. `stats_day` records per Thread × UTC
-   day activity (record counts, inputs, requests, Tokens) and feeds the
-   activity calendar.
+   all-time range stays O(1); deleting a Thread queues its folded hours for
+   recomputation, so the following patrol passes remove its contribution from
+   cells, totals and day shards. `stats_hour_day` stores day activity as
+   per-Thread hour shards (record counts, inputs, requests, Tokens), so a
+   recomputed hour corrects its day exactly; the day view feeds the activity
+   calendar.
 4. **snapshot views** — `stats_view_totals`, `stats_view_model`,
    `stats_view_worker`, `stats_view_day`: the per-range cells that requests
    read. The patrol rewrites one range's views atomically with a

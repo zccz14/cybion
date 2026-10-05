@@ -39,6 +39,7 @@ mod history;
 mod linkit_notifications;
 mod normai;
 mod recovery;
+mod stats;
 mod thread_controls;
 mod thread_sharing;
 mod traffic;
@@ -160,6 +161,7 @@ struct AppState {
     active_requests: Arc<Mutex<HashMap<String, ActiveRequest>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     traffic: Arc<traffic::Monitor>,
+    stats: Arc<stats::Patrol>,
 }
 
 #[derive(Clone)]
@@ -383,10 +385,12 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         active_requests: Arc::new(Mutex::new(HashMap::new())),
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
         traffic,
+        stats: stats::Patrol::new(),
     };
     tracing::info!(%address, "Cybion Cloud listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
     tokio::spawn(recovery::supervise(state.clone()));
+    tokio::spawn(stats::supervise(state.clone()));
     axum::serve(listener, app(state)).await?;
     Ok(())
 }
@@ -1266,7 +1270,7 @@ CREATE TABLE IF NOT EXISTS stats_state (
 );
 CREATE TABLE IF NOT EXISTS stats_pending (
   source TEXT NOT NULL,
-  row_id INTEGER NOT NULL,
+  row_id TEXT NOT NULL,
   PRIMARY KEY (source,row_id)
 );
 CREATE TABLE IF NOT EXISTS stats_dirty_hour (
@@ -2294,7 +2298,15 @@ struct WorkerResultInput {
     error: Option<String>,
 }
 
-type WorkerCallResultRow = (String, Option<i64>, String, Option<i64>, String, String);
+type WorkerCallResultRow = (
+    String,
+    Option<i64>,
+    String,
+    Option<i64>,
+    String,
+    String,
+    i64,
+);
 
 #[derive(Clone)]
 struct IntegrationSettings {
@@ -3079,6 +3091,7 @@ async fn insights(
     let thread_id = query.thread_id.filter(|value| !value.trim().is_empty());
     let model = query.model.filter(|value| !value.trim().is_empty());
     let request_kind = query.request_kind.filter(|value| !value.trim().is_empty());
+    state.stats.note_read(&identity.user.id);
     user_db(&state, &identity.user, true, move |connection| {
         let transaction = connection.transaction()?;
         load_insights(
@@ -4063,6 +4076,7 @@ async fn delete_thread(
     let id = thread_id(&id)?;
     let owner = identity.user.id.clone();
     user_db(&state, &identity.user, true, move |connection| {
+        stats::note_thread_deleted(connection, &id)?;
         let changed = connection.execute("DELETE FROM threads WHERE id=?", [id])?;
         if changed == 0 {
             return Err(ApiError::not_found("thread not found"));
@@ -7939,19 +7953,20 @@ async fn worker_result(
         }
         let call: Option<WorkerCallResultRow> = transaction
             .query_row(
-                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type FROM worker_calls
+                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type,created_at FROM worker_calls
                  WHERE id=? AND worker_id=?",
                 params![&call_id, &worker_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             )
             .optional()?;
-        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id, responses_output_type)) = call else {
+        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id, responses_output_type, created_at)) = call else {
             return Err(ApiError::not_found("Worker call not found"));
         };
         let thread_exists:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM threads WHERE id=?)",[&thread_id],|r|r.get(0))?;
         if !thread_exists {
             let saved:Option<String>=transaction.query_row("SELECT result_json FROM worker_calls WHERE id=?",[&call_id],|r|r.get(0))?;
             if saved.as_deref().is_some_and(|v|v!=result_json) {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
+            stats::mark_dirty(&transaction, created_at)?;
             transaction.execute("UPDATE worker_calls SET result_json=?,status='failed',error=COALESCE(error,'Thread deleted'),completed_at=COALESCE(completed_at,?),output_discarded=1 WHERE id=?",params![result_json,now(),call_id])?;
             transaction.commit()?;return Ok(());
         }
@@ -7961,6 +7976,7 @@ async fn worker_result(
                 if saved!=result_json {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
             } else {
                 persist_history_record(&transaction,HistoryRecordInsert{thread_id:&thread_id,kind:"activity",payload:&json!({"type":"late_worker_result","call_id":responses_call_id,"result":input.result}),created_at:now()})?;
+                stats::mark_dirty(&transaction, created_at)?;
                 transaction.execute("UPDATE worker_calls SET result_json=? WHERE id=?",params![result_json,call_id])?;
             }
             transaction.commit()?;
@@ -7971,6 +7987,7 @@ async fn worker_result(
             "call_id": if responses_call_id.is_empty() { call_id.clone() } else { responses_call_id.clone() },
             "output": input.result.to_string(),
         });
+        stats::mark_dirty(&transaction, created_at)?;
         let accepted = matches!(call_status.as_str(), "queued" | "delivered");
         if accepted {
             transaction.execute(
@@ -8095,6 +8112,7 @@ mod tests {
                 active_requests: Arc::new(Mutex::new(HashMap::new())),
                 traffic: Arc::new(traffic::Monitor::open(&admin_db_path).unwrap()),
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
+                stats: stats::Patrol::new(),
             },
         )
     }
