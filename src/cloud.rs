@@ -1336,14 +1336,14 @@ CREATE TABLE IF NOT EXISTS stats_total_history (
   records INTEGER NOT NULL,
   payload_bytes INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS stats_day (
-  day INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS stats_hour_day (
+  hour INTEGER NOT NULL,
   thread_id TEXT NOT NULL,
   records INTEGER NOT NULL,
   inputs INTEGER NOT NULL,
   requests INTEGER NOT NULL,
   tokens INTEGER NOT NULL,
-  PRIMARY KEY (day,thread_id)
+  PRIMARY KEY (hour,thread_id)
 );
 CREATE TABLE IF NOT EXISTS stats_view_totals (
   range TEXT PRIMARY KEY,

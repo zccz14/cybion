@@ -532,7 +532,7 @@ async fn schema_30_upgrade_adds_usage_stats_snapshots_and_insight_indexes() {
              DROP TABLE stats_state; DROP TABLE stats_pending; DROP TABLE stats_dirty_hour;
              DROP TABLE stats_hour_audit; DROP TABLE stats_hour_worker; DROP TABLE stats_hour_history;
              DROP TABLE stats_total_audit; DROP TABLE stats_total_worker; DROP TABLE stats_total_history;
-             DROP TABLE stats_day;
+             DROP TABLE stats_hour_day;
              DROP TABLE stats_view_totals; DROP TABLE stats_view_model; DROP TABLE stats_view_worker; DROP TABLE stats_view_day;
              PRAGMA user_version=29;",
         )?;
@@ -551,7 +551,7 @@ async fn schema_30_upgrade_adds_usage_stats_snapshots_and_insight_indexes() {
             "stats_total_audit",
             "stats_total_worker",
             "stats_total_history",
-            "stats_day",
+            "stats_hour_day",
             "stats_view_totals",
             "stats_view_model",
             "stats_view_worker",
