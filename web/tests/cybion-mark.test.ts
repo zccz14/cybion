@@ -33,3 +33,12 @@ test("the sidebar logo inherits the app theme instead of inverting the favicon",
   assert.match(main, /<CybionMark className="size-6 shrink-0" \/>/)
   assert.ok(!main.includes("dark:invert"))
 })
+
+test("the favicon re-renders in the app theme without a reload", () => {
+  const favicon = readFileSync(new URL("../src/lib/favicon.ts", import.meta.url), "utf8")
+  const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  assert.ok(favicon.includes(triangle))
+  assert.match(favicon, /light: "#000",[\s\S]*dark: "#fff"/)
+  assert.match(favicon, /data:image\/svg\+xml/)
+  assert.match(main, /applyFavicon\(dark \? "dark" : "light"\)/)
+})

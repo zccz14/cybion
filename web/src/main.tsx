@@ -62,6 +62,7 @@ import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, seriali
 import { bashFunctionCall, historyPayloadObject, historyPayloadText, screenshotImageSource } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
+import { applyFavicon } from "@/lib/favicon"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useComposerImages } from "@/hooks/use-composer-images"
@@ -1302,6 +1303,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark)
     localStorage.setItem("cybion.theme", dark ? "dark" : "light")
+    applyFavicon(dark ? "dark" : "light")
   }, [dark])
   const ui = useMemo<UiContextValue>(() => ({
     language,
