@@ -129,7 +129,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 29;
+const USER_SCHEMA_VERSION: i64 = 30;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1253,6 +1253,167 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_thread_id
   ON reasoning_audits(thread_id,id);
 "#;
 
+// Usage statistics are served from materialized snapshots: a background
+// patrol folds raw rows into hour buckets and totals, refreshes the
+// stats_view_* snapshot rows for this table's four ranges, and requests only
+// read those snapshots (see docs/usage-statistics.md). The covering indexes
+// keep the patrol's byte aggregation index-only; the views never need the
+// payload text.
+const USER_STATS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS stats_state (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stats_pending (
+  source TEXT NOT NULL,
+  row_id INTEGER NOT NULL,
+  PRIMARY KEY (source,row_id)
+);
+CREATE TABLE IF NOT EXISTS stats_dirty_hour (
+  hour INTEGER PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS stats_hour_audit (
+  hour INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  calls INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cached_tokens INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  PRIMARY KEY (hour,model,reasoning_effort,request_kind,status)
+);
+CREATE TABLE IF NOT EXISTS stats_hour_worker (
+  hour INTEGER NOT NULL,
+  worker_id TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL DEFAULT '',
+  calls INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  read_bytes INTEGER NOT NULL,
+  write_bytes INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (hour,worker_id,model,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_hour_history (
+  hour INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  records INTEGER NOT NULL,
+  payload_bytes INTEGER NOT NULL,
+  PRIMARY KEY (hour,kind)
+);
+CREATE TABLE IF NOT EXISTS stats_total_audit (
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  calls INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cached_tokens INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  PRIMARY KEY (model,reasoning_effort,request_kind,status)
+);
+CREATE TABLE IF NOT EXISTS stats_total_worker (
+  worker_id TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL DEFAULT '',
+  calls INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  read_bytes INTEGER NOT NULL,
+  write_bytes INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (worker_id,model,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_total_history (
+  kind TEXT NOT NULL PRIMARY KEY,
+  records INTEGER NOT NULL,
+  payload_bytes INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stats_day (
+  day INTEGER NOT NULL,
+  thread_id TEXT NOT NULL,
+  records INTEGER NOT NULL,
+  inputs INTEGER NOT NULL,
+  requests INTEGER NOT NULL,
+  tokens INTEGER NOT NULL,
+  PRIMARY KEY (day,thread_id)
+);
+CREATE TABLE IF NOT EXISTS stats_view_totals (
+  range TEXT PRIMARY KEY,
+  generated_at INTEGER NOT NULL,
+  backfilling INTEGER NOT NULL,
+  completed_requests INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cached_tokens INTEGER NOT NULL,
+  requests_total INTEGER NOT NULL,
+  requests_completed INTEGER NOT NULL,
+  requests_in_flight INTEGER NOT NULL,
+  requests_failed INTEGER NOT NULL,
+  requests_cancelled INTEGER NOT NULL,
+  worker_calls INTEGER NOT NULL,
+  worker_duration INTEGER NOT NULL,
+  worker_timed INTEGER NOT NULL,
+  worker_read_bytes INTEGER NOT NULL,
+  worker_write_bytes INTEGER NOT NULL,
+  history_records INTEGER NOT NULL,
+  history_payload_bytes INTEGER NOT NULL,
+  history_checkpoints INTEGER NOT NULL,
+  latest_record_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS stats_view_model (
+  range TEXT NOT NULL,
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL,
+  calls INTEGER NOT NULL,
+  completed INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  failed INTEGER NOT NULL,
+  cancelled INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cached_tokens INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  PRIMARY KEY (range,model,reasoning_effort,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_view_worker (
+  range TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL DEFAULT '',
+  calls INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  read_bytes INTEGER NOT NULL,
+  write_bytes INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (range,worker_id,model,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_view_day (
+  range TEXT NOT NULL,
+  day INTEGER NOT NULL,
+  active_threads INTEGER NOT NULL,
+  records INTEGER NOT NULL,
+  inputs INTEGER NOT NULL,
+  requests INTEGER NOT NULL,
+  tokens INTEGER NOT NULL,
+  PRIMARY KEY (range,day)
+);
+CREATE INDEX IF NOT EXISTS history_records_insight_range
+  ON history_records(created_at,kind,thread_id,length(CAST(payload AS BLOB)));
+CREATE INDEX IF NOT EXISTS worker_calls_insight_range
+  ON worker_calls(created_at,worker_id,thread_id,caller_user_id,input_record_id,completed_at,worker_label,length(CAST(arguments_json AS BLOB)),length(CAST(COALESCE(result_json, '') AS BLOB)));
+"#;
+
 fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -1501,6 +1662,13 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             "DROP INDEX IF EXISTS worker_calls_cancel_notice;
              CREATE INDEX worker_calls_cancel_notice ON worker_calls(worker_id,worker_boot_id,completed_at,id) WHERE cancel_notified_at IS NULL AND (status='cancelled' OR cancel_requested_at IS NOT NULL);",
         )?;
+    }
+
+    if version < 30 {
+        // Usage statistics move to materialized snapshots maintained by the
+        // background patrol; this adds the snapshot tables and the covering
+        // indexes that keep the fold and tail recompute index-only.
+        transaction.execute_batch(USER_STATS_SCHEMA)?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)

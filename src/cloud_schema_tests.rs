@@ -331,6 +331,7 @@ pub(super) fn remove_sharing_fixture(c: &Connection) {
         DROP INDEX worker_calls_foreign_origin; DROP INDEX worker_calls_queued;
         DROP INDEX worker_calls_pending_output; DROP INDEX worker_calls_created;
         DROP INDEX worker_calls_status_created; DROP INDEX worker_calls_worker_created;
+        DROP INDEX worker_calls_insight_range; DROP INDEX history_records_insight_range;
         ALTER TABLE workers DROP COLUMN deleted_at;",
     )
     .unwrap();
@@ -514,6 +515,72 @@ async fn schema_29_upgrade_adds_cancel_requested_at_and_rebuilds_the_cancel_noti
         )?;
         assert!(sql.contains("cancel_requested_at"), "{sql}");
         assert!(sql.contains("worker_boot_id"), "{sql}");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn schema_30_upgrade_adds_usage_stats_snapshots_and_insight_indexes() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "usage-stats-upgrade-user").unwrap();
+    user_db(&state, &user, true, move |connection| {
+        connection.execute_batch(
+            "DROP INDEX history_records_insight_range;
+             DROP INDEX worker_calls_insight_range;
+             DROP TABLE stats_state; DROP TABLE stats_pending; DROP TABLE stats_dirty_hour;
+             DROP TABLE stats_hour_audit; DROP TABLE stats_hour_worker; DROP TABLE stats_hour_history;
+             DROP TABLE stats_total_audit; DROP TABLE stats_total_worker; DROP TABLE stats_total_history;
+             DROP TABLE stats_day;
+             DROP TABLE stats_view_totals; DROP TABLE stats_view_model; DROP TABLE stats_view_worker; DROP TABLE stats_view_day;
+             PRAGMA user_version=29;",
+        )?;
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        for table in [
+            "stats_state",
+            "stats_pending",
+            "stats_dirty_hour",
+            "stats_hour_audit",
+            "stats_hour_worker",
+            "stats_hour_history",
+            "stats_total_audit",
+            "stats_total_worker",
+            "stats_total_history",
+            "stats_day",
+            "stats_view_totals",
+            "stats_view_model",
+            "stats_view_worker",
+            "stats_view_day",
+        ] {
+            let exists: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?",
+                [table],
+                |r| r.get(0),
+            )?;
+            assert_eq!(exists, 1, "{table}");
+        }
+        for (index, expression) in [
+            (
+                "history_records_insight_range",
+                "length(CAST(payload AS BLOB))",
+            ),
+            (
+                "worker_calls_insight_range",
+                "length(CAST(COALESCE(result_json, '') AS BLOB))",
+            ),
+        ] {
+            let sql: String = connection.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?",
+                [index],
+                |r| r.get(0),
+            )?;
+            assert!(sql.contains(expression), "{sql}");
+        }
         Ok(())
     })
     .await

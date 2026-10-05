@@ -404,6 +404,9 @@ fn audit_pagination_never_reads_payloads_and_pending_work_has_partial_indexes() 
         tables,
         vec![
             "shared_workers",
+            "stats_hour_worker",
+            "stats_total_worker",
+            "stats_view_worker",
             "worker_calls",
             "worker_checks",
             "worker_grants",
