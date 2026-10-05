@@ -25,7 +25,9 @@ command_id="$(aws ssm send-command \
   --query 'Command.CommandId' \
   --output text)"
 
-for _ in $(seq 1 90); do
+# A schema upgrade can migrate every user database while the new service
+# starts; allow up to 30 minutes for the deploy command to finish.
+for _ in $(seq 1 900); do
   state="$(aws ssm get-command-invocation \
     --command-id "$command_id" \
     --instance-id "$instance_id" \

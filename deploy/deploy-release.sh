@@ -74,8 +74,10 @@ if ! systemctl restart cybion.service; then
   exit 1
 fi
 
+# Startup may migrate every user database (schema upgrades build indexes on
+# large tables), so the health window must tolerate a slow first boot.
 healthy=0
-for _ in $(seq 1 30); do
+for _ in $(seq 1 600); do
   if config="$(curl --fail --silent --max-time 3 http://127.0.0.1:1858/api/config 2>/dev/null)" \
     && CONFIG="$config" EXPECTED_VERSION="$version" python3 -c '
 import json
