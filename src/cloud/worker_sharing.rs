@@ -876,9 +876,9 @@ pub(super) fn save_foreign_result(
     status: &str,
     error: Option<&str>,
 ) -> Result<bool, ApiError> {
-    type SavedResult = (Option<String>, String, Option<String>, Option<i64>);
-    let row:Option<SavedResult>=c.query_row("SELECT caller_user_id,status,result_json,started_at FROM worker_calls WHERE id=? AND worker_id=?",params![id,worker],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    let Some((Some(_), previous, saved, started)) = row else {
+    type SavedResult = (Option<String>, String, Option<String>, Option<i64>, i64);
+    let row:Option<SavedResult>=c.query_row("SELECT caller_user_id,status,result_json,started_at,created_at FROM worker_calls WHERE id=? AND worker_id=?",params![id,worker],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    let Some((Some(_), previous, saved, started, created_at)) = row else {
         return Ok(false);
     };
     if started.is_none() {
@@ -892,6 +892,7 @@ pub(super) fn save_foreign_result(
         }
         return Ok(true);
     }
+    stats::mark_dirty(c, created_at)?;
     if previous == "delivered" {
         c.execute("UPDATE worker_calls SET status=?,result_json=?,error=?,completed_at=?,received_at=COALESCE(received_at,?) WHERE id=?",params![status,result,error,now(),now(),id])?;
     } else {

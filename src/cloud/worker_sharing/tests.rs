@@ -404,6 +404,9 @@ fn audit_pagination_never_reads_payloads_and_pending_work_has_partial_indexes() 
         tables,
         vec![
             "shared_workers",
+            "stats_hour_worker",
+            "stats_total_worker",
+            "stats_view_worker",
             "worker_calls",
             "worker_checks",
             "worker_grants",
@@ -1141,57 +1144,6 @@ fn current_schema_reopen_preserves_pending_origin_and_retry_marker() {
         .unwrap();
     assert_eq!(row, (i.id, i.grant, "queued".into(), 0));
     check_user_foreign_keys(&a).unwrap();
-}
-
-#[test]
-fn worker_statistics_do_not_associate_foreign_calls_with_colliding_owner_runs() {
-    let (_root, mut a, b, _) = fixture();
-    granted(&mut a);
-    let foreign = intent(&b, "bash", "foreign");
-    enqueue_intent(&mut a, "b", &foreign).unwrap();
-    a.execute(
-        "UPDATE worker_calls SET status='completed',created_at=1,completed_at=100 WHERE id=?",
-        [&foreign.id],
-    )
-    .unwrap();
-    a.execute("INSERT INTO reasoning_audits(thread_id,input_record_id,model,request_kind,status,started_at,finished_at) VALUES('thread',1,'owner-model','inference','completed',1,2)",[]).unwrap();
-    let all = load_insights(&a, "all".into(), None, None, None, None).unwrap();
-    assert_eq!(all.worker.calls, 1);
-    let thread = load_insights(&a, "all".into(), None, Some("thread".into()), None, None).unwrap();
-    assert_eq!(thread.worker.calls, 0);
-    assert_eq!(thread.attribution.worker_seconds, 0);
-    let model = load_insights(
-        &a,
-        "all".into(),
-        None,
-        None,
-        Some("owner-model".into()),
-        None,
-    )
-    .unwrap();
-    assert_eq!(model.worker.calls, 0);
-    let inference =
-        load_insights(&a, "all".into(), None, None, None, Some("inference".into())).unwrap();
-    assert_eq!(inference.worker.calls, 0);
-    let own = enqueue_worker_call_tx(
-        &a,
-        W,
-        "thread",
-        1,
-        "own",
-        "function_call_output",
-        "bash",
-        &json!({"command":"pwd"}),
-    )
-    .unwrap();
-    a.execute(
-        "UPDATE worker_calls SET status='completed',created_at=3,completed_at=5 WHERE id=?",
-        [own],
-    )
-    .unwrap();
-    let thread = load_insights(&a, "all".into(), None, Some("thread".into()), None, None).unwrap();
-    assert_eq!(thread.worker.calls, 1);
-    assert_eq!(thread.attribution.worker_seconds, 2);
 }
 
 #[test]

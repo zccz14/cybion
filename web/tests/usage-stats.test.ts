@@ -13,13 +13,14 @@ test("the page and its navigation are titled Usage statistics in both languages"
   assert.match(insightsPage, /<Page title=\{t\("usageStats"\)\} description=\{t\("usageStatsDescription"\)\}>/)
 })
 
-test("run time attribution renders the three parts, their shares, and the run count", () => {
-  assert.match(insightsPage, /<CardTitle>\{t\("statsTimeAttribution"\)\}<\/CardTitle>/)
-  assert.match(insightsPage, /\{duration\(data\.attribution\.running_seconds\)\}/)
-  assert.match(insightsPage, /\{duration\(data\.attribution\.inference_seconds\)\}<\/dd><p[^>]*>\{share\(data\.attribution\.inference_seconds\)\}<\/p>/)
-  assert.match(insightsPage, /\{duration\(data\.attribution\.worker_seconds\)\}<\/dd><p[^>]*>\{share\(data\.attribution\.worker_seconds\)\}<\/p>/)
-  assert.match(insightsPage, /\{duration\(data\.attribution\.overhead_seconds\)\}<\/dd><p[^>]*>\{share\(data\.attribution\.overhead_seconds\)\}<\/p>/)
-  assert.match(insightsPage, /statsRunsCounted"\)\.replace\("\{count\}", number\(data\.attribution\.runs\)\)/)
+test("the page shows the snapshot time and the backfilling notice", () => {
+  assert.match(source, /generated_at: number \| null/)
+  assert.match(source, /backfilling: boolean/)
+  assert.match(source, /statsGenerated: "Snapshot \{time\}"/)
+  assert.match(source, /statsBackfilling: "/)
+  assert.match(insightsPage, /formattedTime\(language, data\.generated_at\)/)
+  assert.match(insightsPage, /data\.backfilling && /)
+  assert.doesNotMatch(insightsPage, /attribution/)
 })
 
 test("by-model rows group by reasoning effort and expose request durations", () => {
@@ -53,7 +54,7 @@ test("usage statistics render the daily active-thread calendar", () => {
 
 test("daily activity defines non-checkpoint protocol records and exposes a UTC label", () => {
   assert.match(source, /A Thread is active when it has at least one non-checkpoint protocol record\./)
-  assert.match(source, /statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，包含范围首日的完整数据；不受模型和请求类型筛选影响。"/)
+  assert.match(source, /statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，只计入所选范围内已封口的小时；不受模型和请求类型筛选影响。"/)
   assert.match(source, /<Badge variant="outline">\{t\("statsTimezone"\)\}: \{timezone\}<\/Badge>/)
 })
 

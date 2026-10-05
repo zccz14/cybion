@@ -427,9 +427,13 @@ async fn ctx_integration_columns_are_added_to_existing_user_databases() {
     let path = root.path().join("user.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(USER_SCHEMA).unwrap();
+    // Deployed version 25 databases already carry the Worker-sharing columns
+    // (their schema history passed the version 22 rebuild); mirror that in the
+    // fixture so the upgrade only exercises the missing CTX columns.
     connection
         .execute_batch(
-            "ALTER TABLE integration_settings DROP COLUMN ctx_api_key;
+            "ALTER TABLE worker_calls ADD COLUMN caller_user_id TEXT;
+             ALTER TABLE integration_settings DROP COLUMN ctx_api_key;
              ALTER TABLE integration_settings DROP COLUMN ctx_api_key_id;
              PRAGMA user_version = 25;",
         )

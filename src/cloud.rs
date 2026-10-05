@@ -22,7 +22,6 @@ use axum::{
     },
     routing::{delete, get, post, put},
 };
-use chrono::{NaiveDate, TimeZone, Utc};
 use futures_util::StreamExt;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use rust_embed::RustEmbed;
@@ -39,6 +38,7 @@ mod history;
 mod linkit_notifications;
 mod normai;
 mod recovery;
+mod stats;
 mod thread_controls;
 mod thread_sharing;
 mod traffic;
@@ -129,7 +129,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 29;
+const USER_SCHEMA_VERSION: i64 = 30;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -160,6 +160,7 @@ struct AppState {
     active_requests: Arc<Mutex<HashMap<String, ActiveRequest>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
     traffic: Arc<traffic::Monitor>,
+    stats: Arc<stats::Patrol>,
 }
 
 #[derive(Clone)]
@@ -383,10 +384,12 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         active_requests: Arc::new(Mutex::new(HashMap::new())),
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
         traffic,
+        stats: stats::Patrol::new(),
     };
     tracing::info!(%address, "Cybion Cloud listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
     tokio::spawn(recovery::supervise(state.clone()));
+    tokio::spawn(stats::supervise(state.clone()));
     axum::serve(listener, app(state)).await?;
     Ok(())
 }
@@ -1253,6 +1256,153 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_thread_id
   ON reasoning_audits(thread_id,id);
 "#;
 
+// Usage statistics are served from materialized snapshots: a background
+// patrol folds raw rows into hour buckets and totals, refreshes the
+// stats_view_* snapshot rows for this table's four ranges, and requests only
+// read those snapshots (see docs/usage-statistics.md). The covering indexes
+// keep the patrol's byte aggregation index-only; the views never need the
+// payload text.
+const USER_STATS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS stats_state (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stats_pending (
+  source TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  PRIMARY KEY (source,row_id)
+);
+CREATE TABLE IF NOT EXISTS stats_dirty_hour (
+  hour INTEGER PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS stats_hour_audit (
+  hour INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  calls INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cached_tokens INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  PRIMARY KEY (hour,model,reasoning_effort,request_kind,status)
+);
+CREATE TABLE IF NOT EXISTS stats_hour_worker (
+  hour INTEGER NOT NULL,
+  worker_id TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL DEFAULT '',
+  calls INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  read_bytes INTEGER NOT NULL,
+  write_bytes INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (hour,worker_id,model,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_hour_history (
+  hour INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  records INTEGER NOT NULL,
+  payload_bytes INTEGER NOT NULL,
+  PRIMARY KEY (hour,kind)
+);
+CREATE TABLE IF NOT EXISTS stats_total_audit (
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  calls INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cached_tokens INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  PRIMARY KEY (model,reasoning_effort,request_kind,status)
+);
+CREATE TABLE IF NOT EXISTS stats_total_worker (
+  worker_id TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL DEFAULT '',
+  calls INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  read_bytes INTEGER NOT NULL,
+  write_bytes INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (worker_id,model,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_total_history (
+  kind TEXT NOT NULL PRIMARY KEY,
+  records INTEGER NOT NULL,
+  payload_bytes INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stats_hour_day (
+  hour INTEGER NOT NULL,
+  thread_id TEXT NOT NULL,
+  records INTEGER NOT NULL,
+  inputs INTEGER NOT NULL,
+  requests INTEGER NOT NULL,
+  tokens INTEGER NOT NULL,
+  PRIMARY KEY (hour,thread_id)
+);
+CREATE TABLE IF NOT EXISTS stats_view_totals (
+  range TEXT PRIMARY KEY,
+  generated_at INTEGER NOT NULL,
+  backfilling INTEGER NOT NULL,
+  history_records INTEGER NOT NULL,
+  history_payload_bytes INTEGER NOT NULL,
+  history_checkpoints INTEGER NOT NULL,
+  latest_record_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS stats_view_model (
+  range TEXT NOT NULL,
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL,
+  calls INTEGER NOT NULL,
+  completed INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  failed INTEGER NOT NULL,
+  cancelled INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cached_tokens INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  PRIMARY KEY (range,model,reasoning_effort,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_view_worker (
+  range TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  request_kind TEXT NOT NULL DEFAULT '',
+  calls INTEGER NOT NULL,
+  duration_sum INTEGER NOT NULL,
+  timed_calls INTEGER NOT NULL,
+  read_bytes INTEGER NOT NULL,
+  write_bytes INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (range,worker_id,model,request_kind)
+);
+CREATE TABLE IF NOT EXISTS stats_view_day (
+  range TEXT NOT NULL,
+  day INTEGER NOT NULL,
+  active_threads INTEGER NOT NULL,
+  records INTEGER NOT NULL,
+  inputs INTEGER NOT NULL,
+  requests INTEGER NOT NULL,
+  tokens INTEGER NOT NULL,
+  PRIMARY KEY (range,day)
+);
+CREATE INDEX IF NOT EXISTS history_records_insight_range
+  ON history_records(created_at,kind,thread_id,length(CAST(payload AS BLOB)));
+CREATE INDEX IF NOT EXISTS worker_calls_insight_range
+  ON worker_calls(created_at,worker_id,thread_id,caller_user_id,input_record_id,completed_at,worker_label,length(CAST(arguments_json AS BLOB)),length(CAST(COALESCE(result_json, '') AS BLOB)));
+"#;
+
 fn ensure_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -1502,6 +1652,13 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
              CREATE INDEX worker_calls_cancel_notice ON worker_calls(worker_id,worker_boot_id,completed_at,id) WHERE cancel_notified_at IS NULL AND (status='cancelled' OR cancel_requested_at IS NOT NULL);",
         )?;
     }
+
+    if version < 30 {
+        // Usage statistics move to materialized snapshots maintained by the
+        // background patrol; this adds the snapshot tables and the covering
+        // indexes that keep the fold and tail recompute index-only.
+        transaction.execute_batch(USER_STATS_SCHEMA)?;
+    }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
         .map_err(ApiError::internal)?;
@@ -1691,7 +1848,6 @@ struct ReasoningAuditPage {
 #[derive(Deserialize, Default)]
 struct InsightsQuery {
     range: Option<String>,
-    thread_id: Option<String>,
     model: Option<String>,
     request_kind: Option<String>,
 }
@@ -1699,12 +1855,12 @@ struct InsightsQuery {
 #[derive(Serialize)]
 struct Insights {
     range: String,
-    generated_at: i64,
+    generated_at: Option<i64>,
+    backfilling: bool,
     tokens: InsightTokens,
     requests: InsightRequests,
     by_model: Vec<InsightModel>,
     worker: InsightWorker,
-    attribution: InsightAttribution,
     history: InsightHistory,
     dimensions: InsightDimensions,
     activity: InsightActivity,
@@ -1786,35 +1942,16 @@ struct InsightWorkerItem {
     average_duration_seconds: Option<f64>,
 }
 
-/// Thread running time split into inference, Worker-call and Cybion overhead
-/// seconds, plus the number of runs that contributed.
-#[derive(Default, Serialize)]
-struct InsightAttribution {
-    runs: i64,
-    running_seconds: i64,
-    inference_seconds: i64,
-    worker_seconds: i64,
-    overhead_seconds: i64,
-}
-
-#[derive(Serialize)]
-struct InsightCount {
-    key: String,
-    count: i64,
-}
-
 #[derive(Serialize)]
 struct InsightHistory {
     total_records: i64,
     payload_bytes: i64,
     checkpoint_count: i64,
     latest_record_at: Option<i64>,
-    kinds: Vec<InsightCount>,
 }
 
 #[derive(Serialize)]
 struct InsightDimensions {
-    thread_ids: Vec<String>,
     models: Vec<String>,
     request_kinds: Vec<String>,
 }
@@ -2140,7 +2277,15 @@ struct WorkerResultInput {
     error: Option<String>,
 }
 
-type WorkerCallResultRow = (String, Option<i64>, String, Option<i64>, String, String);
+type WorkerCallResultRow = (
+    String,
+    Option<i64>,
+    String,
+    Option<i64>,
+    String,
+    String,
+    i64,
+);
 
 #[derive(Clone)]
 struct IntegrationSettings {
@@ -2921,617 +3066,24 @@ async fn insights(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Query(query): Query<InsightsQuery>,
 ) -> Result<Json<Insights>, ApiError> {
-    let (range, started_after) = insight_range(query.range.as_deref())?;
-    let thread_id = query.thread_id.filter(|value| !value.trim().is_empty());
+    let range = insight_range(query.range.as_deref())?;
     let model = query.model.filter(|value| !value.trim().is_empty());
     let request_kind = query.request_kind.filter(|value| !value.trim().is_empty());
+    state.stats.note_read(&identity.user.id);
     user_db(&state, &identity.user, true, move |connection| {
         let transaction = connection.transaction()?;
-        load_insights(
-            &transaction,
-            range,
-            started_after,
-            thread_id,
-            model,
-            request_kind,
-        )
+        stats::load_insights(&transaction, &range, model, request_kind)
     })
     .await
     .map(Json)
 }
 
-fn insight_range(value: Option<&str>) -> Result<(String, Option<i64>), ApiError> {
+fn insight_range(value: Option<&str>) -> Result<String, ApiError> {
     let range = value.unwrap_or("7d").trim();
-    let seconds = match range {
-        "24h" => Some(24 * 60 * 60),
-        "7d" => Some(7 * 24 * 60 * 60),
-        "30d" => Some(30 * 24 * 60 * 60),
-        "all" => None,
-        _ => return Err(ApiError::bad_request("insight range is invalid")),
-    };
-    Ok((range.to_owned(), seconds.map(|seconds| now() - seconds)))
-}
-
-fn utc_date(timestamp: i64) -> Result<NaiveDate, ApiError> {
-    Utc.timestamp_opt(timestamp, 0)
-        .single()
-        .map(|value| value.date_naive())
-        .ok_or_else(|| ApiError::internal("activity timestamp is out of range"))
-}
-
-fn utc_day_bounds(date: NaiveDate) -> (i64, i64) {
-    let start = date
-        .and_hms_opt(0, 0, 0)
-        .expect("midnight is valid")
-        .and_utc()
-        .timestamp();
-    (start, start + 86_400)
-}
-
-fn insight_day_range(
-    connection: &Connection,
-    started_after: Option<i64>,
-    generated_at: i64,
-) -> Result<Option<(NaiveDate, NaiveDate)>, ApiError> {
-    let today = utc_date(generated_at)?;
-    let start = match started_after {
-        Some(start) => Some(start),
-        None => connection.query_row(
-            "SELECT MIN(timestamp) FROM (
-                SELECT MIN(created_at) AS timestamp FROM history_records WHERE kind <> 'checkpoint'
-                UNION ALL SELECT MIN(started_at) FROM reasoning_audits
-             )",
-            [],
-            |row| row.get::<_, Option<i64>>(0),
-        )?,
-    };
-    let Some(start) = start else {
-        return Ok(None);
-    };
-    Ok(Some((utc_date(start)?.min(today), today)))
-}
-
-fn empty_active_day(date: String) -> InsightActiveDay {
-    InsightActiveDay {
-        date,
-        active_threads: 0,
-        activity_records: 0,
-        input_records: 0,
-        requests: 0,
-        total_tokens: 0,
+    match range {
+        "24h" | "7d" | "30d" | "all" => Ok(range.to_owned()),
+        _ => Err(ApiError::bad_request("insight range is invalid")),
     }
-}
-
-fn load_insight_activity(
-    connection: &Connection,
-    started_after: Option<i64>,
-    generated_at: i64,
-) -> Result<InsightActivity, ApiError> {
-    let Some((first_day, last_day)) = insight_day_range(connection, started_after, generated_at)?
-    else {
-        return Ok(InsightActivity {
-            timezone: INSIGHT_TIMEZONE,
-            days: Vec::new(),
-        });
-    };
-    let (first_day_start, _) = utc_day_bounds(first_day);
-    let (_, end) = utc_day_bounds(last_day);
-    let filter_start = first_day_start;
-    let mut by_date = HashMap::<String, InsightActiveDay>::new();
-    let mut history_statement = connection.prepare(
-        "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch') AS date,
-                COUNT(DISTINCT thread_id),
-                COUNT(*),
-                COALESCE(SUM(CASE WHEN kind='input' THEN 1 ELSE 0 END), 0)
-         FROM history_records
-         WHERE kind <> 'checkpoint' AND created_at >= ?1 AND created_at < ?2
-         GROUP BY date
-         ORDER BY date",
-    )?;
-    let history_rows = history_statement.query_map(params![filter_start, end], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-        ))
-    })?;
-    for row in history_rows {
-        let (date, active_threads, activity_records, input_records) = row?;
-        let item = by_date
-            .entry(date.clone())
-            .or_insert_with(|| empty_active_day(date));
-        item.active_threads = active_threads;
-        item.activity_records = activity_records;
-        item.input_records = input_records;
-    }
-    let mut request_statement = connection.prepare(
-        "SELECT strftime('%Y-%m-%d', started_at, 'unixepoch') AS date,
-                COUNT(*),
-                COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
-         FROM reasoning_audits
-         WHERE started_at >= ?1 AND started_at < ?2
-         GROUP BY date
-         ORDER BY date",
-    )?;
-    let request_rows = request_statement.query_map(params![filter_start, end], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-    for row in request_rows {
-        let (date, requests, total_tokens) = row?;
-        let item = by_date
-            .entry(date.clone())
-            .or_insert_with(|| empty_active_day(date));
-        item.requests = requests;
-        item.total_tokens = total_tokens;
-    }
-    let days = first_day
-        .iter_days()
-        .take_while(|date| *date <= last_day)
-        .map(|date| {
-            let key = date.format("%Y-%m-%d").to_string();
-            by_date
-                .remove(&key)
-                .unwrap_or_else(|| empty_active_day(key))
-        })
-        .collect();
-    Ok(InsightActivity {
-        timezone: INSIGHT_TIMEZONE,
-        days,
-    })
-}
-
-fn load_insights(
-    connection: &Connection,
-    range: String,
-    started_after: Option<i64>,
-    thread_id: Option<String>,
-    model: Option<String>,
-    request_kind: Option<String>,
-) -> Result<Insights, ApiError> {
-    let generated_at = now();
-    let audit_where = "(?1 IS NULL OR started_at >= ?1)
-        AND (?2 IS NULL OR thread_id = ?2)
-        AND (?3 IS NULL OR model = ?3)
-        AND (?4 IS NULL OR request_kind = ?4)";
-    let history_where = "(?1 IS NULL OR created_at >= ?1)
-        AND (?2 IS NULL OR thread_id = ?2)";
-    let audit_params = params![started_after, thread_id, model, request_kind];
-    let (completed_requests, input_tokens, output_tokens, cached_tokens): (i64, i64, i64, i64) =
-        connection.query_row(
-            &format!(
-                "SELECT COUNT(*),
-                        COALESCE(SUM(COALESCE(input_tokens, 0)), 0),
-                        COALESCE(SUM(COALESCE(output_tokens, 0)), 0),
-                        COALESCE(SUM(COALESCE(cached_tokens, 0)), 0)
-                 FROM reasoning_audits
-                 WHERE status = 'completed' AND {audit_where}"
-            ),
-            audit_params,
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
-    let (total, completed, in_flight, failed, cancelled): (i64, i64, i64, i64, i64) = connection
-        .query_row(
-            &format!(
-                "SELECT COUNT(*),
-                        COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN status='in_flight' THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END), 0)
-                 FROM reasoning_audits WHERE {audit_where}"
-            ),
-            audit_params,
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
-    let mut models = Vec::new();
-    let mut statement = connection.prepare(&format!(
-        "SELECT model, reasoning_effort, COUNT(*),
-                COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status='in_flight' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(input_tokens, 0) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(output_tokens, 0) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status='completed' THEN COALESCE(cached_tokens, 0) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN finished_at IS NOT NULL THEN finished_at - started_at ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN finished_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-         FROM reasoning_audits WHERE {audit_where}
-         GROUP BY model, reasoning_effort
-         ORDER BY (SUM(CASE WHEN status='completed' THEN COALESCE(input_tokens, 0) ELSE 0 END)
-                 + SUM(CASE WHEN status='completed' THEN COALESCE(output_tokens, 0) ELSE 0 END)) DESC,
-                  model,
-                  CASE reasoning_effort WHEN 'none' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2
-                       WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END"
-    ))?;
-    let rows = statement.query_map(audit_params, |row| {
-        let input_tokens: i64 = row.get(7)?;
-        let output_tokens: i64 = row.get(8)?;
-        let cached_tokens: i64 = row.get(9)?;
-        let duration_seconds: i64 = row.get(10)?;
-        let timed_requests: i64 = row.get(11)?;
-        Ok(InsightModel {
-            model: row.get(0)?,
-            reasoning_effort: row.get(1)?,
-            calls: row.get(2)?,
-            completed: row.get(3)?,
-            in_flight: row.get(4)?,
-            failed: row.get(5)?,
-            cancelled: row.get(6)?,
-            input_tokens,
-            output_tokens,
-            total_tokens: input_tokens.saturating_add(output_tokens),
-            cached_tokens,
-            cache_hit_rate: (input_tokens > 0)
-                .then(|| cached_tokens as f64 / input_tokens as f64 * 100.0),
-            input_output_ratio: (output_tokens > 0)
-                .then(|| input_tokens as f64 / output_tokens as f64),
-            duration_seconds,
-            average_duration_seconds: (timed_requests > 0)
-                .then(|| duration_seconds as f64 / timed_requests as f64),
-        })
-    })?;
-    for row in rows {
-        models.push(row?);
-    }
-    let worker_where = "(?1 IS NULL OR c.created_at >= ?1)
-        AND (?2 IS NULL OR EXISTS (
-            SELECT 1 FROM reasoning_audits a
-            WHERE c.caller_user_id IS NULL AND a.thread_id = c.thread_id
-              AND a.input_record_id = c.input_record_id
-              AND a.model = ?2
-        ))
-        AND (?3 IS NULL OR EXISTS (
-            SELECT 1 FROM reasoning_audits a
-            WHERE c.caller_user_id IS NULL AND a.thread_id = c.thread_id
-              AND a.input_record_id = c.input_record_id
-              AND a.request_kind = ?3
-        ))
-        AND (?4 IS NULL OR (c.caller_user_id IS NULL AND c.thread_id=?4))";
-    let worker_params = params![started_after, model, request_kind, thread_id];
-    let duration_sum = "COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN c.completed_at - c.created_at ELSE 0 END), 0)";
-    let duration_count = "COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN 1 ELSE 0 END), 0)";
-    let (worker_calls, worker_read_bytes, worker_write_bytes, worker_duration, worker_timed): (
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    ) = connection.query_row(
-        &format!(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
-                    COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0),
-                    {duration_sum},
-                    {duration_count}
-             FROM worker_calls c WHERE {worker_where}"
-        ),
-        worker_params,
-        |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        },
-    )?;
-    let mut workers = Vec::new();
-    let mut worker_statement = connection.prepare(&format!(
-        "SELECT c.worker_id, COALESCE(MAX(c.worker_label), MAX(w.label), c.worker_id), COUNT(*),
-                COALESCE(SUM(length(CAST(arguments_json AS BLOB))), 0),
-                COALESCE(SUM(length(CAST(COALESCE(result_json, '') AS BLOB))), 0),
-                {duration_sum},
-                {duration_count}
-         FROM worker_calls c LEFT JOIN workers w ON w.id = c.worker_id
-         WHERE {worker_where}
-         GROUP BY c.worker_id
-         ORDER BY (SUM(length(CAST(arguments_json AS BLOB)))
-                 + SUM(length(CAST(COALESCE(result_json, '') AS BLOB)))) DESC,
-                  c.worker_id"
-    ))?;
-    let worker_rows = worker_statement.query_map(worker_params, |row| {
-        let duration_seconds: i64 = row.get(5)?;
-        let timed_calls: i64 = row.get(6)?;
-        Ok(InsightWorkerItem {
-            worker_id: row.get(0)?,
-            worker_label: row.get(1)?,
-            calls: row.get(2)?,
-            read_bytes: row.get(3)?,
-            write_bytes: row.get(4)?,
-            duration_seconds,
-            average_duration_seconds: (timed_calls > 0)
-                .then(|| duration_seconds as f64 / timed_calls as f64),
-        })
-    })?;
-    for row in worker_rows {
-        workers.push(row?);
-    }
-    let (total_records, payload_bytes, checkpoint_count, latest_record_at): (
-        i64,
-        i64,
-        i64,
-        Option<i64>,
-    ) = connection.query_row(
-        &format!(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(length(CAST(payload AS BLOB))), 0),
-                    COALESCE(SUM(CASE WHEN kind='checkpoint' THEN 1 ELSE 0 END), 0),
-                    MAX(created_at)
-             FROM history_records WHERE {history_where}"
-        ),
-        params![started_after, thread_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    )?;
-    let mut kinds = Vec::new();
-    let mut kind_statement = connection.prepare(&format!(
-        "SELECT kind, COUNT(*) FROM history_records WHERE {history_where}
-         GROUP BY kind ORDER BY kind"
-    ))?;
-    let kind_rows = kind_statement.query_map(params![started_after, thread_id], |row| {
-        Ok(InsightCount {
-            key: row.get(0)?,
-            count: row.get(1)?,
-        })
-    })?;
-    for row in kind_rows {
-        kinds.push(row?);
-    }
-    let dimensions = InsightDimensions {
-        thread_ids: connection
-            .prepare("SELECT DISTINCT thread_id FROM reasoning_audits ORDER BY thread_id")?
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<String>, _>>()?,
-        models: connection
-            .prepare("SELECT DISTINCT model FROM reasoning_audits ORDER BY model")?
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<String>, _>>()?,
-        request_kinds: connection
-            .prepare("SELECT DISTINCT request_kind FROM reasoning_audits ORDER BY request_kind")?
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<String>, _>>()?,
-    };
-    let attribution = load_attribution(
-        connection,
-        generated_at,
-        started_after,
-        thread_id.as_deref(),
-    )?;
-    let activity = load_insight_activity(connection, started_after, generated_at)?;
-    Ok(Insights {
-        range,
-        generated_at,
-        tokens: InsightTokens {
-            completed_requests,
-            input_tokens,
-            output_tokens,
-            total_tokens: input_tokens.saturating_add(output_tokens),
-            cached_tokens,
-            cache_hit_rate: (input_tokens > 0)
-                .then(|| cached_tokens as f64 / input_tokens as f64 * 100.0),
-            input_output_ratio: (output_tokens > 0)
-                .then(|| input_tokens as f64 / output_tokens as f64),
-        },
-        requests: InsightRequests {
-            total,
-            completed,
-            in_flight,
-            failed,
-            cancelled,
-        },
-        by_model: models,
-        worker: InsightWorker {
-            calls: worker_calls,
-            read_bytes: worker_read_bytes,
-            write_bytes: worker_write_bytes,
-            duration_seconds: worker_duration,
-            average_duration_seconds: (worker_timed > 0)
-                .then(|| worker_duration as f64 / worker_timed as f64),
-            by_worker: workers,
-        },
-        attribution,
-        history: InsightHistory {
-            total_records,
-            payload_bytes,
-            checkpoint_count,
-            latest_record_at,
-            kinds,
-        },
-        dimensions,
-        activity,
-    })
-}
-
-/// How a Thread run splits between model inference, Worker calls and Cybion
-/// processing. A run starts at its input or thread-control record and ends at
-/// the last settled timestamp it produced. The latest run of a still-running
-/// Thread ends at `now`. Inference keeps overlapping Worker time: a Worker call
-/// only counts for the part that runs after the model stream it raced.
-fn load_attribution(
-    connection: &Connection,
-    now_ts: i64,
-    started_after: Option<i64>,
-    thread_id: Option<&str>,
-) -> Result<InsightAttribution, ApiError> {
-    struct Run {
-        thread: String,
-        started_at: i64,
-        audits: Vec<(i64, i64)>,
-        workers: Vec<(i64, i64)>,
-    }
-    let mut boundaries = Vec::new();
-    let mut boundary_statement = connection.prepare(
-        "SELECT thread_id,id,created_at FROM history_records
-         WHERE (kind='input' OR (kind='activity' AND json_extract(payload,'$.type')='thread_control'))
-           AND (?1 IS NULL OR created_at >= ?1)
-           AND (?2 IS NULL OR thread_id = ?2)
-         ORDER BY thread_id,id",
-    )?;
-    let rows = boundary_statement.query_map(params![started_after, thread_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-    for row in rows {
-        boundaries.push(row?);
-    }
-    let mut runs: HashMap<i64, Run> = HashMap::new();
-    let mut last_boundary: HashMap<String, i64> = HashMap::new();
-    for (thread, id, created_at) in boundaries {
-        runs.insert(
-            id,
-            Run {
-                thread: thread.clone(),
-                started_at: created_at,
-                audits: Vec::new(),
-                workers: Vec::new(),
-            },
-        );
-        last_boundary.insert(thread, id);
-    }
-    let mut running_threads = HashSet::new();
-    let mut running_statement =
-        connection.prepare("SELECT id FROM threads WHERE status='running'")?;
-    let rows = running_statement.query_map([], |row| row.get::<_, String>(0))?;
-    for row in rows {
-        running_threads.insert(row?);
-    }
-    // An unsettled audit or Worker call belongs to the run it was started
-    // from; only the current run of a running Thread stays open at `now`.
-    let open_run = |runs: &HashMap<i64, Run>, id: i64| -> bool {
-        runs.get(&id).is_some_and(|run| {
-            running_threads.contains(&run.thread) && last_boundary.get(&run.thread) == Some(&id)
-        })
-    };
-    let mut audit_statement = connection.prepare(
-        "SELECT input_record_id,started_at,finished_at FROM reasoning_audits
-         WHERE input_record_id IS NOT NULL AND (?1 IS NULL OR started_at >= ?1)",
-    )?;
-    let rows = audit_statement.query_map(params![started_after], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, Option<i64>>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (input_record_id, started_at, finished_at) = row?;
-        let end = finished_at.or_else(|| open_run(&runs, input_record_id).then_some(now_ts));
-        if let (Some(end), Some(run)) = (end, runs.get_mut(&input_record_id)) {
-            run.audits.push((started_at, end));
-        }
-    }
-    let mut worker_statement = connection.prepare(
-        "SELECT input_record_id,created_at,completed_at FROM worker_calls
-         WHERE caller_user_id IS NULL AND input_record_id IS NOT NULL AND (?1 IS NULL OR created_at >= ?1)",
-    )?;
-    let rows = worker_statement.query_map(params![started_after], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, Option<i64>>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (input_record_id, created_at, completed_at) = row?;
-        let end = completed_at.or_else(|| open_run(&runs, input_record_id).then_some(now_ts));
-        if let (Some(end), Some(run)) = (end, runs.get_mut(&input_record_id)) {
-            run.workers.push((created_at, end));
-        }
-    }
-    let mut attribution = InsightAttribution::default();
-    for (id, run) in &runs {
-        let end = if open_run(&runs, *id) {
-            now_ts
-        } else {
-            let Some(end) = run
-                .audits
-                .iter()
-                .chain(run.workers.iter())
-                .map(|(_, end)| *end)
-                .max()
-            else {
-                continue;
-            };
-            end
-        };
-        if end <= run.started_at {
-            continue;
-        }
-        let audits = merged_intervals(clip_intervals(&run.audits, run.started_at, end));
-        let inference_seconds = interval_duration(&audits);
-        let workers = merged_intervals(clip_intervals(&run.workers, run.started_at, end));
-        let worker_seconds = interval_duration(&subtracted_intervals(workers, &audits));
-        attribution.runs += 1;
-        attribution.running_seconds += end - run.started_at;
-        attribution.inference_seconds += inference_seconds;
-        attribution.worker_seconds += worker_seconds;
-        attribution.overhead_seconds = attribution.overhead_seconds.saturating_add(
-            (end - run.started_at).saturating_sub(inference_seconds + worker_seconds),
-        );
-    }
-    Ok(attribution)
-}
-
-fn clip_intervals(intervals: &[(i64, i64)], start: i64, end: i64) -> Vec<(i64, i64)> {
-    intervals
-        .iter()
-        .filter_map(|&(from, to)| {
-            let from = from.max(start);
-            let to = to.min(end);
-            (to > from).then_some((from, to))
-        })
-        .collect()
-}
-
-fn merged_intervals(mut intervals: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
-    intervals.sort_unstable();
-    let mut merged: Vec<(i64, i64)> = Vec::new();
-    for (from, to) in intervals {
-        match merged.last_mut() {
-            Some(last) if from <= last.1 => last.1 = last.1.max(to),
-            _ => merged.push((from, to)),
-        }
-    }
-    merged
-}
-
-fn interval_duration(intervals: &[(i64, i64)]) -> i64 {
-    intervals.iter().map(|(from, to)| to - from).sum()
-}
-
-fn subtracted_intervals(mut base: Vec<(i64, i64)>, mask: &[(i64, i64)]) -> Vec<(i64, i64)> {
-    for &(mask_from, mask_to) in mask {
-        let mut remaining = Vec::new();
-        for (from, to) in base {
-            if mask_to <= from || mask_from >= to {
-                remaining.push((from, to));
-                continue;
-            }
-            if mask_from > from {
-                remaining.push((from, mask_from));
-            }
-            if mask_to < to {
-                remaining.push((mask_to, to));
-            }
-        }
-        base = remaining;
-    }
-    base
 }
 
 async fn reasoning_audits(
@@ -3909,6 +3461,7 @@ async fn delete_thread(
     let id = thread_id(&id)?;
     let owner = identity.user.id.clone();
     user_db(&state, &identity.user, true, move |connection| {
+        stats::note_thread_deleted(connection, &id)?;
         let changed = connection.execute("DELETE FROM threads WHERE id=?", [id])?;
         if changed == 0 {
             return Err(ApiError::not_found("thread not found"));
@@ -7785,19 +7338,20 @@ async fn worker_result(
         }
         let call: Option<WorkerCallResultRow> = transaction
             .query_row(
-                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type FROM worker_calls
+                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type,created_at FROM worker_calls
                  WHERE id=? AND worker_id=?",
                 params![&call_id, &worker_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             )
             .optional()?;
-        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id, responses_output_type)) = call else {
+        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id, responses_output_type, created_at)) = call else {
             return Err(ApiError::not_found("Worker call not found"));
         };
         let thread_exists:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM threads WHERE id=?)",[&thread_id],|r|r.get(0))?;
         if !thread_exists {
             let saved:Option<String>=transaction.query_row("SELECT result_json FROM worker_calls WHERE id=?",[&call_id],|r|r.get(0))?;
             if saved.as_deref().is_some_and(|v|v!=result_json) {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
+            stats::mark_dirty(&transaction, created_at)?;
             transaction.execute("UPDATE worker_calls SET result_json=?,status='failed',error=COALESCE(error,'Thread deleted'),completed_at=COALESCE(completed_at,?),output_discarded=1 WHERE id=?",params![result_json,now(),call_id])?;
             transaction.commit()?;return Ok(());
         }
@@ -7807,6 +7361,7 @@ async fn worker_result(
                 if saved!=result_json {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
             } else {
                 persist_history_record(&transaction,HistoryRecordInsert{thread_id:&thread_id,kind:"activity",payload:&json!({"type":"late_worker_result","call_id":responses_call_id,"result":input.result}),created_at:now()})?;
+                stats::mark_dirty(&transaction, created_at)?;
                 transaction.execute("UPDATE worker_calls SET result_json=? WHERE id=?",params![result_json,call_id])?;
             }
             transaction.commit()?;
@@ -7817,6 +7372,7 @@ async fn worker_result(
             "call_id": if responses_call_id.is_empty() { call_id.clone() } else { responses_call_id.clone() },
             "output": input.result.to_string(),
         });
+        stats::mark_dirty(&transaction, created_at)?;
         let accepted = matches!(call_status.as_str(), "queued" | "delivered");
         if accepted {
             transaction.execute(
@@ -7941,6 +7497,7 @@ mod tests {
                 active_requests: Arc::new(Mutex::new(HashMap::new())),
                 traffic: Arc::new(traffic::Monitor::open(&admin_db_path).unwrap()),
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
+                stats: stats::Patrol::new(),
             },
         )
     }
@@ -8238,282 +7795,6 @@ mod tests {
         let second = Uuid::parse_str(&second.id).unwrap();
         assert_eq!(first.get_version(), Some(uuid::Version::SortRand));
         assert!(first < second);
-    }
-
-    #[tokio::test]
-    async fn insights_aggregate_tokens_durations_worker_payload_bytes_and_time_attribution() {
-        let (_root, state) = test_state();
-        let user = user_for_subject(&state, "insights-user").unwrap();
-        let first = create_test_thread(&state, &user).await;
-        let upstream =
-            insert_upstream(&state, &user, "second-upstream", "http://127.0.0.1:1").await;
-        let second = create_thread_for(
-            &state,
-            &user,
-            CreateThreadInput {
-                title: Some("Second".to_owned()),
-                external_ref: None,
-                model: Some("second-model".to_owned()),
-                upstream_id: Some(upstream.id),
-                reasoning_effort: None,
-                service_tier_fast: None,
-            },
-            ThreadOrigin::Web,
-        )
-        .await
-        .unwrap();
-        let first_id = first.id.clone();
-        let first_model = first.model.clone();
-        let second_id = second.id.clone();
-        let second_model = second.model.clone();
-        let second_model_name = second.model.clone();
-        let stats = user_db(&state, &user, false, move |connection| {
-            let base = now();
-            let input = persist_history_record(
-                connection,
-                HistoryRecordInsert {
-                    thread_id: &first.id,
-                    kind: "input",
-                    payload: &json!({"role":"user","content":"hello"}),
-                    created_at: base,
-                },
-            )?;
-            connection.execute(
-                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens)
-                 VALUES(?,?,?,?,'high','completed',?,?,?,?,?)",
-                params![input, &first_id, "inference", &first_model, base + 1, base + 11, 100_i64, 25_i64, 40_i64],
-            )?;
-            for (started_at, finished_at) in [(base + 13, base + 23), (base + 44, base + 54)] {
-                connection.execute(
-                    "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,finished_at)
-                     VALUES(?,?,?,?,'low','failed',?,?)",
-                    params![input, &first_id, "inference", &first_model, started_at, finished_at],
-                )?;
-            }
-            connection.execute(
-                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at)
-                 VALUES(?,?,?,'in_flight',?)",
-                params![&second_id, "inference", &second_model, base + 5],
-            )?;
-            connection.execute(
-                "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at)
-                 VALUES('worker-1','Laptop','hash',?,'online',?)",
-                params![base, base],
-            )?;
-            connection.execute(
-                "INSERT INTO worker_calls(id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,completed_at,result_json)
-                 VALUES('call-1','worker-1',?,?,'bash',?,'completed',?,?,?)",
-                params![
-                    &first_id,
-                    input,
-                    r#"{"command":"ls"}"#,
-                    base + 12,
-                    base + 42,
-                    r#"{"stdout":"ok"}"#
-                ],
-            )?;
-            load_insights(
-                connection,
-                "all".to_owned(),
-                None,
-                None,
-                None,
-                None,
-            )
-        })
-        .await
-        .unwrap();
-        assert_eq!(stats.requests.total, 4);
-        assert_eq!(stats.requests.in_flight, 1);
-        assert_eq!(stats.tokens.completed_requests, 1);
-        assert_eq!(stats.tokens.input_tokens, 100);
-        assert_eq!(stats.tokens.output_tokens, 25);
-        assert_eq!(stats.tokens.cached_tokens, 40);
-        assert_eq!(stats.tokens.cache_hit_rate, Some(40.0));
-        assert_eq!(stats.tokens.input_output_ratio, Some(4.0));
-        assert_eq!(stats.by_model.len(), 3);
-        let model = |effort: &str| {
-            stats
-                .by_model
-                .iter()
-                .find(|item| item.reasoning_effort.as_deref() == Some(effort))
-                .unwrap()
-        };
-        let high = model("high");
-        assert_eq!((high.calls, high.completed), (1, 1));
-        assert_eq!(high.duration_seconds, 10);
-        assert_eq!(high.average_duration_seconds, Some(10.0));
-        let low = model("low");
-        assert_eq!((low.calls, low.failed), (2, 2));
-        assert_eq!(low.duration_seconds, 20);
-        assert_eq!(low.average_duration_seconds, Some(10.0));
-        let unset = stats
-            .by_model
-            .iter()
-            .find(|item| item.model == second_model_name)
-            .unwrap();
-        assert_eq!(unset.reasoning_effort, None);
-        assert_eq!(unset.in_flight, 1);
-        assert_eq!(unset.duration_seconds, 0);
-        assert_eq!(unset.average_duration_seconds, None);
-        assert_eq!(stats.worker.calls, 1);
-        assert_eq!(stats.worker.duration_seconds, 30);
-        assert_eq!(stats.worker.average_duration_seconds, Some(30.0));
-        assert_eq!(stats.worker.read_bytes, r#"{"command":"ls"}"#.len() as i64);
-        assert_eq!(stats.worker.write_bytes, r#"{"stdout":"ok"}"#.len() as i64);
-        assert_eq!(stats.worker.by_worker[0].worker_label, "Laptop");
-        assert_eq!(stats.worker.by_worker[0].duration_seconds, 30);
-        assert_eq!(
-            stats.worker.by_worker[0].average_duration_seconds,
-            Some(30.0)
-        );
-        assert_eq!(stats.attribution.runs, 1);
-        assert_eq!(stats.attribution.running_seconds, 54);
-        assert_eq!(stats.attribution.inference_seconds, 30);
-        assert_eq!(stats.attribution.worker_seconds, 20);
-        assert_eq!(stats.attribution.overhead_seconds, 4);
-    }
-
-    #[tokio::test]
-    async fn insights_include_daily_active_thread_rollups() {
-        let (_root, state) = test_state();
-        let user = user_for_subject(&state, "daily-activity-user").unwrap();
-        let first = create_test_thread(&state, &user).await;
-        let second = create_test_thread(&state, &user).await;
-        let first_id = first.id.clone();
-        let second_id = second.id.clone();
-        let base = 1_700_000_000_i64;
-        let (activity, recent_activity) = user_db(&state, &user, false, move |connection| {
-            let first_input = persist_history_record(
-                connection,
-                HistoryRecordInsert {
-                    thread_id: &first_id,
-                    kind: "input",
-                    payload: &json!({"role":"user","content":"first prompt"}),
-                    created_at: base,
-                },
-            )?;
-            persist_history_record(
-                connection,
-                HistoryRecordInsert {
-                    thread_id: &first_id,
-                    kind: "response_output",
-                    payload: &json!({"type":"message","content":"done"}),
-                    created_at: base + 100,
-                },
-            )?;
-            persist_history_record(
-                connection,
-                HistoryRecordInsert {
-                    thread_id: &first_id,
-                    kind: "checkpoint",
-                    payload: &json!({"role":"developer","content":"checkpoint"}),
-                    created_at: base + 200,
-                },
-            )?;
-            let second_input = persist_history_record(
-                connection,
-                HistoryRecordInsert {
-                    thread_id: &second_id,
-                    kind: "input",
-                    payload: &json!({"role":"user","content":"second prompt"}),
-                    created_at: base + 2 * 86_400,
-                },
-            )?;
-            connection.execute(
-                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens)
-                 VALUES(?,?,?,'fixture','completed',?,?,10,5)",
-                params![first_input, &first_id, "inference", base + 10, base + 20],
-            )?;
-            connection.execute(
-                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens)
-                 VALUES(?,?,?,'fixture','completed',?,?,20,8)",
-                params![second_input, &second_id, "inference", base + 2 * 86_400 + 10, base + 2 * 86_400 + 20],
-            )?;
-            let activity = load_insight_activity(connection, None, base + 3 * 86_400)?;
-            let recent_activity = load_insight_activity(connection, Some(base + 50), base + 3 * 86_400)?;
-            Ok((activity, recent_activity))
-        })
-        .await
-        .unwrap();
-        let first_date = utc_date(base).unwrap().format("%Y-%m-%d").to_string();
-        let second_date = utc_date(base + 2 * 86_400)
-            .unwrap()
-            .format("%Y-%m-%d")
-            .to_string();
-        let first_day = activity
-            .days
-            .iter()
-            .find(|day| day.date == first_date)
-            .unwrap();
-        let second_day = activity
-            .days
-            .iter()
-            .find(|day| day.date == second_date)
-            .unwrap();
-        assert_eq!(
-            (
-                first_day.active_threads,
-                first_day.activity_records,
-                first_day.input_records
-            ),
-            (1, 2, 1)
-        );
-        assert_eq!(
-            (
-                second_day.active_threads,
-                second_day.activity_records,
-                second_day.input_records
-            ),
-            (1, 1, 1)
-        );
-        let empty_date = utc_date(base + 86_400)
-            .unwrap()
-            .format("%Y-%m-%d")
-            .to_string();
-        let empty_day = activity
-            .days
-            .iter()
-            .find(|day| day.date == empty_date)
-            .unwrap();
-        assert_eq!(
-            (
-                empty_day.active_threads,
-                empty_day.activity_records,
-                empty_day.input_records
-            ),
-            (0, 0, 0)
-        );
-        let recent_first_day = recent_activity
-            .days
-            .iter()
-            .find(|day| day.date == first_date)
-            .unwrap();
-        assert_eq!(
-            (
-                recent_first_day.active_threads,
-                recent_first_day.activity_records,
-                recent_first_day.input_records
-            ),
-            (1, 2, 1)
-        );
-    }
-
-    #[test]
-    fn attribution_interval_helpers_merge_clip_and_subtract() {
-        assert_eq!(
-            merged_intervals(vec![(5, 10), (1, 3), (2, 6)]),
-            vec![(1, 10)]
-        );
-        assert_eq!(interval_duration(&[(1, 3), (5, 10)]), 7);
-        assert_eq!(
-            subtracted_intervals(vec![(12, 42)], &[(13, 23)]),
-            vec![(12, 13), (23, 42)]
-        );
-        assert_eq!(
-            clip_intervals(&[(0, 5), (8, 20)], 3, 10),
-            vec![(3, 5), (8, 10)]
-        );
     }
 
     #[test]
