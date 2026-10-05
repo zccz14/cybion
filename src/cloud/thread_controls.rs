@@ -10,11 +10,6 @@ pub(super) enum RequestInput {
     /// One complete Responses `input` item: a text message or a message whose
     /// content carries pasted images.
     Prompt(Value),
-    Report {
-        date: NaiveDate,
-        thread_id: Option<String>,
-        language: String,
-    },
     Continue,
     Compact,
 }
@@ -86,19 +81,6 @@ fn record_request(
                     created_at: now(),
                 },
             )?;
-            reports::on_prompt(&transaction, &thread, id)?;
-            (id, RequestOperation::Inference)
-        }
-        RequestInput::Report {
-            date,
-            thread_id: scope,
-            language,
-        } => {
-            let id = reports::prepare_task(&transaction, &thread, date, scope, language)?;
-            if thread.status == "running" {
-                transaction.commit()?;
-                return Ok((id, RequestOperation::Inference));
-            }
             (id, RequestOperation::Inference)
         }
         control @ (RequestInput::Continue | RequestInput::Compact) => {
@@ -112,11 +94,6 @@ fn record_request(
                 ("continue", RequestOperation::Inference)
             };
             let id = control_record(&transaction, thread_id, action)?;
-            if action == "continue" {
-                reports::on_continue(&transaction, &thread, id)?;
-            } else if thread.purpose == "reports" {
-                reports::register_run(&transaction, &thread, id)?;
-            }
             (id, operation)
         }
     };
@@ -192,13 +169,6 @@ pub(super) async fn cancel_for(
         let thread = load_thread(&transaction, &cancelled_thread_id)?;
         if thread.status != "running" {
             return Ok(thread);
-        }
-        if let Some(input) = latest_request_record_id(&transaction, &cancelled_thread_id)? {
-            reports::finish(
-                &transaction,
-                input,
-                Some("Cancelled by user; continue manually to resume the captured report task"),
-            )?;
         }
         control_record(&transaction, &cancelled_thread_id, "cancel")?;
         transaction.execute(

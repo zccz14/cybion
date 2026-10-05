@@ -11,7 +11,6 @@ import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import type { ThreadUsage } from "@/lib/thread-usage"
 
 export type ThreadListItem = {
-  purpose?: "work" | "reports"
   created_by: "web" | "api"
   external_ref: string | null
   id: string

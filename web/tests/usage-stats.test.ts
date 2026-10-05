@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-const reportSource = readFileSync(new URL("../src/components/daily-reports.tsx", import.meta.url), "utf8")
 const insightsPage = source.slice(source.indexOf("function InsightsPage("), source.indexOf("function ReasoningAuditPage("))
 
 test("the page and its navigation are titled Usage statistics in both languages", () => {
@@ -44,13 +43,12 @@ test("reasoning audits expose the recorded reasoning effort", () => {
   assert.match(auditPage, /<code>\{item\.reasoning_effort \?\? "—"\}<\/code>/)
 })
 
-test("usage statistics render the daily active-thread calendar and selected daily report", () => {
+test("usage statistics render the daily active-thread calendar", () => {
   assert.match(source, /activity: \{ timezone: string; days: InsightActiveDay\[\] \}/)
   assert.match(insightsPage, /<DailyActivityCard/)
   assert.match(insightsPage, /data\.activity\.days/)
   assert.match(source, /function DailyActivityCard\(/)
-  assert.match(insightsPage, /<DailyReports/)
-  assert.match(reportSource, /`\/api\/reports\/daily\?date=\$\{encodeURIComponent\(date!\)\}`/)
+  assert.doesNotMatch(source, /DailyReports|ReportThreadNotice/)
 })
 
 test("daily activity defines non-checkpoint protocol records and exposes a UTC label", () => {
@@ -60,12 +58,7 @@ test("daily activity defines non-checkpoint protocol records and exposes a UTC l
 })
 
 
-test("report execution is visibly scoped to its Thread and audit filters follow evidence links", () => {
-  assert.match(reportSource, /\/api\/reports\/thread/)
-  assert.match(reportSource, /reportAuditPath\(reportThread.id\)/)
-  assert.match(reportSource, /control\.mutate\("cancel"\)/)
-  assert.match(reportSource, /control\.mutate\("continue"\)/)
-  assert.match(source, /current\.purpose === "reports" && <ReportThreadNotice/)
+test("the reasoning audit page follows thread evidence links", () => {
   assert.match(source, /const threadFilter = filters\.get\("thread_id"\)/)
   assert.match(source, /if \(threadFilter\) params\.set\("thread_id", threadFilter\)/)
 })
