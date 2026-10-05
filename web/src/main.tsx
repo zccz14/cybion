@@ -87,8 +87,6 @@ import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads
 import { sharedThreadReturnHash } from "@/lib/thread-sharing"
 import { WorkerAudit } from "@/components/worker-audit"
 import { WorkerConnections } from "@/components/worker-connections"
-import { DailyReports } from "@/components/daily-reports"
-import { ReportThreadNotice } from "@/components/report-thread-notice"
 import { AdminUsers } from "@/components/admin-users"
 import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
@@ -173,7 +171,6 @@ type ThreadDefaults = {
 }
 type ThreadStatus = "idle" | "running" | "failed"
 type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & {
-  purpose: "work" | "reports"
   created_by: "web" | "api"
   external_ref: string | null
   id: string
@@ -391,7 +388,7 @@ const copy = {
     generateTitle: "Generate a title from the full conversation",
     delete: "Delete",
     deleteTitle: "Delete this thread?",
-    deleteDescription: "This Thread’s history, reasoning audits and Worker calls will be removed. Copies already read into other Threads remain there. Saved reports outlive a deleted report Thread, but its audit links will be unavailable.",
+    deleteDescription: "This Thread’s history, reasoning audits and Worker calls will be removed. Copies already read into other Threads remain there.",
     archiveThread: "Archive",
     restoreThread: "Restore",
     archived: "Archived",
@@ -501,7 +498,7 @@ const copy = {
     saveWorker: "Save name",
     workerAuditRange: "{from}–{to} of {total} calls",
     auditRange: "{from}–{to} of {total} requests",
-    usageStatsDescription: "Token usage, cache efficiency, request outcomes, Worker call duration and bytes, and how Thread running time divides between inference, Worker calls, and Cybion overhead. Daily activity is a workspace-wide UTC calendar independent of model/request filters, with a drill-down report.",
+    usageStatsDescription: "Token usage, cache efficiency, request outcomes, Worker call duration and bytes, and how Thread running time divides between inference, Worker calls, and Cybion overhead. Daily activity is a workspace-wide UTC calendar independent of model/request filters.",
     statsRange: "Time range",
     stats24h: "Last 24 hours",
     stats7d: "Last 7 days",
@@ -556,7 +553,6 @@ const copy = {
     statsCalendarLegend: "Fewer",
     statsCalendarLegendMore: "More",
     statsTimezone: "Timezone",
-    statsSummary: "Summary",
     statsRequestsCount: "Requests",
     statsTotalTokensShort: "Tokens",
     statsNoData: "No statistics for this range.",
@@ -665,7 +661,6 @@ const copy = {
     toolBash: "Run shell commands",
     toolBrowserControl: "Control a browser",
     toolComputerUse: "Control the desktop",
-    toolListThreads: "List work Threads", toolReadHistory: "Read source history", toolReadReport: "Read reports and versions", toolUpdateReport: "Append report version", toolCybionReports: "Cybion · report Thread only",
     toolReadContext: "Read contexts",
     toolListContexts: "List contexts",
     toolListWorkers: "List Workers",
@@ -728,7 +723,7 @@ const copy = {
     generateTitle: "引用全部上下文生成标题",
     delete: "删除",
     deleteTitle: "删除这个线程？",
-    deleteDescription: "该 Thread 的历史、推理审计和 Worker 调用会被删除。其他 Thread 已读取的副本仍保留。删除报告 Thread 会保留日报，但其生成审计链接将不可用。",
+    deleteDescription: "该 Thread 的历史、推理审计和 Worker 调用会被删除。其他 Thread 已读取的副本仍保留。",
     archiveThread: "归档",
     restoreThread: "恢复",
     archived: "已归档",
@@ -838,7 +833,7 @@ const copy = {
     saveWorker: "保存名称",
     workerAuditRange: "第 {from}–{to} 条，共 {total} 次调用",
     auditRange: "第 {from}–{to} 条，共 {total} 个请求",
-    usageStatsDescription: "按模型查看 Token 用量、缓存效率、请求结果、Worker 调用耗时与字节流量，以及 Thread 运行耗时在推理、Worker 调用和 Cybion 开销之间的拆分。每日活跃统计是独立于模型/请求类型筛选的工作区级 UTC 日历，并可展开日报。",
+    usageStatsDescription: "按模型查看 Token 用量、缓存效率、请求结果、Worker 调用耗时与字节流量，以及 Thread 运行耗时在推理、Worker 调用和 Cybion 开销之间的拆分。每日活跃统计是独立于模型/请求类型筛选的工作区级 UTC 日历。",
     statsRange: "时间范围",
     stats24h: "近 24 小时",
     stats7d: "近 7 天",
@@ -893,7 +888,6 @@ const copy = {
     statsCalendarLegend: "少",
     statsCalendarLegendMore: "多",
     statsTimezone: "时区",
-    statsSummary: "摘要",
     statsRequestsCount: "请求",
     statsTotalTokensShort: "Token",
     statsNoData: "当前范围没有统计数据。",
@@ -1002,7 +996,6 @@ const copy = {
     toolBash: "运行 Shell 命令",
     toolBrowserControl: "控制浏览器",
     toolComputerUse: "控制桌面",
-    toolListThreads: "列出工作 Thread", toolReadHistory: "读取原始历史", toolReadReport: "读取日报及版本", toolUpdateReport: "保存报表新版本", toolCybionReports: "Cybion · 仅报告 Thread",
     toolReadContext: "读取上下文",
     toolListContexts: "列出上下文",
     toolListWorkers: "列出 Worker",
@@ -1800,7 +1793,6 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
         <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
         <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
       </div>
-      {current.purpose === "reports" && <ReportThreadNotice id={current.id} language={language} />}
       <ThreadUsagePanel usage={current.usage} language={language} />
       {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || attachments.images.length > 0) && submit.mutate({ input, images: attachments.images })} /></div>}
       {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
@@ -2220,7 +2212,6 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
   const [range, setRange] = useState<Insights["range"]>("7d")
   const [model, setModel] = useState("all")
   const [requestKind, setRequestKind] = useState("all")
-  const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const query = useQuery({
     queryKey: ["insights", sdk.session.getState().sessionId, range, model, requestKind],
     queryFn: () => {
@@ -2231,13 +2222,6 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
     },
     refetchInterval: 5000,
   })
-  const activityDays = query.data?.activity.days ?? []
-  useEffect(() => {
-    if (!query.data) return
-    setSelectedDate((current) => current && activityDays.some((day) => day.date === current)
-      ? current
-      : [...activityDays].reverse().find((day) => day.active_threads > 0)?.date ?? activityDays.at(-1)?.date ?? null)
-  }, [activityDays, query.data])
   const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
   const rate = (value: number | null) => value === null
     ? "—"
@@ -2291,10 +2275,7 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
     <DailyActivityCard
       days={data.activity.days}
       timezone={data.activity.timezone}
-      selectedDate={selectedDate}
-      onSelectDate={setSelectedDate}
     />
-    <DailyReports key={`${sdk.session.getState().sessionId}:${selectedDate}`} date={selectedDate} language={language} sessionId={sdk.session.getState().sessionId ?? ""} request={(path, init) => api(sdk, path, init)} />
     <Card>
       <CardHeader><CardTitle>{t("statsTokenUsage")}</CardTitle><CardDescription>{t("statsByModel")}</CardDescription></CardHeader>
       <CardContent>
@@ -2330,13 +2311,9 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
 function DailyActivityCard({
   days,
   timezone,
-  selectedDate,
-  onSelectDate,
 }: {
   days: InsightActiveDay[]
   timezone: string
-  selectedDate: string | null
-  onSelectDate: (date: string) => void
 }) {
   const { t, language } = useUi()
   const maxActiveThreads = Math.max(1, ...days.map((day) => day.active_threads))
@@ -2377,21 +2354,18 @@ function DailyActivityCard({
         <div className="overflow-x-auto pb-2" role="grid" aria-label={t("statsDailyActivity")}>
           <div className="grid min-w-max grid-flow-col grid-rows-7 gap-1" style={{ gridAutoColumns: "0.8rem" }}>
             {calendar.map((cell, index) => cell.day && cell.date
-              ? <button
+              ? <span
                 key={cell.date}
-                type="button"
                 role="gridcell"
                 aria-label={dayDescription(cell.day)}
-                aria-pressed={selectedDate === cell.date}
                 title={dayDescription(cell.day)}
-                onClick={() => onSelectDate(cell.date!)}
-                className={`size-3.5 rounded-sm ${tone(cell.day.active_threads)} ${selectedDate === cell.date ? "ring-2 ring-ring ring-offset-2 ring-offset-background" : ""}`}
+                className={`size-3.5 rounded-sm ${tone(cell.day.active_threads)}`}
               />
               : <span key={`blank-${index}`} aria-hidden="true" className="size-3.5" />)}
           </div>
         </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
-          <p>{selectedDate ? `${t("statsSummary")}: ${dateLabel(selectedDate)}` : t("statsDailyActivity")}</p>
+          <p>{t("statsDailyActivity")}</p>
           <div className="flex items-center gap-2" aria-label={t("statsDailyActivity")}><span>{t("statsCalendarLegend")}</span><span className="size-3 rounded-sm bg-muted" /><span className="size-3 rounded-sm bg-primary/20" /><span className="size-3 rounded-sm bg-primary/40" /><span className="size-3 rounded-sm bg-primary/65" /><span className="size-3 rounded-sm bg-primary" /><span>{t("statsCalendarLegendMore")}</span></div>
         </div>
       </>}
@@ -2868,10 +2842,6 @@ const toolLabels: Record<string, CopyKey> = {
   cybion_list_contexts: "toolListContexts",
   cybion_list_workers: "toolListWorkers",
   read_context: "toolReadContext",
-  cybion_list_threads: "toolListThreads",
-  cybion_read_history: "toolReadHistory",
-  cybion_read_report: "toolReadReport",
-  cybion_update_report: "toolUpdateReport",
   bash: "toolBash",
   browser_control: "toolBrowserControl",
   computer_use: "toolComputerUse",
@@ -2883,7 +2853,6 @@ function ToolsPage() {
   const { t } = useUi()
   const groups = [
     { names: toolCatalog.context.map((tool) => tool.name), provider: t("toolCybion") },
-    { names: toolCatalog.cybion.map((tool) => tool.name), provider: t("toolCybionReports") },
     { names: toolCatalog.worker.map((tool) => tool.name), provider: "Worker" },
     { names: Object.keys(toolCatalog.native), provider: t("toolOpenAi") },
   ]

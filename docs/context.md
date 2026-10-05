@@ -35,13 +35,12 @@ The checkpoint is included as the first item when one exists. Records from
 other threads are never eligible, even when their numeric IDs fall inside the
 same range. A missing, foreign, or non-protocol `idx_tail` is an error.
 
-Each Responses request replays this compiled array. Report Threads prepend
-their task policy as a developer message; every other request starts with the
+Each Responses request replays this compiled array, starting with the
 conversation records themselves. Compaction and title generation append their
 instruction as the final user message after the replayed records, so the
-warmed request prefix stays reusable. The report policy is request metadata;
-the durable conversation remains the record range above. The compiler uses
-`kind` to select protocol records; `activity` stays outside the model context.
+warmed request prefix stays reusable. The durable conversation remains the
+record range above. The compiler uses `kind` to select protocol records;
+`activity` stays outside the model context.
 
 ## Registry tools
 

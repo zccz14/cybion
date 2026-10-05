@@ -38,7 +38,7 @@ export function ThreadStatusBadge({ status, language }: StatusProps) {
   </span>
 }
 
-export function ThreadLink({ thread, language }: { thread: { purpose?: "work" | "reports"; created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; usage: ThreadUsage }; language: StatusProps["language"] }) {
+export function ThreadLink({ thread, language }: { thread: { created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; usage: ThreadUsage }; language: StatusProps["language"] }) {
   const status = thread.display_status
   const location = useLocation()
   const { label, hint } = threadStatusText(status, language)
@@ -51,7 +51,6 @@ export function ThreadLink({ thread, language }: { thread: { purpose?: "work" | 
             <span className="truncate font-medium">{thread.title}</span>
             {thread.created_by === "api" && <span className="shrink-0 rounded border px-1 text-[0.65rem] font-normal text-muted-foreground">API</span>}
           </span>
-          {thread.purpose === "reports" && <span className="w-fit rounded border px-1 text-[0.65rem] text-muted-foreground">{language === "zh" ? "报告" : "Reports"}</span>}
           <span className={cn("text-xs", presentation[status].color)}>{label}</span>
           <ThreadUsageSummary usage={thread.usage} language={language} />
         </span>

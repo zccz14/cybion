@@ -90,11 +90,9 @@ Reasoning and Worker audits refer to the request's originating history record,
 which may be an input or a control activity.
 
 Deleting a thread removes its history, checkpoints, audit rows, and Worker-call
-rows within the owning user database. Its source-linked reports and derived
-daily reports are removed too. Copies already read into another Thread's
-history remain in that destination Thread until it is deleted. Deleting the
-report executor Thread preserves independently saved report artifacts but
-removes its audit links. Other users' databases are unaffected.
+rows within the owning user database. Copies already read into another Thread's
+history remain in that destination Thread until it is deleted. Other users'
+databases are unaffected.
 
 ## Origin and external references
 
@@ -155,15 +153,10 @@ widest selection.
 
 ## Report-purpose Threads
 
-An account can explicitly create one visible report Thread with purpose
-`reports`; other Threads have purpose `work`. Purpose is server-assigned, not
-a general editable field. A report Thread uses the common runtime but receives
-only four owner-scoped Cybion Controller tools and cannot dispatch Worker,
-context or external tools. Report buttons and direct conversation share its
-history, audits and controls. It skips automatic naming and Linkit task
-notifications. Daily sources/metrics exclude it; general account usage and the
-activity heatmap include it. See [Daily reports](daily-reports.md) for its
-snapshot-aware continue/restart behavior and retention boundaries.
+Daily reports were removed from Cybion; new Threads are always purpose
+`work`. Databases from the feature's lifetime may still contain Threads with
+purpose `reports`; those rows are kept untouched, and nothing generates or
+maintains them any more.
 
 ## Read-only sharing
 

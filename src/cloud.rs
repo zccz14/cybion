@@ -39,7 +39,6 @@ mod history;
 mod linkit_notifications;
 mod normai;
 mod recovery;
-mod reports;
 mod thread_controls;
 mod thread_sharing;
 mod traffic;
@@ -559,7 +558,6 @@ fn recover_user_requests(path: &Path) -> Result<()> {
         Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     ensure_user_schema(&mut connection).map_err(|error| anyhow::anyhow!(error.message))?;
-    reports::recover(&connection).map_err(|error| anyhow::anyhow!(error.message))?;
     let interrupted = {
         let mut statement = connection
             .prepare("SELECT id FROM threads WHERE status='running' ORDER BY updated_at,id")?;
@@ -622,13 +620,6 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/compact", post(thread_controls::compact))
         .route("/api/threads/{id}/title", post(generate_thread_title))
         .route("/api/insights", get(insights))
-        .route("/api/reports/daily", get(daily_report))
-        .route("/api/reports/thread", post(reports::ensure_report_thread))
-        .route(
-            "/api/reports/daily/{date}/generate",
-            post(reports::generate),
-        )
-        .route("/api/reports/summaries/{id}", get(reports::read_summary))
         .route("/api/history", get(history::list))
         .route("/api/history/{id}", get(history::read))
         .route("/api/reasoning-audits", get(reasoning_audits))
@@ -1356,7 +1347,6 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
     transaction.execute_batch(linkit_notifications::SCHEMA)?;
-    transaction.execute_batch(reports::SCHEMA)?;
     if version < 14 {
         // COMPATIBILITY: the Cybion schema upgrader preserves notification setup for pre-14 databases
         // with stored Bot credentials. Remove when the supported schema floor
@@ -1484,7 +1474,6 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // at schema 16+; retain the migration test.
         migrate_legacy_upstream(&transaction)?;
     }
-    reports::migrate(&transaction)?;
     if version < 22 {
         worker_sharing::migrate(&transaction)?;
     }
@@ -1735,39 +1724,6 @@ struct InsightActiveDay {
     input_records: i64,
     requests: i64,
     total_tokens: i64,
-}
-
-#[derive(Deserialize, Default)]
-struct DailyReportQuery {
-    date: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DailyReport {
-    date: String,
-    timezone: &'static str,
-    generated_at: i64,
-    active_thread_count: i64,
-    activity_records: i64,
-    input_records: i64,
-    requests: i64,
-    total_tokens: i64,
-    threads: Vec<DailyThreadSummary>,
-    summary: reports::SummaryState,
-    generation: reports::GenerationView,
-}
-
-#[derive(Serialize)]
-struct DailyThreadSummary {
-    id: String,
-    title: String,
-    summary: Option<String>,
-    activity_count: i64,
-    input_count: i64,
-    request_count: i64,
-    total_tokens: i64,
-    last_activity_at: i64,
-    daily_summary: Option<reports::SummaryState>,
 }
 
 #[derive(Serialize)]
@@ -3129,139 +3085,6 @@ fn load_insight_activity(
     })
 }
 
-fn report_date(value: Option<&str>) -> Result<NaiveDate, ApiError> {
-    let Some(value) = value else {
-        return utc_date(now());
-    };
-    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .map_err(|_| ApiError::bad_request("report date must be YYYY-MM-DD"))?;
-    if value.len() != 10 || date.format("%Y-%m-%d").to_string() != value {
-        return Err(ApiError::bad_request("report date must be YYYY-MM-DD"));
-    }
-    Ok(date)
-}
-
-fn report_input_summary(payload: Option<String>) -> Option<String> {
-    let payload = payload?;
-    let value: Value = serde_json::from_str(&payload).ok()?;
-    let content = value.get("content")?;
-    let text = match content {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => return None,
-    };
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.is_empty() {
-        return None;
-    }
-    let summary = text.chars().take(240).collect::<String>();
-    Some(if summary.chars().count() < text.chars().count() {
-        format!("{summary}…")
-    } else {
-        summary
-    })
-}
-
-fn load_daily_report(connection: &Connection, date: NaiveDate) -> Result<DailyReport, ApiError> {
-    let (start, end) = utc_day_bounds(date);
-    let (active_thread_count, activity_records, input_records): (i64, i64, i64) = connection
-        .query_row(
-            "SELECT COUNT(DISTINCT thread_id), COUNT(*),
-                    COALESCE(SUM(CASE WHEN kind='input' THEN 1 ELSE 0 END), 0)
-             FROM history_records
-             WHERE kind <> 'checkpoint' AND created_at >= ?1 AND created_at < ?2
-               AND thread_id IN (SELECT id FROM threads WHERE purpose='work')",
-            params![start, end],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-    let (requests, total_tokens): (i64, i64) = connection.query_row(
-        "SELECT COUNT(*),
-                COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
-         FROM reasoning_audits WHERE started_at >= ?1 AND started_at < ?2 AND thread_id IN (SELECT id FROM threads WHERE purpose='work')",
-        params![start, end],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let mut statement = connection.prepare(
-        "SELECT t.id, t.title,
-                (SELECT COUNT(*) FROM history_records h
-                 WHERE h.thread_id=t.id AND h.kind <> 'checkpoint'
-                   AND h.created_at >= ?1 AND h.created_at < ?2),
-                (SELECT COUNT(*) FROM history_records h
-                 WHERE h.thread_id=t.id AND h.kind='input'
-                   AND h.created_at >= ?1 AND h.created_at < ?2),
-                (SELECT COUNT(*) FROM reasoning_audits a
-                 WHERE a.thread_id=t.id AND a.started_at >= ?1 AND a.started_at < ?2),
-                (SELECT COALESCE(SUM(COALESCE(a.input_tokens, 0) + COALESCE(a.output_tokens, 0)), 0)
-                 FROM reasoning_audits a
-                 WHERE a.thread_id=t.id AND a.started_at >= ?1 AND a.started_at < ?2),
-                (SELECT MAX(h.created_at) FROM history_records h
-                 WHERE h.thread_id=t.id AND h.kind <> 'checkpoint'
-                   AND h.created_at >= ?1 AND h.created_at < ?2) AS last_activity_at,
-                (SELECT h.payload FROM history_records h
-                 WHERE h.thread_id=t.id AND h.kind='input'
-                   AND h.created_at >= ?1 AND h.created_at < ?2
-                 ORDER BY h.created_at DESC, h.id DESC LIMIT 1)
-         FROM threads t
-         WHERE t.purpose='work' AND EXISTS(
-             SELECT 1 FROM history_records h
-             WHERE h.thread_id=t.id AND h.kind <> 'checkpoint'
-               AND h.created_at >= ?1 AND h.created_at < ?2
-         )
-         ORDER BY last_activity_at DESC, t.id",
-    )?;
-    let rows = statement.query_map(params![start, end], |row| {
-        let latest_input: Option<String> = row.get(7)?;
-        Ok(DailyThreadSummary {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            summary: report_input_summary(latest_input),
-            activity_count: row.get(2)?,
-            input_count: row.get(3)?,
-            request_count: row.get(4)?,
-            total_tokens: row.get(5)?,
-            last_activity_at: row.get(6)?,
-            daily_summary: None,
-        })
-    })?;
-    let mut threads = Vec::new();
-    for row in rows {
-        let mut thread = row?;
-        thread.daily_summary = Some(reports::thread_state(connection, date, &thread.id)?);
-        threads.push(thread);
-    }
-    Ok(DailyReport {
-        date: date.format("%Y-%m-%d").to_string(),
-        timezone: INSIGHT_TIMEZONE,
-        generated_at: now(),
-        active_thread_count,
-        activity_records,
-        input_records,
-        requests,
-        total_tokens,
-        threads,
-        summary: reports::day_state(connection, date)?,
-        generation: reports::view(connection, &date.to_string())?,
-    })
-}
-
-async fn daily_report(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    Query(query): Query<DailyReportQuery>,
-) -> Result<Json<DailyReport>, ApiError> {
-    let date = report_date(query.date.as_deref())?;
-    user_db(&state, &identity.user, true, move |connection| {
-        let transaction = connection.transaction()?;
-        load_daily_report(&transaction, date)
-    })
-    .await
-    .map(Json)
-}
-
 fn load_insights(
     connection: &Connection,
     range: String,
@@ -3973,12 +3796,7 @@ async fn update_thread(
     }
     let updated_at = now();
     let thread = user_db(&state, &identity.user, true, move |connection| {
-        let current = load_thread(connection, &id)?;
-        if current.purpose == "reports" && current.status == "running"
-            && (model.is_some() || upstream_id.is_some() || reasoning_effort.is_some()
-                || input.service_tier_fast.is_some() || context_budget.is_some()) {
-            return Err(ApiError::conflict("stop the report Thread before changing its generation settings"));
-        }
+        load_thread(connection, &id)?;
         if let Some(id) = upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
@@ -4065,7 +3883,6 @@ async fn request_thread_title(
         false,
         false,
         Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
-        None,
         None,
     )
     .await?;
@@ -4779,19 +4596,7 @@ async fn process_request(
                     .await
                 }
             };
-            if thread.purpose == "reports" {
-                match tokio::time::timeout(Duration::from_secs(1800), turn).await {
-                    Ok(result) => result,
-                    Err(_) => Err((
-                        thread.clone(),
-                        Box::new(ApiError::unavailable(
-                            "report turn exceeded 30 minutes; continue manually to resume saved progress",
-                        )),
-                    )),
-                }
-            } else {
-                turn.await
-            }
+            turn.await
         }
         Ok((thread, None)) => Err((
             thread,
@@ -4838,9 +4643,7 @@ async fn process_request(
     match result {
         Ok((thread, output)) => {
             match finalize_request_success(&state, &user, &thread_id, record_idx).await {
-                Ok(true)
-                    if operation == RequestOperation::Inference && thread.purpose != "reports" =>
-                {
+                Ok(true) if operation == RequestOperation::Inference => {
                     let thread = maybe_name_thread(&state, &user, &thread).await;
                     linkit_notifications::notify(&state, &user, &thread, true, &output).await;
                 }
@@ -4855,7 +4658,7 @@ async fn process_request(
                 let current =
                     finalize_request_failure(&state, &user, &thread, record_idx, &error.message)
                         .await;
-                if current && thread.purpose != "reports" {
+                if current {
                     linkit_notifications::notify(&state, &user, &thread, false, &error.message)
                         .await;
                 }
@@ -4937,24 +4740,6 @@ async fn finalize_request_success(
             transaction.commit()?;
             return Ok(false);
         }
-        reports::finish(&transaction, record_idx, None)?;
-        if let Some(message) = reports::failed_message(&transaction, record_idx)? {
-            transaction.execute(
-                "UPDATE threads SET status='failed',updated_at=? WHERE id=?",
-                params![now(), thread_id],
-            )?;
-            persist_history_record(
-                &transaction,
-                HistoryRecordInsert {
-                    thread_id: &thread_id,
-                    kind: "activity",
-                    payload: &json!({"role":"system","content":message}),
-                    created_at: now(),
-                },
-            )?;
-            transaction.commit()?;
-            return Ok(false);
-        }
         let previous = load_thread(&transaction, &thread_id)?.status;
         let changed = transaction.execute(
             "UPDATE threads SET status='idle',updated_at=? WHERE id=? AND status='running'",
@@ -4991,7 +4776,6 @@ async fn finalize_request_failure(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let latest_request = latest_request_record_id(&transaction, &thread_id)?;
         let current = latest_request == Some(record_idx);
-        reports::finish(&transaction, record_idx, Some(&error_for_db))?;
         persist_history_record(
             &transaction,
             HistoryRecordInsert {
@@ -5304,11 +5088,6 @@ fn load_protocol_items(
            AND h.kind IN ('input','response_output','tool_output','checkpoint')
          ORDER BY h.id",
     )?;
-    let report_thread: bool = connection.query_row(
-        "SELECT purpose='reports' FROM threads WHERE id=?",
-        [thread_id],
-        |row| row.get(0),
-    )?;
     let rows = statement
         .query_map(params![thread_id, idx_head, idx_tail], |row| {
             Ok((
@@ -5321,7 +5100,7 @@ fn load_protocol_items(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     // Screenshots can only live in tool_output records; skip the ledger read
     // for ranges that cannot contain one.
-    let reinjected = if report_thread || !rows.iter().any(|row| row.2 == "tool_output") {
+    let reinjected = if !rows.iter().any(|row| row.2 == "tool_output") {
         HashSet::new()
     } else {
         let ordered_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
@@ -5332,9 +5111,7 @@ fn load_protocol_items(
     for (id, created_at, kind, payload) in rows {
         let item: Value =
             serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let item = if report_thread {
-            item
-        } else if reinjected.contains(&id) {
+        let item = if reinjected.contains(&id) {
             screenshot_replay_item(&item)
         } else {
             context_protocol_item(&item)
@@ -5709,23 +5486,12 @@ async fn request_agent(
                 continue;
             }
         }
-        let (prefix, has_workers) = if thread.purpose == "reports" {
-            (
-                Some(
-                    reports::prefix(state, user, source_record_idx)
-                        .await
-                        .map_err(|error| (thread.clone(), Box::new(error)))?,
-                ),
-                false,
-            )
-        } else {
-            let workers = user_db(state, user, false, |connection| {
-                registered_workers(connection)
-            })
-            .await
-            .map_err(|error| (thread.clone(), Box::new(error)))?;
-            (None, !workers.is_empty())
-        };
+        let workers = user_db(state, user, false, |connection| {
+            registered_workers(connection)
+        })
+        .await
+        .map_err(|error| (thread.clone(), Box::new(error)))?;
+        let has_workers = !workers.is_empty();
         let response = match responses_request_with_options(
             state,
             user,
@@ -5744,7 +5510,6 @@ async fn request_agent(
             true,
             true,
             None,
-            prefix,
             Some(cancellation.clone()),
         )
         .await
@@ -5777,10 +5542,6 @@ async fn request_agent(
             }
             Ok(response) => response,
         };
-        if thread.purpose == "reports" {
-            proactive_compactions = 0;
-            checkpoint_retries = 0;
-        }
         let ResponsesResult {
             value: response,
             output_items,
@@ -5949,11 +5710,6 @@ async fn compact_thread_context(
             "checkpoint source records do not reach its context tail",
         ));
     }
-    let prefix = if thread.purpose == "reports" {
-        Some(reports::prefix(state, user, source_record_idx).await?)
-    } else {
-        None
-    };
     let summary = compact_protocol_context(
         state,
         user,
@@ -5966,7 +5722,6 @@ async fn compact_thread_context(
         &context.protocol_items,
         &context.record_metadata,
         cancellation.clone(),
-        prefix,
     )
     .await?;
     if *cancellation.borrow() {
@@ -6065,7 +5820,6 @@ async fn compact_protocol_context(
     items: &[Value],
     metadata: &[ProtocolRecordMetadata],
     cancellation: watch::Receiver<bool>,
-    request_prefix: Option<Value>,
 ) -> Result<String, ApiError> {
     if items.is_empty() || items.len() != metadata.len() {
         return Err(ApiError::conflict(
@@ -6088,7 +5842,6 @@ async fn compact_protocol_context(
             model,
             compaction_input(prefix.as_ref(), raw_items, raw_metadata),
             Some(cancellation.clone()),
-            request_prefix.clone(),
         )
         .await
         {
@@ -6108,7 +5861,6 @@ async fn compact_protocol_context(
                         &raw_items[0],
                         &raw_metadata[0],
                         cancellation.clone(),
-                        request_prefix.clone(),
                     )
                     .await;
                 }
@@ -6130,7 +5882,6 @@ async fn compact_protocol_context(
                             &raw_metadata[..left_len],
                         ),
                         Some(cancellation.clone()),
-                        request_prefix.clone(),
                     )
                     .await
                     {
@@ -6157,7 +5908,6 @@ async fn compact_protocol_context(
                                 &raw_items[0],
                                 &raw_metadata[0],
                                 cancellation.clone(),
-                                request_prefix.clone(),
                             )
                             .await?;
                             prefix = Some(compacted_checkpoint_item(&summary));
@@ -6187,7 +5937,6 @@ async fn summarize_context_once(
     model: &str,
     items: Vec<Value>,
     cancellation: Option<watch::Receiver<bool>>,
-    prefix: Option<Value>,
 ) -> Result<String, ApiError> {
     let response = responses_request_with_options(
         state,
@@ -6206,7 +5955,6 @@ async fn summarize_context_once(
         false,
         false,
         Some(CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS),
-        prefix,
         cancellation,
     )
     .await?;
@@ -6322,7 +6070,6 @@ async fn compact_oversized_record(
     item: &Value,
     metadata: &ProtocolRecordMetadata,
     cancellation: watch::Receiver<bool>,
-    request_prefix: Option<Value>,
 ) -> Result<String, ApiError> {
     let encoded = serde_json::to_string(item).map_err(ApiError::internal)?;
     let digest = format!("{:x}", Sha256::digest(encoded.as_bytes()));
@@ -6373,7 +6120,6 @@ async fn compact_oversized_record(
                 model,
                 compaction_input(fragment_prefix.as_ref(), raw_fragments, raw_metadata),
                 Some(cancellation.clone()),
-                request_prefix.clone(),
             )
             .await
             {
@@ -6408,7 +6154,6 @@ async fn compact_oversized_record(
                         &raw_metadata[..left_len],
                     ),
                     Some(cancellation.clone()),
-                    request_prefix.clone(),
                 )
                 .await
                 {
@@ -6439,7 +6184,6 @@ async fn compact_oversized_record(
 
 #[derive(Clone)]
 struct AuditSpec {
-    report_thread: bool,
     user: User,
     input_record_id: Option<i64>,
     thread_id: String,
@@ -6488,7 +6232,6 @@ async fn responses_request(
         false,
         max_output_tokens,
         None,
-        None,
     )
     .await
 }
@@ -6511,28 +6254,9 @@ async fn responses_request_with_options(
     web_search: bool,
     image_generation: bool,
     max_output_tokens: Option<usize>,
-    prefix: Option<Value>,
     cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<ResponsesResult, ApiError> {
-    let id = thread_id.to_owned();
-    let reporting = user_db(state, user, false, move |c| {
-        Ok(load_thread(c, &id)?.purpose == "reports")
-    })
-    .await?;
-    if reporting && let Some(input) = input_record_id {
-        let config = (request_kind == "inference")
-            .then(|| reports::agent_config(model, upstream, reasoning_effort, service_tier_fast));
-        user_db(state, user, false, move |c| {
-            reports::check_budget(c, input)?;
-            if let Some(config) = config {
-                reports::validate_config(c, input, &config)?;
-            }
-            Ok(())
-        })
-        .await?;
-    }
     let audit = AuditSpec {
-        report_thread: reporting,
         user: user.clone(),
         input_record_id,
         thread_id: thread_id.to_owned(),
@@ -6555,20 +6279,9 @@ async fn responses_request_with_options(
         web_search,
         image_generation,
         max_output_tokens,
-        prefix,
         Some((audit, cancellation)),
     );
-    if reporting {
-        tokio::time::timeout(Duration::from_secs(180), request)
-            .await
-            .unwrap_or_else(|_| {
-                Err(ApiError::unavailable(
-                    "report model call exceeded 180 seconds; continue manually",
-                ))
-            })
-    } else {
-        request.await
-    }
+    request.await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6585,10 +6298,9 @@ async fn send_responses_request(
     web_search: bool,
     image_generation: bool,
     max_output_tokens: Option<usize>,
-    prefix: Option<Value>,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
 ) -> Result<ResponsesResult, ApiError> {
-    let mut payload = responses_payload_with_prefix(
+    let payload = responses_payload_with_options(
         model,
         reasoning_effort,
         service_tier_fast,
@@ -6598,23 +6310,7 @@ async fn send_responses_request(
         web_search,
         image_generation,
         max_output_tokens,
-        prefix,
     );
-    if let Some((spec, _)) = &audit
-        && spec.report_thread
-    {
-        payload["max_output_tokens"] = json!(max_output_tokens.unwrap_or(16384).min(16384));
-        if spec.request_kind == "inference" {
-            payload["tools"] = TOOL_CATALOG["cybion"].clone();
-            payload["tool_choice"] = json!("auto");
-        } else {
-            payload
-                .as_object_mut()
-                .expect("Responses payload")
-                .remove("tools");
-            payload["tool_choice"] = json!("none");
-        }
-    }
     let mut request = state
         .client
         .post(format!(
@@ -7170,7 +6866,7 @@ fn responses_payload(
     include_tools: bool,
     max_output_tokens: Option<usize>,
 ) -> Value {
-    responses_payload_with_prefix(
+    responses_payload_with_options(
         model,
         None,
         false,
@@ -7180,12 +6876,11 @@ fn responses_payload(
         false,
         false,
         max_output_tokens,
-        None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn responses_payload_with_prefix(
+fn responses_payload_with_options(
     model: &str,
     reasoning_effort: Option<&str>,
     service_tier_fast: bool,
@@ -7195,16 +6890,7 @@ fn responses_payload_with_prefix(
     web_search: bool,
     image_generation: bool,
     max_output_tokens: Option<usize>,
-    prefix: Option<Value>,
 ) -> Value {
-    let input = match (prefix, input) {
-        (Some(prefix), Value::Array(mut items)) => {
-            items.insert(0, prefix);
-            Value::Array(items)
-        }
-        (Some(prefix), input) => Value::Array(vec![prefix, input]),
-        (None, input) => input,
-    };
     let mut payload = json!({"model":model,"input":input,"store":false,"stream":true});
     if let Some(reasoning_effort) = reasoning_effort {
         // Codex requests summaries explicitly so the summary event stream is
@@ -7448,9 +7134,6 @@ async fn start_response_tool(
     input_id: i64,
     item: &ResponseItem,
 ) -> Result<Option<PendingToolCall>, ApiError> {
-    if thread.purpose == "reports" {
-        return reports::answer_tool(state, user, thread, input_id, item).await;
-    }
     if let ResponseItem::ToolSearchCall(call) = item
         && call.execution == "client"
         && let Some(call_id) = &call.call_id
@@ -8692,7 +8375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insights_include_daily_active_thread_rollups_and_reports() {
+    async fn insights_include_daily_active_thread_rollups() {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "daily-activity-user").unwrap();
         let first = create_test_thread(&state, &user).await;
@@ -8700,7 +8383,7 @@ mod tests {
         let first_id = first.id.clone();
         let second_id = second.id.clone();
         let base = 1_700_000_000_i64;
-        let (activity, recent_activity, report) = user_db(&state, &user, false, move |connection| {
+        let (activity, recent_activity) = user_db(&state, &user, false, move |connection| {
             let first_input = persist_history_record(
                 connection,
                 HistoryRecordInsert {
@@ -8749,8 +8432,7 @@ mod tests {
             )?;
             let activity = load_insight_activity(connection, None, base + 3 * 86_400)?;
             let recent_activity = load_insight_activity(connection, Some(base + 50), base + 3 * 86_400)?;
-            let report = load_daily_report(connection, utc_date(base)?)?;
-            Ok((activity, recent_activity, report))
+            Ok((activity, recent_activity))
         })
         .await
         .unwrap();
@@ -8815,20 +8497,6 @@ mod tests {
             ),
             (1, 2, 1)
         );
-        assert_eq!(report.date, first_date);
-        assert_eq!(
-            (
-                report.active_thread_count,
-                report.activity_records,
-                report.input_records
-            ),
-            (1, 2, 1)
-        );
-        assert_eq!(report.requests, 1);
-        assert_eq!(report.total_tokens, 15);
-        assert_eq!(report.threads.len(), 1);
-        assert_eq!(report.threads[0].summary.as_deref(), Some("first prompt"));
-        assert_eq!(report.threads[0].request_count, 1);
     }
 
     #[test]
@@ -10147,7 +9815,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["worker-a", "worker-b", "worker-c", "worker-d", "worker-z"]
         );
-        let before = responses_payload_with_prefix(
+        let before = responses_payload_with_options(
             "test-model",
             None,
             false,
@@ -10156,7 +9824,6 @@ mod tests {
             true,
             true,
             true,
-            None,
             None,
         );
         assert_eq!(before["tools"].as_array().unwrap().len(), 8);
@@ -10164,7 +9831,7 @@ mod tests {
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
         let workers = registered_workers(&connection).unwrap();
-        let after = responses_payload_with_prefix(
+        let after = responses_payload_with_options(
             "test-model",
             None,
             false,
@@ -10173,7 +9840,6 @@ mod tests {
             true,
             true,
             true,
-            None,
             None,
         );
         assert_eq!(
@@ -10790,7 +10456,6 @@ mod tests {
             true,
             None,
             None,
-            None,
         )
         .await
         .unwrap();
@@ -10921,7 +10586,6 @@ mod tests {
                         false,
                         false,
                         false,
-                        None,
                         None,
                         None,
                     )

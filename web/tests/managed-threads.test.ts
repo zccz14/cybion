@@ -80,12 +80,10 @@ test("the tools page renders the shared tool catalog", () => {
   const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
   assert.match(source, /import toolCatalog from "\.\.\/\.\.\/tools\.json"/)
   assert.match(source, /toolCatalog\.context\.map/)
-  assert.match(source, /toolCatalog\.cybion\.map/)
   assert.match(source, /toolCatalog\.worker\.map/)
   assert.match(source, /Object\.keys\(toolCatalog\.native\)/)
   const names = [
     ...catalog.context.map((tool: { name: string }) => tool.name),
-    ...catalog.cybion.map((tool: { name: string }) => tool.name),
     ...catalog.worker.map((tool: { name: string }) => tool.name),
     ...Object.keys(catalog.native),
   ]
