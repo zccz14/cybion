@@ -273,7 +273,8 @@ type InsightActiveDay = {
 }
 type Insights = {
   range: "24h" | "7d" | "30d" | "all"
-  generated_at: number
+  generated_at: number | null
+  backfilling: boolean
   activity: { timezone: string; days: InsightActiveDay[] }
   tokens: {
     completed_requests: number
@@ -287,9 +288,8 @@ type Insights = {
   requests: { total: number; completed: number; in_flight: number; failed: number; cancelled: number }
   by_model: InsightModel[]
   worker: { calls: number; read_bytes: number; write_bytes: number; duration_seconds: number; average_duration_seconds: number | null; by_worker: InsightWorkerItem[] }
-  attribution: { runs: number; running_seconds: number; inference_seconds: number; worker_seconds: number; overhead_seconds: number }
-  history: { total_records: number; payload_bytes: number; checkpoint_count: number; latest_record_at: number | null; kinds: { key: string; count: number }[] }
-  dimensions: { thread_ids: string[]; models: string[]; request_kinds: string[] }
+  history: { total_records: number; payload_bytes: number; checkpoint_count: number; latest_record_at: number | null }
+  dimensions: { models: string[]; request_kinds: string[] }
 }
 type Upstream = {
   id: string
@@ -509,7 +509,8 @@ const copy = {
     statsRequestKind: "Request type",
     statsAllRequestKinds: "All request types",
     statsClearFilters: "Clear filters",
-    statsGenerated: "Aggregated {time}",
+    statsGenerated: "Snapshot {time}",
+    statsBackfilling: "Snapshots are still backfilling history; older days fill in as the patrol proceeds.",
     statsTokenUsage: "Token usage",
     statsCompletedRequests: "Completed requests",
     statsInputTokens: "Input tokens",
@@ -533,20 +534,13 @@ const copy = {
     statsNoWorkers: "No Worker calls in this range.",
     statsTotalDuration: "Total duration",
     statsAverageDuration: "Avg duration",
-    statsTimeAttribution: "Time attribution",
-    statsTimeAttributionDescription: "Thread running time divided between inference, Worker calls, and Cybion overhead. A run starts at its input record and ends when it settles; runs that started inside the selected time range are counted.",
-    statsThreadRunning: "Thread running",
-    statsInferenceTime: "Inference",
-    statsWorkerTime: "Worker calls",
-    statsOverheadTime: "Cybion overhead",
-    statsRunsCounted: "{count} runs counted",
     statsHistory: "Protocol history",
     statsHistoryRecords: "Records",
     statsPayloadBytes: "Payload bytes",
     statsCheckpoints: "Checkpoints",
     statsLatestRecord: "Latest record",
     statsDailyActivity: "Daily active Threads",
-    statsDailyActivityDescription: "A Thread is active when it has at least one non-checkpoint protocol record. Calendar days use UTC, including the full first calendar day. Model and request filters do not apply.",
+    statsDailyActivityDescription: "A Thread is active when it has at least one non-checkpoint protocol record. Calendar days use UTC over the closed hours inside the selected range; model and request filters do not apply.",
     statsActiveThreads: "Active Threads",
     statsActivityRecords: "Activity records",
     statsInputs: "Inputs",
@@ -844,7 +838,8 @@ const copy = {
     statsRequestKind: "请求类型",
     statsAllRequestKinds: "全部请求类型",
     statsClearFilters: "清除筛选",
-    statsGenerated: "聚合时间 {time}",
+    statsGenerated: "快照时间 {time}",
+    statsBackfilling: "快照仍在回填历史，较早的数据会随巡检逐步补全。",
     statsTokenUsage: "Token 用量",
     statsCompletedRequests: "已完成请求",
     statsInputTokens: "输入 Token",
@@ -868,20 +863,13 @@ const copy = {
     statsNoWorkers: "当前范围没有 Worker 调用。",
     statsTotalDuration: "总耗时",
     statsAverageDuration: "平均耗时",
-    statsTimeAttribution: "耗时归因",
-    statsTimeAttributionDescription: "Thread 运行耗时在推理、Worker 调用与 Cybion 开销之间的拆分。只统计在所选时间范围内开始的运行；一次运行从收到输入开始，到产生最后一条已结束记录为止。",
-    statsThreadRunning: "Thread 运行",
-    statsInferenceTime: "推理",
-    statsWorkerTime: "Worker 调用",
-    statsOverheadTime: "Cybion 开销",
-    statsRunsCounted: "已统计 {count} 次运行",
     statsHistory: "协议历史",
     statsHistoryRecords: "记录数",
     statsPayloadBytes: "负载字节",
     statsCheckpoints: "检查点",
     statsLatestRecord: "最近记录",
     statsDailyActivity: "每日活跃 Thread",
-    statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，包含范围首日的完整数据；不受模型和请求类型筛选影响。",
+    statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，只计入所选范围内已封口的小时；不受模型和请求类型筛选影响。",
     statsActiveThreads: "活跃 Thread",
     statsActivityRecords: "活动记录",
     statsInputs: "输入",
@@ -2234,9 +2222,6 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
   if (query.error) return <Page title={t("usageStats")} description={t("usageStatsDescription")}><RequestError error={query.error} onRetry={() => void query.refetch()} /></Page>
   if (!query.data) return <Page title={t("usageStats")} description={t("usageStatsDescription")}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t("usageStats")}</CardContent></Card></Page>
   const data = query.data
-  const share = (value: number) => data.attribution.running_seconds > 0
-    ? rate(value / data.attribution.running_seconds * 100)
-    : "—"
   const tokenMetrics = [
     [t("statsCompletedRequests"), number(data.tokens.completed_requests)],
     [t("statsInputTokens"), number(data.tokens.input_tokens)],
@@ -2271,7 +2256,10 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
         <Button type="button" variant="outline" size="sm" onClick={clear}><RefreshCwIcon data-icon="inline-start" />{t("statsClearFilters")}</Button>
       </CardContent>
     </Card>
-    <p className="text-xs text-muted-foreground">{t("statsGenerated").replace("{time}", formattedTime(language, data.generated_at))}</p>
+    <div className="flex flex-col gap-1">
+      <p className="text-xs text-muted-foreground">{t("statsGenerated").replace("{time}", formattedTime(language, data.generated_at))}</p>
+      {data.backfilling && <p className="text-xs text-muted-foreground">{t("statsBackfilling")}</p>}
+    </div>
     <DailyActivityCard
       days={data.activity.days}
       timezone={data.activity.timezone}
@@ -2280,18 +2268,6 @@ function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
       <CardHeader><CardTitle>{t("statsTokenUsage")}</CardTitle><CardDescription>{t("statsByModel")}</CardDescription></CardHeader>
       <CardContent>
         <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">{tokenMetrics.map(([label, value]) => <div key={String(label)}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{value}</dd></div>)}</dl>
-      </CardContent>
-    </Card>
-    <Card>
-      <CardHeader><CardTitle>{t("statsTimeAttribution")}</CardTitle><CardDescription>{t("statsTimeAttributionDescription")}</CardDescription></CardHeader>
-      <CardContent>
-        <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div><dt className="text-xs text-muted-foreground">{t("statsThreadRunning")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.running_seconds)}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">{t("statsInferenceTime")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.inference_seconds)}</dd><p className="mt-1 text-xs text-muted-foreground">{share(data.attribution.inference_seconds)}</p></div>
-          <div><dt className="text-xs text-muted-foreground">{t("statsWorkerTime")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.worker_seconds)}</dd><p className="mt-1 text-xs text-muted-foreground">{share(data.attribution.worker_seconds)}</p></div>
-          <div><dt className="text-xs text-muted-foreground">{t("statsOverheadTime")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.attribution.overhead_seconds)}</dd><p className="mt-1 text-xs text-muted-foreground">{share(data.attribution.overhead_seconds)}</p></div>
-        </dl>
-        <p className="mt-4 text-xs text-muted-foreground">{t("statsRunsCounted").replace("{count}", number(data.attribution.runs))}</p>
       </CardContent>
     </Card>
     <Card>

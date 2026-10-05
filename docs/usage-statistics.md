@@ -18,9 +18,9 @@ The data flows through these layers inside each user database:
    Their write semantics are unchanged.
 2. **hour buckets** — `stats_hour_audit`, `stats_hour_worker`,
    `stats_hour_history`: cells aggregated per UTC hour and dimension.
-   An hour closes only after it has ended and a safety window passed, and only
-   terminal rows fold into it. A row that is not settled yet is remembered in
-   `stats_pending` and folded into its own hour once it settles. A late
+   An hour closes only after it has ended and a safety window passed. A row
+   that is not settled yet is also remembered in `stats_pending`, and its hour
+   is recomputed once it settles. A late
    mutation to an already-folded row (for example a Worker result that arrives
    after its call folded) enqueues that hour in `stats_dirty_hour`, and the
    patrol recomputes the hour.
@@ -28,7 +28,7 @@ The data flows through these layers inside each user database:
    all-time range stays O(1); deleting a Thread queues its folded hours for
    recomputation, so the following patrol passes remove its contribution from
    cells, totals and day shards. `stats_hour_day` stores day activity as
-   per-Thread hour shards (record counts, inputs, requests, Tokens), so a
+   per-Thread hour shards (record counts, inputs, requests, tokens), so a
    recomputed hour corrects its day exactly; the day view feeds the activity
    calendar.
 4. **snapshot views** — `stats_view_totals`, `stats_view_model`,
@@ -38,8 +38,11 @@ The data flows through these layers inside each user database:
    dimension cells, not by the size of history.**
 
 Freshness is deliberately traded for cost. A read returns the last refreshed
-snapshot; the view states the snapshot time, and the page displays it. There
-is no read-triggered computation and reads never wait for the patrol.
+snapshot; the view states the snapshot time, and the page displays it. Until a
+database has built its first snapshot the page notes that it is still being
+prepared, and while backfill is incomplete it notes that history is still
+filling in. There is no read-triggered computation and reads never wait for
+the patrol.
 
 ## The patrol
 
@@ -79,15 +82,18 @@ backfill; its hours close as time passes.
 | Section | Answers | Snapshot source |
 | --- | --- | --- |
 | Token usage, By model | How much usage did model requests consume? | `stats_view_model` (range × model × reasoning effort × request kind, with status counts) |
-| Request outcomes | What happened to requests? | `stats_view_totals` |
+| Request outcomes | What happened to requests? | `stats_view_model` cells summed over the range |
 | Worker calls | How long did Worker calls take, and how much did they transfer? | `stats_view_worker` (range × worker, durations, read/write bytes) |
 | Protocol history | How much history is stored? | `stats_view_totals` (records, payload bytes, checkpoints, latest record) |
 | Daily activity | Which Threads were active? | `stats_view_day` for the range's UTC days |
 
-Model and request-kind filters narrow the model and Worker sections. A Worker
-call is attributed to the audit that dispatched it — the earliest audit on its
-`(thread_id, input_record_id)` — so a filtered read counts each call once and
-no fingerprinting heuristic is involved.
+Model and request-kind filters narrow the token and request summaries, the
+By-model rows, and the Worker section. A Worker call is attributed to the
+audit that dispatched it — the earliest audit on its `(thread_id,
+input_record_id)` — so a filtered read counts each call once and no
+fingerprinting heuristic is involved. Executions dispatched by other accounts
+through worker sharing stay unattributed and appear only in unfiltered Worker
+numbers.
 
 ## Durations
 
@@ -106,8 +112,9 @@ The activity calendar is a UTC calendar over the selected range, built from
 at least one `history_records` row for the Thread whose `kind` is not
 `checkpoint`. Checkpoint-only maintenance does not make a Thread active. The
 heatmap reports the distinct active Thread count for each day and keeps empty
-days in the calendar so gaps remain visible. The calendar counts all purposes.
-Model and request-kind filters do not change it.
+days in the calendar so gaps remain visible; the days at the window edge are
+partial, because only hours inside the closed range count. The calendar counts
+every Thread. Model and request-kind filters do not change it.
 
 ## Removed in this rebuild
 

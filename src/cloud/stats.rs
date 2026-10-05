@@ -6,9 +6,10 @@
 //! See `docs/usage-statistics.md` for the full architecture.
 
 use super::*;
+use chrono::{TimeZone, Utc};
 use futures_util::StreamExt;
 use rusqlite::OptionalExtension;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -46,7 +47,6 @@ fn hour_start(timestamp: i64) -> i64 {
     timestamp - timestamp.rem_euclid(HOUR)
 }
 
-#[allow(dead_code)]
 fn day_start(timestamp: i64) -> i64 {
     timestamp - timestamp.rem_euclid(86_400)
 }
@@ -55,7 +55,6 @@ fn latest_closable_hour(now_ts: i64) -> i64 {
     hour_start(now_ts - SAFETY_SECONDS - HOUR)
 }
 
-#[allow(dead_code)]
 fn utc_date_string(day: i64) -> Result<String, ApiError> {
     Utc.timestamp_opt(day, 0)
         .single()
@@ -261,18 +260,21 @@ fn fold_hour_workers(connection: &Connection, hour: i64, end: i64) -> Result<(),
     let mut statement = connection.prepare(
         "SELECT c.worker_id,
                 COALESCE((SELECT a.model FROM reasoning_audits a
-                          WHERE a.thread_id=c.thread_id AND a.input_record_id=c.input_record_id
+                          WHERE c.caller_user_id IS NULL
+                            AND a.thread_id=c.thread_id AND a.input_record_id=c.input_record_id
                           ORDER BY a.id LIMIT 1),''),
                 COALESCE((SELECT a.request_kind FROM reasoning_audits a
-                          WHERE a.thread_id=c.thread_id AND a.input_record_id=c.input_record_id
+                          WHERE c.caller_user_id IS NULL
+                            AND a.thread_id=c.thread_id AND a.input_record_id=c.input_record_id
                           ORDER BY a.id LIMIT 1),''),
                 COUNT(*),
                 COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN c.completed_at - c.created_at ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN c.completed_at IS NOT NULL THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(length(CAST(c.arguments_json AS BLOB))),0),
                 COALESCE(SUM(length(CAST(COALESCE(c.result_json,'') AS BLOB))),0),
-                COALESCE(MAX(c.worker_label),'')
-         FROM worker_calls c WHERE c.created_at >= ?1 AND c.created_at < ?2
+                COALESCE(MAX(c.worker_label), MAX(w.label), '')
+         FROM worker_calls c LEFT JOIN workers w ON w.id=c.worker_id
+         WHERE c.created_at >= ?1 AND c.created_at < ?2
          GROUP BY c.worker_id, 2, 3",
     )?;
     let rows = statement.query_map(params![hour, end], |row| {
@@ -1097,7 +1099,9 @@ const MODEL_WINDOW_SQL: &str = "SELECT model,reasoning_effort,request_kind,
         COALESCE(SUM(CASE WHEN status='in_flight' THEN calls ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN status='failed' THEN calls ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN status='cancelled' THEN calls ELSE 0 END),0),
-        COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(cached_tokens),0),
+        COALESCE(SUM(CASE WHEN status='completed' THEN input_tokens ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN status='completed' THEN output_tokens ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN status='completed' THEN cached_tokens ELSE 0 END),0),
         COALESCE(SUM(duration_sum),0),COALESCE(SUM(timed_calls),0)
  FROM stats_total_audit
  GROUP BY model,reasoning_effort,request_kind
@@ -1109,7 +1113,9 @@ const MODEL_HOUR_SQL: &str = "SELECT model,reasoning_effort,request_kind,
         COALESCE(SUM(CASE WHEN status='in_flight' THEN calls ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN status='failed' THEN calls ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN status='cancelled' THEN calls ELSE 0 END),0),
-        COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(cached_tokens),0),
+        COALESCE(SUM(CASE WHEN status='completed' THEN input_tokens ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN status='completed' THEN output_tokens ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN status='completed' THEN cached_tokens ELSE 0 END),0),
         COALESCE(SUM(duration_sum),0),COALESCE(SUM(timed_calls),0)
  FROM stats_hour_audit WHERE hour>=?1 AND hour<=?2
  GROUP BY model,reasoning_effort,request_kind
@@ -1537,6 +1543,416 @@ async fn patrol_pass(
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot reads
+// ---------------------------------------------------------------------------
+
+/// Effort ordering used to rank By-model rows: `none`…`max`, then unset.
+fn effort_rank(effort: Option<&str>) -> i64 {
+    match effort {
+        Some("none") => 0,
+        Some("low") => 1,
+        Some("medium") => 2,
+        Some("high") => 3,
+        Some("xhigh") => 4,
+        Some("max") => 5,
+        _ => 6,
+    }
+}
+
+#[derive(Default)]
+struct InsightAgg {
+    calls: i64,
+    completed: i64,
+    in_flight: i64,
+    failed: i64,
+    cancelled: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_tokens: i64,
+    duration_sum: i64,
+    timed_calls: i64,
+}
+
+impl InsightAgg {
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        calls: i64,
+        completed: i64,
+        in_flight: i64,
+        failed: i64,
+        cancelled: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        cached_tokens: i64,
+        duration_sum: i64,
+        timed_calls: i64,
+    ) {
+        self.calls += calls;
+        self.completed += completed;
+        self.in_flight += in_flight;
+        self.failed += failed;
+        self.cancelled += cancelled;
+        self.input_tokens += input_tokens;
+        self.output_tokens += output_tokens;
+        self.cached_tokens += cached_tokens;
+        self.duration_sum += duration_sum;
+        self.timed_calls += timed_calls;
+    }
+}
+
+#[derive(Default)]
+struct WorkerInsightAgg {
+    label: String,
+    calls: i64,
+    duration_sum: i64,
+    timed_calls: i64,
+    read_bytes: i64,
+    write_bytes: i64,
+}
+
+/// Reads one range's materialized snapshot for `GET /api/insights`; it only
+/// touches `stats_view_*` rows, so its cost is bounded by the number of
+/// dimension cells, never by the size of history.
+///
+/// `model` and `request_kind` narrow the token and request summaries, the
+/// By-model rows and the Worker section. The activity calendar always covers
+/// the whole range, like the raw implementations it replaces.
+pub(super) fn load_insights(
+    connection: &Connection,
+    range: &str,
+    model: Option<String>,
+    request_kind: Option<String>,
+) -> Result<Insights, ApiError> {
+    let totals = connection
+        .query_row(
+            "SELECT generated_at,backfilling,history_records,history_payload_bytes,
+                    history_checkpoints,latest_record_at
+             FROM stats_view_totals WHERE range=?1",
+            [range],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (
+        generated_at,
+        backfilling,
+        history_records,
+        history_payload_bytes,
+        history_checkpoints,
+        latest_record_at,
+    ) = match totals {
+        Some((
+            generated_at,
+            backfilling,
+            history_records,
+            history_payload_bytes,
+            history_checkpoints,
+            latest_record_at,
+        )) => (
+            Some(generated_at),
+            backfilling != 0,
+            history_records,
+            history_payload_bytes,
+            history_checkpoints,
+            latest_record_at,
+        ),
+        None => (None, true, 0, 0, 0, None),
+    };
+
+    let mut model_sql = String::from(
+        "SELECT model,reasoning_effort,calls,completed,in_flight,failed,cancelled,
+                input_tokens,output_tokens,cached_tokens,duration_sum,timed_calls
+         FROM stats_view_model WHERE range=?",
+    );
+    let mut model_params = vec![rusqlite::types::Value::Text(range.to_owned())];
+    if let Some(model) = &model {
+        model_sql.push_str(" AND model=?");
+        model_params.push(rusqlite::types::Value::Text(model.clone()));
+    }
+    if let Some(kind) = &request_kind {
+        model_sql.push_str(" AND request_kind=?");
+        model_params.push(rusqlite::types::Value::Text(kind.clone()));
+    }
+    let mut totals_agg = InsightAgg::default();
+    let mut model_groups: BTreeMap<(String, String), InsightAgg> = BTreeMap::new();
+    {
+        let mut statement = connection.prepare(&model_sql)?;
+        let rows = statement.query_map(params_from_iter(model_params), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
+            ))
+        })?;
+        for row in rows {
+            let (
+                model,
+                effort,
+                calls,
+                completed,
+                in_flight,
+                failed,
+                cancelled,
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                duration_sum,
+                timed_calls,
+            ) = row?;
+            for agg in [
+                &mut totals_agg,
+                model_groups.entry((model, effort)).or_default(),
+            ] {
+                agg.add(
+                    calls,
+                    completed,
+                    in_flight,
+                    failed,
+                    cancelled,
+                    input_tokens,
+                    output_tokens,
+                    cached_tokens,
+                    duration_sum,
+                    timed_calls,
+                );
+            }
+        }
+    }
+    let mut by_model: Vec<InsightModel> = model_groups
+        .into_iter()
+        .map(|((model, effort), agg)| InsightModel {
+            model,
+            reasoning_effort: (!effort.is_empty()).then_some(effort),
+            calls: agg.calls,
+            completed: agg.completed,
+            in_flight: agg.in_flight,
+            failed: agg.failed,
+            cancelled: agg.cancelled,
+            input_tokens: agg.input_tokens,
+            output_tokens: agg.output_tokens,
+            total_tokens: agg.input_tokens.saturating_add(agg.output_tokens),
+            cached_tokens: agg.cached_tokens,
+            cache_hit_rate: (agg.input_tokens > 0)
+                .then(|| agg.cached_tokens as f64 / agg.input_tokens as f64 * 100.0),
+            input_output_ratio: (agg.output_tokens > 0)
+                .then(|| agg.input_tokens as f64 / agg.output_tokens as f64),
+            duration_seconds: agg.duration_sum,
+            average_duration_seconds: (agg.timed_calls > 0)
+                .then(|| agg.duration_sum as f64 / agg.timed_calls as f64),
+        })
+        .collect();
+    by_model.sort_by(|a, b| {
+        b.input_tokens
+            .saturating_add(b.output_tokens)
+            .cmp(&a.input_tokens.saturating_add(a.output_tokens))
+            .then_with(|| a.model.cmp(&b.model))
+            .then_with(|| {
+                effort_rank(a.reasoning_effort.as_deref())
+                    .cmp(&effort_rank(b.reasoning_effort.as_deref()))
+            })
+    });
+
+    let mut worker_sql = String::from(
+        "SELECT worker_id,label,calls,duration_sum,timed_calls,read_bytes,write_bytes
+         FROM stats_view_worker WHERE range=?",
+    );
+    let mut worker_params = vec![rusqlite::types::Value::Text(range.to_owned())];
+    if let Some(model) = &model {
+        worker_sql.push_str(" AND model=?");
+        worker_params.push(rusqlite::types::Value::Text(model.clone()));
+    }
+    if let Some(kind) = &request_kind {
+        worker_sql.push_str(" AND request_kind=?");
+        worker_params.push(rusqlite::types::Value::Text(kind.clone()));
+    }
+    let mut worker_totals = WorkerInsightAgg::default();
+    let mut worker_groups: BTreeMap<String, WorkerInsightAgg> = BTreeMap::new();
+    {
+        let mut statement = connection.prepare(&worker_sql)?;
+        let rows = statement.query_map(params_from_iter(worker_params), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        for row in rows {
+            let (worker_id, label, calls, duration_sum, timed_calls, read_bytes, write_bytes) =
+                row?;
+            worker_totals.calls += calls;
+            worker_totals.duration_sum += duration_sum;
+            worker_totals.timed_calls += timed_calls;
+            worker_totals.read_bytes += read_bytes;
+            worker_totals.write_bytes += write_bytes;
+            let agg = worker_groups.entry(worker_id).or_default();
+            agg.calls += calls;
+            agg.duration_sum += duration_sum;
+            agg.timed_calls += timed_calls;
+            agg.read_bytes += read_bytes;
+            agg.write_bytes += write_bytes;
+            if label > agg.label {
+                agg.label = label;
+            }
+        }
+    }
+    let mut by_worker: Vec<InsightWorkerItem> = worker_groups
+        .into_iter()
+        .map(|(worker_id, agg)| InsightWorkerItem {
+            worker_label: if agg.label.is_empty() {
+                worker_id.clone()
+            } else {
+                agg.label
+            },
+            worker_id,
+            calls: agg.calls,
+            read_bytes: agg.read_bytes,
+            write_bytes: agg.write_bytes,
+            duration_seconds: agg.duration_sum,
+            average_duration_seconds: (agg.timed_calls > 0)
+                .then(|| agg.duration_sum as f64 / agg.timed_calls as f64),
+        })
+        .collect();
+    by_worker.sort_by(|a, b| {
+        b.read_bytes
+            .saturating_add(b.write_bytes)
+            .cmp(&a.read_bytes.saturating_add(a.write_bytes))
+            .then_with(|| a.worker_id.cmp(&b.worker_id))
+    });
+
+    let models: Vec<String> = connection
+        .prepare("SELECT DISTINCT model FROM stats_view_model WHERE range=?1 ORDER BY model")?
+        .query_map([range], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let request_kinds: Vec<String> = connection
+        .prepare(
+            "SELECT DISTINCT request_kind FROM stats_view_model WHERE range=?1 ORDER BY request_kind",
+        )?
+        .query_map([range], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(Insights {
+        range: range.to_owned(),
+        generated_at,
+        backfilling,
+        tokens: InsightTokens {
+            completed_requests: totals_agg.completed,
+            input_tokens: totals_agg.input_tokens,
+            output_tokens: totals_agg.output_tokens,
+            total_tokens: totals_agg
+                .input_tokens
+                .saturating_add(totals_agg.output_tokens),
+            cached_tokens: totals_agg.cached_tokens,
+            cache_hit_rate: (totals_agg.input_tokens > 0)
+                .then(|| totals_agg.cached_tokens as f64 / totals_agg.input_tokens as f64 * 100.0),
+            input_output_ratio: (totals_agg.output_tokens > 0)
+                .then(|| totals_agg.input_tokens as f64 / totals_agg.output_tokens as f64),
+        },
+        requests: InsightRequests {
+            total: totals_agg.calls,
+            completed: totals_agg.completed,
+            in_flight: totals_agg.in_flight,
+            failed: totals_agg.failed,
+            cancelled: totals_agg.cancelled,
+        },
+        by_model,
+        worker: InsightWorker {
+            calls: worker_totals.calls,
+            read_bytes: worker_totals.read_bytes,
+            write_bytes: worker_totals.write_bytes,
+            duration_seconds: worker_totals.duration_sum,
+            average_duration_seconds: (worker_totals.timed_calls > 0)
+                .then(|| worker_totals.duration_sum as f64 / worker_totals.timed_calls as f64),
+            by_worker,
+        },
+        history: InsightHistory {
+            total_records: history_records,
+            payload_bytes: history_payload_bytes,
+            checkpoint_count: history_checkpoints,
+            latest_record_at,
+        },
+        dimensions: InsightDimensions {
+            models,
+            request_kinds,
+        },
+        activity: InsightActivity {
+            timezone: INSIGHT_TIMEZONE,
+            days: snapshot_activity_days(connection, range)?,
+        },
+    })
+}
+
+/// Rebuilds the UTC calendar for one range from the day cells, filling empty
+/// days between the first and last day the closed range covers.
+fn snapshot_activity_days(
+    connection: &Connection,
+    range: &str,
+) -> Result<Vec<InsightActiveDay>, ApiError> {
+    let Some((low, high)) = closed_range(connection)? else {
+        return Ok(Vec::new());
+    };
+    let (start, _) = range_window(low, high, range);
+    let first_day = day_start(start);
+    let last_day = day_start(high);
+    let mut by_day = HashMap::<i64, (i64, i64, i64, i64, i64)>::new();
+    let mut statement = connection.prepare(
+        "SELECT day,active_threads,records,inputs,requests,tokens
+         FROM stats_view_day WHERE range=?1 ORDER BY day",
+    )?;
+    let rows = statement.query_map([range], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (day, active_threads, records, inputs, requests, tokens) = row?;
+        by_day.insert(day, (active_threads, records, inputs, requests, tokens));
+    }
+    let mut days = Vec::new();
+    let mut cursor = first_day;
+    while cursor <= last_day {
+        let (active_threads, records, inputs, requests, tokens) =
+            by_day.remove(&cursor).unwrap_or((0, 0, 0, 0, 0));
+        days.push(InsightActiveDay {
+            date: utc_date_string(cursor)?,
+            active_threads,
+            activity_records: records,
+            input_records: inputs,
+            requests,
+            total_tokens: tokens,
+        });
+        cursor += 86_400;
+    }
+    Ok(days)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1881,5 +2297,266 @@ mod tests {
             )
             .unwrap();
         assert_eq!(shards, 0);
+    }
+
+    #[test]
+    fn snapshot_reads_serve_totals_models_workers_history_and_dimensions() {
+        let (_directory, mut connection) = open_db();
+        insert_thread(&connection, "t1");
+        let base = base_hour();
+        let h = base + HOUR;
+        insert_history(&connection, "t1", "input", h + 10);
+        insert_history(&connection, "t1", "response_output", h + 20);
+        insert_history(&connection, "t1", "checkpoint", h + 30);
+        connection
+            .execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens)
+                 VALUES(1,'t1','inference','m','high','completed',?1,?2,10,5,2)",
+                params![h + 40, h + 50],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens)
+                 VALUES(1,'t1','inference','m','high','failed',?1,?2,7,3,1)",
+                params![h + 60, h + 70],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO reasoning_audits(thread_id,request_kind,model,reasoning_effort,status,started_at)
+                 VALUES('t1','compaction','n','low','in_flight',?1)",
+                [h + 80],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO worker_calls(id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,completed_at,result_json)
+                 VALUES('c1','w1','t1',1,'bash','{}','completed',?1,?2,'done')",
+                params![h + 90, h + 120],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at) VALUES('w1','Laptop','hash',0,'online',0)",
+                [],
+            )
+            .unwrap();
+
+        let now = h + 3 * HOUR + 60;
+        let mut budget = MAX_FOLD_HOURS_PER_PASS;
+        advance_forward(&mut connection, now, &mut budget).unwrap();
+        advance_backfill(&mut connection, &mut budget).unwrap();
+        let mut last = [0i64; 4];
+        for _ in 0..3 {
+            refresh_views(
+                &mut connection,
+                now,
+                Some(now + INTEREST_TTL_SECONDS),
+                &mut last,
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_insights(&connection, "all", None, None).unwrap();
+        assert_eq!(snapshot.generated_at, Some(now));
+        assert!(!snapshot.backfilling);
+        assert_eq!(snapshot.requests.total, 3);
+        assert_eq!(
+            (snapshot.requests.completed, snapshot.requests.failed),
+            (1, 1)
+        );
+        assert_eq!(snapshot.requests.in_flight, 1);
+        assert_eq!(snapshot.tokens.completed_requests, 1);
+        assert_eq!(snapshot.tokens.input_tokens, 10);
+        assert_eq!(snapshot.tokens.output_tokens, 5);
+        assert_eq!(snapshot.tokens.cached_tokens, 2);
+        assert_eq!(snapshot.tokens.cache_hit_rate, Some(20.0));
+        assert_eq!(snapshot.tokens.input_output_ratio, Some(2.0));
+        assert_eq!(snapshot.by_model.len(), 2);
+        let grouped = snapshot
+            .by_model
+            .iter()
+            .find(|item| item.model == "m")
+            .unwrap();
+        assert_eq!(
+            (grouped.calls, grouped.completed, grouped.failed),
+            (2, 1, 1)
+        );
+        assert_eq!(grouped.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(grouped.duration_seconds, 20);
+        assert_eq!(grouped.average_duration_seconds, Some(10.0));
+        let pending = snapshot
+            .by_model
+            .iter()
+            .find(|item| item.model == "n")
+            .unwrap();
+        assert_eq!(pending.in_flight, 1);
+        assert_eq!(pending.duration_seconds, 0);
+        assert_eq!(pending.average_duration_seconds, None);
+        assert_eq!(snapshot.worker.calls, 1);
+        assert_eq!(snapshot.worker.duration_seconds, 30);
+        assert_eq!(snapshot.worker.average_duration_seconds, Some(30.0));
+        assert_eq!(snapshot.worker.read_bytes, 2);
+        assert_eq!(snapshot.worker.write_bytes, 4);
+        assert_eq!(snapshot.worker.by_worker.len(), 1);
+        assert_eq!(snapshot.worker.by_worker[0].worker_label, "Laptop");
+        assert_eq!(snapshot.worker.by_worker[0].duration_seconds, 30);
+        assert_eq!(snapshot.history.total_records, 3);
+        assert_eq!(snapshot.history.payload_bytes, 6);
+        assert_eq!(snapshot.history.checkpoint_count, 1);
+        assert_eq!(snapshot.history.latest_record_at, Some(h + 30));
+        assert_eq!(
+            snapshot.dimensions.models,
+            vec!["m".to_owned(), "n".to_owned()]
+        );
+        assert_eq!(
+            snapshot.dimensions.request_kinds,
+            vec!["compaction".to_owned(), "inference".to_owned()]
+        );
+        assert_eq!(snapshot.activity.days.len(), 1);
+        let day = &snapshot.activity.days[0];
+        assert_eq!(day.date, utc_date_string(day_start(h)).unwrap());
+        assert_eq!(
+            (day.active_threads, day.activity_records, day.input_records),
+            (1, 2, 1)
+        );
+        // Day cells keep accounting every status, like the raw day rollup did.
+        assert_eq!((day.requests, day.total_tokens), (3, 25));
+
+        // Filters narrow the summaries and tables, never the calendar.
+        let filtered = load_insights(
+            &connection,
+            "all",
+            Some("m".to_owned()),
+            Some("inference".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(filtered.by_model.len(), 1);
+        assert_eq!(filtered.by_model[0].model, "m");
+        assert_eq!(filtered.requests.total, 2);
+        assert_eq!(filtered.tokens.completed_requests, 1);
+        assert_eq!(filtered.worker.calls, 1);
+        assert_eq!(filtered.worker.duration_seconds, 30);
+        assert_eq!(filtered.dimensions.models.len(), 2);
+        assert_eq!(filtered.activity.days.len(), 1);
+    }
+
+    #[test]
+    fn worker_snapshot_counts_foreign_executions_without_attributing_them() {
+        let (_directory, mut connection) = open_db();
+        insert_thread(&connection, "t1");
+        let base = base_hour();
+        let h = base + HOUR;
+        connection
+            .execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,finished_at)
+                 VALUES(7,'t1','inference','owner-model','completed',?1,?2)",
+                params![h + 30, h + 40],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO worker_calls(id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,completed_at,result_json,caller_user_id)
+                 VALUES('own','w1','t1',7,'bash','{}','completed',?1,?2,'ok',NULL)",
+                params![h + 50, h + 52],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO worker_calls(id,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,completed_at,result_json,caller_user_id)
+                 VALUES('foreign','w1','t1',7,'bash','{}','completed',?1,?2,'ok','caller-b')",
+                params![h + 60, h + 160],
+            )
+            .unwrap();
+
+        let now = h + 3 * HOUR + 60;
+        let mut budget = MAX_FOLD_HOURS_PER_PASS;
+        advance_forward(&mut connection, now, &mut budget).unwrap();
+        advance_backfill(&mut connection, &mut budget).unwrap();
+        let mut last = [0i64; 4];
+        for _ in 0..3 {
+            refresh_views(&mut connection, now, None, &mut last).unwrap();
+        }
+
+        // Foreign executions count as Worker work, but only own calls carry a
+        // dispatch model and request kind.
+        let all = load_insights(&connection, "all", None, None).unwrap();
+        assert_eq!(all.worker.calls, 2);
+        assert_eq!(all.worker.duration_seconds, 102);
+        assert_eq!(all.worker.by_worker[0].calls, 2);
+        let model =
+            load_insights(&connection, "all", Some("owner-model".to_owned()), None).unwrap();
+        assert_eq!(model.worker.calls, 1);
+        assert_eq!(model.worker.duration_seconds, 2);
+        let kind = load_insights(&connection, "all", None, Some("inference".to_owned())).unwrap();
+        assert_eq!(kind.worker.calls, 1);
+        assert_eq!(kind.worker.duration_seconds, 2);
+    }
+
+    #[test]
+    fn activity_calendar_fills_empty_days_within_the_closed_range() {
+        let (_directory, mut connection) = open_db();
+        insert_thread(&connection, "t1");
+        let base = base_hour();
+        let day1 = base + HOUR;
+        let day3 = base + 86_400 + 12 * HOUR;
+        insert_history(&connection, "t1", "input", day1 + 10);
+        insert_audit(
+            &connection,
+            "t1",
+            "completed",
+            day1 + 20,
+            Some(day1 + 30),
+            Some(1),
+            Some(1),
+        );
+        insert_history(&connection, "t1", "input", day3 + 10);
+
+        let now = day3 + 3 * HOUR + 60;
+        let mut budget = MAX_FOLD_HOURS_PER_PASS;
+        advance_forward(&mut connection, now, &mut budget).unwrap();
+        advance_backfill(&mut connection, &mut budget).unwrap();
+        let mut last = [0i64; 4];
+        for _ in 0..3 {
+            refresh_views(&mut connection, now, None, &mut last).unwrap();
+        }
+
+        let all = load_insights(&connection, "all", None, None).unwrap();
+        assert_eq!(all.activity.days.len(), 3);
+        assert_eq!(
+            all.activity.days[0].date,
+            utc_date_string(day_start(day1)).unwrap()
+        );
+        assert_eq!(all.activity.days[0].active_threads, 1);
+        assert_eq!(all.activity.days[1].active_threads, 0);
+        assert_eq!(all.activity.days[1].requests, 0);
+        assert_eq!(all.activity.days[2].active_threads, 1);
+
+        let recent = load_insights(&connection, "24h", None, None).unwrap();
+        assert_eq!(recent.activity.days.len(), 2);
+        assert_eq!(
+            recent.activity.days[0].date,
+            utc_date_string(day_start(day3 - 23 * HOUR)).unwrap()
+        );
+        assert_eq!(recent.activity.days[0].active_threads, 0);
+        assert_eq!(recent.activity.days[1].active_threads, 1);
+    }
+
+    #[test]
+    fn snapshot_reads_are_empty_and_backfilling_when_nothing_is_folded() {
+        let (_directory, connection) = open_db();
+        let snapshot = load_insights(&connection, "24h", None, None).unwrap();
+        assert_eq!(snapshot.generated_at, None);
+        assert!(snapshot.backfilling);
+        assert_eq!(snapshot.requests.total, 0);
+        assert_eq!(snapshot.tokens.total_tokens, 0);
+        assert_eq!(snapshot.tokens.cache_hit_rate, None);
+        assert!(snapshot.by_model.is_empty());
+        assert_eq!(snapshot.worker.calls, 0);
+        assert!(snapshot.worker.by_worker.is_empty());
+        assert_eq!(snapshot.history.total_records, 0);
+        assert!(snapshot.dimensions.models.is_empty());
+        assert!(snapshot.activity.days.is_empty());
     }
 }
