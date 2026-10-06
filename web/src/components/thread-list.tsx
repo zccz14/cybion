@@ -16,6 +16,7 @@ export type ThreadListItem = {
   id: string
   title: string
   display_status: ThreadDisplayStatus
+  updated_at: number
   usage: ThreadUsage
 }
 

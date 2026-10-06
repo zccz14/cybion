@@ -20,6 +20,7 @@ import "../src/styles.css"
 import "linkit-react-components/styles.css"
 
 const statuses: ThreadDisplayStatus[] = ["running", "completed", "failed", "stopped", "ready", "compacting"]
+const updated_at = Math.floor(Date.now() / 1000) - 90
 const markdown = "### 黑灰主题\n\n正文、**强调**、[链接](#details)和 `inline code` 保持清晰。\n\n> 引用使用中性的文字与边框。\n\n- 更新主题色\n- 保留状态语义\n\n```sh\nprintf 'Cybion\\n'\n```\n\n| 状态 | 含义 |\n| --- | --- |\n| 已完成 | 最近一次执行已结束 |"
 function ThemeFixture() {
   const [dark, setDark] = useState(true)
@@ -37,7 +38,7 @@ function ThemeFixture() {
       </header>
       <main className="flex min-w-0 flex-1 flex-col lg:flex-row">
         <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-r lg:border-b-0" data-testid="thread-sidebar">
-          <nav className="flex flex-col gap-1" aria-label="Threads">{statuses.map((status) => <ThreadLink key={status} thread={{ id: status, title: `Thread · ${status}`, display_status: status, usage: emptyThreadUsage }} language="zh" />)}</nav>
+          <nav className="flex flex-col gap-1" aria-label="Threads">{statuses.map((status) => <ThreadLink key={status} thread={{ id: status, title: `Thread · ${status}`, display_status: status, updated_at, usage: emptyThreadUsage }} language="zh" />)}</nav>
         </aside>
         <section className="flex min-w-0 flex-1 flex-col gap-5 p-4 sm:p-6">
           <div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto font-semibold">重新设计暗黑模式配色</h2><ThreadStatusBadge status="running" language="zh" /></div>

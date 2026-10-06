@@ -8,19 +8,23 @@ import { CybionMark } from "../src/components/cybion-mark"
 import { emptyThreadUsage } from "../src/lib/thread-usage"
 import "../src/styles.css"
 
+// Ages are relative to page-load time so specs can assert exact labels
+// under a fixed Playwright clock.
+const now = Math.floor(Date.now() / 1000)
+
 const threads: ThreadListItem[] = [
-  { id: "worker", title: "修复 Worker 配对与导航", created_by: "api", external_ref: "bridge/task-7", display_status: "running", usage: emptyThreadUsage },
-  { id: "search", title: "Mobile thread list search", created_by: "web", external_ref: null, display_status: "completed", usage: emptyThreadUsage },
-  { id: "remote", title: "检查远程服务器连接", created_by: "web", external_ref: null, display_status: "failed", usage: emptyThreadUsage },
+  { id: "worker", title: "修复 Worker 配对与导航", created_by: "api", external_ref: "bridge/task-7", display_status: "running", updated_at: now - 30, usage: emptyThreadUsage },
+  { id: "search", title: "Mobile thread list search", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 5 * 60, usage: emptyThreadUsage },
+  { id: "remote", title: "检查远程服务器连接", created_by: "web", external_ref: null, display_status: "failed", updated_at: now - 3 * 3600, usage: emptyThreadUsage },
 ]
 
 const olderSeed: ThreadListItem[] = [
-  { id: "older-a", title: "Older thread A", created_by: "web", external_ref: null, display_status: "completed", usage: emptyThreadUsage },
-  { id: "older-b", title: "Older thread B", created_by: "web", external_ref: null, display_status: "completed", usage: emptyThreadUsage },
+  { id: "older-a", title: "Older thread A", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 2 * 86400, usage: emptyThreadUsage },
+  { id: "older-b", title: "Older thread B", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 2 * 86400, usage: emptyThreadUsage },
 ]
 
 const archivedSeed: ThreadListItem[] = [
-  { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", usage: emptyThreadUsage },
+  { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", updated_at: now - 40 * 86400, usage: emptyThreadUsage },
 ]
 
 // The fixture mirrors the server-side filter and cursor paging semantics plus

@@ -20,3 +20,19 @@ export function formatStatsDuration(seconds: number, language: "en" | "zh") {
   const value = safe < 10 ? Number(safe.toFixed(1)) : Math.round(safe)
   return zh ? `${value} 秒` : `${value}s`
 }
+
+export function formatRelativeTime(language: "en" | "zh", value: number, now: number) {
+  const zh = language === "zh"
+  const seconds = Math.max(0, now - value)
+  if (seconds < 60) return zh ? "刚刚" : "just now"
+  if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60)
+    return zh ? `${minutes} 分钟前` : `${minutes}m ago`
+  }
+  if (seconds < 86400) {
+    const hours = Math.floor(seconds / 3600)
+    return zh ? `${hours} 小时前` : `${hours}h ago`
+  }
+  const days = Math.floor(seconds / 86400)
+  return zh ? `${days} 天前` : `${days}d ago`
+}

@@ -134,3 +134,18 @@ test("filters live in the URL and survive reload, back, and forward", async ({ p
   await expect(page).toHaveURL(/q=search/)
   await expect(page.getByRole("link")).toHaveCount(1)
 })
+
+test("rows show how long ago each thread was last updated, and stay fresh while open", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-10-06T12:00:00Z") })
+  await page.goto("/e2e/thread-list.html")
+  const row = (name: RegExp) => page.getByRole("link", { name })
+  await expect(row(/Mobile thread list search/).getByText("5 分钟前", { exact: true })).toBeVisible()
+  await expect(row(/检查远程服务器连接/).getByText("3 小时前", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "全部" }).click()
+  await expect(row(/修复 Worker 配对与导航/).getByText("刚刚", { exact: true })).toBeVisible()
+  await page.clock.runFor("02:00")
+  await expect(row(/Mobile thread list search/).getByText("7 分钟前", { exact: true })).toBeVisible()
+  await expect(row(/修复 Worker 配对与导航/).getByText("2 分钟前", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Language", exact: true }).click()
+  await expect(row(/Mobile thread list search/).getByText("7m ago", { exact: true })).toBeVisible()
+})
