@@ -67,7 +67,7 @@ fn grants_are_owner_only_revisioned_coalesced_and_tombstoned() {
     assert_eq!(workers[0].access, "shared");
     assert_eq!(workers[0].owner_user_id, "a");
     assert!(
-        responses_tools(!workers.is_empty(), true, true, true)
+        responses_tools(!workers.is_empty(), true, &[], true, true)
             .as_array()
             .unwrap()
             .iter()
