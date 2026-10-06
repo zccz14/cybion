@@ -44,11 +44,10 @@ suffix:
 [summary prefix] + [raw record suffix]
 ```
 
-The controller first submits the complete state. On a context-window error or an
-exhausted output budget it compacts the left half, promotes that result to the
-temporary prefix, removes the compacted records from the raw suffix, and retries
-the complete state. If a single raw record is still too large, its serialized
-JSON is split into ordered fragments carrying its record index, kind, ordinal,
+The controller first submits the complete state. On a context-window error it
+compacts the left half, promotes that result to the temporary prefix, removes
+the compacted records from the raw suffix, and retries the complete state. If a single raw record is still too large,
+its serialized JSON is split into ordered fragments carrying its record index, kind, ordinal,
 count, and digest; fragment width is reduced until the upstream window accepts
 the request. Any other error stops the process immediately.
 
@@ -56,10 +55,7 @@ the request. Any other error stops the process immediately.
 
 The compaction instruction is delivered as the final user message after the
 replayed conversation, so the summarization call shares the conversation's
-prefix cache and only the trailing instruction is new. Its output cap is 65,536
-tokens and must cover provider-counted reasoning tokens; when the upstream stops
-the summary at that cap, the reduction algorithm treats it as reducible and
-retries with a smaller range.
+prefix cache and only the trailing instruction is new.
 
 Only the final validated Markdown is appended as a `checkpoint` record. The
 source records and every ordinary Responses output remain available through

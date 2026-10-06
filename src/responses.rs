@@ -105,7 +105,6 @@ pub(crate) enum ResponsesStreamError {
     Sse(String),
     InvalidPayload(String),
     ContextOverflow(String),
-    OutputBudgetExhausted(String),
     QuotaExceeded(String),
     UsageNotIncluded(String),
     CyberPolicy(String),
@@ -135,7 +134,6 @@ impl Display for ResponsesStreamError {
             Self::Sse(s)
             | Self::InvalidPayload(s)
             | Self::ContextOverflow(s)
-            | Self::OutputBudgetExhausted(s)
             | Self::QuotaExceeded(s)
             | Self::UsageNotIncluded(s)
             | Self::CyberPolicy(s)
@@ -149,15 +147,8 @@ impl Display for ResponsesStreamError {
     }
 }
 
-/// Classify an `incomplete` terminal response: an exhausted output budget is a
-/// recoverable compaction reduction signal; every other reason stays protocol.
 fn incomplete_response_error(reason: &str) -> ResponsesStreamError {
-    let message = format!("Incomplete response returned, reason: {reason}");
-    if reason == "max_output_tokens" {
-        ResponsesStreamError::OutputBudgetExhausted(message)
-    } else {
-        ResponsesStreamError::Protocol(message)
-    }
+    ResponsesStreamError::Protocol(format!("Incomplete response returned, reason: {reason}"))
 }
 
 #[derive(Debug, Deserialize)]

@@ -43,13 +43,6 @@ async fn reply(socket: &mut tokio::net::TcpStream, text: &str) {
     socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
 }
 
-async fn reply_incomplete(socket: &mut tokio::net::TcpStream, reason: &str) {
-    let body =
-        json!({"id":"response","status":"incomplete","incomplete_details":{"reason":reason}})
-            .to_string();
-    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-}
-
 async fn reply_completed(socket: &mut tokio::net::TcpStream, text: &str) {
     let body = json!({"id":"response", "end_turn":true, "output":[{
         "type":"message","id":"message","role":"assistant",
@@ -501,7 +494,7 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
     .unwrap();
     wait_finished(&state, &user, &thread).await;
     let request = server.await.unwrap();
-    assert_eq!(request["max_output_tokens"], 65_536);
+    assert!(request.get("max_output_tokens").is_none());
     let input_items = request["input"].as_array().unwrap();
     let instruction = input_items.last().unwrap();
     assert_eq!(instruction["role"], "user");
@@ -921,90 +914,6 @@ async fn display_status_ignores_audits_and_late_output_and_is_scoped_to_the_thre
 }
 
 #[tokio::test]
-async fn compaction_reduces_the_range_when_the_summary_exhausts_the_output_budget() {
-    let (_root, state) = test_state();
-    let user = user_for_subject(&state, "compact-budget-user").unwrap();
-    let thread = create_test_thread(&state, &user).await;
-    user_db(&state, &user, false, {
-        let thread_id = thread.id.clone();
-        move |connection| {
-            insert_record(
-                connection,
-                &thread_id,
-                "input",
-                json!({"role":"user","content":"first"}),
-            );
-            insert_record(
-                connection,
-                &thread_id,
-                "response_output",
-                json!({"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"second"}]}),
-            );
-            insert_record(
-                connection,
-                &thread_id,
-                "input",
-                json!({"role":"user","content":"third"}),
-            );
-            Ok(())
-        }
-    })
-    .await
-    .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
-    let server = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for index in 0..3 {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_json_request(&mut socket).await;
-            if index == 0 {
-                reply_incomplete(&mut socket, "max_output_tokens").await;
-            } else {
-                reply(&mut socket, &checkpoint_body("budget reduction")).await;
-            }
-            requests.push(request);
-        }
-        requests
-    });
-    enqueue(
-        state.clone(),
-        user.clone(),
-        thread.id.clone(),
-        RequestInput::Compact,
-    )
-    .await
-    .unwrap();
-    wait_finished(&state, &user, &thread).await;
-    let requests = server.await.unwrap();
-    assert_eq!(
-        requests.len(),
-        3,
-        "output-budget exhaustion must reduce the range and retry"
-    );
-    let first = requests[0]["input"].as_array().unwrap().len();
-    let second = requests[1]["input"].as_array().unwrap().len();
-    assert!(
-        second < first,
-        "the retry must summarize a strictly smaller range: {first} -> {second}"
-    );
-    for request in &requests {
-        assert_eq!(request["max_output_tokens"], 65_536);
-    }
-    let history = history_for(&state, &user, thread.id.clone(), 0)
-        .await
-        .unwrap();
-    assert_eq!(history.last().unwrap().kind, "checkpoint");
-    assert_eq!(
-        read_thread_for(&state, &user, thread.id.clone())
-            .await
-            .unwrap()
-            .status,
-        "idle"
-    );
-}
-
-#[tokio::test]
 async fn proactive_compaction_checkpoints_the_context_before_an_oversized_inference() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "proactive-user").unwrap();
@@ -1072,7 +981,7 @@ async fn proactive_compaction_checkpoints_the_context_before_an_oversized_infere
             .unwrap()
             .contains("Checkpoint compaction")
     );
-    assert_eq!(requests[0]["max_output_tokens"], 65_536);
+    assert!(requests[0].get("max_output_tokens").is_none());
     assert!(
         requests[1]["input"]
             .as_array()

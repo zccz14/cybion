@@ -1253,10 +1253,7 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
     let named = maybe_name_thread(&state, &user, &thread).await;
     assert_eq!(named.title, "Flaky Thread Titles");
     let request = server.await.unwrap();
-    assert!(
-        request["max_output_tokens"].as_u64().unwrap() >= 512,
-        "title requests must leave room for reasoning before the title: {request}"
-    );
+    assert!(request.get("max_output_tokens").is_none());
     let input = request["input"].as_array().unwrap();
     assert_eq!(
         input[0]["content"], "fix the flaky title generation",
@@ -1368,7 +1365,7 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
             .contains("concise title"),
         "the title instruction must close the request: {request}"
     );
-    assert_eq!(request["max_output_tokens"].as_u64().unwrap(), 1024);
+    assert!(request.get("max_output_tokens").is_none());
     let stored: String = user_db(&state, &user, false, {
         let thread_id = thread.id.clone();
         move |connection| {
