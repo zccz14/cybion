@@ -18,6 +18,9 @@ finished or the user's real-world objective has been achieved.
 - List rows reserve a fixed 16px icon slot, then a title and visible status label.
   Titles truncate; hovering or keyboard-focusing a row shows the full title and
   an explanation. Status labels remain visible on touch devices.
+- The title line also shows how long ago the Thread was last updated — 刚刚 /
+  5 分钟前 / 3 小时前 / N 天前 (just now / 5m ago / 3h ago / Nd ago) — refreshed
+  once a minute from the browser clock.
 - The selected row has a neutral background/border and `aria-current="page"`.
   Selection does not change the execution color.
 - The detail header and active-execution message reuse the same icon, label,

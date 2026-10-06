@@ -28,3 +28,9 @@ test("both thread lists and conversation status use the same server-derived pres
   assert.doesNotMatch(source, /StatusDot|statusLabel|latestThreadAction/)
   assert.match(source, /thread=\{item.id === current.id \? current : item\}/)
 })
+
+test("thread list rows show how long ago each thread was last updated", () => {
+  const source = readFileSync(new URL("../src/components/thread-status.tsx", import.meta.url), "utf8")
+  assert.match(source, /data-slot="thread-updated-at"/)
+  assert.match(source, /formatRelativeTime\(language, thread\.updated_at, now\)/)
+})

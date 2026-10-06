@@ -1,5 +1,7 @@
 import { CheckIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIcon, TriangleAlertIcon } from "lucide-react"
 import { NavLink, useLocation } from "react-router-dom"
+import { useNowSeconds } from "@/hooks/use-now"
+import { formatRelativeTime } from "@/lib/time"
 import { threadStatusText, type ThreadDisplayStatus } from "@/lib/thread-status"
 import { cn } from "@/lib/utils"
 import type { ThreadUsage } from "@/lib/thread-usage"
@@ -38,9 +40,10 @@ export function ThreadStatusBadge({ status, language }: StatusProps) {
   </span>
 }
 
-export function ThreadLink({ thread, language }: { thread: { created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; usage: ThreadUsage }; language: StatusProps["language"] }) {
+export function ThreadLink({ thread, language }: { thread: { created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; updated_at: number; usage: ThreadUsage }; language: StatusProps["language"] }) {
   const status = thread.display_status
   const location = useLocation()
+  const now = useNowSeconds()
   const { label, hint } = threadStatusText(status, language)
   return <Tooltip>
     <TooltipTrigger asChild>
@@ -50,6 +53,7 @@ export function ThreadLink({ thread, language }: { thread: { created_by?: "web" 
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate font-medium">{thread.title}</span>
             {thread.created_by === "api" && <span className="shrink-0 rounded border px-1 text-[0.65rem] font-normal text-muted-foreground">API</span>}
+            <time data-slot="thread-updated-at" dateTime={new Date(thread.updated_at * 1000).toISOString()} className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{formatRelativeTime(language, thread.updated_at, now)}</time>
           </span>
           <span className={cn("text-xs", presentation[status].color)}>{label}</span>
           <ThreadUsageSummary usage={thread.usage} language={language} />

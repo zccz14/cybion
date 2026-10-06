@@ -9,6 +9,7 @@ import { emptyThreadUsage } from "../src/lib/thread-usage"
 import "../src/styles.css"
 
 const statuses: ThreadDisplayStatus[] = ["running", "completed", "failed", "stopped", "ready", "compacting"]
+const updated_at = Math.floor(Date.now() / 1000) - 90
 const titles = ["重新设计 Thread 列表的状态展示", "修复 Worker 配对与导航", "检查远程服务器连接", "整理历史执行记录", "准备新任务", "压缩长期研究任务的上下文与保存完整执行记录"]
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")
@@ -25,7 +26,7 @@ function Fixture() {
       <aside className="w-full rounded-xl border bg-sidebar/40 p-3 lg:w-64 lg:shrink-0">
         <h2 className="px-3 pb-3 text-xs font-medium text-muted-foreground">{language === "zh" ? "线程" : "Threads"}</h2>
         <nav aria-label="Threads" className="flex flex-col gap-1">
-          {statuses.map((status, index) => <ThreadLink key={status} thread={{ id: status, title: titles[index], display_status: status === "running" ? runningStatus : status, usage: emptyThreadUsage }} language={language} />)}
+          {statuses.map((status, index) => <ThreadLink key={status} thread={{ id: status, title: titles[index], display_status: status === "running" ? runningStatus : status, updated_at, usage: emptyThreadUsage }} language={language} />)}
         </nav>
       </aside>
       <section className="min-w-0 flex-1 rounded-xl border bg-card p-5">

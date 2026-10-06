@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
-import { formatStatsDuration, formattedTime } from "../src/lib/time.ts"
+import { formatRelativeTime, formatStatsDuration, formattedTime } from "../src/lib/time.ts"
 
 for (const language of ["en", "zh"] as const) {
   test(`${language} timestamps always display two-digit seconds, including whole minutes`, () => {
@@ -53,5 +53,23 @@ test("stats durations collapse to the largest useful unit in both languages", ()
   ] as const) {
     assert.equal(formatStatsDuration(seconds, "en"), en)
     assert.equal(formatStatsDuration(seconds, "zh"), zh)
+  }
+})
+
+test("relative last-updated labels switch units from just now through days", () => {
+  const now = Date.UTC(2026, 9, 6, 12, 0, 0) / 1000
+  for (const [offset, en, zh] of [
+    [0, "just now", "刚刚"],
+    [59, "just now", "刚刚"],
+    [60, "1m ago", "1 分钟前"],
+    [59 * 60 + 59, "59m ago", "59 分钟前"],
+    [3600, "1h ago", "1 小时前"],
+    [23 * 3600 + 59 * 60, "23h ago", "23 小时前"],
+    [86400, "1d ago", "1 天前"],
+    [40 * 86400 + 59, "40d ago", "40 天前"],
+    [-90, "just now", "刚刚"],
+  ] as const) {
+    assert.equal(formatRelativeTime("en", now - offset, now), en)
+    assert.equal(formatRelativeTime("zh", now - offset, now), zh)
   }
 })
