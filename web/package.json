@@ -19,7 +19,7 @@
     "auth-mini-react-components": "0.6.10",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "linkit-react-components": "^0.4.0",
+    "linkit-react-components": "^0.5.1",
     "lucide-react": "^0.544.0",
     "mermaid": "^11.17.2",
     "radix-ui": "^1.6.7",

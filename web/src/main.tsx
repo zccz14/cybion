@@ -41,14 +41,12 @@ import {
   DownloadIcon,
   ExternalLinkIcon,
   FileKey2Icon,
-  MoonIcon,
   NetworkIcon,
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
   SendIcon,
   Settings2Icon,
-  SunIcon,
   SparklesIcon,
   TerminalSquareIcon,
   Trash2Icon,
@@ -416,7 +414,6 @@ const copy = {
     online: "Online",
     offline: "Offline",
     remove: "Remove",
-    theme: "Theme",
     language: "Language",
     light: "Light",
     dark: "Dark",
@@ -746,7 +743,6 @@ const copy = {
     online: "在线",
     offline: "离线",
     remove: "移除",
-    theme: "主题",
     language: "语言",
     light: "浅色",
     dark: "深色",
@@ -1024,8 +1020,6 @@ type CopyKey = keyof typeof copy.en
 type UiContextValue = {
   language: Language
   setLanguage: (language: Language) => void
-  dark: boolean
-  toggleTheme: () => void
   t: (key: CopyKey) => string
 }
 const UiContext = createContext<UiContextValue | null>(null)
@@ -1230,7 +1224,6 @@ function WorkspaceNav({ nav }: { nav: WorkspaceNavGroup[] }) {
 
 function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("cybion.language") === "zh" ? "zh" : "en")
-  const [dark, setDark] = useState(() => localStorage.getItem("cybion.theme") === "dark" || (!localStorage.getItem("cybion.theme") && matchMedia("(prefers-color-scheme: dark)").matches))
   const labels = copy[language]
   // The filter selection lives in the URL so views are shareable, survive
   // reloads, and step through browser history.
@@ -1283,20 +1276,14 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en"
     localStorage.setItem("cybion.language", language)
   }, [language])
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", dark)
-    localStorage.setItem("cybion.theme", dark ? "dark" : "light")
-    applyFavicon(dark ? "dark" : "light")
-  }, [dark])
   const ui = useMemo<UiContextValue>(() => ({
     language,
     setLanguage,
-    dark,
-    toggleTheme: () => setDark((current) => !current),
     t: (key) => copy[language][key],
-  }), [dark, language])
+  }), [language])
   return <LinkitProvider linkitBaseUrl="https://linkit.ntnl.io" lang={language === "zh" ? "zh-CN" : "en-US"}>
     <LinkitLanguageSync setLanguage={setLanguage} />
+    <LinkitFaviconSync />
     <NormaiAutoConnect sdk={sdk} />
     <LinkitAutoEnsure sdk={sdk} />
     <UiContext.Provider value={ui}>
@@ -1329,6 +1316,12 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
       </ErrorBoundary>
     </UiContext.Provider>
   </LinkitProvider>
+}
+
+function LinkitFaviconSync() {
+  const { resolvedTheme } = useLinkit()
+  useEffect(() => { applyFavicon(resolvedTheme) }, [resolvedTheme])
+  return null
 }
 
 function LinkitLanguageSync({ setLanguage }: { setLanguage: (language: Language) => void }) {
@@ -1380,7 +1373,7 @@ function WorkspaceShell({
   filters: ThreadListFilters
   onFiltersChange: (filters: ThreadListFilters) => void
 }) {
-  const { language, dark, toggleTheme, t } = useUi()
+  const { language, t } = useUi()
   const location = useLocation()
   const navigate = useNavigate()
   const routeTitle = location.pathname.startsWith("/shared-threads") ? (language === "zh" ? "分享给我" : "Shared with me") : pageTitle(location.pathname, t)
@@ -1438,9 +1431,6 @@ function WorkspaceShell({
           {threadsLoading && <p className="sr-only">{t("threads")}</p>}
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon-sm" aria-label={t("theme")} onClick={toggleTheme}>
-            {dark ? <SunIcon /> : <MoonIcon />}
-          </Button>
           <LinkitMyInfo />
         </div>
       </header>

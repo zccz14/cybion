@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#ffffff" />
+    <script>
+      // Linkit owns the dark mode preference (see linkit-react-components);
+      // apply the mirrored preference before the first paint.
+      (function () {
+        try {
+          var choice = localStorage.getItem("linkit.theme");
+          var dark = choice === "dark" || (choice !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch (error) {}
+      })();
+    </script>
     <link rel="icon" href="/cybion-mark.svg" type="image/svg+xml" />
     <title>Cybion</title>
   </head>

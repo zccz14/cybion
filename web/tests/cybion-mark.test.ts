@@ -40,5 +40,5 @@ test("the favicon re-renders in the app theme without a reload", () => {
   assert.ok(favicon.includes(triangle))
   assert.match(favicon, /light: "#000",[\s\S]*dark: "#fff"/)
   assert.match(favicon, /data:image\/svg\+xml/)
-  assert.match(main, /applyFavicon\(dark \? "dark" : "light"\)/)
+  assert.match(main, /applyFavicon\(resolvedTheme\)/)
 })
