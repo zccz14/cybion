@@ -81,9 +81,6 @@ const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 // prefix cache stays reusable and only the trailing instruction is new.
 const THREAD_TITLE_PROMPT: &str = "You name conversation threads. Return only a concise title of 2-8 words that describes the whole conversation. Do not use quotes, Markdown, a period, or a generic title like Untitled thread.";
 
-// Title requests must cover hidden reasoning tokens: reasoning-first models
-// report an incomplete response before emitting the title when the cap is small.
-const THREAD_TITLE_MAX_OUTPUT_TOKENS: usize = 1024;
 const WORKER_ONLINE_SECONDS: i64 = 45;
 // A delivered Worker call that outlives its own timeout by this grace before
 // the Controller requests cancellation; the grace absorbs clock skew and the
@@ -107,9 +104,6 @@ const REINJECTED_SCREENSHOT_WINDOW: usize = 1;
 const MAX_INPUT_IMAGES: usize = 4;
 const MAX_INPUT_IMAGE_CHARS: usize = 4 * 1024 * 1024;
 const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
-// The checkpoint summary must fit inside this cap; reasoning-first providers
-// charge their hidden reasoning tokens to the same output budget.
-const CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS: usize = 65_536;
 // Proactive compaction keeps the replayed context under this default token
 // budget. 0 disables it; per-user defaults and per-thread overrides tune it.
 const DEFAULT_CONTEXT_BUDGET_TOKENS: i64 = 200_000;
@@ -198,7 +192,6 @@ struct ApiError {
 enum ApiErrorKind {
     Ordinary,
     ContextOverflow,
-    OutputBudgetExhausted,
     Cancelled,
     Transient { retry_after_ms: Option<u64> },
 }
@@ -260,16 +253,6 @@ impl ApiError {
         }
     }
 
-    /// The upstream stopped generation at the output cap; a compaction summary
-    /// is truncated, so the reduction cascade may retry with less input.
-    fn output_budget_exhausted(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: message.into(),
-            kind: ApiErrorKind::OutputBudgetExhausted,
-        }
-    }
-
     fn transient(message: impl Into<String>, retry_after_ms: Option<u64>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -299,13 +282,9 @@ impl ApiError {
         self.kind == ApiErrorKind::ContextOverflow
     }
 
-    /// Compaction reductions retry when the range did not fit the window or
-    /// when the summary did not fit the output budget.
+    /// Compaction reductions retry when the range did not fit the window.
     fn is_compaction_reducible(&self) -> bool {
-        matches!(
-            self.kind,
-            ApiErrorKind::ContextOverflow | ApiErrorKind::OutputBudgetExhausted
-        )
+        self.kind == ApiErrorKind::ContextOverflow
     }
 
     fn is_cancelled(&self) -> bool {
@@ -3434,7 +3413,6 @@ async fn request_thread_title(
         false,
         false,
         false,
-        Some(THREAD_TITLE_MAX_OUTPUT_TOKENS),
         None,
     )
     .await?;
@@ -5062,7 +5040,6 @@ async fn request_agent(
             // Thread turns always inject the native web search and image tools.
             true,
             true,
-            None,
             Some(cancellation.clone()),
         )
         .await
@@ -5507,7 +5484,6 @@ async fn summarize_context_once(
         false,
         false,
         false,
-        Some(CHECKPOINT_SUMMARY_MAX_OUTPUT_TOKENS),
         cancellation,
     )
     .await?;
@@ -5769,7 +5745,6 @@ async fn responses_request(
     model: &str,
     input: Value,
     include_tools: bool,
-    max_output_tokens: Option<usize>,
 ) -> Result<ResponsesResult, ApiError> {
     send_responses_request(
         state,
@@ -5783,7 +5758,6 @@ async fn responses_request(
         include_tools,
         false,
         false,
-        max_output_tokens,
         None,
     )
     .await
@@ -5806,7 +5780,6 @@ async fn responses_request_with_options(
     include_worker_tools: bool,
     web_search: bool,
     image_generation: bool,
-    max_output_tokens: Option<usize>,
     cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<ResponsesResult, ApiError> {
     let audit = AuditSpec {
@@ -5831,7 +5804,6 @@ async fn responses_request_with_options(
         request_kind == "inference",
         web_search,
         image_generation,
-        max_output_tokens,
         Some((audit, cancellation)),
     );
     request.await
@@ -5850,7 +5822,6 @@ async fn send_responses_request(
     include_context_tools: bool,
     web_search: bool,
     image_generation: bool,
-    max_output_tokens: Option<usize>,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
 ) -> Result<ResponsesResult, ApiError> {
     let payload = responses_payload_with_options(
@@ -5862,7 +5833,6 @@ async fn send_responses_request(
         include_context_tools,
         web_search,
         image_generation,
-        max_output_tokens,
     );
     let mut request = state
         .client
@@ -6135,9 +6105,6 @@ fn stream_api_error(error: ResponsesStreamError) -> ApiError {
     match error {
         ResponsesStreamError::Cancelled => ApiError::cancelled(),
         ResponsesStreamError::ContextOverflow(message) => ApiError::context_overflow(message),
-        ResponsesStreamError::OutputBudgetExhausted(message) => {
-            ApiError::output_budget_exhausted(message)
-        }
         ResponsesStreamError::RateLimitExceeded {
             message,
             retry_after_ms,
@@ -6413,12 +6380,7 @@ async fn finish_reasoning_audit(
 }
 
 #[allow(dead_code)]
-fn responses_payload(
-    model: &str,
-    input: Value,
-    include_tools: bool,
-    max_output_tokens: Option<usize>,
-) -> Value {
+fn responses_payload(model: &str, input: Value, include_tools: bool) -> Value {
     responses_payload_with_options(
         model,
         None,
@@ -6428,7 +6390,6 @@ fn responses_payload(
         include_tools,
         false,
         false,
-        max_output_tokens,
     )
 }
 
@@ -6442,7 +6403,6 @@ fn responses_payload_with_options(
     include_context_tools: bool,
     web_search: bool,
     image_generation: bool,
-    max_output_tokens: Option<usize>,
 ) -> Value {
     let mut payload = json!({"model":model,"input":input,"store":false,"stream":true});
     if let Some(reasoning_effort) = reasoning_effort {
@@ -6466,9 +6426,6 @@ fn responses_payload_with_options(
     } else {
         // Requests without tools must never turn replayed history into a tool call.
         payload["tool_choice"] = json!("none");
-    }
-    if let Some(max_output_tokens) = max_output_tokens {
-        payload["max_output_tokens"] = json!(max_output_tokens);
     }
     sanitize_responses_input(&mut payload);
     payload
@@ -9105,7 +9062,6 @@ mod tests {
             true,
             true,
             true,
-            None,
         );
         assert_eq!(before["tools"].as_array().unwrap().len(), 8);
         connection.execute(
@@ -9121,7 +9077,6 @@ mod tests {
             true,
             true,
             true,
-            None,
         );
         assert_eq!(
             serde_json::to_vec(&before).unwrap(),
@@ -9403,7 +9358,7 @@ mod tests {
             {"type":"web_search_call","action":{"query":"secret"}},
             {"type":"image_generation_call","action":{"x":1},"size":"1024x1024"}
         ]);
-        let payload = responses_payload("test-model", original.clone(), false, None);
+        let payload = responses_payload("test-model", original.clone(), false);
         let input = payload["input"].as_array().unwrap();
         assert_eq!(
             input
@@ -9436,7 +9391,7 @@ mod tests {
             {"type":"function_call","call_id":"c2","name":"bash","arguments":"{}"},
             {"type":"function_call_output","call_id":"c2","output":"wired"}
         ]);
-        let payload = responses_payload("test-model", original, false, None);
+        let payload = responses_payload("test-model", original, false);
         let input = payload["input"].as_array().unwrap();
         // Strict Responses validators reject any item between a call and its
         // unanswered output, so a turn must replay as message(s), then calls,
@@ -9736,7 +9691,6 @@ mod tests {
             true,
             true,
             None,
-            None,
         )
         .await
         .unwrap();
@@ -9868,7 +9822,6 @@ mod tests {
                         false,
                         false,
                         None,
-                        None,
                     )
                     .await
                     .unwrap();
@@ -9940,7 +9893,6 @@ mod tests {
             "test-model",
             json!([{"role":"user","content":"hello"}]),
             true,
-            None,
         )
         .await
         .unwrap();

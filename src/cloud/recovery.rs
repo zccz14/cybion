@@ -163,14 +163,8 @@ pub(super) async fn retry(
     input: i64,
     error: &ApiError,
 ) -> Result<bool, ApiError> {
-    // An upstream that stops at the requested output cap ends the sampling
-    // stream before the model emits its next item, so the next sampling attempt
-    // replays the partial output and may finish the turn; Codex retries such a
-    // disconnected stream. Only inference reaches this retry because the
-    // compaction reduction cascade consumes this kind first.
     let retry_after_ms = match &error.kind {
         ApiErrorKind::Transient { retry_after_ms } => *retry_after_ms,
-        ApiErrorKind::OutputBudgetExhausted => None,
         _ => return Ok(false),
     };
     let id = thread.to_owned();

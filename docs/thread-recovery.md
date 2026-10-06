@@ -13,10 +13,8 @@ compaction commits its checkpoint and idle status together. Errors in a model
 stream no longer invent failures for Worker commands already dispatched.
 
 Connection failures, HTTP 408/429/5xx, idle/closed streams, rate limiting and
-provider overload retry with backoff. An inference response the upstream
-stopped at the requested output cap is a stream cut short before the model's
-next item: it retries the same sampling request, while compaction instead
-reduces its range. HTTP authentication/invalid-request/quota failures do not.
+provider overload retry with backoff. HTTP authentication/invalid-request/quota
+failures do not.
 Retry-After and the retry count/next time survive Controller restarts. Five
 consecutive failed attempts exhaust the budget; completed model responses
 reset it. Retry waits and stale operations respect cancellation. Linkit
