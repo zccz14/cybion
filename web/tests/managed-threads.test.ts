@@ -99,6 +99,23 @@ test("the tools page renders the shared tool catalog", () => {
   }
 })
 
+test("Custom Tools render from the shared catalog without per-tool web edits", () => {
+  const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
+  const connectors = catalog.custom_tools as Record<string, { tools: { name: string }[] }>
+  const names = Object.values(connectors).flatMap((connector) => connector.tools.map((tool) => tool.name))
+  assert.ok(names.length >= 1)
+  assert.match(source, /toolCatalog\.custom_tools/)
+  assert.match(source, /toolCustomTools/)
+  assert.match(source, /tool\.title \?\?/)
+  for (const name of names) {
+    assert.equal(
+      source.match(new RegExp(`${name}: "tool[A-Za-z]+"`)),
+      null,
+      `custom tool ${name} must not need a hardcoded label`,
+    )
+  }
+})
+
 test("the management surfaces expose integration keys and SQLite-free Worker pairing", () => {
   assert.match(source, /\/api\/api-keys/)
   assert.match(source, /\/api\/workers/)

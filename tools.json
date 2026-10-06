@@ -152,5 +152,213 @@
     "image_generation": {
       "type": "image_generation"
     }
+  },
+  "custom_tools": {
+    "linkit": {
+      "title": {
+        "en": "Linkit",
+        "zh": "Linkit"
+      },
+      "base_url": "https://linkit.ntnl.io",
+      "auth": {
+        "scheme": "bearer",
+        "secret": {
+          "store": "integration_settings",
+          "field": "linkit_bot_token"
+        }
+      },
+      "available_when": [
+        {
+          "store": "integration_settings",
+          "field": "linkit_bot_id"
+        },
+        {
+          "store": "integration_settings",
+          "field": "linkit_bot_token"
+        },
+        {
+          "store": "integration_settings",
+          "field": "linkit_username"
+        }
+      ],
+      "limits": {
+        "per_minute": 30
+      },
+      "tools": [
+        {
+          "type": "function",
+          "name": "linkit_list_conversations",
+          "title": {
+            "en": "List Linkit conversations",
+            "zh": "列出 Linkit 会话"
+          },
+          "description": "List Linkit conversations visible to the user's Cybion bot (id, title, kind). Use before sending to discover conversation_id.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "binding": {
+            "method": "GET",
+            "path": "/api/conversations",
+            "effect": "read",
+            "result": {
+              "projection": {
+                "conversations": {
+                  "list": "conversations",
+                  "pick": {
+                    "id": "id",
+                    "title": "title",
+                    "kind": "kind"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "function",
+          "name": "linkit_read_messages",
+          "title": {
+            "en": "Read Linkit messages",
+            "zh": "读取 Linkit 消息"
+          },
+          "description": "Read recent messages of a Linkit conversation the bot belongs to.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "conversation_id": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              }
+            },
+            "required": [
+              "conversation_id"
+            ],
+            "additionalProperties": false
+          },
+          "binding": {
+            "method": "GET",
+            "path": "/api/conversations/{conversation_id}/messages",
+            "path_params": [
+              "conversation_id"
+            ],
+            "query": [
+              "limit"
+            ],
+            "effect": "read",
+            "result": {
+              "projection": {
+                "messages": {
+                  "list": "messages",
+                  "pick": {
+                    "id": "id",
+                    "sender_id": "sender_id",
+                    "body": "body",
+                    "created_at": "created_at"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "function",
+          "name": "linkit_send_message",
+          "title": {
+            "en": "Send Linkit message",
+            "zh": "发送 Linkit 消息"
+          },
+          "description": "Send a message to a Linkit conversation the bot belongs to. Only use when the user asks to notify someone or send something to Linkit.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "conversation_id": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "urgent": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "conversation_id",
+              "body"
+            ],
+            "additionalProperties": false
+          },
+          "binding": {
+            "method": "POST",
+            "path": "/api/conversations/{conversation_id}/messages",
+            "path_params": [
+              "conversation_id"
+            ],
+            "body": [
+              "body",
+              "urgent"
+            ],
+            "defaults": {
+              "urgent": false
+            },
+            "body_constants": {
+              "attachment_ids": []
+            },
+            "effect": "send",
+            "settlement": {
+              "strategy": "mark_then_send"
+            },
+            "result": {
+              "projection": {
+                "message_id": "id",
+                "conversation_id": "conversation_id"
+              }
+            }
+          }
+        },
+        {
+          "type": "function",
+          "name": "linkit_open_direct",
+          "title": {
+            "en": "Open Linkit direct conversation",
+            "zh": "打开 Linkit 私信会话"
+          },
+          "description": "Get the direct conversation id for a Linkit user (username or UUID). Then send with linkit_send_message.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "username_or_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "username_or_id"
+            ],
+            "additionalProperties": false
+          },
+          "binding": {
+            "method": "POST",
+            "path": "/api/conversations/direct/{username_or_id}",
+            "path_params": [
+              "username_or_id"
+            ],
+            "effect": "send",
+            "settlement": {
+              "strategy": "mark_then_send"
+            },
+            "result": {
+              "projection": {
+                "conversation_id": "id"
+              }
+            }
+          }
+        }
+      ]
+    }
   }
 }

@@ -84,6 +84,12 @@ the first authenticated browser session initializes that key atomically.
 - `tools.json` is the single source for the upstream tool catalog. The request
   builder sends it and the Configuration → Tools page renders it, so the
   capability list cannot drift from the tools a Thread can actually use.
+- [Custom Tools](docs/custom-tools.md) extend that catalog with declarative
+  controller-side integrations: each connector declares its base URL,
+  credential references, per-tool request bindings and response projections,
+  and the generic executor handles routing, credential injection, settlement
+  and rate limiting without per-integration code. Linkit is the first
+  connector.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record
