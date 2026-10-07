@@ -12,3 +12,8 @@ test("administrator users page keeps identity and per-user operational metrics t
   assert.match(source, /refetchInterval: 5000/)
   assert.match(source, /仅管理员可查看用户列表。/)
 })
+
+test("administrator users page does not repeat the raw user id or show a traffic start date", () => {
+  assert.doesNotMatch(source, /\{user\.user_id\}<\/code>/)
+  assert.doesNotMatch(source, /流量起算|Traffic since/)
+})

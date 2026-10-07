@@ -7483,6 +7483,10 @@ mod ctx_tests;
 mod normai_tests;
 
 #[cfg(test)]
+#[path = "cloud_traffic_tests.rs"]
+mod traffic_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

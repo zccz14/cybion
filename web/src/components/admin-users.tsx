@@ -19,7 +19,7 @@ type Metrics = {
 }
 type Traffic = {
   worker_received_bytes: number; worker_sent_bytes: number
-  upstream_received_bytes: number; upstream_sent_bytes: number; since: number
+  upstream_received_bytes: number; upstream_sent_bytes: number
 }
 type User = { user_id: string; is_admin: boolean; metrics: Metrics | null; traffic: Traffic | null; error: string | null }
 type Users = { items: User[]; generated_at: number }
@@ -33,10 +33,10 @@ const copy = {
     search: "搜索用户 ID", refresh: "刷新", loading: "正在读取用户…", error: "无法读取用户列表", retry: "重试",
     unavailable: "该用户的统计暂不可用", required: "仅管理员可查看用户列表。", empty: "暂无用户",
     noMatch: "没有匹配的用户", clear: "清空搜索", emptyHint: "用户首次登录 Cybion 后会显示在这里。",
-    input: "输入", output: "输出", cached: "缓存", sent: "发送", received: "接收", since: "流量起算", notMetered: "尚无流量",
+    input: "输入", output: "输出", cached: "缓存", sent: "发送", received: "接收",
     updated: "更新于", auto: "每 5 秒刷新", previous: "上一页", next: "下一页", definitions: "统计口径",
     usageNote: "推理请求包含普通推理和上下文压缩，覆盖所有状态。Token 为上游已报告的输入与输出之和，缓存率 = 缓存输入 Token ÷ 输入 Token。无输入用量时显示 —。请求和 Token 基于保留的审计记录；删除线程会移除相关审计。",
-    networkNote: "流量从各用户首次计量起累计，分别显示 Cybion 向 Worker / 推理上游发送和接收的 HTTP 正文字节，包含 Worker 心跳和 SSE 帧，不含 HTTP 头与 TLS 开销。上线前流量无法回溯。",
+    networkNote: "流量为累计值，分别显示 Cybion 向 Worker / 推理上游发送和接收的 HTTP 正文字节，包含 Worker 心跳和 SSE 帧，不含 HTTP 头与 TLS 开销。",
     sqliteNote: "SQLite 为该用户数据库主文件、WAL 与 SHM 文件的合计。",
     count: (visible: number, total: number) => `${visible} / ${total} 位用户`,
   },
@@ -46,10 +46,10 @@ const copy = {
     search: "Search user ID", refresh: "Refresh", loading: "Loading users…", error: "Could not load users", retry: "Retry",
     unavailable: "User metrics are unavailable", required: "Administrator access is required to view users.", empty: "No users yet",
     noMatch: "No matching users", clear: "Clear search", emptyHint: "Users appear here after their first Cybion sign-in.",
-    input: "Input", output: "Output", cached: "Cached", sent: "Sent", received: "Received", since: "Traffic since", notMetered: "No traffic yet",
+    input: "Input", output: "Output", cached: "Cached", sent: "Sent", received: "Received",
     updated: "Updated", auto: "Refreshes every 5 seconds", previous: "Previous", next: "Next", definitions: "Metric definitions",
     usageNote: "Requests include inference and context compaction in every status. Tokens add reported input and output usage; cache rate = cached input tokens ÷ input tokens. No input usage displays —. Request and token totals use retained audits; deleting a thread removes its audits.",
-    networkNote: "Traffic accumulates from each user's first measurement. Sent and received HTTP body bytes are measured from Cybion to Workers / inference upstreams, including Worker heartbeats and SSE framing, excluding HTTP headers and TLS overhead. Traffic before deployment cannot be recovered.",
+    networkNote: "Traffic is a running total: sent and received HTTP body bytes between Cybion and Workers / inference upstreams, including Worker heartbeats and SSE framing, excluding HTTP headers and TLS overhead.",
     sqliteNote: "SQLite includes the user's main database, WAL and SHM files.",
     count: (visible: number, total: number) => `${visible} / ${total} users`,
   },
@@ -135,11 +135,7 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
               const m = user.metrics, traffic = user.traffic
               return <TableRow key={user.user_id}>
                 <TableCell>
-                  <div className="flex flex-col gap-1.5 py-2">
-                    <div className="flex items-center gap-2"><LinkitUserInfo userId={user.user_id} />{user.is_admin && <Badge variant="secondary">{t.admin}</Badge>}</div>
-                    <code className="text-xs text-muted-foreground">{user.user_id}</code>
-                    <span className="text-xs text-muted-foreground">{traffic ? `${t.since} ${formattedTime(language, traffic.since)}` : t.notMetered}</span>
-                  </div>
+                  <div className="flex items-center gap-2 py-2"><LinkitUserInfo userId={user.user_id} />{user.is_admin && <Badge variant="secondary">{t.admin}</Badge>}</div>
                 </TableCell>
                 {m ? <>
                   <TableCell className="text-right tabular-nums">{number(m.requests)}</TableCell>
