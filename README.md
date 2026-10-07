@@ -75,7 +75,9 @@ the first authenticated browser session initializes that key atomically.
 - The conversation supports a minimal mode that folds every turn down to its
   input plus one tail item: the turn's last AI reply or its last activity
   line, whichever came later; all other replies, activities, and protocol
-  records stay collapsed. The personal default lives in Configuration →
+  records stay collapsed, while the turn's images (generated images and
+  ledger-marked screenshots) surface as one image group with the tail item.
+  The personal default lives in Configuration →
   Personal settings; a per-thread override in the thread settings takes
   precedence. It is a display preference stored with the user's settings, and
   it changes neither inference nor history records.
