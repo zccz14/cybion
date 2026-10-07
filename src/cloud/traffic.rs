@@ -10,7 +10,6 @@ pub(super) struct Counters {
     worker_sent: AtomicU64,
     upstream_received: AtomicU64,
     upstream_sent: AtomicU64,
-    since: i64,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -19,7 +18,6 @@ pub(super) struct Snapshot {
     pub worker_sent_bytes: u64,
     pub upstream_received_bytes: u64,
     pub upstream_sent_bytes: u64,
-    pub since: i64,
 }
 
 impl Counters {
@@ -29,7 +27,6 @@ impl Counters {
             worker_sent_bytes: self.worker_sent.load(Ordering::Relaxed),
             upstream_received_bytes: self.upstream_received.load(Ordering::Relaxed),
             upstream_sent_bytes: self.upstream_sent.load(Ordering::Relaxed),
-            since: self.since,
         }
     }
 }
@@ -49,11 +46,23 @@ impl Monitor {
             worker_received_bytes INTEGER NOT NULL,
             worker_sent_bytes INTEGER NOT NULL,
             upstream_received_bytes INTEGER NOT NULL,
-            upstream_sent_bytes INTEGER NOT NULL,
-            since INTEGER NOT NULL
+            upstream_sent_bytes INTEGER NOT NULL
         );",
         )?;
-        let mut statement = connection.prepare("SELECT user_id,worker_received_bytes,worker_sent_bytes,upstream_received_bytes,upstream_sent_bytes,since FROM user_traffic")?;
+        let legacy_since: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('user_traffic') WHERE name='since')",
+            [],
+            |row| row.get(0),
+        )?;
+        if legacy_since {
+            // COMPATIBILITY: administrator databases created before the traffic start
+            // date was removed carry a NOT NULL `since` column that rejects inserts
+            // which no longer supply it. Retire this migration after an audit confirms
+            // pragma_table_info('user_traffic') has no `since` column on every deployed
+            // administrator database; keep the preservation regression test.
+            connection.execute_batch("ALTER TABLE user_traffic DROP COLUMN since;")?;
+        }
+        let mut statement = connection.prepare("SELECT user_id,worker_received_bytes,worker_sent_bytes,upstream_received_bytes,upstream_sent_bytes FROM user_traffic")?;
         let users = statement
             .query_map([], |row| {
                 Ok((
@@ -63,7 +72,6 @@ impl Monitor {
                         worker_sent: AtomicU64::new(row.get(2)?),
                         upstream_received: AtomicU64::new(row.get(3)?),
                         upstream_sent: AtomicU64::new(row.get(4)?),
-                        since: row.get(5)?,
                     }),
                 ))
             })?
@@ -79,12 +87,7 @@ impl Monitor {
             .lock()
             .expect("traffic registry poisoned")
             .entry(user_id.to_owned())
-            .or_insert_with(|| {
-                Arc::new(Counters {
-                    since: now(),
-                    ..Default::default()
-                })
-            })
+            .or_default()
             .clone()
     }
 
@@ -109,7 +112,7 @@ impl Monitor {
         let transaction = connection.transaction()?;
         for (id, s) in snapshots {
             transaction.execute(
-                "INSERT INTO user_traffic VALUES(?1,?2,?3,?4,?5,?6)
+                "INSERT INTO user_traffic VALUES(?1,?2,?3,?4,?5)
                 ON CONFLICT(user_id) DO UPDATE SET
                 worker_received_bytes=excluded.worker_received_bytes,
                 worker_sent_bytes=excluded.worker_sent_bytes,
@@ -121,7 +124,6 @@ impl Monitor {
                     s.worker_sent_bytes,
                     s.upstream_received_bytes,
                     s.upstream_sent_bytes,
-                    s.since
                 ],
             )?;
         }
