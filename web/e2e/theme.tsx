@@ -10,7 +10,9 @@ import { Label } from "../src/components/ui/label"
 import { Textarea } from "../src/components/ui/textarea"
 import { Switch } from "../src/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../src/components/ui/select"
-import { Sidebar, SidebarContent, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from "../src/components/ui/sidebar"
+import { AppLayout, type AppNavGroup } from "@zccz14/ux"
+import { CybionMark } from "../src/components/cybion-mark"
+import { LinkitFixtureProviders } from "./linkit-fixture"
 import { Message, MessageContent, MessageFooter, MessageGroup } from "../src/components/ui/message"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
@@ -22,20 +24,25 @@ import "linkit-react-components/styles.css"
 const statuses: ThreadDisplayStatus[] = ["running", "completed", "failed", "stopped", "ready", "compacting"]
 const updated_at = Math.floor(Date.now() / 1000) - 90
 const markdown = "### 黑灰主题\n\n正文、**强调**、[链接](#details)和 `inline code` 保持清晰。\n\n> 引用使用中性的文字与边框。\n\n- 更新主题色\n- 保留状态语义\n\n```sh\nprintf 'Cybion\\n'\n```\n\n| 状态 | 含义 |\n| --- | --- |\n| 已完成 | 最近一次执行已结束 |"
+const themeNav: AppNavGroup[] = [
+  { label: "Workspace", items: [{ to: "/threads", label: "Threads", icon: <TerminalSquareIcon /> }] },
+]
 function ThemeFixture() {
   const [dark, setDark] = useState(true)
-  useEffect(() => { document.documentElement.classList.toggle("dark", dark) }, [dark])
-  return <SidebarProvider>
-    <Sidebar>
-      <SidebarHeader><span className="px-2 py-1 text-lg font-semibold">Cybion</span></SidebarHeader>
-      <SidebarContent><SidebarMenu><SidebarMenuItem><SidebarMenuButton isActive><TerminalSquareIcon />Threads</SidebarMenuButton></SidebarMenuItem></SidebarMenu></SidebarContent>
-    </Sidebar>
-    <SidebarInset>
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
-        <SidebarTrigger aria-label="Navigation" />
-        <h1 className="min-w-0 flex-1 truncate text-sm font-medium">中性黑灰 · Neutral dark</h1>
-        <Button variant="ghost" size="icon-sm" aria-label="Switch theme" onClick={() => setDark(!dark)}>{dark ? <SunIcon /> : <MoonIcon />}</Button>
-      </header>
+  useEffect(() => {
+    // LinkitProvider owns the root theme (dark class + inline color-scheme),
+    // so the fixture overrides both together to present each palette.
+    const root = document.documentElement
+    root.classList.toggle("dark", dark)
+    root.style.colorScheme = dark ? "dark" : "light"
+  }, [dark])
+  return <AppLayout
+    logo={{ light: <CybionMark className="size-6 shrink-0" />, dark: <CybionMark className="size-6 shrink-0" /> }}
+    title="Cybion"
+    nav={themeNav}
+    pageTitle="中性黑灰 · Neutral dark"
+    headerSlot={<Button variant="ghost" size="icon-sm" aria-label="Switch theme" onClick={() => setDark(!dark)}>{dark ? <SunIcon /> : <MoonIcon />}</Button>}
+  >
       <main className="flex min-w-0 flex-1 flex-col lg:flex-row">
         <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-r lg:border-b-0" data-testid="thread-sidebar">
           <nav className="flex flex-col gap-1" aria-label="Threads">{statuses.map((status) => <ThreadLink key={status} thread={{ id: status, title: `Thread · ${status}`, display_status: status, updated_at, usage: emptyThreadUsage }} language="zh" />)}</nav>
@@ -62,7 +69,6 @@ function ThemeFixture() {
           </form>
         </section>
       </main>
-    </SidebarInset>
-  </SidebarProvider>
+  </AppLayout>
 }
-createRoot(document.getElementById("root")!).render(<StrictMode><TooltipProvider><HashRouter><ThemeFixture /></HashRouter></TooltipProvider></StrictMode>)
+createRoot(document.getElementById("root")!).render(<StrictMode><LinkitFixtureProviders lang="zh-CN"><TooltipProvider><HashRouter><ThemeFixture /></HashRouter></TooltipProvider></LinkitFixtureProviders></StrictMode>)
