@@ -4,9 +4,15 @@ Every conversation is an independent thread owned by one Auth Mini user. A
 thread is identified by a time-ordered UUID v7 and carries a title, model,
 reasoning effort, Fast mode, an optional context-budget override, status,
 timestamps, its creation origin, and an append-only history.
-Inference requests always include the provider-native `web_search` and
-`image_generation` tools. Users and API clients can append input to any thread
-they own.
+Inference requests always include the provider-native `web_search` tool and
+the `image_generation` tool. Image generation is a controller-side tool: when
+a model calls `image_generation`, the Controller sends `POST
+{upstream}/images/generations` (the hosted gateway routes the pinned image
+model to the OpenAI LB image catalog), appends the tool output and the
+generated image to the Thread in one transaction, and the turn continues.
+Failures answer the model instead of failing the turn, and a superseded
+request keeps the outcome as activity like a late Worker result. Users and API
+clients can append input to any thread they own.
 
 ```text
 user database

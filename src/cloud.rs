@@ -77,6 +77,10 @@ const WORKER_ANDROID_RELEASE_BASE_URL: &str =
     "https://github.com/zccz14/cybion-worker-for-android/releases/download";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+// Intercepted image generation calls the Thread's own upstream image endpoint;
+// hosted gateways route /images/generations by model name over their image
+// catalog, so the controller pins this default image model.
+const IMAGE_GENERATION_MODEL: &str = "gpt-image-2";
 // Automatic naming and the rename form share one request path: the compiled
 // conversation is replayed and the naming instruction trails it, so the warmed
 // prefix cache stays reusable and only the trailing instruction is new.
@@ -5064,7 +5068,8 @@ async fn request_agent(
             thread.service_tier_fast,
             Value::Array(context.items.clone()),
             has_workers,
-            // Thread turns always inject the native web search and image tools.
+            // Thread turns always inject the native web search tool and the
+            // intercepted image generation tool.
             true,
             true,
             Some(cancellation.clone()),
@@ -5249,6 +5254,57 @@ async fn append_tool_output_item(
         transaction.execute("UPDATE custom_tool_calls SET output_record_id=? WHERE thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NULL",params![id,thread_id,input_record_id,call])?;
         transaction.commit()?;
         Ok(id)
+    })
+    .await
+}
+
+/// Appends one intercepted image generation outcome in a single transaction:
+/// the tool output that settles the model's call and the generated image. The
+/// atomic pair keeps recovery deterministic - the call is either still
+/// unanswered (and the generation reruns) or settled together with its image,
+/// never settled without one. A superseded request keeps the outcome as
+/// activity, mirroring a late Worker result.
+async fn append_image_generation_output(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input_record_id: i64,
+    output: &Value,
+    image: Option<&Value>,
+) -> Result<i64, ApiError> {
+    let thread_id = thread.id.clone();
+    let output = output.clone();
+    let image = image.cloned();
+    let created_at = now();
+    user_db(state, user, false, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let kind = if request_superseded(&transaction, &thread_id, input_record_id)? {
+            "activity"
+        } else {
+            "tool_output"
+        };
+        let record = persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id: &thread_id,
+                kind,
+                payload: &output,
+                created_at,
+            },
+        )?;
+        if let Some(image) = &image {
+            persist_history_record(
+                &transaction,
+                HistoryRecordInsert {
+                    thread_id: &thread_id,
+                    kind,
+                    payload: image,
+                    created_at,
+                },
+            )?;
+        }
+        transaction.commit()?;
+        Ok(record)
     })
     .await
 }
@@ -6681,6 +6737,93 @@ async fn list_workers_tool_output(state: &AppState, user: &User) -> Result<Value
     Ok(json!({ "workers": workers }))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageGenerationArguments {
+    prompt: String,
+}
+
+/// Executes one intercepted `image_generation` call: the controller asks the
+/// Thread's upstream image endpoint and returns the model-facing tool output
+/// plus the generated image item. Argument problems and upstream failures are
+/// answered to the model instead of failing the turn.
+async fn image_generation_tool_output(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input: &str,
+) -> Result<(Value, Option<Value>), ApiError> {
+    let arguments: ImageGenerationArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!(
+            "image_generation arguments must contain a prompt: {error}"
+        ))
+    })?;
+    let prompt = arguments.prompt.trim();
+    if prompt.is_empty() {
+        return Err(ApiError::bad_request(
+            "image_generation prompt must not be empty",
+        ));
+    }
+    let upstream = load_thread_upstream(state, user, thread).await?;
+    let response = state
+        .client
+        .post(format!(
+            "{}/images/generations",
+            upstream.base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(upstream.api_key.as_str())
+        .json(&json!({ "model": IMAGE_GENERATION_MODEL, "prompt": prompt }))
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => {
+            return Ok((
+                json!({ "error": "image generation is temporarily unavailable" }),
+                None,
+            ));
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let error = if status.is_client_error() {
+            format!("image generation was rejected (HTTP {})", status.as_u16())
+        } else {
+            format!(
+                "image generation is temporarily unavailable (HTTP {})",
+                status.as_u16()
+            )
+        };
+        return Ok((json!({ "error": error }), None));
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|_| ApiError::unavailable("image generation returned an invalid response"))?;
+    let data = body
+        .pointer("/data/0")
+        .ok_or_else(|| ApiError::unavailable("image generation returned no image"))?;
+    let result = data
+        .get("b64_json")
+        .and_then(Value::as_str)
+        .filter(|result| !result.is_empty())
+        .ok_or_else(|| ApiError::unavailable("image generation returned no image"))?;
+    let mut output = json!({ "status": "completed" });
+    let mut image = json!({
+        "type": "image_generation_call",
+        "status": "completed",
+        "result": result,
+        "output_format": "png",
+    });
+    if let Some(revised_prompt) = data.get("revised_prompt").and_then(Value::as_str)
+        && !revised_prompt.is_empty()
+    {
+        output["revised_prompt"] = json!(revised_prompt);
+        image["revised_prompt"] = json!(revised_prompt);
+    }
+    Ok((output, Some(image)))
+}
+
 async fn start_response_tool(
     state: &AppState,
     user: &User,
@@ -6714,6 +6857,24 @@ async fn start_response_tool(
         ),
         _ => return Ok(None),
     };
+    if name == "image_generation" {
+        let (output, image) = match image_generation_tool_output(state, user, thread, input).await {
+            Ok(result) => result,
+            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                (json!({ "error": error.message }), None)
+            }
+            Err(error) => return Err(error),
+        };
+        let output = json!({
+            "type": output_type,
+            "call_id": call_id,
+            "output": serde_json::to_string(&output).map_err(ApiError::internal)?,
+        });
+        return Ok(Some(PendingToolCall::Answered(
+            append_image_generation_output(state, user, thread, input_id, &output, image.as_ref())
+                .await?,
+        )));
+    }
     let controller_output = match name.as_str() {
         "read_context" => Some(read_context_tool_output(state, user, input).await),
         "cybion_list_contexts" => Some(list_contexts_tool_output(state, user).await),
@@ -9564,12 +9725,12 @@ mod tests {
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
         assert_eq!(tools[3], json!({"type":"web_search"}));
-        assert_eq!(tools[4], json!({"type":"image_generation"}));
+        assert_eq!(tools[4], TOOL_CATALOG["native"]["image_generation"]);
         let worker_and_native = responses_tools(true, true, &[], true, true);
         assert_eq!(worker_and_native.as_array().unwrap().len(), 8);
         assert_eq!(worker_and_native[3]["name"], "bash");
         assert_eq!(worker_and_native[6]["type"], "web_search");
-        assert_eq!(worker_and_native[7]["type"], "image_generation");
+        assert_eq!(worker_and_native[7]["name"], "image_generation");
         let web_search_only = responses_tools(false, true, &[], true, false);
         assert_eq!(web_search_only.as_array().unwrap().len(), 4);
         assert_eq!(web_search_only[3], json!({"type":"web_search"}));
@@ -9684,7 +9845,25 @@ mod tests {
         );
         assert_eq!(
             TOOL_CATALOG["native"],
-            json!({"web_search":{"type":"web_search"},"image_generation":{"type":"image_generation"}})
+            json!({
+                "web_search": {"type": "web_search"},
+                "image_generation": {
+                    "type": "function",
+                    "name": "image_generation",
+                    "description": "Generate an image from a text prompt and attach it to this conversation for the user to see. Use it whenever the user asks for a picture, illustration, diagram, or any other visual. Describe the subject, style, colors, and composition fully in the prompt; it always creates a new image and cannot edit existing ones.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {
+                                "type": "string",
+                                "description": "Complete description of the image to generate."
+                            }
+                        },
+                        "required": ["prompt"],
+                        "additionalProperties": false
+                    }
+                }
+            })
         );
     }
 
@@ -9788,7 +9967,7 @@ mod tests {
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
         assert_eq!(tools[3], json!({"type":"web_search"}));
-        assert_eq!(tools[4], json!({"type":"image_generation"}));
+        assert_eq!(tools[4], TOOL_CATALOG["native"]["image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

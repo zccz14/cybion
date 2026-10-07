@@ -1,6 +1,6 @@
 use super::tests::{
-    bind_thread_upstream, create_test_thread, insert_record, insert_upstream, read_json_request,
-    test_state,
+    bind_thread_upstream, create_test_thread, insert_record, insert_upstream, read_http_request,
+    read_json_request, test_state,
 };
 use super::*;
 use crate::responses::{ResponseCompleted, ResponseEvent};
@@ -1007,7 +1007,7 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
             .unwrap()
             .iter()
             .filter_map(|tool| tool["type"].as_str().map(str::to_owned))
-            .filter(|tool_type| matches!(tool_type.as_str(), "web_search" | "image_generation"))
+            .filter(|tool_type| tool_type == "web_search")
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -1018,10 +1018,19 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
             "read_context",
             "bash",
             "browser_control",
-            "computer_use"
+            "computer_use",
+            "image_generation"
         ]
     );
-    assert_eq!(natives(&requests[0]), ["web_search", "image_generation"]);
+    assert_eq!(natives(&requests[0]), ["web_search"]);
+    let image = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "image_generation")
+        .unwrap();
+    assert_eq!(image["type"], "function");
+    assert_eq!(image["parameters"]["required"], json!(["prompt"]));
     for request in &requests {
         assert_eq!(request["tool_choice"], "auto");
     }
@@ -1498,5 +1507,267 @@ fn replayed_tool_calls_move_messages_out_of_the_pending_batch() {
     assert_eq!(
         call_ids,
         vec!["", "", "call-a", "call-b", "call-a", "call-b"]
+    );
+}
+
+#[tokio::test]
+async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_image() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-generation-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (headers, request) = read_http_request(&mut socket).await;
+        let body = json!({"data":[{"b64_json":"iVBORw0KGgo","revised_prompt":"A red circle."}]})
+            .to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        (headers, request)
+    });
+    let upstream = insert_upstream(&state, &user, "images", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-image",
+        "call_id":"call-image",
+        "name":"image_generation",
+        "arguments": json!({"prompt":"A red circle on a white background."}).to_string()
+    }))
+    .unwrap();
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    let (headers, request) = server.await.unwrap();
+    assert!(
+        headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("authorization: Bearer sk-fixture"))
+    );
+    assert_eq!(
+        request,
+        json!({"model":"gpt-image-2","prompt":"A red circle on a white background."})
+    );
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let output = &history[history.len() - 2];
+    assert_eq!(output.kind, "tool_output");
+    assert_eq!(output.payload["type"], "function_call_output");
+    assert_eq!(output.payload["call_id"], "call-image");
+    assert_eq!(
+        serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+        json!({"status":"completed","revised_prompt":"A red circle."})
+    );
+    let image = &history[history.len() - 1];
+    assert_eq!(image.kind, "tool_output");
+    assert_eq!(image.payload["type"], "image_generation_call");
+    assert_eq!(image.payload["status"], "completed");
+    assert_eq!(image.payload["result"], "iVBORw0KGgo");
+    assert_eq!(image.payload["output_format"], "png");
+    // The settled call and its image replay together as one turn.
+    let items = vec![tool.value(), output.payload.clone(), image.payload.clone()];
+    assert_eq!(replayable_context_items(&items).len(), 3);
+}
+
+#[tokio::test]
+async fn image_generation_failures_are_answered_to_the_model() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-generation-failure-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (status, body) in [
+            (
+                "400 Bad Request",
+                "{\"error\":{\"message\":\"model_not_priced\"}}",
+            ),
+            (
+                "502 Bad Gateway",
+                "{\"error\":{\"message\":\"image generation failed\"}}",
+            ),
+        ] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(read_json_request(&mut socket).await);
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        requests
+    });
+    let upstream = insert_upstream(&state, &user, "images", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    for (call_id, expected) in [
+        ("call-rejected", "image generation was rejected (HTTP 400)"),
+        (
+            "call-unavailable",
+            "image generation is temporarily unavailable (HTTP 502)",
+        ),
+    ] {
+        let tool = ResponseItem::from_value(json!({
+            "type":"function_call",
+            "id": format!("fc-{call_id}"),
+            "call_id": call_id,
+            "name": "image_generation",
+            "arguments": json!({"prompt":"A red circle."}).to_string()
+        }))
+        .unwrap();
+        assert!(matches!(
+            start_response_tool(&state, &user, &thread, input, &tool)
+                .await
+                .unwrap(),
+            Some(PendingToolCall::Answered(_))
+        ));
+        let history = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        let output = history.last().unwrap();
+        assert_eq!(output.payload["type"], "function_call_output");
+        assert_eq!(output.payload["call_id"], call_id);
+        assert_eq!(
+            serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+            json!({"error": expected})
+        );
+    }
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0],
+        json!({"model":"gpt-image-2","prompt":"A red circle."})
+    );
+}
+
+#[tokio::test]
+async fn image_generation_arguments_are_validated_before_the_image_request() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-generation-argument-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    for (call_id, arguments, expected) in [
+        (
+            "call-missing",
+            json!({}),
+            "image_generation arguments must contain a prompt",
+        ),
+        (
+            "call-empty",
+            json!({"prompt":"   "}),
+            "image_generation prompt must not be empty",
+        ),
+    ] {
+        let tool = ResponseItem::from_value(json!({
+            "type":"function_call",
+            "id": format!("fc-{call_id}"),
+            "call_id": call_id,
+            "name": "image_generation",
+            "arguments": arguments.to_string()
+        }))
+        .unwrap();
+        assert!(matches!(
+            start_response_tool(&state, &user, &thread, input, &tool)
+                .await
+                .unwrap(),
+            Some(PendingToolCall::Answered(_))
+        ));
+        let history = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        let output = history.last().unwrap();
+        assert_eq!(output.payload["type"], "function_call_output");
+        let value: Value =
+            serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap();
+        assert!(
+            value["error"].as_str().unwrap().contains(expected),
+            "{value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn superseded_image_generation_outcomes_are_activity() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-generation-superseded-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let body = json!({"data":[{"b64_json":"iVBORw0KGgo"}]}).to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let upstream = insert_upstream(&state, &user, "images", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(
+            connection,
+            &thread_id,
+            "input",
+            json!({"role":"user","content":"newer input"}),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-image",
+        "call_id":"call-image",
+        "name":"image_generation",
+        "arguments": json!({"prompt":"A red circle."}).to_string()
+    }))
+    .unwrap();
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    server.await.unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    for record in &history[history.len() - 2..] {
+        assert_eq!(record.kind, "activity");
+    }
+    assert_eq!(
+        history[history.len() - 1].payload["type"],
+        "image_generation_call"
     );
 }
