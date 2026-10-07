@@ -79,8 +79,12 @@ the first authenticated browser session initializes that key atomically.
   Personal settings; a per-thread override in the thread settings takes
   precedence. It is a display preference stored with the user's settings, and
   it changes neither inference nor history records.
-- Thread turns always include the `web_search` and `image_generation` native
-  tools in the inference request to the configured provider.
+- Thread turns always include the provider-native `web_search` tool and the
+  `image_generation` tool. The Controller intercepts image calls: it requests
+  the Thread's image endpoint (`POST {upstream}/images/generations`; the
+  hosted gateway routes it to the OpenAI LB image catalog) and appends the
+  generated image to the Thread, so models without native image generation
+  (for example DeepSeek) generate images through the same path.
 - `tools.json` is the single source for the upstream tool catalog. The request
   builder sends it and the Configuration → Tools page renders it, so the
   capability list cannot drift from the tools a Thread can actually use.
