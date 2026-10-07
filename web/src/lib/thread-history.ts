@@ -1,3 +1,6 @@
+import { screenshotImageSource } from "./history-payload.ts"
+import { generatedImageSource } from "./thread-response.ts"
+
 export type HistoryRecord = {
   id: number
   thread_id: string
@@ -11,9 +14,24 @@ export type HistoryRecord = {
 export type ThreadHistoryEntry =
   | { type: "message"; key: string; record: HistoryRecord }
   | { type: "process"; key: string; records: HistoryRecord[]; startedAt: number; finishedAt: number }
+  | { type: "image-group"; key: string; records: HistoryRecord[] }
+
+export type ThreadImage = { source: string; kind: "generated" | "screenshot" }
+
+// A record shows an image when it is a generated image carrying its base64
+// result, or a ledger-marked screenshot carrying PNG data. Everything else
+// stays ordinary protocol text.
+export function threadImage(record: HistoryRecord): ThreadImage | null {
+  const generated = generatedImageSource(record.payload)
+  if (generated !== null) return { source: generated, kind: "generated" }
+  const screenshot = record.screenshot === true ? screenshotImageSource(record.payload) : null
+  return screenshot !== null ? { source: screenshot, kind: "screenshot" } : null
+}
 
 function isStandaloneRecord(record: HistoryRecord) {
   if (record.kind === "input" || record.kind === "activity") return true
+  // Image records never join a process group, so a collapsed group cannot hide one.
+  if (threadImage(record) !== null) return true
   const payload = record.payload
   return record.kind === "response_output" && payload !== null && typeof payload === "object"
     && "type" in payload && payload.type === "message"
@@ -89,7 +107,9 @@ function threadHistoryTailCandidate(record: HistoryRecord) {
 }
 
 // INVARIANT: a turn is the span from an input record to the next input; only its tail
-// candidate stays visible, so every emitted entry still keys off a stable record key.
+// candidate stays visible, so every emitted entry still keys off a stable record key. The
+// turn's images collect into one image group shown with that tail candidate, so minimal
+// mode still never folds image content away.
 export function groupThreadHistoryMinimal(records: readonly HistoryRecord[]): ThreadHistoryEntry[] {
   const entries: ThreadHistoryEntry[] = []
   let segment: HistoryRecord[] = []
@@ -98,9 +118,16 @@ export function groupThreadHistoryMinimal(records: readonly HistoryRecord[]): Th
     for (let index = segment.length - 1; index >= 0; index -= 1) {
       if (threadHistoryTailCandidate(segment[index])) { winner = index; break }
     }
+    const images = segment.filter((record, index) => index !== winner && threadImage(record) !== null)
+    const flushImages = () => {
+      if (images.length === 0) return
+      entries.push({ type: "image-group", key: `images:${threadHistoryRecordKey(images[0])}`, records: images })
+    }
     segment.forEach((record, index) => {
+      if (index !== winner && threadImage(record) !== null) return
       if (record.kind === "input" || index === winner) {
         entries.push({ type: "message", key: threadHistoryRecordKey(record), record })
+        if (index === winner) flushImages()
         return
       }
       const previous = entries.at(-1)
@@ -113,6 +140,7 @@ export function groupThreadHistoryMinimal(records: readonly HistoryRecord[]): Th
       const key = threadHistoryRecordKey(record)
       entries.push({ type: "process", key: `process:${key}`, records: [record], startedAt: record.created_at, finishedAt: record.created_at })
     })
+    if (winner < 0) flushImages()
     segment = []
   }
   for (const record of records) {

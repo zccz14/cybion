@@ -1,6 +1,7 @@
 import { useMemo, type ReactNode } from "react"
 import { groupThreadHistory, groupThreadHistoryMinimal, threadHistoryRecordKey, type HistoryRecord } from "@/lib/thread-history"
 import { MessageScrollerItem } from "@/components/ui/message-scroller"
+import { ThreadImageGroup } from "@/components/thread-image-group"
 import { ThreadProcessGroup } from "@/components/thread-process-group"
 
 export function ThreadHistory({ records, language, minimal, renderRecord }: {
@@ -13,10 +14,10 @@ export function ThreadHistory({ records, language, minimal, renderRecord }: {
   // INVARIANT: a stable messageId per entry keeps the scroller able to anchor the viewport while
   // older pages are prepended.
   return entries.map((entry) => <MessageScrollerItem key={entry.key} messageId={entry.key}>
-    {entry.type === "process"
-      ? <ThreadProcessGroup language={language} count={entry.records.length} durationSeconds={entry.finishedAt - entry.startedAt}>
-        {entry.records.map((record) => <div key={threadHistoryRecordKey(record)} className="min-w-0">{renderRecord(record)}</div>)}
-      </ThreadProcessGroup>
-      : renderRecord(entry.record)}
+    {entry.type === "process" && <ThreadProcessGroup language={language} count={entry.records.length} durationSeconds={entry.finishedAt - entry.startedAt}>
+      {entry.records.map((record) => <div key={threadHistoryRecordKey(record)} className="min-w-0">{renderRecord(record)}</div>)}
+    </ThreadProcessGroup>}
+    {entry.type === "message" && renderRecord(entry.record)}
+    {entry.type === "image-group" && <ThreadImageGroup language={language} images={entry.records} />}
   </MessageScrollerItem>)
 }

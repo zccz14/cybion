@@ -3,8 +3,8 @@ import test from "node:test"
 import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
-function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id): HistoryRecord {
-  return { id, thread_id: "thread-a", kind, payload, created_at }
+function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id, screenshot = false): HistoryRecord {
+  return { id, thread_id: "thread-a", kind, payload, created_at, ...(screenshot ? { screenshot: true } : {}) }
 }
 
 test("empty histories and histories containing only standalone messages do not create process groups", () => {
@@ -40,8 +40,9 @@ test("all other record types form adjacent groups, including singletons at both 
     record(13, "response_output", { type: "reasoning" }),
   ]
   const entries = groupThreadHistory(records)
+  // The image_generation_call record stays standalone: image content never joins a process group.
   assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
-    [1], 2, [3, 4, 5, 6, 7, 8, 9], 10, [11], 12, [13],
+    [1], 2, [3, 4, 5, 6], 7, [8, 9], 10, [11], 12, [13],
   ])
 })
 
@@ -250,4 +251,67 @@ test("minimal entries keep stable keys through polling and the preview handoff",
   const committed = groupThreadHistoryMinimal([{ ...preview, id: 10, created_at: 105 }, { ...message, id: 11, created_at: 110 }])
   assert.deepEqual(initial.map((entry) => entry.key), committed.map((entry) => entry.key))
   assert.deepEqual(initial.map((entry) => entry.type), ["process", "message"])
+})
+
+const png = `iVBORw0KGgo${"A".repeat(64)}`
+const generatedImage = { type: "image_generation_call", result: png, output_format: "png" }
+const screenshotOutput = { type: "function_call_output", call_id: "call-1", output: JSON.stringify({ data: png }) }
+
+test("generated images and ledger screenshots stay outside process groups", () => {
+  const records = [
+    record(1, "response_output", { id: "rs_1", type: "reasoning" }),
+    record(2, "tool_output", generatedImage),
+    record(3, "tool_output", screenshotOutput, 3, true),
+    record(4, "tool_output", { type: "function_call_output", call_id: "call-2", output: "screenshot failed" }, 4, true),
+    record(5, "tool_output", { type: "image_generation_call", output_format: "png" }),
+    record(6, "tool_output", { type: "image_generation_call", result: png, output_format: "gif" }),
+    record(7, "tool_output", screenshotOutput),
+  ]
+  const entries = groupThreadHistory(records)
+  assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
+    [1], 2, 3, [4, 5, 6, 7],
+  ])
+})
+
+test("minimal mode collects a turn's images into one image group shown with its tail candidate", () => {
+  const records = [
+    record(1, "input"),
+    record(2, "response_output", { id: "rs_2", type: "reasoning" }),
+    record(3, "tool_output", screenshotOutput, 3, true),
+    record(4, "tool_output", generatedImage),
+    record(5, "response_output", { id: "msg_5", type: "message" }),
+    record(6, "tool_output", { output: "late" }),
+  ]
+  const entries = groupThreadHistoryMinimal(records)
+  assert.deepEqual(entries.map((entry) => entry.type), ["message", "process", "message", "image-group", "process"])
+  assert.deepEqual(entries[1].type === "process" && entries[1].records.map((item) => item.id), [2])
+  assert.equal(entries[2].type === "message" && entries[2].record.id, 5)
+  assert.deepEqual(entries[3].type === "image-group" && entries[3].records.map((item) => item.id), [3, 4])
+  assert.match(entries[3].key, /^images:/)
+  assert.deepEqual(entries[4].type === "process" && entries[4].records.map((item) => item.id), [6])
+  const polled = groupThreadHistoryMinimal(structuredClone(records))
+  assert.deepEqual(polled.map((entry) => entry.key), entries.map((entry) => entry.key))
+})
+
+test("minimal mode keeps an image tail candidate visible and groups only the other images", () => {
+  const records = [
+    record(1, "input"),
+    record(2, "tool_output", generatedImage),
+    record(3, "activity", generatedImage, 3),
+  ]
+  const entries = groupThreadHistoryMinimal(records)
+  assert.deepEqual(entries.map((entry) => entry.type), ["message", "message", "image-group"])
+  assert.equal(entries[1].type === "message" && entries[1].record.id, 3)
+  assert.deepEqual(entries[2].type === "image-group" && entries[2].records.map((item) => item.id), [2])
+})
+
+test("minimal mode shows images as a group even when a turn has no tail candidate", () => {
+  const records = [
+    record(1, "tool_output", generatedImage),
+    record(2, "tool_output", { output: "text" }),
+  ]
+  const entries = groupThreadHistoryMinimal(records)
+  assert.deepEqual(entries.map((entry) => entry.type), ["process", "image-group"])
+  assert.deepEqual(entries[0].type === "process" && entries[0].records.map((item) => item.id), [2])
+  assert.deepEqual(entries[1].type === "image-group" && entries[1].records.map((item) => item.id), [1])
 })

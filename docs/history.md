@@ -40,10 +40,11 @@ messages, reasoning summaries, tool results, checkpoints, and runtime activity
 directly from `kind` and `payload`. An input may carry pasted images as
 `input_image` content parts; the conversation shows them inside the user message
 with an open-image dialog, while the History table keeps exposing the raw
-payload. A marked screenshot output that carries PNG data renders its capture
-with the same open-image dialog; a capture without PNG data — a failed one, for
-example — keeps the ordinary tool output rendering. Thread naming reads the
-input text from its payload.
+payload. A generated image (`image_generation_call` with a base64 result)
+renders as an image inline, and a marked screenshot output that carries PNG
+data renders its capture with the same open-image dialog; a capture without PNG
+data — a failed one, for example — keeps the ordinary tool output rendering.
+Thread naming reads the input text from its payload.
 
 The conversation opens on a bounded window instead of the whole thread. The
 browser-authenticated `GET /api/threads/{id}/history/window` endpoint accepts:
@@ -68,8 +69,9 @@ with `has_older` false instead of hiding rows, and a page that finds no older
 
 The conversation derives its display from the combined durable history and
 pending response items. Inputs, assistant `response_output` items of type
-`message`, and every `activity` record stay outside process groups and end the
-preceding group. All other consecutive records form a `ThreadProcessGroup`,
+`message`, every `activity` record, and image records — a generated image or a
+ledger-marked screenshot with PNG data — stay outside process groups and end
+the preceding group. All other consecutive records form a `ThreadProcessGroup`,
 including a single record. Expanding the group renders the original records in
 their original order, with their existing payload inspection controls. A
 `checkpoint` record renders its stored Markdown through the shared Markdown
@@ -89,6 +91,14 @@ labels use `运行了 hh 小时 mm 分钟 ss 秒`; English labels use
 same-timestamp group reports zero. Standalone messages and the current clock
 do not contribute to the duration. Pending items retain the existing response
 preview timestamp (`started_at`) until durable timestamps become available.
+
+Minimal mode never folds image content away. Each turn's image records collect
+into one image group rendered with the turn's tail item — its last reply or
+activity line — in record order, and each image opens the zoom dialog. An image
+record that is itself the tail item stays the tail item, and only the turn's
+other images join the group; a folded turn without a tail item still shows its
+images as one image group. The image records are removed from the folded
+remainder, so expanding the process group never duplicates them.
 
 Grouping and disclosure state exist only in the browser. They do not change
 stored rows, API payloads, or model context. Stable group keys keep disclosures
