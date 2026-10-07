@@ -4,7 +4,6 @@ import {
   HashRouter,
   Link,
   Navigate,
-  NavLink,
   Route,
   Routes,
   useLocation,
@@ -23,7 +22,8 @@ import {
 } from "@tanstack/react-query"
 import { AuthMiniProvider, useAuthMini, type AuthMiniVerificationFailure } from "auth-mini-react-components"
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
-import { LinkitMyInfo, LinkitProvider, useLinkit } from "linkit-react-components"
+import { LinkitProvider, useLinkit } from "linkit-react-components"
+import { AppLayout, type AppNavGroup } from "@zccz14/ux"
 import {
   ActivityIcon,
   ArchiveIcon,
@@ -135,22 +135,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarHeader,
-  SidebarInset,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  SidebarProvider,
-  SidebarTrigger,
-  useSidebar,
-} from "@/components/ui/sidebar"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
@@ -1198,30 +1182,6 @@ async function browserSupportsEd25519() {
 type WorkspaceNavItem = { to: string; label: string; icon: typeof TerminalSquareIcon }
 type WorkspaceNavGroup = { id: string; label: string; items: WorkspaceNavItem[] }
 
-function WorkspaceNav({ nav }: { nav: WorkspaceNavGroup[] }) {
-  const { setOpenMobile } = useSidebar()
-  return <>
-    {nav.map(({ id, label, items }) => <SidebarGroup key={id}>
-      <SidebarGroupLabel>{label}</SidebarGroupLabel>
-      <SidebarGroupContent>
-        <SidebarMenu>
-          {items.map(({ to, label: itemLabel, icon: Icon }) => <SidebarMenuItem key={to}>
-            <SidebarMenuButton asChild tooltip={itemLabel}>
-              <NavLink
-                to={to}
-                onClick={() => setOpenMobile(false)}
-                className={({ isActive }) => isActive ? "font-medium" : ""}
-              >
-                <Icon /><span>{itemLabel}</span>
-              </NavLink>
-            </SidebarMenuButton>
-          </SidebarMenuItem>)}
-        </SidebarMenu>
-      </SidebarGroupContent>
-    </SidebarGroup>)}
-  </>
-}
-
 function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("cybion.language") === "zh" ? "zh" : "en")
   const labels = copy[language]
@@ -1401,41 +1361,26 @@ function WorkspaceShell({
     { to: "/api", label: t("api"), icon: FileKey2Icon },
     { to: "/tools", label: t("tools"), icon: WrenchIcon },
   ]
-  const nav: WorkspaceNavGroup[] = [
+  const workspaceNav: WorkspaceNavGroup[] = [
     { id: "work", label: t("navWork"), items: workNav },
     { id: "audit", label: t("navAudit"), items: auditNav },
     ...(administrationNav.length > 0 ? [{ id: "administration", label: t("navAdministration"), items: administrationNav }] : []),
     { id: "configuration", label: t("navConfiguration"), items: configurationNav },
   ]
-  return <SidebarProvider>
-    <Sidebar collapsible="icon">
-      <SidebarHeader>
-        <div className="flex items-center gap-2.5 px-2 py-1 font-heading text-lg font-semibold">
-          <CybionMark className="size-6 shrink-0" />
-          <span className="group-data-[collapsible=icon]:hidden">Cybion</span>
-        </div>
-      </SidebarHeader>
-      <SidebarContent><WorkspaceNav nav={nav} /></SidebarContent>
-      <SidebarFooter>
-        <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground group-data-[collapsible=icon]:justify-center">
-          <span className="size-2 rounded-full bg-emerald-500" aria-hidden="true" />
-          <span className="group-data-[collapsible=icon]:hidden">{t("hosted")}</span>
-        </div>
-      </SidebarFooter>
-    </Sidebar>
-    <SidebarInset className="h-svh overflow-hidden">
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b px-3 sm:px-4">
-        <SidebarTrigger aria-label={t("menu")} />
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{routeTitle}</p>
-          {threadsLoading && <p className="sr-only">{t("threads")}</p>}
-        </div>
-        <div className="flex items-center gap-1">
-          <LinkitMyInfo />
-        </div>
-      </header>
-      {Boolean(threadsError) && location.pathname.startsWith("/threads") && <div className="p-4"><RequestError error={threadsError} /></div>}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+  const nav: AppNavGroup[] = workspaceNav.map((group) => ({
+    label: group.label,
+    items: group.items.map((item) => ({ to: item.to, label: item.label, icon: <item.icon /> })),
+  }))
+
+  return <AppLayout
+    logo={{ light: <CybionMark className="size-6 shrink-0" />, dark: <CybionMark className="size-6 shrink-0" /> }}
+    title="Cybion"
+    nav={nav}
+    pageTitle={routeTitle}
+    headerSlot={<span className="flex items-center gap-2 text-xs text-muted-foreground"><span className="size-2 rounded-full bg-emerald-500" aria-hidden="true" /><span className="hidden sm:inline">{t("hosted")}</span></span>}
+  >
+    {threadsLoading && <p className="sr-only">{t("threads")}</p>}
+    {Boolean(threadsError) && location.pathname.startsWith("/threads") && <div className="p-4"><RequestError error={threadsError} /></div>}
         <ErrorBoundary
           resetKeys={[location.pathname]}
           fallback={({ error, reset }) => <ErrorBoundaryFallback
@@ -1472,9 +1417,7 @@ function WorkspaceShell({
             <Route path="*" element={<Navigate to="/threads" replace />} />
           </Routes>
         </ErrorBoundary>
-      </div>
-    </SidebarInset>
-  </SidebarProvider>
+  </AppLayout>
 }
 
 function pageTitle(pathname: string, t: (key: CopyKey) => string) {
