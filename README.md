@@ -80,7 +80,7 @@ the first authenticated browser session initializes that key atomically.
   precedence. It is a display preference stored with the user's settings, and
   it changes neither inference nor history records.
 - Thread turns always include the provider-native `web_search` tool and the
-  `image_generation` tool. The Controller intercepts image calls: it requests
+  `normai_image_generation` tool. The Controller intercepts image calls: it requests
   the Thread's image endpoint (`POST {upstream}/images/generations`; the
   hosted gateway routes it to the OpenAI LB image catalog) and appends the
   generated image to the Thread, so models without native image generation

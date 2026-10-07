@@ -2815,7 +2815,7 @@ const toolLabels: Record<string, CopyKey> = {
   browser_control: "toolBrowserControl",
   computer_use: "toolComputerUse",
   web_search: "toolWebSearch",
-  image_generation: "toolImageGeneration",
+  normai_image_generation: "toolImageGeneration",
 }
 
 function ToolsPage() {

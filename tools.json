@@ -149,9 +149,9 @@
     "web_search": {
       "type": "web_search"
     },
-    "image_generation": {
+    "normai_image_generation": {
       "type": "function",
-      "name": "image_generation",
+      "name": "normai_image_generation",
       "description": "Generate an image from a text prompt and attach it to this conversation for the user to see. Use it whenever the user asks for a picture, illustration, diagram, or any other visual. Describe the subject, style, colors, and composition fully in the prompt; it always creates a new image and cannot edit existing ones.",
       "parameters": {
         "type": "object",

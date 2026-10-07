@@ -1019,7 +1019,7 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
             "bash",
             "browser_control",
             "computer_use",
-            "image_generation"
+            "normai_image_generation"
         ]
     );
     assert_eq!(natives(&requests[0]), ["web_search"]);
@@ -1027,7 +1027,7 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|tool| tool["name"] == "image_generation")
+        .find(|tool| tool["name"] == "normai_image_generation")
         .unwrap();
     assert_eq!(image["type"], "function");
     assert_eq!(image["parameters"]["required"], json!(["prompt"]));
@@ -1542,7 +1542,7 @@ async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_ima
         "type":"function_call",
         "id":"fc-image",
         "call_id":"call-image",
-        "name":"image_generation",
+        "name":"normai_image_generation",
         "arguments": json!({"prompt":"A red circle on a white background."}).to_string()
     }))
     .unwrap();
@@ -1633,7 +1633,7 @@ async fn image_generation_failures_are_answered_to_the_model() {
             "type":"function_call",
             "id": format!("fc-{call_id}"),
             "call_id": call_id,
-            "name": "image_generation",
+            "name": "normai_image_generation",
             "arguments": json!({"prompt":"A red circle."}).to_string()
         }))
         .unwrap();
@@ -1672,19 +1672,19 @@ async fn image_generation_arguments_are_validated_before_the_image_request() {
         (
             "call-missing",
             json!({}),
-            "image_generation arguments must contain a prompt",
+            "normai_image_generation arguments must contain a prompt",
         ),
         (
             "call-empty",
             json!({"prompt":"   "}),
-            "image_generation prompt must not be empty",
+            "normai_image_generation prompt must not be empty",
         ),
     ] {
         let tool = ResponseItem::from_value(json!({
             "type":"function_call",
             "id": format!("fc-{call_id}"),
             "call_id": call_id,
-            "name": "image_generation",
+            "name": "normai_image_generation",
             "arguments": arguments.to_string()
         }))
         .unwrap();
@@ -1749,7 +1749,7 @@ async fn superseded_image_generation_outcomes_are_activity() {
         "type":"function_call",
         "id":"fc-image",
         "call_id":"call-image",
-        "name":"image_generation",
+        "name":"normai_image_generation",
         "arguments": json!({"prompt":"A red circle."}).to_string()
     }))
     .unwrap();
