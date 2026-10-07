@@ -6659,7 +6659,7 @@ fn responses_tools(
         tools.push(TOOL_CATALOG["native"]["web_search"].clone());
     }
     if image_generation {
-        tools.push(TOOL_CATALOG["native"]["image_generation"].clone());
+        tools.push(TOOL_CATALOG["native"]["normai_image_generation"].clone());
     }
     Value::Array(tools)
 }
@@ -6751,7 +6751,7 @@ struct ImageGenerationArguments {
     prompt: String,
 }
 
-/// Executes one intercepted `image_generation` call: the controller asks the
+/// Executes one intercepted `normai_image_generation` call: the controller asks the
 /// Thread's upstream image endpoint and returns the model-facing tool output
 /// plus the generated image item. Argument problems and upstream failures are
 /// answered to the model instead of failing the turn.
@@ -6763,13 +6763,13 @@ async fn image_generation_tool_output(
 ) -> Result<(Value, Option<Value>), ApiError> {
     let arguments: ImageGenerationArguments = serde_json::from_str(input).map_err(|error| {
         ApiError::bad_request(format!(
-            "image_generation arguments must contain a prompt: {error}"
+            "normai_image_generation arguments must contain a prompt: {error}"
         ))
     })?;
     let prompt = arguments.prompt.trim();
     if prompt.is_empty() {
         return Err(ApiError::bad_request(
-            "image_generation prompt must not be empty",
+            "normai_image_generation prompt must not be empty",
         ));
     }
     let upstream = load_thread_upstream(state, user, thread).await?;
@@ -6865,7 +6865,7 @@ async fn start_response_tool(
         ),
         _ => return Ok(None),
     };
-    if name == "image_generation" {
+    if name == "normai_image_generation" {
         let (output, image) = match image_generation_tool_output(state, user, thread, input).await {
             Ok(result) => result,
             Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
@@ -9790,12 +9790,12 @@ mod tests {
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
         assert_eq!(tools[3], json!({"type":"web_search"}));
-        assert_eq!(tools[4], TOOL_CATALOG["native"]["image_generation"]);
+        assert_eq!(tools[4], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, &[], true, true);
         assert_eq!(worker_and_native.as_array().unwrap().len(), 8);
         assert_eq!(worker_and_native[3]["name"], "bash");
         assert_eq!(worker_and_native[6]["type"], "web_search");
-        assert_eq!(worker_and_native[7]["name"], "image_generation");
+        assert_eq!(worker_and_native[7]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, &[], true, false);
         assert_eq!(web_search_only.as_array().unwrap().len(), 4);
         assert_eq!(web_search_only[3], json!({"type":"web_search"}));
@@ -9912,9 +9912,9 @@ mod tests {
             TOOL_CATALOG["native"],
             json!({
                 "web_search": {"type": "web_search"},
-                "image_generation": {
+                "normai_image_generation": {
                     "type": "function",
-                    "name": "image_generation",
+                    "name": "normai_image_generation",
                     "description": "Generate an image from a text prompt and attach it to this conversation for the user to see. Use it whenever the user asks for a picture, illustration, diagram, or any other visual. Describe the subject, style, colors, and composition fully in the prompt; it always creates a new image and cannot edit existing ones.",
                     "parameters": {
                         "type": "object",
@@ -10032,7 +10032,7 @@ mod tests {
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
         assert_eq!(tools[3], json!({"type":"web_search"}));
-        assert_eq!(tools[4], TOOL_CATALOG["native"]["image_generation"]);
+        assert_eq!(tools[4], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(
