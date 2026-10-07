@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    http::{HeaderMap, StatusCode, Uri, header},
     middleware::{Next, from_fn_with_state},
     response::{
         IntoResponse, Response,
@@ -128,16 +128,20 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 31;
+const USER_SCHEMA_VERSION: i64 = 32;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
 const THREAD_ID_HEADER: &str = "thread-id";
 const SESSION_ID_HEADER: &str = "session-id";
-const GLOBAL_REQUEST_HEADERS_MIGRATED_KEY: &str = "global_request_headers_migrated";
-const GLOBAL_USER_AGENT_KEY: &str = "openai_user_agent";
-const GLOBAL_ORIGINATOR_KEY: &str = "openai_originator";
+/// Upstream `originator` Cybion presents to OpenAI-LB style gateways.
+const CYBION_ORIGINATOR: &str = "cybion";
 const INSIGHT_TIMEZONE: &str = "UTC";
+
+/// User-Agent Cybion presents to upstream gateways and hosted services.
+fn cybion_user_agent() -> String {
+    format!("cybion/{}", env!("CARGO_PKG_VERSION"))
+}
 
 // The browser bearer is minted for all five resource hosts. Cybion forwards
 // that ordinary Auth Mini token only to each service's existing user API; no
@@ -340,7 +344,6 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
     prepare_data_dir(&data_dir)?;
     let admin_db_path = data_dir.join("default.sqlite3");
     prepare_admin_db(&admin_db_path)?;
-    migrate_global_request_headers(&admin_db_path, &data_dir)?;
     recover_interrupted_requests(&data_dir)?;
     let run_dir = data_dir.join("run");
     fs::create_dir_all(&run_dir)?;
@@ -354,7 +357,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         data_dir: Arc::new(data_dir),
         admin_db_path: Arc::new(admin_db_path.clone()),
         client: reqwest::Client::builder()
-            .user_agent(format!("cybion-cloud/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(cybion_user_agent())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(600))
             .build()?,
@@ -411,121 +414,6 @@ fn prepare_admin_db(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    Ok(())
-}
-
-fn admin_meta_string_sync(path: &Path, key: &str) -> Result<Option<String>, ApiError> {
-    let connection = Connection::open(path).map_err(ApiError::internal)?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(ApiError::internal)?;
-    let value = connection
-        .query_row("SELECT value FROM app_meta WHERE key=?", [key], |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(ApiError::internal)?;
-    Ok(value)
-}
-
-#[derive(Default)]
-struct GlobalRequestHeaders {
-    user_agent: String,
-    originator: String,
-}
-
-async fn global_request_headers(state: &AppState) -> Result<GlobalRequestHeaders, ApiError> {
-    let path = state.admin_db_path.clone();
-    tokio::task::spawn_blocking(move || {
-        Ok(GlobalRequestHeaders {
-            user_agent: admin_meta_string_sync(&path, GLOBAL_USER_AGENT_KEY)?.unwrap_or_default(),
-            originator: admin_meta_string_sync(&path, GLOBAL_ORIGINATOR_KEY)?.unwrap_or_default(),
-        })
-    })
-    .await
-    .map_err(ApiError::internal)?
-}
-
-fn set_admin_meta_string_sync(path: &Path, key: &str, value: &str) -> Result<(), ApiError> {
-    let connection = Connection::open(path).map_err(ApiError::internal)?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(ApiError::internal)?;
-    connection
-        .execute(
-            "INSERT INTO app_meta(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![key, value],
-        )
-        .map_err(ApiError::internal)?;
-    Ok(())
-}
-
-fn migrate_global_request_headers(admin_db_path: &Path, data_dir: &Path) -> Result<()> {
-    if admin_meta_string_sync(admin_db_path, GLOBAL_REQUEST_HEADERS_MIGRATED_KEY)
-        .map_err(|error| anyhow::anyhow!(error.message))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let root_user_id = admin_meta_string_sync(admin_db_path, "root_user_id")
-        .map_err(|error| anyhow::anyhow!(error.message))?;
-    let users_dir = data_dir.join("users");
-    let mut paths = fs::read_dir(&users_dir)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("sqlite3"))
-        .collect::<Vec<_>>();
-    paths.sort();
-    if let Some(root_user_id) = root_user_id {
-        let root_path = users_dir.join(format!("{root_user_id}.sqlite3"));
-        paths.sort_by_key(|path| if path == &root_path { 0 } else { 1 });
-    }
-    let mut user_agent = None;
-    let mut originator = None;
-    for path in paths {
-        let connection = Connection::open(path)?;
-        let has_headers: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name IN ('user_agent','originator'))",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_headers {
-            continue;
-        }
-        let values = connection
-            .query_row(
-                "SELECT COALESCE(user_agent,''),COALESCE(originator,'') FROM integration_settings WHERE id=1",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let Some((candidate_user_agent, candidate_originator)) = values else {
-            continue;
-        };
-        if user_agent.is_none() && !candidate_user_agent.trim().is_empty() {
-            user_agent = Some(candidate_user_agent);
-        }
-        if originator.is_none() && !candidate_originator.trim().is_empty() {
-            originator = Some(candidate_originator);
-        }
-        if user_agent.is_some() && originator.is_some() {
-            break;
-        }
-    }
-    set_admin_meta_string_sync(
-        admin_db_path,
-        GLOBAL_USER_AGENT_KEY,
-        user_agent.as_deref().unwrap_or_default(),
-    )
-    .map_err(|error| anyhow::anyhow!(error.message))?;
-    set_admin_meta_string_sync(
-        admin_db_path,
-        GLOBAL_ORIGINATOR_KEY,
-        originator.as_deref().unwrap_or_default(),
-    )
-    .map_err(|error| anyhow::anyhow!(error.message))?;
-    set_admin_meta_string_sync(admin_db_path, GLOBAL_REQUEST_HEADERS_MIGRATED_KEY, "1")
-        .map_err(|error| anyhow::anyhow!(error.message))?;
     Ok(())
 }
 
@@ -642,10 +530,6 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/experimental-features",
             get(experimental_features).put(update_experimental_features),
-        )
-        .route(
-            "/api/integrations",
-            get(integrations).put(update_integrations),
         )
         .route(
             "/api/integrations/upstreams",
@@ -1153,8 +1037,6 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   openai_consumer_secret TEXT NOT NULL DEFAULT '',
   api_key TEXT NOT NULL DEFAULT '',
   openai_base_url TEXT NOT NULL DEFAULT 'https://openai.ntnl.io/v1',
-  user_agent TEXT NOT NULL DEFAULT '',
-  originator TEXT NOT NULL DEFAULT '',
   linkit_bot_id TEXT NOT NULL DEFAULT '',
   linkit_bot_token TEXT NOT NULL DEFAULT '',
   linkit_username TEXT NOT NULL DEFAULT '',
@@ -1519,8 +1401,6 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     }
     for (name, definition) in [
         ("api_key", "TEXT NOT NULL DEFAULT ''"),
-        ("user_agent", "TEXT NOT NULL DEFAULT ''"),
-        ("originator", "TEXT NOT NULL DEFAULT ''"),
         ("ctx_api_key", "TEXT NOT NULL DEFAULT ''"),
         ("ctx_api_key_id", "TEXT NOT NULL DEFAULT ''"),
     ] {
@@ -1535,6 +1415,23 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                     &format!("ALTER TABLE integration_settings ADD COLUMN {name} {definition}"),
                     [],
                 )
+                .map_err(ApiError::internal)?;
+        }
+    }
+    for name in ["user_agent", "originator"] {
+        // COMPATIBILITY: schema <=31 stored the removed global request-header
+        // settings in this table; the feature was removed. Retire this drop
+        // once every retained user database is schema 32+; retain the test.
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if exists {
+            transaction
+                .execute_batch(&format!(
+                    "ALTER TABLE integration_settings DROP COLUMN {name}"
+                ))
                 .map_err(ApiError::internal)?;
         }
     }
@@ -2007,12 +1904,6 @@ struct WorkerCallAuditPage {
     page_size: usize,
 }
 
-#[derive(Debug, Serialize)]
-struct IntegrationStatusView {
-    user_agent: String,
-    originator: String,
-}
-
 #[derive(Clone, Serialize)]
 struct ExperimentalFeaturesView {
     thread_id_header: bool,
@@ -2024,13 +1915,6 @@ struct ExperimentalFeaturesView {
 struct UpdateExperimentalFeaturesInput {
     thread_id_header: Option<bool>,
     session_id_header: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateIntegrationHeadersInput {
-    user_agent: Option<String>,
-    originator: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3001,63 +2885,6 @@ async fn update_experimental_features(
     .await
     .map_err(ApiError::internal)??;
     experimental_features(State(state)).await
-}
-
-async fn integrations(
-    State(state): State<AppState>,
-    axum::Extension(_identity): axum::Extension<BrowserIdentity>,
-) -> Result<Json<IntegrationStatusView>, ApiError> {
-    let headers = global_request_headers(&state).await?;
-    Ok(Json(IntegrationStatusView {
-        user_agent: headers.user_agent,
-        originator: headers.originator,
-    }))
-}
-
-fn request_header_setting(value: String, field: &str) -> Result<String, ApiError> {
-    let value = value.trim().to_owned();
-    if value.chars().count() > 512 || value.chars().any(char::is_control) {
-        return Err(ApiError::bad_request(format!(
-            "{field} must contain at most 512 visible characters"
-        )));
-    }
-    if !value.is_empty() {
-        HeaderValue::from_str(&value).map_err(|_| {
-            ApiError::bad_request(format!("{field} must be a valid HTTP header value"))
-        })?;
-    }
-    Ok(value)
-}
-
-async fn update_integrations(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    Json(input): Json<UpdateIntegrationHeadersInput>,
-) -> Result<Json<IntegrationStatusView>, ApiError> {
-    if !is_admin(&state, &identity.user.id, false).await? {
-        return Err(ApiError::forbidden("administrator access is required"));
-    }
-    let user_agent = input
-        .user_agent
-        .map(|value| request_header_setting(value, "user_agent"))
-        .transpose()?;
-    let originator = input
-        .originator
-        .map(|value| request_header_setting(value, "originator"))
-        .transpose()?;
-    let path = state.admin_db_path.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Some(value) = user_agent {
-            set_admin_meta_string_sync(&path, GLOBAL_USER_AGENT_KEY, &value)?;
-        }
-        if let Some(value) = originator {
-            set_admin_meta_string_sync(&path, GLOBAL_ORIGINATOR_KEY, &value)?;
-        }
-        Ok::<_, ApiError>(())
-    })
-    .await
-    .map_err(ApiError::internal)??;
-    integrations(State(state), axum::Extension(identity)).await
 }
 
 async fn system_resources(
@@ -5945,14 +5772,8 @@ async fn send_responses_request(
         ))
         .bearer_auth(upstream.api_key.as_str())
         .header("Accept", "text/event-stream")
+        .header("originator", CYBION_ORIGINATOR)
         .json(&payload);
-    let headers = global_request_headers(state).await?;
-    if !headers.user_agent.is_empty() {
-        request = request.header(header::USER_AGENT, &headers.user_agent);
-    }
-    if !headers.originator.is_empty() {
-        request = request.header("originator", &headers.originator);
-    }
     if let Some((spec, _)) = audit.as_ref() {
         for (key, header) in [
             (EXPERIMENTAL_THREAD_ID_HEADER_KEY, THREAD_ID_HEADER),
@@ -6780,6 +6601,7 @@ async fn image_generation_tool_output(
             upstream.base_url.trim_end_matches('/')
         ))
         .bearer_auth(upstream.api_key.as_str())
+        .header("originator", CYBION_ORIGINATOR)
         .json(&json!({ "model": IMAGE_GENERATION_MODEL, "prompt": prompt }))
         .send()
         .await;
@@ -7676,7 +7498,10 @@ mod tests {
             AppState {
                 data_dir: Arc::new(data_dir),
                 admin_db_path: Arc::new(admin_db_path.clone()),
-                client: reqwest::Client::new(),
+                client: reqwest::Client::builder()
+                    .user_agent(cybion_user_agent())
+                    .build()
+                    .unwrap(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
                 custom_tool_base_urls: Arc::new(Mutex::new(HashMap::new())),
                 ctx_api_url: CTX_API_URL.to_owned(),
@@ -9942,7 +9767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audited_request_has_idx_snapshot_and_global_headers() {
+    async fn audited_request_has_idx_snapshot_and_cybion_upstream_identity() {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "audit-user").unwrap();
         let thread = create_test_thread(&state, &user).await;
@@ -9961,10 +9786,6 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        set_admin_meta_string_sync(&state.admin_db_path, GLOBAL_USER_AGENT_KEY, "My-Cybion/1.0")
-            .unwrap();
-        set_admin_meta_string_sync(&state.admin_db_path, GLOBAL_ORIGINATOR_KEY, "my-client")
-            .unwrap();
         let (sent, received) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -10009,15 +9830,16 @@ mod tests {
         assert_eq!(response_text(&result.value).as_deref(), Some("ok"));
         let (headers, request) = received.await.unwrap();
         server.await.unwrap();
+        let expected_user_agent = format!("user-agent: cybion/{}", env!("CARGO_PKG_VERSION"));
         assert!(
             headers
                 .lines()
-                .any(|line| line.eq_ignore_ascii_case("user-agent: My-Cybion/1.0"))
+                .any(|line| line.eq_ignore_ascii_case(&expected_user_agent))
         );
         assert!(
             headers
                 .lines()
-                .any(|line| line.eq_ignore_ascii_case("originator: my-client"))
+                .any(|line| line.eq_ignore_ascii_case("originator: cybion"))
         );
         assert!(
             headers

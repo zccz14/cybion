@@ -188,6 +188,47 @@ fn schema_28_upgrade_drops_the_removed_turn_state_table_and_preserves_history() 
 }
 
 #[test]
+fn schema_32_upgrade_drops_the_removed_request_header_columns_and_preserves_history() {
+    // A deployed schema 31 database: current tables plus the removed per-user
+    // User-Agent / originator request header settings.
+    let mut connection = Connection::open_in_memory().unwrap();
+    ensure_user_schema(&mut connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('a','Alpha','model','idle',1,1);
+             INSERT INTO history_records(id,thread_id,kind,payload,created_at) VALUES(1,'a','input','{\"role\":\"user\",\"content\":\"keep\"}',101);
+             ALTER TABLE integration_settings ADD COLUMN user_agent TEXT NOT NULL DEFAULT '';
+             ALTER TABLE integration_settings ADD COLUMN originator TEXT NOT NULL DEFAULT '';
+             PRAGMA user_version=31;",
+        )
+        .unwrap();
+    let original = history_snapshot(&connection);
+    for _ in 0..2 {
+        ensure_user_schema(&mut connection).unwrap();
+        assert_core_history_schema(&connection);
+        assert_eq!(history_snapshot(&connection), original);
+        for name in ["user_agent", "originator"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('integration_settings') WHERE name=?",
+                        [name],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+    }
+    // A database from before the settings feature has neither column; the same
+    // upgrade must pass without them.
+    let mut legacy = Connection::open_in_memory().unwrap();
+    ensure_user_schema(&mut legacy).unwrap();
+    legacy.pragma_update(None, "user_version", 31).unwrap();
+    ensure_user_schema(&mut legacy).unwrap();
+}
+
+#[test]
 fn failed_history_schema_upgrade_rolls_back_columns_index_version_and_data() {
     let mut connection = legacy_database(8);
     let original = history_snapshot(&connection);
