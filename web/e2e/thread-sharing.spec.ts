@@ -103,8 +103,10 @@ test("viewer reads history, screenshots and live updates without any execution o
   await expect(page.getByRole("button", { name: "Load earlier messages" })).toHaveCount(0)
   state.extra = true
   await expect(page.getByText("New owner update", { exact: true })).toBeAttached()
-  await page.locator("summary").filter({ hasText: "Ran for" }).click()
-  await expect(page.locator('img[src^="data:image/png"]')).toHaveCount(1)
+  const screenshot = page.locator('img[src^="data:image/png"]')
+  await expect(screenshot).toHaveCount(1)
+  await expect(screenshot).toBeVisible()
+  expect(await screenshot.evaluate((node) => node.closest("details") === null)).toBe(true)
   await page.getByRole("checkbox", { name: "Minimal view (only for me)" }).check()
   await expect(page.getByRole("textbox")).toHaveCount(0)
   for (const label of ["Send", "Stop", "Continue", "Compact", "Delete", "Rename", "Share Thread"]) await expect(page.getByRole("button", { name: label, exact: true })).toHaveCount(0)
