@@ -9,7 +9,7 @@ const png = `iVBORw0KGgo${"A".repeat(64)}`
 const generated = { id: 11, thread_id: "thread-a", kind: "tool_output", payload: { type: "image_generation_call", result: `${png}B`, output_format: "png" }, created_at: 1 }
 const screenshot = { id: 12, thread_id: "thread-a", kind: "tool_output", payload: { type: "function_call_output", call_id: "call-1", output: JSON.stringify({ data: `${png}C` }) }, created_at: 2, screenshot: true }
 
-test("image groups render each record's image with a zoom dialog trigger in both languages", async () => {
+test("image groups render each record's image in a one-row carousel with a zoom dialog trigger in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { ThreadImageGroup } = await server.ssrLoadModule("/src/components/thread-image-group.tsx")
@@ -21,10 +21,16 @@ test("image groups render each record's image with a zoom dialog trigger in both
       const labels = language === "zh" ? ["生成的图片", "屏幕截图", "查看图片"] : ["Generated image", "Screenshot", "Open image"]
       for (const label of labels) assert.ok(html.includes(`alt="${label}"`) || html.includes(`aria-label="${label}"`), `missing ${label} in ${language}`)
       assert.equal((html.match(/aria-label="(?:查看图片|Open image)"/g) ?? []).length, 2)
+      assert.ok(html.includes('data-slot="carousel"') && html.includes('data-slot="carousel-content"'))
+      assert.equal((html.match(/data-slot="carousel-item"/g) ?? []).length, 2)
+      assert.ok(html.includes('data-slot="carousel-previous"') && html.includes('data-slot="carousel-next"'))
+      assert.ok(html.includes("Previous slide") && html.includes("Next slide"))
     }
-    const empty = renderToStaticMarkup(createElement(ThreadImageGroup, { language: "en", images: [generated] }))
-    assert.ok(empty.includes("Generated image"))
-    assert.ok(!empty.includes("Screenshot"))
+    const single = renderToStaticMarkup(createElement(ThreadImageGroup, { language: "en", images: [generated] }))
+    assert.ok(single.includes("Generated image"))
+    assert.ok(!single.includes("Screenshot"))
+    assert.ok(single.includes('data-slot="carousel-item"'))
+    assert.ok(!single.includes("carousel-previous") && !single.includes("Next slide"), "a single image renders without navigation controls")
   } finally {
     await server.close()
   }
@@ -53,6 +59,8 @@ test("ThreadHistory keeps images outside collapsed groups and shows the minimal 
     const minimal = render(createElement(ThreadHistory, { records, language: "en", minimal: true, renderRecord: stub }))
     assert.equal((minimal.match(/data-slot="thread-image-group"/g) ?? []).length, 1)
     assert.equal((minimal.match(/data:image\/png;base64,/g) ?? []).length, 2)
+    assert.equal((minimal.match(/data-slot="carousel-item"/g) ?? []).length, 2)
+    assert.ok(minimal.includes("Next slide"), "multiple images get navigation controls")
     assert.ok(minimal.indexOf('data-record-id="13"') < minimal.indexOf('data-slot="thread-image-group"'), "the image group renders with the tail candidate")
     assert.ok(!minimal.includes('data-record-id="11"') && !minimal.includes('data-record-id="12"'), "grouped images are not duplicated through renderRecord")
   } finally {

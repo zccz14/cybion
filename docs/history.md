@@ -94,11 +94,13 @@ preview timestamp (`started_at`) until durable timestamps become available.
 
 Minimal mode never folds image content away. Each turn's image records collect
 into one image group rendered with the turn's tail item — its last reply or
-activity line — in record order, and each image opens the zoom dialog. An image
-record that is itself the tail item stays the tail item, and only the turn's
-other images join the group; a folded turn without a tail item still shows its
-images as one image group. The image records are removed from the folded
-remainder, so expanding the process group never duplicates them.
+activity line — in record order. A turn with several images browses them in a
+single-row carousel with previous/next controls; a single image renders without
+controls. Each image opens the zoom dialog. An image record that is itself the
+tail item stays the tail item, and only the turn's other images join the group;
+a folded turn without a tail item still shows its images as one image group.
+The image records are removed from the folded remainder, so expanding the
+process group never duplicates them.
 
 Grouping and disclosure state exist only in the browser. They do not change
 stored rows, API payloads, or model context. Stable group keys keep disclosures
