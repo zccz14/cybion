@@ -21,54 +21,6 @@ pub(super) fn base64url(bytes: &[u8]) -> String {
     encoded
 }
 
-#[test]
-fn existing_user_request_headers_migrate_to_global_admin_settings() {
-    let root = tempfile::tempdir().unwrap();
-    prepare_data_dir(root.path()).unwrap();
-    let admin_db = root.path().join("default.sqlite3");
-    prepare_admin_db(&admin_db).unwrap();
-    let user_db = root.path().join("users/root.sqlite3");
-    let connection = Connection::open(&user_db).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE integration_settings (
-                id INTEGER PRIMARY KEY,
-                openai_consumer_id TEXT NOT NULL,
-                openai_consumer_secret TEXT NOT NULL,
-                openai_base_url TEXT NOT NULL,
-                user_agent TEXT NOT NULL,
-                originator TEXT NOT NULL,
-                linkit_bot_id TEXT NOT NULL,
-                linkit_bot_token TEXT NOT NULL,
-                linkit_username TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            INSERT INTO integration_settings VALUES(1,'','','','Migrated-UA/1.0','migrated-client','','','',1);",
-        )
-        .unwrap();
-    connection.close().unwrap();
-    set_admin_meta_string_sync(&admin_db, "root_user_id", "root").unwrap();
-    migrate_global_request_headers(&admin_db, root.path()).unwrap();
-    assert_eq!(
-        admin_meta_string_sync(&admin_db, GLOBAL_USER_AGENT_KEY)
-            .unwrap()
-            .as_deref(),
-        Some("Migrated-UA/1.0")
-    );
-    assert_eq!(
-        admin_meta_string_sync(&admin_db, GLOBAL_ORIGINATOR_KEY)
-            .unwrap()
-            .as_deref(),
-        Some("migrated-client")
-    );
-    assert_eq!(
-        admin_meta_string_sync(&admin_db, GLOBAL_REQUEST_HEADERS_MIGRATED_KEY)
-            .unwrap()
-            .as_deref(),
-        Some("1")
-    );
-}
-
 async fn install_test_issuer(
     state: &AppState,
 ) -> (String, SigningKey, tokio::task::JoinHandle<()>) {
@@ -189,52 +141,6 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         .await
         .unwrap();
     assert_eq!(loaded, defaults);
-    let integrations_url = format!("{base}/api/integrations");
-    let integrations: Value = client
-        .get(&integrations_url)
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(integrations["user_agent"], "");
-    assert_eq!(integrations["originator"], "");
-    let custom_headers = json!({"user_agent":"My-Cybion/1.0","originator":"my-client"});
-    let saved_integrations: Value = client
-        .put(&integrations_url)
-        .bearer_auth(&token)
-        .json(&custom_headers)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        saved_integrations["user_agent"],
-        custom_headers["user_agent"]
-    );
-    assert_eq!(
-        saved_integrations["originator"],
-        custom_headers["originator"]
-    );
-    assert_eq!(
-        client
-            .put(&integrations_url)
-            .bearer_auth(&token)
-            .json(&json!({"user_agent":"bad\nvalue"}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
     assert_eq!(
         client
             .put(&settings_url)
@@ -369,54 +275,30 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
         StatusCode::UNAUTHORIZED
     );
     let other_token = browser_token(&issuer, &key, "http-settings-other", "other-session");
-    for (url, body) in [
-        (
-            &integrations_url,
-            json!({"user_agent":"not-allowed","originator":"not-allowed"}),
-        ),
-        (
-            &experiments_url,
-            json!({"thread_id_header":false,"session_id_header":true}),
-        ),
-    ] {
-        for method in [reqwest::Method::GET, reqwest::Method::PUT] {
-            assert_eq!(
-                client
-                    .request(method, url)
-                    .json(&body)
-                    .send()
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::UNAUTHORIZED
-            );
-        }
+    let gated = json!({"thread_id_header":false,"session_id_header":true});
+    for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
-                .put(url)
-                .bearer_auth(&other_token)
-                .json(&body)
+                .request(method, &experiments_url)
+                .json(&gated)
                 .send()
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::FORBIDDEN
+            StatusCode::UNAUTHORIZED
         );
     }
-    let unchanged_headers: Value = client
-        .get(&integrations_url)
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    for field in ["user_agent", "originator"] {
-        assert_eq!(unchanged_headers[field], custom_headers[field]);
-    }
+    assert_eq!(
+        client
+            .put(&experiments_url)
+            .bearer_auth(&other_token)
+            .json(&gated)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     let unchanged_features: Value = client
         .get(&experiments_url)
         .bearer_auth(&token)
@@ -739,24 +621,6 @@ async fn experimental_features_can_only_be_changed_by_the_administrator() {
     let features = experimental_features(State(state)).await.unwrap().0;
     assert!(!features.thread_id_header);
     assert!(!features.session_id_header);
-}
-
-#[tokio::test]
-async fn global_request_headers_can_only_be_changed_by_the_administrator() {
-    let (_root, state) = test_state();
-    assert!(admin_user_sync(&state.admin_db_path, "root", true).unwrap());
-    let user = user_for_subject(&state, "other-user").unwrap();
-    let error = update_integrations(
-        State(state),
-        browser_identity_for(&user),
-        Json(UpdateIntegrationHeadersInput {
-            user_agent: Some("not-allowed".to_owned()),
-            originator: Some("not-allowed".to_owned()),
-        }),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

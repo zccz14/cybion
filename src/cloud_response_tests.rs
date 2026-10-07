@@ -1558,6 +1558,17 @@ async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_ima
             .lines()
             .any(|line| line.eq_ignore_ascii_case("authorization: Bearer sk-fixture"))
     );
+    let expected_user_agent = format!("user-agent: cybion/{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case(&expected_user_agent))
+    );
+    assert!(
+        headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("originator: cybion"))
+    );
     assert_eq!(
         request,
         json!({"model":"gpt-image-2","prompt":"A red circle on a white background."})

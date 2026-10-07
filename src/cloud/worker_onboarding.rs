@@ -1,6 +1,7 @@
 //! Device-initiated pairing. The long-lived credential is generated on the device;
 //! neither the browser nor the pairing store ever receives its plaintext.
 use super::*;
+use axum::http::HeaderValue;
 
 const TTL: i64 = 600;
 
