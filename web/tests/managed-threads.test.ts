@@ -137,7 +137,8 @@ test("the hosted shell keeps the outer navigation and Linkit account surface", (
     assert.match(source, new RegExp(`to: \"${route}\"`))
   }
   assert.match(source, /<LinkitProvider/)
-  assert.match(source, /<LinkitMyInfo \/>/)
+  assert.match(source, /import \{ AppLayout, type AppNavGroup \} from "@zccz14\/ux"/)
+  assert.doesNotMatch(source, /<LinkitMyInfo/)
 })
 
 test("the shadcn tooltip context and layered error boundaries protect the shell", () => {

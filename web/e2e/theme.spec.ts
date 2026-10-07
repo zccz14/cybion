@@ -1,4 +1,13 @@
 import { expect, test, type Locator } from "@playwright/test"
+import { linkitFixtureResponse } from "./linkit-fixture"
+
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/**", (route) => {
+    const linkit = linkitFixtureResponse(route.request(), [])
+    if (linkit) return route.fulfill(linkit)
+    return route.fulfill({ status: 404, json: { error: "Not stubbed in the theme fixture" } })
+  })
+})
 
 async function readableNeutralText(locator: Locator) {
   const result = await locator.evaluate((element) => {
@@ -88,7 +97,7 @@ test("keyboard focus, mobile drawer and narrow layout use the neutral theme", as
   await input.press("Tab")
   await expect(page.getByRole("combobox")).toBeFocused()
   await expect(page.getByRole("combobox")).toHaveCSS("border-top-color", "rgb(212, 212, 212)")
-  await page.getByRole("button", { name: "Navigation", exact: true }).click()
+  await page.locator(".ux-app-header__trigger").click()
   await expect(page.getByRole("dialog")).toHaveCSS("background-color", "rgb(22, 22, 22)")
   await page.keyboard.press("Escape")
   await expect(page.getByRole("dialog")).toHaveCount(0)

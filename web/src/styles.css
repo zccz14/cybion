@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@zccz14/ux/styles.css";
 @plugin "@tailwindcss/typography";
 @source "../node_modules/auth-mini-react-components/dist";
 
@@ -124,3 +125,7 @@
 }
 
 #root { isolation: isolate; }
+
+/* Cybion pages own their spacing (two-pane thread layouts, self-padded
+   containers), so the shared shell keeps the main region padding-neutral. */
+.ux-main { padding: 0; }
