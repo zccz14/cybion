@@ -4483,8 +4483,8 @@ fn validate_protocol_record(
 /// Estimate the next inference request's input tokens from recorded evidence:
 /// the latest measured inference input plus appended record bytes, or the whole
 /// compiled range's bytes when no measured anchor still applies. Bytes are
-/// priced at `CONTEXT_ESTIMATE_BYTES_PER_TOKEN` and rounded up; embedded media
-/// data URLs are priced at a bounded cost instead of their raw characters.
+/// priced at `CONTEXT_ESTIMATE_BYTES_PER_TOKEN` and rounded up; embedded binary
+/// media is priced at a bounded cost instead of its raw characters.
 fn estimate_context_tokens(
     connection: &Connection,
     thread_id: &str,
@@ -4579,11 +4579,11 @@ fn estimated_screenshot_bytes(payload: &str, reinjected: bool) -> i64 {
 }
 
 /// One record's estimated replay bytes: its stored character count, except that
-/// each embedded media data URL is priced at a bounded cost instead of its raw
-/// base64 characters.
+/// embedded binary media (a data URL or a generated image's base64 result) is
+/// priced at a bounded cost instead of its raw base64 characters.
 fn estimated_payload_bytes(payload: &str) -> i64 {
     let bytes = payload.chars().count() as i64;
-    if !payload.contains("\"data:") {
+    if !payload.contains("\"data:") && !payload.contains("\"image_generation_call\"") {
         return bytes;
     }
     let Ok(value) = serde_json::from_str::<Value>(payload) else {
@@ -4596,16 +4596,24 @@ fn estimated_payload_bytes(payload: &str) -> i64 {
 
 fn accumulate_media_savings(value: &Value, savings: &mut i64) {
     let capped = CONTEXT_MEDIA_ESTIMATE_TOKENS * CONTEXT_ESTIMATE_BYTES_PER_TOKEN;
+    let savings_for = |text: &str| (text.chars().count() as i64 - capped).max(0);
     match value {
         Value::String(text) if text.starts_with("data:") => {
-            *savings += (text.chars().count() as i64 - capped).max(0);
+            *savings += savings_for(text);
         }
         Value::Array(values) => values
             .iter()
             .for_each(|value| accumulate_media_savings(value, savings)),
-        Value::Object(object) => object
-            .values()
-            .for_each(|value| accumulate_media_savings(value, savings)),
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("image_generation_call")
+                && let Some(Value::String(result)) = object.get("result")
+            {
+                *savings += savings_for(result);
+            }
+            object
+                .values()
+                .for_each(|value| accumulate_media_savings(value, savings));
+        }
         _ => {}
     }
 }
@@ -7958,6 +7966,63 @@ mod tests {
             "a pasted image data URL is priced at a bounded cost, not by its base64 characters"
         );
         assert!(estimate < raw / CONTEXT_ESTIMATE_BYTES_PER_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn context_estimate_prices_generated_images_as_bounded_media() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "estimate-generated-image-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let result = "A".repeat(900_000);
+        let result_chars = result.chars().count() as i64;
+        let (first, second, raw) = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                let first = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"draw a night city"}),
+                );
+                let second = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({
+                        "type":"image_generation_call",
+                        "status":"completed",
+                        "result":result,
+                        "output_format":"png",
+                    }),
+                );
+                let raw: i64 = connection.query_row(
+                    "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
+                     WHERE thread_id=? AND id>=? AND id<=?",
+                    params![thread_id, first, second],
+                    |row| row.get(0),
+                )?;
+                Ok((first, second, raw))
+            }
+        })
+        .await
+        .unwrap();
+        let estimate = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| estimate_context_tokens(connection, &thread_id, first, second)
+        })
+        .await
+        .unwrap();
+        let capped = CONTEXT_MEDIA_ESTIMATE_TOKENS * CONTEXT_ESTIMATE_BYTES_PER_TOKEN;
+        assert_eq!(
+            estimate,
+            (raw - (result_chars - capped) + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1)
+                / CONTEXT_ESTIMATE_BYTES_PER_TOKEN,
+            "a generated image result is priced at a bounded cost, not by its base64 characters"
+        );
+        assert!(
+            estimate < 2_000,
+            "the estimate must not price the raw base64 characters: {estimate}"
+        );
     }
 
     #[test]
