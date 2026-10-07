@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious } from "@/components/ui/carousel"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { threadHistoryRecordKey, threadImage, type HistoryRecord } from "@/lib/thread-history"
 
@@ -9,17 +10,23 @@ const copy = {
 
 export function ThreadImageGroup({ language, images }: { language: "en" | "zh"; images: readonly HistoryRecord[] }) {
   const text = copy[language]
-  return <div data-slot="thread-image-group" className="flex min-w-0 flex-wrap gap-2">
-    {images.map((record) => {
-      const image = threadImage(record)
-      if (image === null) return null
-      return <ThreadImage
-        key={threadHistoryRecordKey(record)}
-        language={language}
-        label={image.kind === "generated" ? text.generated : text.screenshot}
-        source={image.source}
-      />
-    })}
+  const files = images.flatMap((record) => {
+    const image = threadImage(record)
+    if (image === null) return []
+    return [{ key: threadHistoryRecordKey(record), label: image.kind === "generated" ? text.generated : text.screenshot, source: image.source }]
+  })
+  return <div data-slot="thread-image-group" className="min-w-0 max-w-xl">
+    <Carousel opts={{ align: "start" }}>
+      <CarouselContent>
+        {files.map((file) => <CarouselItem key={file.key}>
+          <ThreadImage language={language} label={file.label} source={file.source} />
+        </CarouselItem>)}
+      </CarouselContent>
+      {files.length > 1 && <>
+        <CarouselPrevious className="left-2" />
+        <CarouselNext className="right-2" />
+      </>}
+    </Carousel>
   </div>
 }
 

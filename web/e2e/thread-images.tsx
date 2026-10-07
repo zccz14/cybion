@@ -11,19 +11,20 @@ const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAus
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown, seconds: number, screenshot = false): HistoryRecord {
   return { id, thread_id: "thread-a", kind, payload, created_at: base + seconds, ...(screenshot ? { screenshot: true } : {}) }
 }
-export const threadImageRecords = [
+const threadImageRecords = [
   record(1, "input", { content: "先截个图。" }, 0),
   record(2, "response_output", { id: "rs_2", type: "reasoning", summary: [{ text: "准备截图。" }] }, 5),
   record(3, "tool_output", { type: "function_call_output", call_id: "call-shot", output: JSON.stringify({ data: png }) }, 40, true),
   record(4, "response_output", { id: "msg_4", type: "message", content: [{ type: "output_text", text: "截图完成。" }] }, 45),
-  record(5, "input", { content: "再画一张图。" }, 100),
+  record(5, "input", { content: "再画两张图。" }, 100),
   record(6, "response_output", { id: "rs_6", type: "reasoning", summary: [{ text: "开始出图。" }] }, 105),
   record(7, "tool_output", { type: "function_call_output", call_id: "call-img", output: JSON.stringify({ status: "completed" }) }, 150),
   record(8, "tool_output", { type: "image_generation_call", status: "completed", result: png, output_format: "png" }, 155),
-  record(9, "tool_output", { type: "function_call_output", call_id: "call-shot-2", output: JSON.stringify({ error: "screenshot failed" }) }, 160, true),
-  record(10, "response_output", { id: "msg_10", type: "message", content: [{ type: "output_text", text: "图片已生成。" }] }, 165),
-  record(11, "input", { content: "只出图不回复。" }, 200),
-  record(12, "tool_output", { type: "image_generation_call", status: "completed", result: png, output_format: "png" }, 260),
+  record(9, "tool_output", { type: "image_generation_call", status: "completed", result: png, output_format: "png" }, 160),
+  record(10, "tool_output", { type: "function_call_output", call_id: "call-shot-2", output: JSON.stringify({ error: "screenshot failed" }) }, 165, true),
+  record(11, "response_output", { id: "msg_11", type: "message", content: [{ type: "output_text", text: "图片已生成。" }] }, 170),
+  record(12, "input", { content: "只出图不回复。" }, 200),
+  record(13, "tool_output", { type: "image_generation_call", status: "completed", result: png, output_format: "png" }, 260),
 ]
 
 function Fixture() {
