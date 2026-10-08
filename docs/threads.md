@@ -4,9 +4,12 @@ Every conversation is an independent thread owned by one Auth Mini user. A
 thread is identified by a time-ordered UUID v7 and carries a title, model,
 reasoning effort, Fast mode, an optional context-budget override, status,
 timestamps, its creation origin, and an append-only history.
-Inference requests always include the provider-native `web_search` tool and
-the `normai_image_generation` tool. Image generation is a controller-side tool: when
-a model calls `normai_image_generation`, the Controller sends `POST
+Inference requests always include the `normai_web_search` and
+`normai_image_generation` tools. Both are controller-side tools: when a model
+calls `normai_web_search`, the Controller sends `POST {upstream}/web-search`
+(the hosted gateway routes the pinned `deepseek` source to a load-balancing
+upstream) and appends the result sources as its tool output; when a model
+calls `normai_image_generation`, the Controller sends `POST
 {upstream}/images/generations` (the hosted gateway routes the pinned image
 model to the OpenAI LB image catalog), appends the tool output and the
 generated image to the Thread in one transaction, and the turn continues.
