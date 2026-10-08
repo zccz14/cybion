@@ -146,8 +146,23 @@
     }
   ],
   "native": {
-    "web_search": {
-      "type": "web_search"
+    "normai_web_search": {
+      "type": "function",
+      "name": "normai_web_search",
+      "description": "Search the web and return the result sources (title, URL, and snippet). Use it whenever the user asks about current events, recent releases, prices, or any fact that may have changed since your knowledge; run more searches when one query is not enough, and cite the sources in your reply.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The search query, written like a search engine query. Split complex questions into several targeted searches."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
     },
     "normai_image_generation": {
       "type": "function",

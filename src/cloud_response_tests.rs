@@ -946,7 +946,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
 }
 
 #[tokio::test]
-async fn inference_always_injects_native_web_search_and_image_generation() {
+async fn inference_always_injects_web_search_and_image_tools() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "tool-switch-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -1001,15 +1001,6 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
             .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
             .collect::<Vec<_>>()
     };
-    let natives = |request: &Value| {
-        request["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|tool| tool["type"].as_str().map(str::to_owned))
-            .filter(|tool_type| tool_type == "web_search")
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
         names(&requests[0]),
         [
@@ -1019,10 +1010,18 @@ async fn inference_always_injects_native_web_search_and_image_generation() {
             "bash",
             "browser_control",
             "computer_use",
+            "normai_web_search",
             "normai_image_generation"
         ]
     );
-    assert_eq!(natives(&requests[0]), ["web_search"]);
+    let web_search = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "normai_web_search")
+        .unwrap();
+    assert_eq!(web_search["type"], "function");
+    assert_eq!(web_search["parameters"]["required"], json!(["query"]));
     let image = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -1781,4 +1780,286 @@ async fn superseded_image_generation_outcomes_are_activity() {
         history[history.len() - 1].payload["type"],
         "image_generation_call"
     );
+}
+
+#[tokio::test]
+async fn web_search_calls_the_upstream_web_search_endpoint_and_returns_sources() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "web-search-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (headers, request) = read_http_request(&mut socket).await;
+        let body = json!({
+            "created": 1,
+            "model": "deepseek-flash",
+            "queries": ["rust release"],
+            "sources": [
+                {"url": "https://example.com/one", "title": "One", "snippet": "excerpt one"},
+                {"url": "https://example.com/two"}
+            ],
+            "truncated": false,
+            "usage": {"input_tokens": 9, "output_tokens": 12}
+        })
+        .to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        (headers, request)
+    });
+    let upstream = insert_upstream(&state, &user, "search", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-search",
+        "call_id":"call-search",
+        "name":"normai_web_search",
+        "arguments": json!({"query":"  rust release  "}).to_string()
+    }))
+    .unwrap();
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    let (headers, request) = server.await.unwrap();
+    assert!(
+        headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("authorization: Bearer sk-fixture"))
+    );
+    let expected_user_agent = format!("user-agent: cybion/{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case(&expected_user_agent))
+    );
+    assert!(
+        headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("originator: cybion"))
+    );
+    assert_eq!(request, json!({"source":"deepseek","query":"rust release"}));
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let output = history.last().unwrap();
+    assert_eq!(output.kind, "tool_output");
+    assert_eq!(output.payload["type"], "function_call_output");
+    assert_eq!(output.payload["call_id"], "call-search");
+    assert_eq!(
+        serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+        json!({
+            "status": "completed",
+            "queries": ["rust release"],
+            "sources": [
+                {"url": "https://example.com/one", "title": "One", "snippet": "excerpt one"},
+                {"url": "https://example.com/two"}
+            ]
+        })
+    );
+    // The settled call and its sources replay together as one turn.
+    let items = vec![tool.value(), output.payload.clone()];
+    assert_eq!(replayable_context_items(&items).len(), 2);
+}
+
+#[tokio::test]
+async fn web_search_failures_are_answered_to_the_model() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "web-search-failure-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (status, body) in [
+            (
+                "400 Bad Request",
+                "{\"error\":\"source must be deepseek or openai\"}",
+            ),
+            (
+                "503 Service Unavailable",
+                "{\"error\":\"provider_pool_empty\"}",
+            ),
+        ] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(read_json_request(&mut socket).await);
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        requests
+    });
+    let upstream = insert_upstream(&state, &user, "search", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    for (call_id, expected) in [
+        ("call-rejected", "web search was rejected (HTTP 400)"),
+        (
+            "call-unavailable",
+            "web search is temporarily unavailable (HTTP 503)",
+        ),
+    ] {
+        let tool = ResponseItem::from_value(json!({
+            "type":"function_call",
+            "id": format!("fc-{call_id}"),
+            "call_id": call_id,
+            "name": "normai_web_search",
+            "arguments": json!({"query":"rust release"}).to_string()
+        }))
+        .unwrap();
+        assert!(matches!(
+            start_response_tool(&state, &user, &thread, input, &tool)
+                .await
+                .unwrap(),
+            Some(PendingToolCall::Answered(_))
+        ));
+        let history = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        let output = history.last().unwrap();
+        assert_eq!(output.payload["type"], "function_call_output");
+        assert_eq!(output.payload["call_id"], call_id);
+        assert_eq!(
+            serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+            json!({"error": expected})
+        );
+    }
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0],
+        json!({"source":"deepseek","query":"rust release"})
+    );
+}
+
+#[tokio::test]
+async fn web_search_arguments_are_validated_before_the_search_request() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "web-search-argument-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    for (call_id, arguments, expected) in [
+        (
+            "call-missing",
+            json!({}),
+            "normai_web_search arguments must contain a query",
+        ),
+        (
+            "call-empty",
+            json!({"query":"   "}),
+            "normai_web_search query must not be empty",
+        ),
+    ] {
+        let tool = ResponseItem::from_value(json!({
+            "type":"function_call",
+            "id": format!("fc-{call_id}"),
+            "call_id": call_id,
+            "name": "normai_web_search",
+            "arguments": arguments.to_string()
+        }))
+        .unwrap();
+        assert!(matches!(
+            start_response_tool(&state, &user, &thread, input, &tool)
+                .await
+                .unwrap(),
+            Some(PendingToolCall::Answered(_))
+        ));
+        let history = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        let output = history.last().unwrap();
+        assert_eq!(output.payload["type"], "function_call_output");
+        let value: Value =
+            serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap();
+        assert!(
+            value["error"].as_str().unwrap().contains(expected),
+            "{value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn superseded_web_search_outcomes_are_activity() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "web-search-superseded-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let body = json!({
+            "created": 1,
+            "queries": ["rust release"],
+            "sources": [{"url": "https://example.com/one"}]
+        })
+        .to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let upstream = insert_upstream(&state, &user, "search", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(
+            connection,
+            &thread_id,
+            "input",
+            json!({"role":"user","content":"newer input"}),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-search",
+        "call_id":"call-search",
+        "name":"normai_web_search",
+        "arguments": json!({"query":"rust release"}).to_string()
+    }))
+    .unwrap();
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    server.await.unwrap();
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let output = history.last().unwrap();
+    assert_eq!(output.kind, "activity");
+    assert_eq!(output.payload["type"], "function_call_output");
 }

@@ -81,6 +81,11 @@ const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 // hosted gateways route /images/generations by model name over their image
 // catalog, so the controller pins this default image model.
 const IMAGE_GENERATION_MODEL: &str = "gpt-image-2";
+// Intercepted web search calls the Thread's own upstream web-search endpoint;
+// hosted gateways route /web-search by the requested source, so the controller
+// pins this source (DeepSeek answers with titles and snippets the model can
+// quote directly).
+const WEB_SEARCH_SOURCE: &str = "deepseek";
 // Automatic naming and the rename form share one request path: the compiled
 // conversation is replayed and the naming instruction trails it, so the warmed
 // prefix cache stays reusable and only the trailing instruction is new.
@@ -6477,7 +6482,7 @@ fn responses_tools(
     }
     tools.extend(custom_tools::injected_tools(custom_tools));
     if web_search {
-        tools.push(TOOL_CATALOG["native"]["web_search"].clone());
+        tools.push(TOOL_CATALOG["native"]["normai_web_search"].clone());
     }
     if image_generation {
         tools.push(TOOL_CATALOG["native"]["normai_image_generation"].clone());
@@ -6564,6 +6569,84 @@ async fn list_workers_tool_output(state: &AppState, user: &User) -> Result<Value
         .map(|worker| json!({"worker_id": worker.id, "label": worker.label, "owner_user_id":worker.owner_user_id, "access":worker.access}))
         .collect::<Vec<_>>();
     Ok(json!({ "workers": workers }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebSearchArguments {
+    query: String,
+}
+
+/// Executes one intercepted `normai_web_search` call: the controller asks the
+/// Thread's upstream web-search endpoint and returns the model-facing tool
+/// output. Argument problems and upstream failures are answered to the model
+/// instead of failing the turn.
+async fn web_search_tool_output(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input: &str,
+) -> Result<Value, ApiError> {
+    let arguments: WebSearchArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!(
+            "normai_web_search arguments must contain a query: {error}"
+        ))
+    })?;
+    let query = arguments.query.trim();
+    if query.is_empty() {
+        return Err(ApiError::bad_request(
+            "normai_web_search query must not be empty",
+        ));
+    }
+    let upstream = load_thread_upstream(state, user, thread).await?;
+    let response = state
+        .client
+        .post(format!(
+            "{}/web-search",
+            upstream.base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(upstream.api_key.as_str())
+        .header("originator", CYBION_ORIGINATOR)
+        .json(&json!({ "source": WEB_SEARCH_SOURCE, "query": query }))
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => {
+            return Ok(json!({ "error": "web search is temporarily unavailable" }));
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let error = if status.is_client_error() {
+            format!("web search was rejected (HTTP {})", status.as_u16())
+        } else {
+            format!(
+                "web search is temporarily unavailable (HTTP {})",
+                status.as_u16()
+            )
+        };
+        return Ok(json!({ "error": error }));
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|_| ApiError::unavailable("web search returned an invalid response"))?;
+    let sources = body
+        .get("sources")
+        .and_then(Value::as_array)
+        .filter(|sources| !sources.is_empty())
+        .ok_or_else(|| ApiError::unavailable("web search returned no sources"))?;
+    let queries = body
+        .get("queries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(json!({
+        "status": "completed",
+        "queries": queries,
+        "sources": sources,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -6687,6 +6770,23 @@ async fn start_response_tool(
         ),
         _ => return Ok(None),
     };
+    if name == "normai_web_search" {
+        let output = match web_search_tool_output(state, user, thread, input).await {
+            Ok(output) => output,
+            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                json!({ "error": error.message })
+            }
+            Err(error) => return Err(error),
+        };
+        let output = json!({
+            "type": output_type,
+            "call_id": call_id,
+            "output": serde_json::to_string(&output).map_err(ApiError::internal)?,
+        });
+        return Ok(Some(PendingToolCall::Answered(
+            append_tool_output_item(state, user, thread, input_id, &output).await?,
+        )));
+    }
     if name == "normai_image_generation" {
         let (output, image) = match image_generation_tool_output(state, user, thread, input).await {
             Ok(result) => result,
@@ -9618,16 +9718,19 @@ mod tests {
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[3], json!({"type":"web_search"}));
+        assert_eq!(tools[3], TOOL_CATALOG["native"]["normai_web_search"]);
         assert_eq!(tools[4], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, &[], true, true);
         assert_eq!(worker_and_native.as_array().unwrap().len(), 8);
         assert_eq!(worker_and_native[3]["name"], "bash");
-        assert_eq!(worker_and_native[6]["type"], "web_search");
+        assert_eq!(worker_and_native[6]["name"], "normai_web_search");
         assert_eq!(worker_and_native[7]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, &[], true, false);
         assert_eq!(web_search_only.as_array().unwrap().len(), 4);
-        assert_eq!(web_search_only[3], json!({"type":"web_search"}));
+        assert_eq!(
+            web_search_only[3],
+            TOOL_CATALOG["native"]["normai_web_search"]
+        );
         let context_only = responses_tools(false, true, &[], false, false);
         assert_eq!(
             context_only
@@ -9740,7 +9843,22 @@ mod tests {
         assert_eq!(
             TOOL_CATALOG["native"],
             json!({
-                "web_search": {"type": "web_search"},
+                "normai_web_search": {
+                    "type": "function",
+                    "name": "normai_web_search",
+                    "description": "Search the web and return the result sources (title, URL, and snippet). Use it whenever the user asks about current events, recent releases, prices, or any fact that may have changed since your knowledge; run more searches when one query is not enough, and cite the sources in your reply.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query, written like a search engine query. Split complex questions into several targeted searches."
+                            }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }
+                },
                 "normai_image_generation": {
                     "type": "function",
                     "name": "normai_image_generation",
@@ -9857,7 +9975,7 @@ mod tests {
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
-        assert_eq!(tools[3], json!({"type":"web_search"}));
+        assert_eq!(tools[3], TOOL_CATALOG["native"]["normai_web_search"]);
         assert_eq!(tools[4], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {

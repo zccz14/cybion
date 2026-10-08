@@ -2757,7 +2757,7 @@ const toolLabels: Record<string, CopyKey> = {
   bash: "toolBash",
   browser_control: "toolBrowserControl",
   computer_use: "toolComputerUse",
-  web_search: "toolWebSearch",
+  normai_web_search: "toolWebSearch",
   normai_image_generation: "toolImageGeneration",
 }
 
