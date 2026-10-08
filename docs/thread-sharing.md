@@ -1,6 +1,6 @@
 # Thread sharing
 
-An owner A can give an existing Cybion user B **viewer** access to one Thread.
+An owner A can give any Cybion user B **viewer** access to one Thread. B does not need to have signed in before: a grant silently creates B's account and the share is ready at B's first sign-in.
 This is a live view of the original Thread: all previous conversation content
 and future updates are included, not a copied snapshot. A remains the sole owner.
 The grant neither transfers execution identity nor grants access to Workers,
@@ -16,7 +16,7 @@ from **Work → Shared with me** (also available on the Workers page) when A nee
 the exact ID. The dialog lists active/revoked recipients and pending discovery
 propagation.
 A header chip keeps the active share count visible even when the dialog closes.
-An active grant's repeated PUT is idempotent. Self-grants and recipients who have never signed in to Cybion fail.
+An active grant's repeated PUT is idempotent. Self-grants fail; a recipient who has never signed in to Cybion is provisioned silently instead of being rejected.
 No invitation, email lookup, public user directory or anonymous capability link is
 created. Deployment itself grants nobody access to a Thread.
 
@@ -71,7 +71,9 @@ Schema 24 adds two business tables to the existing per-user SQLite databases:
 
 There is no global routing database and no conversation/title/status replica in B.
 Cross-user reads open only existing files, read-only, and require the current
-schema. Cross-user projection writes also never create a missing user database.
+schema. A grant commit silently creates a missing recipient database (current
+schema, empty except the pending discovery row) before syncing; projection
+writes themselves never create a database.
 The requesting identity always comes from verified browser authentication, never
 request parameters. IDs in URLs locate a source, not an authorization authority.
 
@@ -136,8 +138,8 @@ and loaded pages; this feature does not introduce automatic data retention.
 - Archiving changes A's own list only and does not revoke a share. B's hide action
   cannot archive/delete A's Thread or revoke other users.
 - A missing/unavailable source never falls back to cached content and is never
-  created by a read. A missing recipient leaves propagation pending; it is never
-  recreated by the projector.
+  created by a read. A missing recipient database leaves propagation pending; it
+  is never created by the projector.
 
 ## API
 
@@ -182,7 +184,8 @@ it can be retired once the supported schema floor and all retained backups are
 24 or newer. There is no anonymous-link, editor-role, or legacy shared API branch.
 
 Tests cover the real authenticated HTTP router (including bearer/API-key separation,
-forwarded links and every read surface), idempotency, audit/context separation,
+forwarded links and every read surface), idempotency, silent recipient
+provisioning, audit/context separation,
 source read-only transactions, revoke races, pagination, deletion rollback,
 archive semantics, missing files, failed sync/restart/regrant, stale tombstones,
 allowlisted live/history data and screenshot provenance. Browser tests exercise

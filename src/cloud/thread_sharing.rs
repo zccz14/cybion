@@ -138,13 +138,9 @@ fn change_grant(
         return Err(ApiError::bad_request("cannot share a Thread with yourself"));
     }
     if matches!(action, GrantAction::Grant) {
-        let path = related_path(c, &grantee)?;
-        if !path.try_exists().map_err(ApiError::internal)? {
-            return Err(ApiError::bad_request(
-                "recipient must sign in to Cybion first",
-            ));
-        }
-        existing_reader(&path)?;
+        // Silent provisioning: sharing with a recipient who has never signed in
+        // creates their account so the grant syncs now and awaits first sign-in.
+        open_user(&related_path(c, &grantee)?, true)?;
     }
     let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
     load_thread(&tx, thread)?;

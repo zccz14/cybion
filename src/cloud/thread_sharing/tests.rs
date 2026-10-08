@@ -22,9 +22,9 @@ fn count(c: &Connection, table: &str) -> i64 {
 }
 
 #[test]
-fn owner_only_exact_existing_recipients_and_idempotent_audit() {
+fn owner_only_exact_recipients_and_idempotent_audit() {
     let (root, mut a, mut b, c) = fixture();
-    for recipient in ["a", " a ", " b ", "../escape", "missing"] {
+    for recipient in ["a", " a ", " b ", "../escape"] {
         assert!(change_grant(&mut a, "a", THREAD, recipient, GrantAction::Grant).is_err());
     }
     assert!(!root.path().join("missing.sqlite3").exists());
@@ -73,6 +73,35 @@ fn owner_only_exact_existing_recipients_and_idempotent_audit() {
             c, "a", THREAD, g
         ))
         .is_err()
+    );
+}
+
+#[test]
+fn granting_silently_provisions_a_never_signed_in_recipient() {
+    let (root, mut a, _, _) = fixture();
+    let path = root.path().join("missing.sqlite3");
+    assert!(!path.exists());
+    change_grant(&mut a, "a", THREAD, "missing", GrantAction::Grant).unwrap();
+    assert!(path.is_file());
+    sync_grants(&a, "a").unwrap();
+    let missing = open_user(&path, false).unwrap();
+    assert_eq!(
+        missing
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        USER_SCHEMA_VERSION
+    );
+    assert_eq!(count(&missing, "shared_threads"), 1);
+    assert_eq!(get_grant(&a, THREAD, "missing").unwrap().synced_revision, 1);
+    change_grant(&mut a, "a", THREAD, "missing", GrantAction::Grant).unwrap();
+    assert_eq!(count(&a, "thread_grants"), 1);
+    assert_eq!(count(&a, "history_records"), 1);
+    let source = root.path().join("a.sqlite3");
+    assert!(
+        read_source(&source, "missing", THREAD, None, |c, g| shared_view(
+            c, "a", THREAD, g
+        ))
+        .is_ok()
     );
 }
 
@@ -564,6 +593,51 @@ async fn http_browser_auth_readonly_isolation_live_response_revocation_and_api_k
         .await
         .unwrap();
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["id"], t.id);
+    // A recipient who has never signed in: the grant silently provisions the account.
+    let fresh = user_for_subject(&state, "fresh").unwrap();
+    assert!(!fresh.path.exists());
+    let tf = token("fresh");
+    assert_eq!(
+        client
+            .put(format!("{base}/api/threads/{}/grants/fresh", t.id))
+            .bearer_auth(&ta)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(fresh.path.is_file());
+    assert_eq!(
+        client
+            .get(&shared)
+            .bearer_auth(&tf)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .get(format!("{shared}/history/window"))
+            .bearer_auth(&tf)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let page = client
+        .get(format!("{base}/api/shared-threads"))
+        .bearer_auth(&tf)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
     assert_eq!(page["items"][0]["id"], t.id);
     assert_eq!(
         client

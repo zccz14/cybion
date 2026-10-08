@@ -15,7 +15,7 @@ import { sharedThreadPath, type SharingRequest, type ThreadGrant } from "@/lib/t
 const copy = {
   en: {
     share: "Share Thread", shared: "Shared", unknown: "Sharing status unavailable", title: "Share Thread", description: "Only signed-in users you authorize can open this link. Forwarding it does not grant access.",
-    recipient: "Recipient", hint: "Search the Linkit directory by username or UUID. The recipient must have signed in to Cybion before; no invitation is sent.",
+    recipient: "Recipient", hint: "Search the Linkit directory by username or UUID. If the recipient has never signed in to Cybion, their account is created silently; no invitation is sent.",
     warning: "Shares all existing history and future updates, including tool output, screenshots and Context content already recorded here. Sensitive content in the conversation is not automatically redacted. This does not grant device, model or Context access.",
     consent: "I confirm this user may read the entire Thread and future updates.", grant: "Authorize viewing", self: "You already own this Thread. Choose another user.",
     recipients: "People with access", empty: "No access granted yet.", viewer: "Can view", revoked: "Revoked", pending: "Authorized; list sync pending", revocationPending: "Revoked; list sync pending", revoke: "Revoke access", retry: "Retry", loading: "Loading access…",
@@ -26,7 +26,7 @@ const copy = {
   },
   zh: {
     share: "分享 Thread", shared: "已分享", unknown: "分享状态暂不可用", title: "分享 Thread", description: "只有已登录且获得授权的用户可以访问此链接。转发链接不会授予访问权限。",
-    recipient: "接收者", hint: "在 Linkit 目录中按用户名或 UUID 搜索。接收者必须已登录过 Cybion；不会发送邀请。",
+    recipient: "接收者", hint: "在 Linkit 目录中按用户名或 UUID 搜索。若接收者从未登录过 Cybion，将静默创建其账号；不会发送邀请。",
     warning: "分享全部已有历史和后续更新，包括工具输出、截图和已记录的 Context 内容。会话中的敏感内容不会自动脱敏；不会授予设备、模型或 Context 的使用权限。",
     consent: "我确认此用户可以查看整条 Thread 及后续更新。", grant: "授权查看", self: "你已拥有此 Thread，请选择其他用户。",
     recipients: "拥有访问权限", empty: "尚未授予访问权限。", viewer: "可查看", revoked: "已撤销", pending: "已授权，列表同步中", revocationPending: "已撤销，列表同步中", revoke: "撤销访问", retry: "重试", loading: "正在加载权限…",

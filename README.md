@@ -42,7 +42,9 @@ the first authenticated browser session initializes that key atomically.
   without deleting its history; archived Threads stay readable, remain
   available through the archived group, and can be restored from the list or
   the conversation header.
-- Owners can grant another existing Cybion user read-only access to a Thread.
+- Owners can grant another Cybion user read-only access to a Thread, whether or
+  not the recipient has signed in before: a share silently creates their account
+  and waits at their first sign-in.
   **Share Thread** picks the recipient from the Linkit directory; **Shared with
   me** shows received live shares. History and future updates are included, without granting model,
   Worker, Context, account-audit or API-key access. Revocation blocks new source
