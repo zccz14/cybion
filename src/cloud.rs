@@ -110,6 +110,9 @@ const REINJECTED_SCREENSHOT_WINDOW: usize = 1;
 // upstream body. The browser downsizes before sending; these caps reject the rest.
 const MAX_INPUT_IMAGES: usize = 4;
 const MAX_INPUT_IMAGE_CHARS: usize = 4 * 1024 * 1024;
+// A generation can condition on pictures attached to the turn's input; at most
+// this many, mirroring the hosted image endpoint's reference image cap.
+const MAX_REFERENCE_IMAGES: usize = 4;
 const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
 // Proactive compaction keeps the replayed context under this default token
 // budget. 0 disables it; per-user defaults and per-thread overrides tune it.
@@ -6726,6 +6729,7 @@ async fn web_search_tool_output(
 #[serde(deny_unknown_fields)]
 struct ImageGenerationArguments {
     prompt: String,
+    reference_images: Option<Vec<usize>>,
 }
 
 /// The image generation model a Thread turn runs with: the per-thread override
@@ -6746,11 +6750,13 @@ fn effective_image_generation_model(
 /// Thread's upstream image endpoint with the Thread's configured image model and
 /// returns the model-facing tool output plus the generated image item. Argument
 /// problems and upstream failures are answered to the model instead of failing
-/// the turn.
+/// the turn; `reference_images` positions resolve against the pictures attached
+/// to the request's input record.
 async fn image_generation_tool_output(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
+    input_record_id: i64,
     input: &str,
 ) -> Result<(Value, Option<Value>), ApiError> {
     let arguments: ImageGenerationArguments = serde_json::from_str(input).map_err(|error| {
@@ -6774,7 +6780,17 @@ async fn image_generation_tool_output(
             None,
         ));
     };
+    let reference_images = match &arguments.reference_images {
+        Some(positions) if !positions.is_empty() => {
+            resolve_reference_images(state, user, thread, input_record_id, positions).await?
+        }
+        _ => Vec::new(),
+    };
     let upstream = load_thread_upstream(state, user, thread).await?;
+    let mut body = json!({ "model": model, "prompt": prompt });
+    if !reference_images.is_empty() {
+        body["reference_images"] = json!(reference_images);
+    }
     let response = state
         .client
         .post(format!(
@@ -6783,7 +6799,7 @@ async fn image_generation_tool_output(
         ))
         .bearer_auth(upstream.api_key.as_str())
         .header("originator", CYBION_ORIGINATOR)
-        .json(&json!({ "model": model, "prompt": prompt }))
+        .json(&body)
         .send()
         .await;
     let response = match response {
@@ -6833,6 +6849,81 @@ async fn image_generation_tool_output(
         image["revised_prompt"] = json!(revised_prompt);
     }
     Ok((output, Some(image)))
+}
+
+/// Resolves `reference_images` — one-based positions of the pictures attached
+/// to the request's input record — into the base64 data URLs the upstream
+/// image endpoint takes.
+async fn resolve_reference_images(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input_record_id: i64,
+    positions: &[usize],
+) -> Result<Vec<String>, ApiError> {
+    if positions.len() > MAX_REFERENCE_IMAGES {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_REFERENCE_IMAGES} reference images are supported"
+        )));
+    }
+    let thread_id = thread.id.clone();
+    let images = user_db(state, user, false, move |connection| {
+        input_record_images(connection, &thread_id, input_record_id)
+    })
+    .await?;
+    if images.is_empty() {
+        return Err(ApiError::bad_request(
+            "the turn's input has no attached images",
+        ));
+    }
+    let mut reference_images = Vec::with_capacity(positions.len());
+    for position in positions {
+        let image = position
+            .checked_sub(1)
+            .and_then(|index| images.get(index))
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "reference image position {position} is out of range (the input has {} attached images)",
+                    images.len()
+                ))
+            })?;
+        reference_images.push(image.clone());
+    }
+    Ok(reference_images)
+}
+
+/// The pictures attached to one input record: its stored `input_image` parts in
+/// order, exactly as replay sends them to the model.
+fn input_record_images(
+    connection: &Connection,
+    thread_id: &str,
+    record_id: i64,
+) -> Result<Vec<String>, ApiError> {
+    let payload: Option<String> = connection
+        .query_row(
+            "SELECT payload FROM history_records WHERE thread_id=?1 AND id=?2",
+            params![thread_id, record_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(payload) = payload else {
+        return Err(ApiError::not_found("input record not found"));
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+        return Ok(Vec::new());
+    };
+    let Some(content) = value.get("content").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    Ok(content
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("input_image"))
+        .filter_map(|part| {
+            part.get("image_url")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect())
 }
 
 async fn start_response_tool(
@@ -6886,13 +6977,14 @@ async fn start_response_tool(
         )));
     }
     if name == "normai_image_generation" {
-        let (output, image) = match image_generation_tool_output(state, user, thread, input).await {
-            Ok(result) => result,
-            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
-                (json!({ "error": error.message }), None)
-            }
-            Err(error) => return Err(error),
-        };
+        let (output, image) =
+            match image_generation_tool_output(state, user, thread, input_id, input).await {
+                Ok(result) => result,
+                Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                    (json!({ "error": error.message }), None)
+                }
+                Err(error) => return Err(error),
+            };
         let output = json!({
             "type": output_type,
             "call_id": call_id,
@@ -9988,13 +10080,22 @@ mod tests {
                 "normai_image_generation": {
                     "type": "function",
                     "name": "normai_image_generation",
-                    "description": "Generate an image from a text prompt and attach it to this conversation for the user to see. Use it whenever the user asks for a picture, illustration, diagram, or any other visual. Describe the subject, style, colors, and composition fully in the prompt; it always creates a new image and cannot edit existing ones.",
+                    "description": "Generate an image from a text prompt and attach it to this conversation for the user to see. Use it whenever the user asks for a picture, illustration, diagram, or any other visual. Describe the subject, style, colors, and composition fully in the prompt. To edit or derive from pictures the user attached to their input, pass the one-based positions of those pictures in reference_images (for example [1] for the first attached picture, at most 4); without reference_images it creates a new image from the prompt alone.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "prompt": {
                                 "type": "string",
                                 "description": "Complete description of the image to generate."
+                            },
+                            "reference_images": {
+                                "type": "array",
+                                "maxItems": 4,
+                                "items": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                },
+                                "description": "One-based positions of the pictures attached to the user's input to use as references, for example [1] for the first attached picture. Omit to create a new image from the prompt alone."
                             }
                         },
                         "required": ["prompt"],

@@ -13,13 +13,15 @@ pinned `deepseek` source to a load-balancing upstream) and appends the result
 sources as its tool output; when a model calls `normai_image_generation`, the
 Controller sends `POST {upstream}/images/generations` with the configured
 image model (the hosted gateway routes it over the upstream's image catalog;
-`GET {upstream}/models?kind=image` lists the callable image models), appends
-the tool output and the generated image to the Thread in one transaction, and
-the turn continues. The per-thread image generation model wins over the
-account default, and an empty choice at either level keeps the tool out of
-the request. Failures answer the model instead of failing the turn, and a
-superseded request keeps the outcome as activity like a late Worker result.
-Users and API clients can append input to any thread they own.
+`GET {upstream}/models?kind=image` lists the callable image models) and the
+`reference_images` the call selected — one-based positions of the pictures
+attached to the turn's input, at most 4, resolved to their data URLs — then
+appends the tool output and the generated image to the Thread in one
+transaction, and the turn continues. The per-thread image generation model
+wins over the account default, and an empty choice at either level keeps the
+tool out of the request. Failures answer the model instead of failing the
+turn, and a superseded request keeps the outcome as activity like a late
+Worker result. Users and API clients can append input to any thread they own.
 
 ```text
 user database
