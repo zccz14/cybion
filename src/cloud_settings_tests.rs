@@ -103,7 +103,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
     assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2"});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -451,10 +451,14 @@ async fn authenticated_http_models_route_serves_the_endpoint_catalog() {
 async fn available_models_come_from_each_configured_endpoint_catalog() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "models-owner").unwrap();
-    let empty = upstreams::models(State(state.clone()), browser_identity_for(&user))
-        .await
-        .unwrap()
-        .0;
+    let empty = upstreams::models(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Query(upstreams::ModelsQuery { kind: None }),
+    )
+    .await
+    .unwrap()
+    .0;
     assert!(empty.upstreams.is_empty());
 
     let (catalog_port, catalog) = serve_model_catalog_once().await;
@@ -470,10 +474,14 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
     .await
     .unwrap()
     .0;
-    let models = upstreams::models(State(state.clone()), browser_identity_for(&user))
-        .await
-        .unwrap()
-        .0;
+    let models = upstreams::models(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Query(upstreams::ModelsQuery { kind: None }),
+    )
+    .await
+    .unwrap()
+    .0;
     assert_eq!(models.upstreams.len(), 1);
     assert_eq!(models.upstreams[0].id, created.id);
     assert_eq!(
@@ -493,6 +501,7 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
         service_tier_fast: false,
         context_budget_tokens: 150_000,
         minimal_mode: false,
+        image_generation_model: String::new(),
     };
     assert_eq!(
         update_thread_defaults(
@@ -649,6 +658,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         service_tier_fast: true,
         context_budget_tokens: 150_000,
         minimal_mode: false,
+        image_generation_model: String::new(),
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -728,6 +738,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         service_tier_fast: initial.service_tier_fast,
         context_budget_tokens: initial.context_budget_tokens,
         minimal_mode: false,
+        image_generation_model: String::new(),
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -773,6 +784,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         service_tier_fast: true,
         context_budget_tokens: 150_000,
         minimal_mode: false,
+        image_generation_model: String::new(),
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -796,12 +808,29 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 service_tier_fast: false,
                 context_budget_tokens: 150_000,
                 minimal_mode: false,
+                image_generation_model: String::new(),
             }),
         )
         .await
         .unwrap_err();
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
+    let error = update_thread_defaults(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(ThreadDefaults {
+            model: "gpt-6-astra".to_owned(),
+            upstream_id: Some(upstream.id.clone()),
+            reasoning_effort: "high".to_owned(),
+            service_tier_fast: false,
+            context_budget_tokens: 150_000,
+            minimal_mode: false,
+            image_generation_model: "not a model".to_owned(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(
         read_thread_defaults(State(state.clone()), browser_identity_for(&user))
             .await
@@ -828,6 +857,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 service_tier_fast: true,
                 context_budget_tokens: budget,
                 minimal_mode: false,
+                image_generation_model: String::new(),
             }),
         )
         .await
@@ -844,6 +874,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             service_tier_fast: true,
             context_budget_tokens: 150_000,
             minimal_mode: false,
+            image_generation_model: String::new(),
         }),
     )
     .await
@@ -913,6 +944,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
                 service_tier_fast: true,
                 context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
                 minimal_mode: false,
+                image_generation_model: String::new(),
             }
         );
     }
@@ -1057,6 +1089,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
                 service_tier_fast: None,
                 context_budget_tokens: None,
                 minimal_mode: Some(override_value),
+                image_generation_model: None,
                 archived: None,
             }),
         )
@@ -1072,6 +1105,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
         service_tier_fast: false,
         context_budget_tokens: 150_000,
         minimal_mode: true,
+        image_generation_model: String::new(),
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -1082,6 +1116,105 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
     .unwrap()
     .0;
     assert!(saved.minimal_mode);
+    assert_eq!(
+        read_thread_defaults(State(state), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0,
+        defaults
+    );
+}
+
+#[tokio::test]
+async fn image_generation_model_round_trips_at_both_configuration_levels() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-model-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "image-model", "http://127.0.0.1:9/v1").await;
+    let thread = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    // Both levels start empty: image generation is disabled until a model is
+    // chosen, and an unset Thread override follows the account default.
+    assert_eq!(thread.image_generation_model, None);
+    assert_eq!(
+        read_thread_defaults(State(state.clone()), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0
+            .image_generation_model,
+        ""
+    );
+    for (override_value, expected) in [
+        (
+            Some(Some("gpt-image-2".to_owned())),
+            Some("gpt-image-2".to_owned()),
+        ),
+        (Some(Some(String::new())), Some(String::new())),
+        (Some(None), None),
+    ] {
+        let patched = update_thread(
+            State(state.clone()),
+            browser_identity_for(&user),
+            AxumPath(thread.id.clone()),
+            Json(UpdateThreadInput {
+                title: None,
+                model: None,
+                upstream_id: None,
+                reasoning_effort: None,
+                service_tier_fast: None,
+                context_budget_tokens: None,
+                minimal_mode: None,
+                image_generation_model: override_value,
+                archived: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(patched.image_generation_model, expected);
+    }
+    let error = update_thread(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath(thread.id.clone()),
+        Json(UpdateThreadInput {
+            title: None,
+            model: None,
+            upstream_id: None,
+            reasoning_effort: None,
+            service_tier_fast: None,
+            context_budget_tokens: None,
+            minimal_mode: None,
+            image_generation_model: Some(Some("not a model".to_owned())),
+            archived: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    let defaults = ThreadDefaults {
+        model: "gpt-6-astra".to_owned(),
+        upstream_id: Some(upstream.id.clone()),
+        reasoning_effort: "high".to_owned(),
+        service_tier_fast: false,
+        context_budget_tokens: 150_000,
+        minimal_mode: false,
+        image_generation_model: "gpt-image-2".to_owned(),
+    };
+    let saved = update_thread_defaults(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(defaults.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(saved.image_generation_model, "gpt-image-2");
     assert_eq!(
         read_thread_defaults(State(state), browser_identity_for(&user))
             .await

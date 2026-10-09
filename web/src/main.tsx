@@ -98,7 +98,7 @@ import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
-import { ThreadSettingsPopover, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
+import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
@@ -152,9 +152,10 @@ type ThreadDefaults = {
   service_tier_fast: boolean
   context_budget_tokens: number
   minimal_mode: boolean
+  image_generation_model: string
 }
 type ThreadStatus = "idle" | "running" | "failed"
-type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & {
+type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model"> & {
   created_by: "web" | "api"
   external_ref: string | null
   id: string
@@ -163,6 +164,8 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & {
   display_status: ThreadDisplayStatus
   context_budget_tokens: number | null
   minimal_mode: boolean | null
+  /** `null` follows the account default; `""` disables image generation. */
+  image_generation_model: string | null
   archived_at: number | null
   context_tokens: number | null
   usage: ThreadUsage
@@ -179,7 +182,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode"> & { input: string; images: string[] }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model"> & { input: string; images: string[] }
 type ApiKey = {
   id: string
   label: string
@@ -585,6 +588,9 @@ const copy = {
     contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
     minimalMode: "Minimal mode",
     minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
+    imageGenerationModel: "Image generation model",
+    imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
+    imageGenerationDisabled: "Disabled",
     ctxIntegrationTitle: "CTX documents",
     ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) so threads can read your top-level CTX documents as contexts. Cybion stores a dedicated API key you can revoke anytime.",
     ctxConnected: "Connected",
@@ -916,6 +922,9 @@ const copy = {
     contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为 checkpoint；0 表示关闭，内置默认 200000。",
     minimalMode: "极简模式",
     minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
+    imageGenerationModel: "图像生成模型",
+    imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
+    imageGenerationDisabled: "关闭",
     ctxIntegrationTitle: "CTX 文档",
     ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，线程可以把你的一级 CTX 文档当作上下文读取。Cybion 会保存一把专用 API 密钥，可随时吊销。",
     ctxConnected: "已连接",
@@ -1085,6 +1094,18 @@ function useUpstreamModels(sdk: AuthMiniApi) {
   return useQuery({
     queryKey: ["upstream-models"],
     queryFn: ({ signal }) => api<UpstreamModels>(sdk, "/api/integrations/upstreams/models", { signal }),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  })
+}
+
+// Image generation models come from the same catalog, narrowed to the
+// upstreams' image lists (NormAI answers `?kind=image` with its callable
+// image models).
+function useImageModels(sdk: AuthMiniApi) {
+  return useQuery({
+    queryKey: ["upstream-image-models"],
+    queryFn: ({ signal }) => api<UpstreamModels>(sdk, "/api/integrations/upstreams/models?kind=image", { signal }),
     staleTime: 5 * 60 * 1000,
     retry: false,
   })
@@ -1553,6 +1574,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
   })
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useUpstreamModels(sdk)
+  const imageModels = useImageModels(sdk)
   // The conversation opens on the window that starts at the most recent user input instead of
   // the whole thread; older pages load on demand, each one a whole turn that starts at the
   // previous input record, until `has_older` clears.
@@ -1657,7 +1679,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -1757,7 +1779,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || attachments.images.length > 0) && !busy) submit.mutate({ input, images: attachments.images }) }}>
         <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} />
+            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} />
             <div className="flex flex-wrap items-center gap-2">
               <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
               {action === "send"
@@ -2397,6 +2419,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   const defaults = useQuery({ queryKey, queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useUpstreamModels(sdk)
+  const imageModels = useImageModels(sdk)
   const save = useMutation({
     mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
     onMutate: () => client.cancelQueries({ queryKey }),
@@ -2412,7 +2435,8 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
     value.reasoning_effort !== defaults.data.reasoning_effort ||
     value.service_tier_fast !== defaults.data.service_tier_fast ||
     value.context_budget_tokens !== defaults.data.context_budget_tokens ||
-    value.minimal_mode !== defaults.data.minimal_mode
+    value.minimal_mode !== defaults.data.minimal_mode ||
+    value.image_generation_model !== defaults.data.image_generation_model
   )
   function edit(next: ThreadDefaults) {
     setDraft(next)
@@ -2463,6 +2487,17 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
               <FieldDescription id="default-thread-minimal-description">{t("minimalModeDescription")}</FieldDescription>
             </FieldContent>
             <Switch id="default-thread-minimal" aria-describedby="default-thread-minimal-description" checked={value.minimal_mode} disabled={save.isPending} onCheckedChange={(minimal_mode) => edit({ ...value, minimal_mode })} />
+          </Field>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="default-thread-image-model">{t("imageGenerationModel")}</FieldLabel>
+            <Select value={value.image_generation_model === "" ? "off" : value.image_generation_model} disabled={save.isPending} onValueChange={(selection) => edit({ ...value, image_generation_model: selection === "off" ? "" : selection })}>
+              <SelectTrigger id="default-thread-image-model"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectGroup>
+                <SelectItem value="off">{t("imageGenerationDisabled")}</SelectItem>
+                {imageModelOptions(imageModels.data?.upstreams, null, [value.image_generation_model]).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
+              </SelectGroup></SelectContent>
+            </Select>
+            <FieldDescription id="default-thread-image-model-description">{t("imageGenerationModelDescription")}</FieldDescription>
           </Field>
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}

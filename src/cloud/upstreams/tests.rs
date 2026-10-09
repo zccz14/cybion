@@ -170,6 +170,7 @@ async fn creating_threads_requires_an_existing_upstream() {
             service_tier_fast: false,
             context_budget_tokens: 200_000,
             minimal_mode: false,
+            image_generation_model: String::new(),
         }),
     )
     .await
@@ -288,6 +289,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
             service_tier_fast: false,
             context_budget_tokens: 200_000,
             minimal_mode: false,
+            image_generation_model: String::new(),
         }),
     )
     .await
@@ -340,6 +342,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
             service_tier_fast: false,
             context_budget_tokens: 200_000,
             minimal_mode: false,
+            image_generation_model: String::new(),
         }),
     )
     .await
@@ -370,12 +373,16 @@ async fn model_catalogs_fetch_every_upstream_and_isolate_failures() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "catalog-owner").unwrap();
     assert!(
-        super::models(State(state.clone()), identity(&user))
-            .await
-            .unwrap()
-            .0
-            .upstreams
-            .is_empty()
+        super::models(
+            State(state.clone()),
+            identity(&user),
+            Query(ModelsQuery { kind: None }),
+        )
+        .await
+        .unwrap()
+        .0
+        .upstreams
+        .is_empty()
     );
 
     let good = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -457,10 +464,14 @@ async fn model_catalogs_fetch_every_upstream_and_isolate_failures() {
     .unwrap()
     .0;
 
-    let catalogs = super::models(State(state), identity(&user))
-        .await
-        .unwrap()
-        .0;
+    let catalogs = super::models(
+        State(state),
+        identity(&user),
+        Query(ModelsQuery { kind: None }),
+    )
+    .await
+    .unwrap()
+    .0;
     assert_eq!(catalogs.upstreams.len(), 2);
     let healthy_catalog = catalogs
         .upstreams
@@ -479,6 +490,86 @@ async fn model_catalogs_fetch_every_upstream_and_isolate_failures() {
     assert!(error.contains("503"), "{error}");
     good_task.await.unwrap();
     bad_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn image_model_catalogs_fetch_kind_image_and_reject_unknown_kinds() {
+    use tokio::io::AsyncReadExt;
+
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-catalog-owner").unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let head = loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0);
+            bytes.extend_from_slice(&buffer[..read]);
+            if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break String::from_utf8(bytes[..end].to_vec()).unwrap();
+            }
+        };
+        // The gateway routes /images/generations by model name over its image
+        // catalog, so the controller asks the catalog for exactly that list.
+        assert!(head.starts_with("GET /v1/models?kind=image "), "{head}");
+        let body = json!({"object":"list","data":[{"id":"gpt-image-2"}]}).to_string();
+        use tokio::io::AsyncWriteExt;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let images = super::create(
+        State(state.clone()),
+        identity(&user),
+        create(upstreams_input(
+            "images",
+            &format!("http://127.0.0.1:{port}/v1"),
+            Some("sk-image"),
+        )),
+    )
+    .await
+    .unwrap()
+    .0;
+
+    let catalogs = super::models(
+        State(state.clone()),
+        identity(&user),
+        Query(ModelsQuery {
+            kind: Some("image".to_owned()),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(catalogs.upstreams.len(), 1);
+    assert_eq!(catalogs.upstreams[0].id, images.id);
+    assert_eq!(catalogs.upstreams[0].models, ["gpt-image-2"]);
+    assert!(catalogs.upstreams[0].error.is_none());
+    task.await.unwrap();
+
+    // A kind the controller does not know is rejected before any fetch.
+    let error = super::models(
+        State(state),
+        identity(&user),
+        Query(ModelsQuery {
+            kind: Some("audio".to_owned()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
 }
 
 fn upstreams_input(name: &str, base_url: &str, api_key: Option<&str>) -> CreateUpstreamInput {
