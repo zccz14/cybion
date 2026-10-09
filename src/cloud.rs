@@ -37,6 +37,7 @@ mod ctx_contexts;
 mod custom_tools;
 mod history;
 mod linkit_notifications;
+mod machines;
 mod normai;
 mod recovery;
 mod stats;
@@ -133,7 +134,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 32;
+const USER_SCHEMA_VERSION: i64 = 33;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -384,6 +385,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     tokio::spawn(recovery::supervise(state.clone()));
     tokio::spawn(stats::supervise(state.clone()));
+    tokio::spawn(machines::supervise(state.clone()));
     axum::serve(listener, app(state)).await?;
     Ok(())
 }
@@ -476,6 +478,7 @@ fn recover_user_requests(path: &Path) -> Result<()> {
 fn app(state: AppState) -> Router {
     let browser_api = Router::new()
         .merge(thread_sharing::routes())
+        .merge(machines::routes())
         .route("/api/me", get(me))
         .route(
             "/api/thread-defaults",
@@ -1091,6 +1094,20 @@ CREATE TABLE IF NOT EXISTS worker_calls (
 );
 CREATE INDEX IF NOT EXISTS worker_calls_delivery ON worker_calls(worker_id,status,created_at);
 CREATE INDEX IF NOT EXISTS worker_calls_thread_created ON worker_calls(thread_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS machines (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  command TEXT NOT NULL,
+  interval_seconds INTEGER NOT NULL,
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+  last_run_at INTEGER,
+  last_exit INTEGER,
+  offline_notified_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS machines_enabled_created ON machines(enabled,created_at);
 CREATE TABLE IF NOT EXISTS contexts (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -1143,6 +1160,8 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_started_at
 const USER_WORKER_DISPATCH_INDEXES: &str = r#"
 CREATE INDEX IF NOT EXISTS worker_calls_delivered
   ON worker_calls(worker_id,worker_boot_id,created_at,id) WHERE status='delivered';
+CREATE INDEX IF NOT EXISTS worker_calls_machine
+  ON worker_calls(machine_id,created_at) WHERE machine_id IS NOT NULL;
 "#;
 
 // Thread list and detail rows look up each Thread's latest inference
@@ -1476,6 +1495,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("worker_calls", "received_at", "INTEGER"),
         ("worker_calls", "cancel_notified_at", "INTEGER"),
         ("worker_calls", "cancel_requested_at", "INTEGER"),
+        ("worker_calls", "machine_id", "TEXT"),
         ("workers", "upgrade_id", "TEXT"),
         ("workers", "upgrade_version", "TEXT"),
         ("workers", "upgrade_status", "TEXT"),
@@ -7437,6 +7457,29 @@ async fn worker_result(
         .clone()
         .or_else(|| input.failed.then(|| input.result.to_string()));
     let delivery_id = call_id.clone();
+    let machine_effect = user_db(&state, &user, false, {
+        let worker_id = worker_id.clone();
+        let call_id = call_id.clone();
+        let result_json = result_json.clone();
+        let error_text = error_text.clone();
+        move |connection| {
+            machines::settle_call_result(
+                connection,
+                &worker_id,
+                &call_id,
+                &result_json,
+                status,
+                error_text.as_deref(),
+            )
+        }
+    })
+    .await?;
+    // INVARIANT: machine calls never belong to a Thread turn; their result is
+    // settled by the machine scheduler instead of the Thread protocol below.
+    if let Some(effect) = machine_effect {
+        machines::apply_effect(&state, &user, effect).await;
+        return Ok(Json(json!({"ok": true})));
+    }
     user_db(&state, &user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let started:Option<Option<i64>>=transaction.query_row("SELECT started_at FROM worker_calls WHERE id=? AND worker_id=?",params![call_id,worker_id],|r|r.get(0)).optional()?;
@@ -7585,6 +7628,10 @@ mod normai_tests;
 #[cfg(test)]
 #[path = "cloud_traffic_tests.rs"]
 mod traffic_tests;
+
+#[cfg(test)]
+#[path = "cloud_machine_tests.rs"]
+mod machine_tests;
 
 #[cfg(test)]
 mod tests {

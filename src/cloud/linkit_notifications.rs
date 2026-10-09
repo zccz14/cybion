@@ -470,5 +470,29 @@ pub(super) async fn notify(
     }
 }
 
+/// Sends one plain-text message through the owner's Linkit Bot connection,
+/// gated by the same notification switch as Thread notifications; the caller
+/// decides how failures are reported. This never changes machine state.
+pub(super) async fn notify_text(state: &AppState, user: &User, body: &str) -> Result<(), ApiError> {
+    let (settings, enabled) = user_db(state, user, false, |connection| {
+        let enabled: bool = connection
+            .query_row(
+                "SELECT enabled FROM notification_settings WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        Ok((integration_settings(connection)?, enabled))
+    })
+    .await?;
+    if !enabled {
+        return Ok(());
+    }
+    let result = deliver(state, user, &settings, body).await;
+    record_delivery(state, user, &result).await?;
+    result.map(|_| ())
+}
+
 #[cfg(test)]
 mod tests;

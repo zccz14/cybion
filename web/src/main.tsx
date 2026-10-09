@@ -44,6 +44,7 @@ import {
   NetworkIcon,
   PencilIcon,
   PlusIcon,
+  PowerIcon,
   RefreshCwIcon,
   SendIcon,
   Settings2Icon,
@@ -85,6 +86,7 @@ import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads
 import { sharedThreadReturnHash } from "@/lib/thread-sharing"
 import { WorkerAudit } from "@/components/worker-audit"
 import { WorkerConnections } from "@/components/worker-connections"
+import { UltimateMachines } from "@/components/ultimate-machines"
 import { AdminUsers } from "@/components/admin-users"
 import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
@@ -386,6 +388,8 @@ const copy = {
     revoke: "Revoke",
     noKeys: "No API keys yet.",
     workers: "Workers",
+    machines: "Ultimate Machines",
+    machinesDescription: "Scheduled checks on your Workers. A failing check asks its bound Thread to repair it; an offline Worker is reported through Linkit.",
     workersTitle: "Cybion Worker",
     workersDescription: "Pair a personal device so a thread can run approved local tools.",
     workerDownloads: "Download Cybion Worker",
@@ -715,6 +719,8 @@ const copy = {
     revoke: "撤销",
     noKeys: "还没有 API Key。",
     workers: "Worker",
+    machines: "终极机器",
+    machinesDescription: "在 Worker 上按间隔执行检查；失败时请绑定的 Thread 修复，Worker 离线时通过 Linkit 提醒。",
     workersTitle: "Cybion Worker",
     workersDescription: "配对个人设备，让线程可以调用经过授权的本地工具。",
     workerDownloads: "下载 Cybion Worker",
@@ -1342,6 +1348,7 @@ function WorkspaceShell({
     { to: "/shared-threads", label: language === "zh" ? "分享给我" : "Shared with me", icon: UsersIcon },
     { to: "/contexts", label: t("contexts"), icon: NetworkIcon },
     { to: "/workers", label: t("workers"), icon: NetworkIcon },
+    { to: "/machines", label: t("machines"), icon: PowerIcon },
   ]
   const auditNav = [
     { to: "/insights", label: t("usageStats"), icon: ActivityIcon },
@@ -1409,6 +1416,7 @@ function WorkspaceShell({
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/workers" element={<WorkersPage sdk={sdk} />} />
+            <Route path="/machines" element={<UltimateMachinesPage sdk={sdk} />} />
             <Route path="/admin/configuration" element={<SystemConfigurationPage sdk={sdk} />} />
             <Route path="/configuration" element={<ConfigurationPage sdk={sdk} />} />
             <Route path="/settings" element={<ConfigurationPage sdk={sdk} />} />
@@ -1426,6 +1434,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/history")) return t("history")
+  if (pathname.startsWith("/machines")) return t("machines")
   if (pathname.startsWith("/admin/users")) return t("users")
   if (pathname.startsWith("/admin/configuration")) return t("systemConfiguration")
   if (pathname.startsWith("/admin/resources") || pathname.startsWith("/system") || pathname.startsWith("/resources")) return t("systemTitle")
@@ -2331,6 +2340,11 @@ function usageLabel(item: ReasoningAudit) {
 function WorkerAuditPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   return <Page title={t("workerAudit")} description={t("workerAuditDescription")}><WorkerAudit language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
+}
+
+function UltimateMachinesPage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t, language } = useUi()
+  return <Page title={t("machines")} description={t("machinesDescription")}><UltimateMachines language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
 }
 
 function HistoryPage({ sdk }: { sdk: AuthMiniApi }) {

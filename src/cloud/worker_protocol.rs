@@ -102,6 +102,17 @@ pub(super) fn register(
                 tx.execute("UPDATE worker_calls SET status='failed',error=?,failure_code='worker_restarted',completed_at=? WHERE id=?",params![message,now(),id])?;
                 continue;
             }
+            let machine: bool = tx.query_row(
+                "SELECT machine_id IS NOT NULL FROM worker_calls WHERE id=?",
+                [&id],
+                |r| r.get(0),
+            )?;
+            // A machine run settles through the Ultimate Machine scheduler;
+            // never inject its loss into the repair Thread's history.
+            if machine {
+                tx.execute("UPDATE worker_calls SET status='failed',error=?,failure_code='worker_restarted',completed_at=? WHERE id=?",params![message,now(),id])?;
+                continue;
+            }
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?)",
                 [&thread],

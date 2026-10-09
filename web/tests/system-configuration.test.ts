@@ -33,7 +33,7 @@ test("system configuration has a dedicated route, bilingual title, and admin nav
 
 test("Workers belongs to Work and there is no empty System navigation group", () => {
   const work = main.match(/const workNav = \[([\s\S]*?)\n  \]/)![1]
-  assert.deepEqual([...work.matchAll(/to: "([^\"]+)"/g)].map((match) => match[1]), ["/threads", "/shared-threads", "/contexts", "/workers"])
+  assert.deepEqual([...work.matchAll(/to: "([^\"]+)"/g)].map((match) => match[1]), ["/threads", "/shared-threads", "/contexts", "/workers", "/machines"])
   assert.doesNotMatch(main, /navSystem|systemNav/)
   assert.match(main, /id: "work", label: t\("navWork"\), items: workNav/)
   assert.match(main, /to: "\/system", label: t\("systemResources"\)/)

@@ -257,6 +257,8 @@ fn add_total_audit(
 }
 
 fn fold_hour_workers(connection: &Connection, hour: i64, end: i64) -> Result<(), ApiError> {
+    // Machine runs are scheduler automation, not user Worker usage; keep
+    // them out of the usage snapshots folded from worker_calls.
     let mut statement = connection.prepare(
         "SELECT c.worker_id,
                 COALESCE((SELECT a.model FROM reasoning_audits a
@@ -274,7 +276,7 @@ fn fold_hour_workers(connection: &Connection, hour: i64, end: i64) -> Result<(),
                 COALESCE(SUM(length(CAST(COALESCE(c.result_json,'') AS BLOB))),0),
                 COALESCE(MAX(c.worker_label), MAX(w.label), '')
          FROM worker_calls c LEFT JOIN workers w ON w.id=c.worker_id
-         WHERE c.created_at >= ?1 AND c.created_at < ?2
+         WHERE c.created_at >= ?1 AND c.created_at < ?2 AND c.machine_id IS NULL
          GROUP BY c.worker_id, 2, 3",
     )?;
     let rows = statement.query_map(params![hour, end], |row| {
@@ -315,7 +317,7 @@ fn fold_hour_workers(connection: &Connection, hour: i64, end: i64) -> Result<(),
     }
     let mut statement = connection.prepare(
         "SELECT id FROM worker_calls
-         WHERE created_at >= ?1 AND created_at < ?2 AND status IN ('queued','delivered')",
+         WHERE created_at >= ?1 AND created_at < ?2 AND status IN ('queued','delivered') AND machine_id IS NULL",
     )?;
     let rows = statement.query_map(params![hour, end], |row| row.get::<_, String>(0))?;
     for row in rows {
