@@ -68,6 +68,8 @@ test("payload trims name and intent and forwards an empty intent to clear it", (
 })
 
 const component = readFileSync(new URL("../src/components/ultimate-machines.tsx", import.meta.url), "utf8")
+const help = readFileSync(new URL("../src/components/ultimate-machine-help.tsx", import.meta.url), "utf8")
+const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
 
 test("create and edit dialogs share one field group and one payload builder", () => {
   assert.ok(component.includes('idPrefix="machine-create"'))
@@ -76,6 +78,22 @@ test("create and edit dialogs share one field group and one payload builder", ()
   assert.equal(component.match(/JSON\.stringify\(machinePayload\(input\)\)/g)?.length, 2)
   assert.ok(component.includes('method: "PATCH"'))
   assert.ok(component.includes('update.mutate(editDraft)'))
+})
+
+test("the help dialog explains the Shannon origin and loops the self-off machine", () => {
+  assert.ok(component.includes("<UltimateMachineHelp language={language} />"))
+  assert.ok(help.includes("CircleHelpIcon"))
+  assert.ok(help.includes("Claude Shannon"))
+  assert.ok(help.includes("香农"))
+  assert.ok(help.includes("明斯基"))
+  assert.ok(help.includes("Arthur C. Clarke"))
+  for (const name of ["um-lid", "um-lever", "um-led", "um-rod", "um-fist", "um-swing"]) {
+    assert.ok(help.includes(name), name)
+    assert.ok(styles.includes(`.um-scene .${name} {`), name)
+    assert.ok(styles.includes(`@keyframes ${name} `), name)
+  }
+  assert.ok(styles.includes("animation: um-swing 7s ease-in-out infinite"))
+  assert.ok(styles.includes("prefers-reduced-motion"))
 })
 
 test("real machine list renders edit, run and thread links from live data", async () => {
@@ -95,12 +113,14 @@ test("real machine list renders edit, run and thread links from live data", asyn
       )
     const html = render("en")
     assert.ok(html.includes(">Edit<"))
+    assert.ok(html.includes('aria-label="About the Ultimate Machine"'))
     assert.match(html, /New machine/)
     assert.match(html, /Run now/)
     assert.match(html, /Linux US/)
     assert.match(html, /href="\/threads\/t1"/)
     const zh = render("zh")
     assert.ok(zh.includes(">编辑<"))
+    assert.ok(zh.includes('aria-label="关于「终极机器」"'))
     assert.match(zh, /新建机器/)
     assert.match(zh, /立即运行/)
   } finally {

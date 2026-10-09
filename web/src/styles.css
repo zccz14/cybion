@@ -129,3 +129,22 @@
 /* Cybion pages own their spacing (two-pane thread layouts, self-padded
    containers), so the shared shell keeps the main region padding-neutral. */
 .ux-main { padding: 0; }
+
+/* Ultimate machine help: a looping re-enactment of Claude Shannon's "Ultimate
+   Machine" — a box whose only function is to switch itself off. The scene is a
+   176px stage; parts meet around (200px, box top) so the dialog can resize. */
+.um-scene .um-lid { animation: um-lid 7s ease-in-out infinite; transform-origin: 0 100%; }
+.um-scene .um-lever { animation: um-lever 7s ease-in-out infinite; transform-origin: 50% 100%; }
+.um-scene .um-led { animation: um-led 7s ease-in-out infinite; }
+.um-scene .um-rod { animation: um-rod 7s ease-in-out infinite; transform-origin: 50% 100%; }
+.um-scene .um-fist { animation: um-fist 7s ease-in-out infinite; }
+.um-scene .um-swing { animation: um-swing 7s ease-in-out infinite; transform-origin: 50% 100%; }
+@keyframes um-lid { 0%, 16% { transform: rotate(0deg) } 24%, 66% { transform: rotate(-96deg) } 74%, 100% { transform: rotate(0deg) } }
+@keyframes um-lever { 0%, 8% { transform: rotate(21deg) } 14%, 44% { transform: rotate(-21deg) } 50%, 100% { transform: rotate(21deg) } }
+@keyframes um-led { 0%, 9% { opacity: 0 } 15%, 44% { opacity: 1 } 50%, 100% { opacity: 0 } }
+@keyframes um-rod { 0%, 30% { transform: scaleY(0) } 40%, 56% { transform: scaleY(1) } 64%, 100% { transform: scaleY(0) } }
+@keyframes um-fist { 0%, 30% { transform: translateY(76px) } 40%, 56% { transform: translateY(0px) } 64%, 100% { transform: translateY(76px) } }
+@keyframes um-swing { 0%, 44% { transform: translateX(0) rotate(0deg) } 50%, 52% { transform: translateX(18px) rotate(12deg) } 58%, 100% { transform: translateX(0) rotate(0deg) } }
+@media (prefers-reduced-motion: reduce) {
+  .um-scene * { animation: none !important; }
+}

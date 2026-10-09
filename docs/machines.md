@@ -57,3 +57,8 @@ fresh offline episode.
 interval, latest result, and a link to its repair Thread, and offers the pause
 switch, a one-off run, and an edit dialog that shares the create form (name,
 Worker, command, intent, interval). The page polls every 5 seconds.
+
+A `?` button opens a dialog on the origin of the name — the Bell Labs joke box
+(Marvin Minsky's 1952 build, whose fame spread from Claude Shannon's desk)
+whose only function is to switch itself off — with a small looping animation of
+the box doing exactly that.

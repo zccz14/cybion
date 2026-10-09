@@ -175,7 +175,9 @@ the first authenticated browser session initializes that key atomically.
   Each machine owns the Thread created with it; the Machines page (`#/machines`)
   lists every machine with its Worker, interval, latest result, and Thread link,
   and can pause, run once immediately, or edit a machine (name, Worker, command,
-  intent, interval). Machine runs stay out of usage statistics. See
+  intent, interval); a `?` button explains where the name comes from — the Bell
+  Labs box that only switches itself off — with a small animation. Machine runs
+  stay out of usage statistics. See
   [Ultimate machines](docs/machines.md).
 - A paired Worker performs Bash, Browser Control, and Computer Use on the
   user's device. It keeps no model credential or SQLite database.
