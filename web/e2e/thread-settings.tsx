@@ -9,6 +9,13 @@ const catalogs: ModelCatalog[] = [
   { id: "up-lb", name: "OpenAI-LB", models: ["meta-llama/Llama-3.1-8B-Instruct"], error: "Could not load models" },
 ]
 
+// Image models follow the Thread's upstream: up-deepseek and up-lb serve
+// different lists, and the popover narrows to the selected upstream.
+const imageCatalogs: ModelCatalog[] = [
+  { id: "up-deepseek", name: "DeepSeek", models: ["gpt-image-2"], error: null },
+  { id: "up-lb", name: "OpenAI-LB", models: ["gpt-image-2-mini"], error: null },
+]
+
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")
   const [upstreamId, setUpstreamId] = useState<string | null>("up-deepseek")
@@ -17,6 +24,7 @@ function Fixture() {
   const [fast, setFast] = useState(false)
   const [budget, setBudget] = useState<number | null>(null)
   const [minimal, setMinimal] = useState<boolean | null>(null)
+  const [imageModel, setImageModel] = useState<string | null>(null)
   return <main className="flex min-h-svh flex-col gap-6 p-5">
     <header className="flex items-center gap-3">
       <h1 className="mr-auto text-sm font-semibold">Cybion · Thread settings</h1>
@@ -29,9 +37,10 @@ function Fixture() {
       <span data-testid="fast">{String(fast)}</span>
       <span data-testid="budget">{String(budget)}</span>
       <span data-testid="minimal">{String(minimal)}</span>
+      <span data-testid="image-model">{String(imageModel)}</span>
     </div>
     <div className="mt-auto flex items-center justify-between gap-3 border-t pt-4">
-      <ThreadSettingsPopover model={model} upstreamId={upstreamId} catalogs={catalogs} reasoningEffort={effort} fast={fast} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} minimalMode={{ override: minimal, fallback: false, onChange: setMinimal }} onModelChange={(upstreamId, model) => { setUpstreamId(upstreamId); setModel(model) }} onReasoningChange={setEffort} onFastChange={setFast} />
+      <ThreadSettingsPopover model={model} upstreamId={upstreamId} catalogs={catalogs} reasoningEffort={effort} fast={fast} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} minimalMode={{ override: minimal, fallback: false, onChange: setMinimal }} imageGeneration={{ override: imageModel, fallback: "gpt-image-2", catalogs: imageCatalogs, onChange: setImageModel }} onModelChange={(upstreamId, model) => { setUpstreamId(upstreamId); setModel(model) }} onReasoningChange={setEffort} onFastChange={setFast} />
       <Button>发送</Button>
     </div>
   </main>

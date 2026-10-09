@@ -295,10 +295,22 @@ pub(super) async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub(super) struct ModelsQuery {
+    /// `image` narrows every upstream catalog to its image generation models.
+    pub(super) kind: Option<String>,
+}
+
 pub(super) async fn models(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Query(query): Query<ModelsQuery>,
 ) -> Result<Json<UpstreamModelsView>, ApiError> {
+    let kind = match query.kind.as_deref().unwrap_or_default() {
+        "" => None,
+        "image" => Some("image"),
+        kind => return Err(ApiError::bad_request(format!("unknown model kind: {kind}"))),
+    };
     let upstreams = user_db(&state, &identity.user, true, |connection| {
         load_all(connection)
     })
@@ -312,7 +324,7 @@ pub(super) async fn models(
             // INVARIANT: the hosted OpenAI-LB proxy rejects every /v1 request
             // without a non-empty session-id header. Other providers ignore the
             // header, so one request path serves every upstream.
-            match fetch_models(&state, upstream).await {
+            match fetch_models(&state, upstream, kind).await {
                 Ok(models) => UpstreamCatalogView {
                     id: upstream.id.clone(),
                     name: upstream.name.clone(),
@@ -334,8 +346,12 @@ pub(super) async fn models(
     }))
 }
 
-async fn fetch_models(state: &AppState, upstream: &Upstream) -> Result<Vec<String>, ApiError> {
-    let response = state
+async fn fetch_models(
+    state: &AppState,
+    upstream: &Upstream,
+    kind: Option<&str>,
+) -> Result<Vec<String>, ApiError> {
+    let mut request = state
         .client
         .get(format!(
             "{}/models",
@@ -343,10 +359,11 @@ async fn fetch_models(state: &AppState, upstream: &Upstream) -> Result<Vec<Strin
         ))
         .bearer_auth(upstream.api_key.as_str())
         .timeout(Duration::from_secs(15))
-        .header(SESSION_ID_HEADER, Uuid::new_v4().to_string())
-        .send()
-        .await?
-        .error_for_status()?;
+        .header(SESSION_ID_HEADER, Uuid::new_v4().to_string());
+    if let Some(kind) = kind {
+        request = request.query(&[("kind", kind)]);
+    }
+    let response = request.send().await?.error_for_status()?;
     let catalog = response.json::<ModelCatalog>().await?;
     Ok(catalog.data.into_iter().map(|model| model.id).collect())
 }

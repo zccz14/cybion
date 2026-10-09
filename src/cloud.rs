@@ -78,10 +78,6 @@ const WORKER_ANDROID_RELEASE_BASE_URL: &str =
     "https://github.com/zccz14/cybion-worker-for-android/releases/download";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
-// Intercepted image generation calls the Thread's own upstream image endpoint;
-// hosted gateways route /images/generations by model name over their image
-// catalog, so the controller pins this default image model.
-const IMAGE_GENERATION_MODEL: &str = "gpt-image-2";
 // Intercepted web search calls the Thread's own upstream web-search endpoint;
 // hosted gateways route /web-search by the requested source, so the controller
 // pins this source (DeepSeek answers with titles and snippets the model can
@@ -134,7 +130,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 34;
+const USER_SCHEMA_VERSION: i64 = 35;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -981,6 +977,7 @@ CREATE TABLE IF NOT EXISTS threads (
   service_tier_fast INTEGER NOT NULL DEFAULT 0 CHECK(service_tier_fast IN (0,1)),
   context_budget_tokens INTEGER,
   minimal_mode INTEGER,
+  image_generation_model TEXT,
   archived_at INTEGER,
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
@@ -996,7 +993,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   reasoning_effort TEXT NOT NULL CHECK(reasoning_effort IN ('none','low','medium','high','xhigh','max')),
   service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1)),
   context_budget_tokens INTEGER NOT NULL DEFAULT 200000,
-  minimal_mode INTEGER NOT NULL DEFAULT 0
+  minimal_mode INTEGER NOT NULL DEFAULT 0,
+  image_generation_model TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1480,6 +1478,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("threads", "next_retry_at", "INTEGER"),
         ("threads", "context_budget_tokens", "INTEGER"),
         ("threads", "minimal_mode", "INTEGER"),
+        ("threads", "image_generation_model", "TEXT"),
         ("threads", "archived_at", "INTEGER"),
         (
             "thread_defaults",
@@ -1490,6 +1489,11 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             "thread_defaults",
             "minimal_mode",
             "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "thread_defaults",
+            "image_generation_model",
+            "TEXT NOT NULL DEFAULT ''",
         ),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
@@ -1697,6 +1701,9 @@ struct ThreadView {
     context_budget_tokens: Option<i64>,
     /// Per-thread minimal mode override; `None` follows the user default.
     minimal_mode: Option<bool>,
+    /// Per-thread image generation model override; `None` follows the user
+    /// default and an empty string disables image generation for the Thread.
+    image_generation_model: Option<String>,
     /// When the thread was archived; `None` keeps it in the thread list.
     archived_at: Option<i64>,
     /// Input tokens of the most recent inference request, for the context display.
@@ -1989,6 +1996,10 @@ struct ThreadDefaults {
     /// Whether threads without an override start in minimal mode.
     #[serde(default)]
     minimal_mode: bool,
+    /// Image generation model for threads without an override; empty disables
+    /// image generation.
+    #[serde(default)]
+    image_generation_model: String,
 }
 
 fn default_context_budget_tokens() -> i64 {
@@ -2004,6 +2015,7 @@ impl Default for ThreadDefaults {
             service_tier_fast: false,
             context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
             minimal_mode: false,
+            image_generation_model: String::new(),
         }
     }
 }
@@ -2027,6 +2039,10 @@ struct UpdateThreadInput {
     // `null` clears the override back to the user default; true/false sets it.
     #[serde(default, deserialize_with = "deserialize_double_option_bool")]
     minimal_mode: Option<Option<bool>>,
+    // `null` clears the override back to the user default; an empty string
+    // disables image generation for the thread; a model name enables it.
+    #[serde(default, deserialize_with = "deserialize_double_option_string")]
+    image_generation_model: Option<Option<String>>,
     /// `true` archives the thread and hides it from the thread list; `false`
     /// restores it. Omitted keeps the current state.
     #[serde(default)]
@@ -2045,6 +2061,15 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Some(Option::<bool>::deserialize(deserializer)?))
+}
+
+fn deserialize_double_option_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
 #[derive(Deserialize)]
@@ -2247,6 +2272,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         context_budget_tokens: row.get(14)?,
         context_tokens: row.get(15)?,
         minimal_mode: row.get(16)?,
+        image_generation_model: row.get(21)?,
         archived_at: row.get(18)?,
         usage: ThreadUsage {
             input_tokens,
@@ -2363,6 +2389,16 @@ fn model_id(value: String) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+/// Validates an image generation model choice: empty disables image
+/// generation; a name follows the chat-model identifier rules.
+fn image_generation_model(value: String) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    model_id(value.to_owned())
+}
+
 /// Fails unless the upstream row exists.
 fn require_upstream(connection: &Connection, id: &str) -> Result<(), ApiError> {
     upstreams::exists(connection, id)?
@@ -2460,7 +2496,7 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -2471,6 +2507,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                     service_tier_fast: row.get::<_, i64>(3)? != 0,
                     context_budget_tokens: row.get(4)?,
                     minimal_mode: row.get::<_, i64>(5)? != 0,
+                    image_generation_model: row.get(6)?,
                 })
             },
         )
@@ -2504,21 +2541,23 @@ async fn update_thread_defaults(
         service_tier_fast: input.service_tier_fast,
         context_budget_tokens: context_budget_tokens(input.context_budget_tokens)?,
         minimal_mode: input.minimal_mode,
+        image_generation_model: image_generation_model(input.image_generation_model)?,
     };
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = defaults.upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode) VALUES(1,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model) VALUES(1,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model",
             params![
                 defaults.model,
                 defaults.upstream_id,
                 defaults.reasoning_effort,
                 defaults.service_tier_fast,
                 defaults.context_budget_tokens,
-                defaults.minimal_mode
+                defaults.minimal_mode,
+                defaults.image_generation_model
             ],
         )?;
         Ok(defaults)
@@ -2602,7 +2641,8 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        (SELECT ra.input_tokens FROM reasoning_audits ra
          WHERE ra.thread_id=t.id AND ra.request_kind='inference' AND ra.input_tokens IS NOT NULL
          ORDER BY ra.id DESC LIMIT 1),
-       t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref
+       t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref,
+       t.image_generation_model
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT MAX(id) FROM (
@@ -2689,6 +2729,7 @@ async fn create_thread_for(
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
             context_budget_tokens: None,
             minimal_mode: None,
+            image_generation_model: None,
             archived_at: None,
             context_tokens: None,
             status: "idle".to_owned(),
@@ -3199,6 +3240,10 @@ async fn update_thread(
         .context_budget_tokens
         .map(|value| value.map(context_budget_tokens).transpose())
         .transpose()?;
+    let image_generation_model = input
+        .image_generation_model
+        .map(|value| value.map(image_generation_model).transpose())
+        .transpose()?;
     if title.is_none()
         && model.is_none()
         && upstream_id.is_none()
@@ -3206,6 +3251,7 @@ async fn update_thread(
         && input.service_tier_fast.is_none()
         && input.context_budget_tokens.is_none()
         && input.minimal_mode.is_none()
+        && image_generation_model.is_none()
         && input.archived.is_none()
     {
         return Err(ApiError::bad_request("thread update is empty"));
@@ -3217,7 +3263,7 @@ async fn update_thread(
             require_upstream(connection, id)?;
         }
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -3228,6 +3274,8 @@ async fn update_thread(
                 context_budget.flatten(),
                 input.minimal_mode.is_some(),
                 input.minimal_mode.flatten(),
+                image_generation_model.is_some(),
+                image_generation_model.flatten(),
                 input.archived.is_some(),
                 input.archived.map(|archived| archived.then_some(updated_at)),
                 updated_at,
@@ -4031,6 +4079,7 @@ async fn process_request(
                 service_tier_fast: false,
                 context_budget_tokens: None,
                 minimal_mode: None,
+                image_generation_model: None,
                 archived_at: None,
                 context_tokens: None,
                 status: "failed".to_owned(),
@@ -4916,6 +4965,7 @@ async fn request_agent(
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let has_workers = !workers.is_empty();
+        let image_generation = effective_image_generation_model(thread, &defaults).is_some();
         let response = match responses_request_with_options(
             state,
             user,
@@ -4930,10 +4980,11 @@ async fn request_agent(
             thread.service_tier_fast,
             Value::Array(context.items.clone()),
             has_workers,
-            // Thread turns always inject the native web search tool and the
-            // intercepted image generation tool.
+            // Thread turns always inject the native web search tool; the
+            // intercepted image generation tool follows the configured image
+            // model (an empty choice keeps it out of the request).
             true,
-            true,
+            image_generation,
             Some(cancellation.clone()),
         )
         .await
@@ -6677,10 +6728,25 @@ struct ImageGenerationArguments {
     prompt: String,
 }
 
+/// The image generation model a Thread turn runs with: the per-thread override
+/// wins, otherwise the account default. An empty choice disables the feature
+/// and keeps the image tool out of the request.
+fn effective_image_generation_model(
+    thread: &ThreadView,
+    defaults: &ThreadDefaults,
+) -> Option<String> {
+    let value = thread
+        .image_generation_model
+        .as_deref()
+        .unwrap_or(defaults.image_generation_model.as_str());
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 /// Executes one intercepted `normai_image_generation` call: the controller asks the
-/// Thread's upstream image endpoint and returns the model-facing tool output
-/// plus the generated image item. Argument problems and upstream failures are
-/// answered to the model instead of failing the turn.
+/// Thread's upstream image endpoint with the Thread's configured image model and
+/// returns the model-facing tool output plus the generated image item. Argument
+/// problems and upstream failures are answered to the model instead of failing
+/// the turn.
 async fn image_generation_tool_output(
     state: &AppState,
     user: &User,
@@ -6698,6 +6764,16 @@ async fn image_generation_tool_output(
             "normai_image_generation prompt must not be empty",
         ));
     }
+    let defaults = user_db(state, user, false, |connection| {
+        load_thread_defaults(connection)
+    })
+    .await?;
+    let Some(model) = effective_image_generation_model(thread, &defaults) else {
+        return Ok((
+            json!({ "error": "image generation is disabled for this thread" }),
+            None,
+        ));
+    };
     let upstream = load_thread_upstream(state, user, thread).await?;
     let response = state
         .client
@@ -6707,7 +6783,7 @@ async fn image_generation_tool_output(
         ))
         .bearer_auth(upstream.api_key.as_str())
         .header("originator", CYBION_ORIGINATOR)
-        .json(&json!({ "model": IMAGE_GENERATION_MODEL, "prompt": prompt }))
+        .json(&json!({ "model": model, "prompt": prompt }))
         .send()
         .await;
     let response = match response {
@@ -8302,6 +8378,7 @@ mod tests {
             service_tier_fast: None,
             context_budget_tokens: None,
             minimal_mode: None,
+            image_generation_model: None,
             archived: Some(archived),
         }
     }

@@ -17,11 +17,11 @@ export type ModelCatalog = {
   error: string | null
 }
 
-type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint" | "minimalMode" | "minimalModeHint" | "minimalModeDefault" | "minimalModeOn" | "minimalModeOff"
+type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint" | "minimalMode" | "minimalModeHint" | "minimalModeDefault" | "minimalModeOn" | "minimalModeOff" | "imageGeneration" | "imageGenerationHint" | "imageGenerationDefault" | "imageGenerationDisabled"
 
 const copy = {
-  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default.", minimalMode: "Minimal mode", minimalModeHint: "Only the final reply or status of each turn stays open.", minimalModeDefault: "Follow default", minimalModeOn: "On", minimalModeOff: "Off" },
-  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "上下文预算", contextBudgetHint: "超过后自动压缩；留空跟随默认值。", minimalMode: "极简模式", minimalModeHint: "每轮仅展开最后一条回复或状态。", minimalModeDefault: "跟随默认", minimalModeOn: "开启", minimalModeOff: "关闭" },
+  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default.", minimalMode: "Minimal mode", minimalModeHint: "Only the final reply or status of each turn stays open.", minimalModeDefault: "Follow default", minimalModeOn: "On", minimalModeOff: "Off", imageGeneration: "Image generation", imageGenerationHint: "The image model served by this thread's upstream; Disabled turns image generation off.", imageGenerationDefault: "Follow default", imageGenerationDisabled: "Disabled" },
+  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "上下文预算", contextBudgetHint: "超过后自动压缩；留空跟随默认值。", minimalMode: "极简模式", minimalModeHint: "每轮仅展开最后一条回复或状态。", minimalModeDefault: "跟随默认", minimalModeOn: "开启", minimalModeOff: "关闭", imageGeneration: "图像生成", imageGenerationHint: "由该线程的上游提供的图像模型；选择关闭即禁用图像生成。", imageGenerationDefault: "跟随默认", imageGenerationDisabled: "关闭" },
 } satisfies Record<"en" | "zh", Record<ThreadSettingsCopyKey, string>>
 
 // A model is chosen as an upstream/model pair; the encoded value keeps the two
@@ -46,7 +46,18 @@ export function modelGroups(catalogs: ModelCatalog[] | undefined, upstreamId: st
   return [...groups, { id: upstreamId, name: "", models: [model], error: null }]
 }
 
-export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, minimalMode, disabled, onModelChange, onReasoningChange, onFastChange }: {
+// Image generation runs over the Thread's own upstream, so its options are
+// that upstream's image catalog; saved values stay selectable even when the
+// upstream stops reporting them.
+export function imageModelOptions(catalogs: ModelCatalog[] | undefined, upstreamId: string | null, values: (string | null)[]) {
+  const groups = (catalogs ?? []).filter((group) => upstreamId === null || group.id === upstreamId)
+  const models = new Set<string>()
+  for (const group of groups) for (const model of group.models) models.add(model)
+  for (const value of values) if (value) models.add(value)
+  return [...models]
+}
+
+export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, minimalMode, imageGeneration, disabled, onModelChange, onReasoningChange, onFastChange }: {
   model: string
   upstreamId: string | null
   catalogs: ModelCatalog[] | undefined
@@ -55,6 +66,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
   language: "en" | "zh"
   contextBudget?: { override: number | null; fallback: number; onChange: (value: number | null) => void }
   minimalMode?: { override: boolean | null; fallback: boolean; onChange: (value: boolean | null) => void }
+  imageGeneration?: { override: string | null; fallback: string; catalogs: ModelCatalog[] | undefined; onChange: (value: string | null) => void }
   disabled?: boolean
   onModelChange: (upstreamId: string, model: string) => void
   onReasoningChange: (effort: ReasoningEffort) => void
@@ -123,6 +135,18 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
           </SelectGroup></SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">{t.minimalModeHint}</p>
+      </div>}
+      {imageGeneration && <div className="flex flex-col gap-2">
+        <Label>{t.imageGeneration}</Label>
+        <Select value={imageGeneration.override === null ? "default" : imageGeneration.override === "" ? "off" : imageGeneration.override} onValueChange={(value) => imageGeneration.onChange(value === "default" ? null : value === "off" ? "" : value)} disabled={disabled}>
+          <SelectTrigger className="w-full" aria-label={t.imageGeneration}><SelectValue /></SelectTrigger>
+          <SelectContent><SelectGroup>
+            <SelectItem value="default">{`${t.imageGenerationDefault} (${imageGeneration.fallback === "" ? t.imageGenerationDisabled : imageGeneration.fallback})`}</SelectItem>
+            <SelectItem value="off">{t.imageGenerationDisabled}</SelectItem>
+            {imageModelOptions(imageGeneration.catalogs, upstreamId, [imageGeneration.override, imageGeneration.fallback]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
+          </SelectGroup></SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{t.imageGenerationHint}</p>
       </div>}
     </PopoverContent>
   </Popover>

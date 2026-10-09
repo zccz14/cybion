@@ -21,6 +21,44 @@ async fn input_record(state: &AppState, user: &User, thread: &ThreadView) -> i64
     .unwrap()
 }
 
+/// Sets the per-thread image generation model; an empty string disables the
+/// tool for the Thread even when the account default enables it.
+async fn set_thread_image_generation_model(
+    state: &AppState,
+    user: &User,
+    thread_id: &str,
+    model: &str,
+) {
+    let thread_id = thread_id.to_owned();
+    let model = model.to_owned();
+    user_db(state, user, false, move |connection| {
+        connection.execute(
+            "UPDATE threads SET image_generation_model=? WHERE id=?",
+            params![model, thread_id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Sets the account default image generation model that Threads without an
+/// override follow.
+async fn set_default_image_generation_model(state: &AppState, user: &User, model: &str) {
+    let model = model.to_owned();
+    user_db(state, user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model)
+             VALUES(1,'fixture-model',NULL,'medium',0,200000,0,?)
+             ON CONFLICT(id) DO UPDATE SET image_generation_model=excluded.image_generation_model",
+            params![model],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
 fn completed(id: &str, end_turn: bool) -> ResponseEvent {
     ResponseEvent::Completed(
         serde_json::from_value::<ResponseCompleted>(json!({"id":id,"end_turn":end_turn})).unwrap(),
@@ -929,7 +967,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 7);
     let names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -937,6 +975,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
         .filter_map(|tool| tool["name"].as_str())
         .collect::<Vec<_>>();
     assert!(names.contains(&"bash"));
+    assert!(!names.contains(&"normai_image_generation"));
     for key in ["tools", "tool_choice"] {
         assert_eq!(
             serde_json::to_vec(&requests[0][key]).unwrap(),
@@ -946,10 +985,11 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
 }
 
 #[tokio::test]
-async fn inference_always_injects_web_search_and_image_tools() {
+async fn inference_injects_web_search_and_the_configured_image_tool() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "tool-switch-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
+    set_thread_image_generation_model(&state, &user, &thread.id, "gpt-image-2").await;
     let worker_id = "00000000-0000-4000-8000-000000000001";
     user_db(&state, &user, false, move |connection| {
         connection.execute(
@@ -1033,6 +1073,92 @@ async fn inference_always_injects_web_search_and_image_tools() {
     for request in &requests {
         assert_eq!(request["tool_choice"], "auto");
     }
+}
+
+#[tokio::test]
+async fn inference_offers_the_image_tool_only_with_a_configured_image_model() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-tool-switch-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(read_json_request(&mut socket).await);
+            let body = json!({
+                "id":format!("r{index}"), "end_turn":true,
+                "output":[{"type":"message","id":format!("m{index}"),"role":"assistant","content":[{"type":"output_text","text":"done"}]}]
+            }).to_string();
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
+    };
+    let names = |request: &Value| {
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    // Without a configuration the tool stays out of the request.
+    let input = input_record(&state, &user, &thread).await;
+    let (_tx, mut rx) = tokio::sync::watch::channel(false);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // The account default turns it on for Threads without an override.
+    set_default_image_generation_model(&state, &user, "gpt-image-2").await;
+    let input = input_record(&state, &user, &thread).await;
+    let (_tx, mut rx) = tokio::sync::watch::channel(false);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // An explicit empty override disables it again even with the default set.
+    set_thread_image_generation_model(&state, &user, &thread.id, "").await;
+    let input = input_record(&state, &user, &thread).await;
+    let (_tx, mut rx) = tokio::sync::watch::channel(false);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let requests = server.await.unwrap();
+    assert!(
+        !names(&requests[0])
+            .iter()
+            .any(|name| name == "normai_image_generation")
+    );
+    assert!(
+        names(&requests[1])
+            .iter()
+            .any(|name| name == "normai_image_generation")
+    );
+    assert!(
+        !names(&requests[2])
+            .iter()
+            .any(|name| name == "normai_image_generation")
+    );
 }
 
 #[tokio::test]
@@ -1536,6 +1662,7 @@ async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_ima
     });
     let upstream = insert_upstream(&state, &user, "images", &format!("http://{address}")).await;
     bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    set_thread_image_generation_model(&state, &user, &thread.id, "gpt-image-2").await;
     let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
     let tool = ResponseItem::from_value(json!({
         "type":"function_call",
@@ -1595,6 +1722,40 @@ async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_ima
 }
 
 #[tokio::test]
+async fn image_generation_without_a_configured_model_is_answered_to_the_model() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-generation-disabled-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    // No upstream fixture: a disabled model must be answered without any
+    // image request leaving the controller (the thread upstream is
+    // unreachable, so an attempted call would surface a different error).
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-image",
+        "call_id":"call-image",
+        "name":"normai_image_generation",
+        "arguments": json!({"prompt":"A red circle."}).to_string()
+    }))
+    .unwrap();
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let output = history.last().unwrap();
+    assert_eq!(output.payload["type"], "function_call_output");
+    assert_eq!(
+        serde_json::from_str::<Value>(output.payload["output"].as_str().unwrap()).unwrap(),
+        json!({"error":"image generation is disabled for this thread"})
+    );
+}
+
+#[tokio::test]
 async fn image_generation_failures_are_answered_to_the_model() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "image-generation-failure-user").unwrap();
@@ -1631,6 +1792,7 @@ async fn image_generation_failures_are_answered_to_the_model() {
     });
     let upstream = insert_upstream(&state, &user, "images", &format!("http://{address}")).await;
     bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    set_default_image_generation_model(&state, &user, "gpt-image-2").await;
     let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
     for (call_id, expected) in [
         ("call-rejected", "image generation was rejected (HTTP 400)"),
@@ -1742,6 +1904,7 @@ async fn superseded_image_generation_outcomes_are_activity() {
     });
     let upstream = insert_upstream(&state, &user, "images", &format!("http://{address}")).await;
     bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    set_thread_image_generation_model(&state, &user, &thread.id, "gpt-image-2").await;
     let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
     let thread_id = thread.id.clone();
     user_db(&state, &user, false, move |connection| {

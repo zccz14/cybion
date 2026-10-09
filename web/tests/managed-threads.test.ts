@@ -62,9 +62,9 @@ test("history renders reasoning summaries", () => {
   assert.match(source, /function reasoningSummary\(record: HistoryRecord\)/)
 })
 
-test("thread settings live in the composer popover while native tools are always injected", () => {
+test("thread settings live in the composer popover and the image tool follows its configured model", () => {
   const popover = readFileSync(new URL("../src/components/thread-settings-popover.tsx", import.meta.url), "utf8")
-  assert.match(source, /import \{ ThreadSettingsPopover, modelGroups, modelSelection, parseModelSelection \} from "@\/components\/thread-settings-popover"/)
+  assert.match(source, /import \{ ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection \} from "@\/components\/thread-settings-popover"/)
   assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 2)
   assert.match(popover, /REASONING_EFFORTS = \["low", "medium", "high", "xhigh", "max"\]/)
   assert.match(popover, /ZapIcon/)
@@ -74,6 +74,11 @@ test("thread settings live in the composer popover while native tools are always
   assert.doesNotMatch(source, /settings\.mutate\(\{ web_search/)
   assert.doesNotMatch(source, /\.web_search\b/)
   assert.doesNotMatch(source, /\.image_generation\b/)
+  // Web search stays always-on; image generation follows the model chosen at
+  // the Thread and account levels, read from the upstream image catalogs.
+  assert.match(source, /"\/api\/integrations\/upstreams\/models\?kind=image"/)
+  assert.match(source, /imageGeneration=\{defaults\.data \?/)
+  assert.match(popover, /imageModelOptions/)
 })
 
 test("the tools page renders the shared tool catalog", () => {

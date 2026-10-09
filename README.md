@@ -68,12 +68,14 @@ the first authenticated browser session initializes that key atomically.
   browser back/forward. More pages load when the list footer scrolls into
   view; the archived group stays outside the filter.
 - Configuration lets each user save the default model, reasoning effort,
-  Fast mode, and the context budget for new threads. These defaults are
-  stored in the user's database and apply to both web and API creation. An
-  explicit API `model` overrides the default model; existing threads keep their
-  own settings. The context budget is the token threshold for proactive
-  compaction; each thread may override it, `0` disables it, and the built-in
-  default is 200,000. Threads without an override follow later default changes.
+  Fast mode, the context budget, and the image generation model for new
+  threads. These defaults are stored in the user's database and apply to both
+  web and API creation. An explicit API `model` overrides the default model;
+  existing threads keep their own settings. The context budget is the token
+  threshold for proactive compaction; each thread may override it, `0`
+  disables it, and the built-in default is 200,000. The image generation model
+  is the image model threads without an override use; empty disables image
+  generation. Threads without an override follow later default changes.
 - The conversation supports a minimal mode that folds every turn down to its
   input plus one tail item: the turn's last AI reply or its last activity
   line, whichever came later; all other replies, activities, and protocol
@@ -83,13 +85,16 @@ the first authenticated browser session initializes that key atomically.
   Personal settings; a per-thread override in the thread settings takes
   precedence. It is a display preference stored with the user's settings, and
   it changes neither inference nor history records.
-- Thread turns always include the `normai_web_search` and
-  `normai_image_generation` tools. The Controller intercepts both: web search
+- Thread turns always include the `normai_web_search` tool; the
+  `normai_image_generation` tool joins while an image generation model is
+  configured (per-thread override, otherwise the account default; empty
+  disables it). The Controller intercepts both: web search
   requests the Thread's search endpoint (`POST {upstream}/web-search`; the
   hosted gateway routes the pinned `deepseek` source to a load-balancing
   upstream) and answers the model with the result sources; image generation
-  requests the Thread's image endpoint (`POST {upstream}/images/generations`;
-  the hosted gateway routes it to the OpenAI LB image catalog) and appends the
+  requests the Thread's image endpoint (`POST {upstream}/images/generations`
+  with the configured model; the hosted gateway routes it over the upstream's
+  image catalog, listed by `GET {upstream}/models?kind=image`) and appends the
   generated image to the Thread. Models without either native tool (for
   example DeepSeek) use both capabilities through the same path.
 - `tools.json` is the single source for the upstream tool catalog. The request
