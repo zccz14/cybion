@@ -17,6 +17,7 @@ const TICK_SECONDS: u64 = 30;
 const OUTPUT_TAIL_CHARS: usize = 1_500;
 const NAME_MAX_CHARS: usize = 120;
 const COMMAND_MAX_CHARS: usize = 4_000;
+const INTENT_MAX_CHARS: usize = 2_000;
 const MIN_INTERVAL_SECONDS: i64 = 10;
 const MAX_INTERVAL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
@@ -43,6 +44,7 @@ pub(super) struct MachineView {
     worker_id: String,
     worker_label: Option<String>,
     command: String,
+    intent: Option<String>,
     interval_seconds: i64,
     thread_id: String,
     thread_title: Option<String>,
@@ -53,7 +55,7 @@ pub(super) struct MachineView {
 }
 
 const MACHINE_VIEW_SELECT: &str = "
-SELECT m.id,m.name,m.worker_id,w.label,m.command,m.interval_seconds,m.thread_id,t.title,
+SELECT m.id,m.name,m.worker_id,w.label,m.command,m.intent,m.interval_seconds,m.thread_id,t.title,
        m.enabled,m.last_run_at,m.last_exit,m.created_at
 FROM machines m
 LEFT JOIN workers w ON w.id=m.worker_id
@@ -66,13 +68,14 @@ fn machine_view(row: &rusqlite::Row<'_>) -> rusqlite::Result<MachineView> {
         worker_id: row.get(2)?,
         worker_label: row.get(3)?,
         command: row.get(4)?,
-        interval_seconds: row.get(5)?,
-        thread_id: row.get(6)?,
-        thread_title: row.get(7)?,
-        enabled: row.get(8)?,
-        last_run_at: row.get(9)?,
-        last_exit: row.get(10)?,
-        created_at: row.get(11)?,
+        intent: row.get(5)?,
+        interval_seconds: row.get(6)?,
+        thread_id: row.get(7)?,
+        thread_title: row.get(8)?,
+        enabled: row.get(9)?,
+        last_run_at: row.get(10)?,
+        last_exit: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -107,6 +110,7 @@ pub(super) struct CreateMachineInput {
     name: String,
     worker_id: String,
     command: String,
+    intent: Option<String>,
     interval_seconds: i64,
 }
 
@@ -116,19 +120,15 @@ pub(super) async fn create(
     Json(input): Json<CreateMachineInput>,
 ) -> Result<Json<MachineView>, ApiError> {
     let name = label(&input.name, "name", NAME_MAX_CHARS)?;
-    let command = context_text(input.command, "command", COMMAND_MAX_CHARS, true)?;
-    if command.is_empty() {
-        return Err(ApiError::bad_request(format!(
-            "command must contain 1-{COMMAND_MAX_CHARS} characters"
-        )));
-    }
+    let command = machine_command(input.command)?;
+    let intent = machine_intent(input.intent)?;
     let interval = validate_interval_seconds(input.interval_seconds)?;
     let worker_id = record_id(&input.worker_id)?;
     let thread = create_thread_for(
         &state,
         &identity.user,
         CreateThreadInput {
-            title: Some(name.clone()),
+            title: Some(machine_thread_title(&name)),
             external_ref: None,
             model: None,
             upstream_id: None,
@@ -152,8 +152,8 @@ pub(super) async fn create(
                 return Err(ApiError::not_found("selected Worker not found"));
             }
             connection.execute(
-                "INSERT INTO machines(id,name,worker_id,command,interval_seconds,thread_id,enabled,created_at) VALUES(?,?,?,?,?,?,1,?)",
-                params![machine_id, name, worker_id, command, interval, thread_id, now()],
+                "INSERT INTO machines(id,name,worker_id,command,intent,interval_seconds,thread_id,enabled,created_at) VALUES(?,?,?,?,?,?,?,1,?)",
+                params![machine_id, name, worker_id, command, intent, interval, thread_id, now()],
             )?;
             load_machine(connection, &machine_id)
         }
@@ -165,7 +165,12 @@ pub(super) async fn create(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UpdateMachineInput {
-    enabled: bool,
+    pub(super) enabled: Option<bool>,
+    pub(super) name: Option<String>,
+    pub(super) worker_id: Option<String>,
+    pub(super) command: Option<String>,
+    pub(super) intent: Option<String>,
+    pub(super) interval_seconds: Option<i64>,
 }
 
 pub(super) async fn update(
@@ -176,17 +181,107 @@ pub(super) async fn update(
 ) -> Result<Json<MachineView>, ApiError> {
     let id = record_id(&id)?;
     let machine = user_db(&state, &identity.user, true, move |connection| {
-        let changed = connection.execute(
-            "UPDATE machines SET enabled=? WHERE id=?",
-            params![input.enabled as i64, id],
-        )?;
-        if changed == 0 {
-            return Err(ApiError::not_found("machine not found"));
-        }
-        load_machine(connection, &id)
+        update_machine(connection, &id, input)
     })
     .await?;
     Ok(Json(machine))
+}
+
+pub(super) type MachineEditRow = (String, String, String, Option<String>, i64, bool, String);
+
+pub(super) fn update_machine(
+    connection: &Connection,
+    id: &str,
+    input: UpdateMachineInput,
+) -> Result<MachineView, ApiError> {
+    let existing: Option<MachineEditRow> = connection
+        .query_row(
+            "SELECT name,worker_id,command,intent,interval_seconds,enabled,thread_id FROM machines WHERE id=?",
+            [id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        current_name,
+        current_worker,
+        current_command,
+        current_intent,
+        current_interval,
+        current_enabled,
+        thread_id,
+    )) = existing
+    else {
+        return Err(ApiError::not_found("machine not found"));
+    };
+    let previous_name = current_name.clone();
+    let previous_worker = current_worker.clone();
+    let name = match input.name {
+        Some(value) => label(&value, "name", NAME_MAX_CHARS)?,
+        None => current_name,
+    };
+    let worker_id = match input.worker_id {
+        Some(value) => {
+            let worker_id = record_id(&value)?;
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workers WHERE deleted_at IS NULL AND id=?)",
+                [&worker_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(ApiError::not_found("selected Worker not found"));
+            }
+            worker_id
+        }
+        None => current_worker,
+    };
+    let command = match input.command {
+        Some(value) => machine_command(value)?,
+        None => current_command,
+    };
+    let intent = match input.intent {
+        Some(value) => machine_intent(Some(value))?,
+        None => current_intent,
+    };
+    let interval = match input.interval_seconds {
+        Some(value) => validate_interval_seconds(value)?,
+        None => current_interval,
+    };
+    let enabled = input.enabled.unwrap_or(current_enabled);
+    if worker_id != previous_worker {
+        // A new Worker starts a fresh offline episode.
+        connection.execute(
+            "UPDATE machines SET offline_notified_at=NULL WHERE id=?",
+            [id],
+        )?;
+    }
+    if name != previous_name {
+        // Keep the auto-created Thread labeled with the machine name unless the
+        // user renamed it themselves.
+        connection.execute(
+            "UPDATE threads SET title=?,updated_at=? WHERE id=? AND title=?",
+            params![
+                machine_thread_title(&name),
+                now(),
+                thread_id,
+                machine_thread_title(&previous_name)
+            ],
+        )?;
+    }
+    connection.execute(
+        "UPDATE machines SET name=?,worker_id=?,command=?,intent=?,interval_seconds=?,enabled=? WHERE id=?",
+        params![name, worker_id, command, intent, interval, enabled as i64, id],
+    )?;
+    load_machine(connection, id)
 }
 
 pub(super) async fn run_now(
@@ -233,6 +328,31 @@ fn validate_interval_seconds(value: i64) -> Result<i64, ApiError> {
         )));
     }
     Ok(value)
+}
+
+fn machine_thread_title(name: &str) -> String {
+    format!("终极机器 · {name}")
+}
+
+fn machine_command(value: String) -> Result<String, ApiError> {
+    let command = context_text(value, "command", COMMAND_MAX_CHARS, true)?;
+    if command.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "command must contain 1-{COMMAND_MAX_CHARS} characters"
+        )));
+    }
+    Ok(command)
+}
+
+fn machine_intent(value: Option<String>) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let intent = context_text(value, "intent", INTENT_MAX_CHARS, true)?;
+    if intent.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(intent))
 }
 
 type WorkerRow = (
@@ -532,14 +652,14 @@ pub(super) fn settle_call_result(
         "UPDATE worker_calls SET status=?,result_json=?,error=?,completed_at=?,received_at=COALESCE(received_at,?) WHERE id=? AND worker_id=? AND status IN ('queued','delivered')",
         params![status, result_json, error_text, now(), now(), call_id, worker_id],
     )?;
-    let machine: Option<(String, String, String)> = connection
+    let machine: Option<(String, String, String, Option<String>)> = connection
         .query_row(
-            "SELECT name,thread_id,command FROM machines WHERE id=?",
+            "SELECT name,thread_id,command,intent FROM machines WHERE id=?",
             [&machine_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    let Some((name, thread_id, command)) = machine else {
+    let Some((name, thread_id, command, intent)) = machine else {
         return Ok(Some(MachineEffect::Silent));
     };
     let label = worker_label
@@ -575,8 +695,12 @@ pub(super) fn settle_call_result(
     } else {
         tail_chars(&output, OUTPUT_TAIL_CHARS)
     };
+    let intent_section = intent
+        .filter(|intent| !intent.trim().is_empty())
+        .map(|intent| format!("\n意图：\n{intent}\n"))
+        .unwrap_or_default();
     let text = format!(
-        "【终极机器·{name}】在 Worker「{label}」上执行失败：exit={exit}。\n\n命令：\n{command}\n\n输出尾部：\n{output}\n\n请修复，使该命令返回 0；修好后无需回复，下次运行会自动验证。"
+        "【终极机器·{name}】在 Worker「{label}」上执行失败：exit={exit}。\n{intent_section}\n命令：\n{command}\n\n输出尾部：\n{output}\n\n请修复，使该命令返回 0；修好后无需回复，下次运行会自动验证。"
     );
     Ok(Some(MachineEffect::ThreadMessage { thread_id, text }))
 }

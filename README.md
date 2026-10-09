@@ -168,13 +168,14 @@ the first authenticated browser session initializes that key atomically.
 - **Ultimate machines** run one bash command on a Worker on a fixed interval and
   stay silent while it returns 0. A non-zero result — or a run the Worker never
   settles — is delivered into the machine's bound Thread as a user message
-  asking to make the command return 0 again; while that Thread is running,
-  further failure messages are dropped rather than queued. A Worker that is
-  offline (or missing) reports through the Linkit notification channel instead,
-  once per offline episode. Each machine owns the Thread created with it; the
-  Machines page (`#/machines`) lists every machine with its Worker, interval,
-  latest result, and Thread link, and can pause or run a machine once
-  immediately. Machine runs stay out of usage statistics. See
+  asking to make the command return 0 again, echoing the machine's optional
+  command intent; while that Thread is running, further failure messages are
+  dropped rather than queued. A Worker that is offline (or missing) reports
+  through the Linkit notification channel instead, once per offline episode.
+  Each machine owns the Thread created with it; the Machines page (`#/machines`)
+  lists every machine with its Worker, interval, latest result, and Thread link,
+  and can pause, run once immediately, or edit a machine (name, Worker, command,
+  intent, interval). Machine runs stay out of usage statistics. See
   [Ultimate machines](docs/machines.md).
 - A paired Worker performs Bash, Browser Control, and Computer Use on the
   user's device. It keeps no model credential or SQLite database.

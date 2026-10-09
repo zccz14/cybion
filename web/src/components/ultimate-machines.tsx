@@ -1,10 +1,10 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
-import { PlayIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
+import { PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
 
 import { formattedTime } from "@/lib/time"
-import { formatInterval, machineStatus, type Machine, type MachineStatus } from "@/lib/ultimate-machines"
+import { formatInterval, machineDraftValid, machinePayload, machineStatus, MAX_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, type Machine, type MachineDraft, type MachineStatus } from "@/lib/ultimate-machines"
 import { ownedDevice, type Device } from "@/lib/worker-onboarding"
 
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -23,6 +23,8 @@ const copy = {
   en: {
     newMachine: "New machine",
     newMachineHint: "The machine runs the command on the Worker every interval. A failing run asks its bound Thread to repair it.",
+    editMachine: "Edit machine",
+    editMachineHint: "Change the check, its Worker, or the repair intent. Renaming retitles the repair Thread unless you renamed it by hand.",
     name: "Name",
     namePlaceholder: "e.g. Disk space",
     worker: "Worker",
@@ -30,10 +32,16 @@ const copy = {
     workerHint: "Only Workers you own can run machines.",
     command: "Command",
     commandHint: "Exit code 0 means healthy; any other result asks the Thread to fix it.",
+    intent: "Intent",
+    intentPlaceholder: "e.g. Keep the root disk under 90%",
+    intentHint: "Sent with the repair request when a run fails. Leave empty to omit it.",
     interval: "Interval (seconds)",
     intervalHint: "10–2592000 seconds. The first check runs right after creation.",
     create: "Create",
     creating: "Creating…",
+    edit: "Edit",
+    save: "Save",
+    saving: "Saving…",
     cancel: "Cancel",
     empty: "No machines yet.",
     emptyHint: "Create one to turn a failing check into a repair request in a bound Thread.",
@@ -60,6 +68,8 @@ const copy = {
   zh: {
     newMachine: "新建机器",
     newMachineHint: "机器按间隔在 Worker 上执行命令；失败时会请绑定的 Thread 修复。",
+    editMachine: "编辑机器",
+    editMachineHint: "修改检查命令、Worker 或修复意图；重命名会同步修复 Thread 标题（手动改过的标题保留）。",
     name: "名称",
     namePlaceholder: "例如：磁盘空间",
     worker: "Worker",
@@ -67,10 +77,16 @@ const copy = {
     workerHint: "只能绑定自己的 Worker。",
     command: "命令",
     commandHint: "返回 0 表示正常；其他结果会请 Thread 修复。",
+    intent: "命令意图",
+    intentPlaceholder: "例如：确保根分区低于 90%",
+    intentHint: "运行失败时随修复请求一起发送；留空则不发送。",
     interval: "间隔（秒）",
     intervalHint: "10–2592000 秒；创建后立即执行第一次检查。",
     create: "创建",
     creating: "创建中…",
+    edit: "编辑",
+    save: "保存",
+    saving: "保存中…",
     cancel: "取消",
     empty: "还没有终极机器。",
     emptyHint: "创建一台，让失败的检查变成绑定 Thread 里的修复请求。",
@@ -103,8 +119,7 @@ const statusDot: Record<MachineStatus, string> = {
   paused: "bg-muted-foreground/40",
 }
 
-const MIN_INTERVAL_SECONDS = 10
-const MAX_INTERVAL_SECONDS = 2592000
+const EMPTY_DRAFT: MachineDraft = { name: "", workerId: "", command: "", intent: "", interval: "600" }
 
 type Props = { language: "zh" | "en"; sessionId: string | null | undefined; request: <T>(path: string, init?: RequestInit) => Promise<T> }
 
@@ -114,10 +129,8 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
   const t = (key: keyof typeof copy.en) => copy[language][key]
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
-  const [name, setName] = useState("")
-  const [workerId, setWorkerId] = useState("")
-  const [command, setCommand] = useState("")
-  const [intervalValue, setIntervalValue] = useState("600")
+  const [draft, setDraft] = useState<MachineDraft>(EMPTY_DRAFT)
+  const [editDraft, setEditDraft] = useState<(MachineDraft & { id: string }) | null>(null)
 
   const machines = useQuery({
     queryKey: ["machines", sessionId],
@@ -146,28 +159,48 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
     onSuccess: invalidate,
   })
   const create = useMutation({
-    mutationFn: (input: { name: string; worker_id: string; command: string; interval_seconds: number }) =>
+    mutationFn: (input: MachineDraft) =>
       request<Machine>("/api/machines", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify(machinePayload(input)),
       }),
     onSuccess: () => {
       invalidate()
       setOpen(false)
-      setName("")
-      setWorkerId("")
-      setCommand("")
-      setIntervalValue("600")
+      setDraft(EMPTY_DRAFT)
+    },
+  })
+  const update = useMutation({
+    mutationFn: ({ id, ...input }: MachineDraft & { id: string }) =>
+      request<Machine>(`/api/machines/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(machinePayload(input)),
+      }),
+    onSuccess: () => {
+      invalidate()
+      setEditDraft(null)
     },
   })
 
-  const intervalSeconds = Number(intervalValue)
-  const intervalValid = Number.isFinite(intervalSeconds) && intervalSeconds >= MIN_INTERVAL_SECONDS && intervalSeconds <= MAX_INTERVAL_SECONDS
-  const canSubmit = name.trim().length > 0 && workerId.length > 0 && command.trim().length > 0 && intervalValid && !create.isPending
+  const canCreate = machineDraftValid(draft) && !create.isPending
+  const canEdit = editDraft != null && machineDraftValid(editDraft) && !update.isPending
   const ownedWorkers = (workers.data ?? []).filter(ownedDevice)
   const mutationError = (toggle.error ?? run.error) as Error | null
   const items = machines.data ?? []
+
+  const openEdit = (machine: Machine) => {
+    update.reset()
+    setEditDraft({
+      id: machine.id,
+      name: machine.name,
+      workerId: machine.worker_id,
+      command: machine.command,
+      intent: machine.intent ?? "",
+      interval: String(machine.interval_seconds),
+    })
+  }
 
   return (
     <>
@@ -191,46 +224,11 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
                   <DialogTitle>{t("newMachine")}</DialogTitle>
                   <DialogDescription>{t("newMachineHint")}</DialogDescription>
                 </DialogHeader>
-                <FieldGroup>
-                  <Field>
-                    <FieldLabel htmlFor="machine-name">{t("name")}</FieldLabel>
-                    <FieldContent>
-                      <Input id="machine-name" value={name} onChange={(event) => setName(event.target.value)} placeholder={t("namePlaceholder")} />
-                    </FieldContent>
-                  </Field>
-                  <Field>
-                    <FieldLabel>{t("worker")}</FieldLabel>
-                    <FieldContent>
-                      <Select value={workerId} onValueChange={setWorkerId}>
-                        <SelectTrigger><SelectValue placeholder={t("workerPlaceholder")} /></SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {ownedWorkers.map((device) => <SelectItem key={device.id} value={device.id}>{device.label}</SelectItem>)}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </FieldContent>
-                    <FieldDescription>{t("workerHint")}</FieldDescription>
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="machine-command">{t("command")}</FieldLabel>
-                    <FieldContent>
-                      <Textarea id="machine-command" rows={3} value={command} onChange={(event) => setCommand(event.target.value)} placeholder="curl -fsS http://127.0.0.1:8080/health" />
-                    </FieldContent>
-                    <FieldDescription>{t("commandHint")}</FieldDescription>
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="machine-interval">{t("interval")}</FieldLabel>
-                    <FieldContent>
-                      <Input id="machine-interval" type="number" min={MIN_INTERVAL_SECONDS} max={MAX_INTERVAL_SECONDS} value={intervalValue} onChange={(event) => setIntervalValue(event.target.value)} />
-                    </FieldContent>
-                    <FieldDescription>{t("intervalHint")}</FieldDescription>
-                  </Field>
-                </FieldGroup>
+                <MachineFields t={t} idPrefix="machine-create" values={draft} onChange={setDraft} workers={ownedWorkers} />
                 {create.error && <Alert variant="destructive"><AlertDescription>{(create.error as Error).message}</AlertDescription></Alert>}
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setOpen(false)}>{t("cancel")}</Button>
-                  <Button disabled={!canSubmit} onClick={() => create.mutate({ name: name.trim(), worker_id: workerId, command, interval_seconds: intervalSeconds })}>
+                  <Button disabled={!canCreate} onClick={() => create.mutate(draft)}>
                     {create.isPending ? t("creating") : t("create")}
                   </Button>
                 </DialogFooter>
@@ -288,6 +286,9 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-2">
+                          <Button variant="outline" size="sm" onClick={() => openEdit(machine)}>
+                            <PencilIcon />{t("edit")}
+                          </Button>
                           <Switch checked={machine.enabled} disabled={toggle.isPending} onCheckedChange={(enabled) => toggle.mutate({ id: machine.id, enabled })} aria-label={t("enable")} />
                           <Button variant="outline" size="sm" disabled={run.isPending} onClick={() => run.mutate(machine.id)}>
                             <PlayIcon />{t("runNow")}
@@ -301,8 +302,86 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
             </Table>
           )}
         </CardContent>
+        <Dialog open={editDraft != null} onOpenChange={(next) => { if (!next) setEditDraft(null) }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t("editMachine")}</DialogTitle>
+              <DialogDescription>{t("editMachineHint")}</DialogDescription>
+            </DialogHeader>
+            {editDraft && (
+              <MachineFields
+                t={t}
+                idPrefix="machine-edit"
+                values={editDraft}
+                onChange={(values) => setEditDraft({ ...values, id: editDraft.id })}
+                workers={ownedWorkers}
+              />
+            )}
+            {update.error && <Alert variant="destructive"><AlertDescription>{(update.error as Error).message}</AlertDescription></Alert>}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setEditDraft(null)}>{t("cancel")}</Button>
+              <Button disabled={!canEdit} onClick={() => editDraft && update.mutate(editDraft)}>
+                {update.isPending ? t("saving") : t("save")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </Card>
     </>
+  )
+}
+
+function MachineFields({ t, idPrefix, values, onChange, workers }: {
+  t: (key: keyof typeof copy.en) => string
+  idPrefix: string
+  values: MachineDraft
+  onChange: (values: MachineDraft) => void
+  workers: Device[]
+}) {
+  return (
+    <FieldGroup>
+      <Field>
+        <FieldLabel htmlFor={`${idPrefix}-name`}>{t("name")}</FieldLabel>
+        <FieldContent>
+          <Input id={`${idPrefix}-name`} value={values.name} onChange={(event) => onChange({ ...values, name: event.target.value })} placeholder={t("namePlaceholder")} />
+        </FieldContent>
+      </Field>
+      <Field>
+        <FieldLabel>{t("worker")}</FieldLabel>
+        <FieldContent>
+          <Select value={values.workerId} onValueChange={(workerId) => onChange({ ...values, workerId })}>
+            <SelectTrigger><SelectValue placeholder={t("workerPlaceholder")} /></SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {workers.map((device) => <SelectItem key={device.id} value={device.id}>{device.label}</SelectItem>)}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </FieldContent>
+        <FieldDescription>{t("workerHint")}</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${idPrefix}-command`}>{t("command")}</FieldLabel>
+        <FieldContent>
+          <Textarea id={`${idPrefix}-command`} rows={3} value={values.command} onChange={(event) => onChange({ ...values, command: event.target.value })} placeholder="curl -fsS http://127.0.0.1:8080/health" />
+        </FieldContent>
+        <FieldDescription>{t("commandHint")}</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${idPrefix}-intent`}>{t("intent")}</FieldLabel>
+        <FieldContent>
+          <Textarea id={`${idPrefix}-intent`} rows={2} value={values.intent} onChange={(event) => onChange({ ...values, intent: event.target.value })} placeholder={t("intentPlaceholder")} />
+        </FieldContent>
+        <FieldDescription>{t("intentHint")}</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${idPrefix}-interval`}>{t("interval")}</FieldLabel>
+        <FieldContent>
+          <Input id={`${idPrefix}-interval`} type="number" min={MIN_INTERVAL_SECONDS} max={MAX_INTERVAL_SECONDS} value={values.interval} onChange={(event) => onChange({ ...values, interval: event.target.value })} />
+        </FieldContent>
+        <FieldDescription>{t("intervalHint")}</FieldDescription>
+      </Field>
+    </FieldGroup>
   )
 }
 

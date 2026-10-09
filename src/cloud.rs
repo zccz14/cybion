@@ -134,7 +134,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 33;
+const USER_SCHEMA_VERSION: i64 = 34;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1099,6 +1099,7 @@ CREATE TABLE IF NOT EXISTS machines (
   name TEXT NOT NULL,
   worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
   command TEXT NOT NULL,
+  intent TEXT,
   interval_seconds INTEGER NOT NULL,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
@@ -1496,6 +1497,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("worker_calls", "cancel_notified_at", "INTEGER"),
         ("worker_calls", "cancel_requested_at", "INTEGER"),
         ("worker_calls", "machine_id", "TEXT"),
+        ("machines", "intent", "TEXT"),
         ("workers", "upgrade_id", "TEXT"),
         ("workers", "upgrade_version", "TEXT"),
         ("workers", "upgrade_status", "TEXT"),

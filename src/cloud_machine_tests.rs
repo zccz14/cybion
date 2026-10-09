@@ -36,11 +36,12 @@ fn insert_machine(
     worker_id: &str,
     thread_id: &str,
     interval_seconds: i64,
+    intent: Option<&str>,
 ) {
     connection
         .execute(
-            "INSERT INTO machines(id,name,worker_id,command,interval_seconds,thread_id,enabled,created_at) VALUES(?,?,?,?,?,?,1,?)",
-            params![id, "磁盘检查", worker_id, "test -f /tmp/ultimate-machine-ok", interval_seconds, thread_id, now()],
+            "INSERT INTO machines(id,name,worker_id,command,intent,interval_seconds,thread_id,enabled,created_at) VALUES(?,?,?,?,?,?,?,1,?)",
+            params![id, "磁盘检查", worker_id, "test -f /tmp/ultimate-machine-ok", intent, interval_seconds, thread_id, now()],
         )
         .unwrap();
 }
@@ -74,7 +75,7 @@ fn due_machine_dispatches_one_run_and_waits_for_it_to_settle() {
     let connection = machine_connection();
     insert_worker(&connection, "w1", true);
     insert_thread(&connection, "t1");
-    insert_machine(&connection, "m1", "w1", "t1", 600);
+    insert_machine(&connection, "m1", "w1", "t1", 600, None);
 
     // The first check runs immediately after creation, silently.
     assert!(machines::run_due_machines(&connection).unwrap().is_empty());
@@ -103,7 +104,7 @@ fn completed_failure_asks_the_thread_and_waits_one_interval() {
     let connection = machine_connection();
     insert_worker(&connection, "w1", true);
     insert_thread(&connection, "t1");
-    insert_machine(&connection, "m1", "w1", "t1", 600);
+    insert_machine(&connection, "m1", "w1", "t1", 600, None);
     insert_delivered_call(&connection, "c1", "m1", now() - 10);
 
     let effect = machines::settle_call_result(
@@ -165,7 +166,7 @@ fn zero_exit_settles_silently() {
     let connection = machine_connection();
     insert_worker(&connection, "w1", true);
     insert_thread(&connection, "t1");
-    insert_machine(&connection, "m1", "w1", "t1", 600);
+    insert_machine(&connection, "m1", "w1", "t1", 600, None);
     insert_delivered_call(&connection, "c1", "m1", now() - 10);
 
     let effect = machines::settle_call_result(
@@ -191,7 +192,7 @@ fn offline_worker_reports_once_until_a_dispatch_resets_it() {
     let connection = machine_connection();
     insert_worker(&connection, "w1", false);
     insert_thread(&connection, "t1");
-    insert_machine(&connection, "m1", "w1", "t1", 600);
+    insert_machine(&connection, "m1", "w1", "t1", 600, None);
 
     let effects = machines::run_due_machines(&connection).unwrap();
     assert!(
@@ -225,7 +226,7 @@ fn lost_run_is_declared_once_and_the_next_interval_dispatches_again() {
     let connection = machine_connection();
     insert_worker(&connection, "w1", true);
     insert_thread(&connection, "t1");
-    insert_machine(&connection, "m1", "w1", "t1", 600);
+    insert_machine(&connection, "m1", "w1", "t1", 600, None);
     insert_delivered_call(&connection, "c1", "m1", now() - 1000);
 
     let effects = machines::run_due_machines(&connection).unwrap();
@@ -246,4 +247,157 @@ fn lost_run_is_declared_once_and_the_next_interval_dispatches_again() {
     // The loss is declared once; the next interval dispatches a fresh run.
     assert!(machines::run_due_machines(&connection).unwrap().is_empty());
     assert_eq!(call_count(&connection, "m1"), 2);
+}
+
+#[test]
+fn update_machine_rewrites_fields_retitles_the_thread_and_clears_intent() {
+    let connection = machine_connection();
+    insert_worker(&connection, "11111111-1111-1111-1111-111111111111", true);
+    insert_worker(&connection, "22222222-2222-2222-2222-222222222222", true);
+    insert_thread(&connection, "t1");
+    insert_machine(
+        &connection,
+        "m1",
+        "11111111-1111-1111-1111-111111111111",
+        "t1",
+        600,
+        None,
+    );
+    connection
+        .execute(
+            "UPDATE threads SET title=? WHERE id='t1'",
+            ["终极机器 · 磁盘检查"],
+        )
+        .unwrap();
+    let view = machines::update_machine(
+        &connection,
+        "m1",
+        machines::UpdateMachineInput {
+            enabled: Some(false),
+            name: Some("磁盘检查 v2".to_owned()),
+            worker_id: Some("22222222-2222-2222-2222-222222222222".to_owned()),
+            command: Some("df -Pk / >/dev/null".to_owned()),
+            intent: Some("确保根分区低于 90%".to_owned()),
+            interval_seconds: Some(900),
+        },
+    )
+    .unwrap();
+    let view = serde_json::to_value(&view).unwrap();
+    assert_eq!(view["name"].as_str(), Some("磁盘检查 v2"));
+    assert_eq!(
+        view["worker_id"].as_str(),
+        Some("22222222-2222-2222-2222-222222222222")
+    );
+    assert_eq!(view["command"].as_str(), Some("df -Pk / >/dev/null"));
+    assert_eq!(view["interval_seconds"].as_i64(), Some(900));
+    assert_eq!(view["enabled"].as_bool(), Some(false));
+    assert_eq!(view["intent"].as_str(), Some("确保根分区低于 90%"));
+    let title: String = connection
+        .query_row("SELECT title FROM threads WHERE id='t1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(title, "终极机器 · 磁盘检查 v2");
+
+    // A user-renamed Thread keeps its title, and an empty intent clears the field.
+    connection
+        .execute("UPDATE threads SET title='我的维修线' WHERE id='t1'", [])
+        .unwrap();
+    let view = machines::update_machine(
+        &connection,
+        "m1",
+        machines::UpdateMachineInput {
+            enabled: None,
+            name: Some("磁盘检查 v3".to_owned()),
+            worker_id: None,
+            command: None,
+            intent: Some(String::new()),
+            interval_seconds: None,
+        },
+    )
+    .unwrap();
+    let view = serde_json::to_value(&view).unwrap();
+    assert!(view["intent"].is_null());
+    let title: String = connection
+        .query_row("SELECT title FROM threads WHERE id='t1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(title, "我的维修线");
+}
+
+#[test]
+fn update_machine_rejects_invalid_interval_and_unknown_worker_without_touching_the_row() {
+    let connection = machine_connection();
+    insert_worker(&connection, "w1", true);
+    insert_thread(&connection, "t1");
+    insert_machine(&connection, "m1", "w1", "t1", 600, None);
+    assert!(
+        machines::update_machine(
+            &connection,
+            "m1",
+            machines::UpdateMachineInput {
+                enabled: None,
+                name: None,
+                worker_id: None,
+                command: None,
+                intent: None,
+                interval_seconds: Some(5),
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        machines::update_machine(
+            &connection,
+            "m1",
+            machines::UpdateMachineInput {
+                enabled: None,
+                name: None,
+                worker_id: Some("00000000-0000-0000-0000-000000000000".to_owned()),
+                command: None,
+                intent: None,
+                interval_seconds: None,
+            },
+        )
+        .is_err()
+    );
+    let (name, interval, enabled): (String, i64, bool) = connection
+        .query_row(
+            "SELECT name,interval_seconds,enabled FROM machines WHERE id='m1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((name.as_str(), interval, enabled), ("磁盘检查", 600, true));
+}
+
+#[test]
+fn failure_message_carries_the_intent_when_set() {
+    let connection = machine_connection();
+    insert_worker(&connection, "w1", true);
+    insert_thread(&connection, "t1");
+    insert_machine(
+        &connection,
+        "m1",
+        "w1",
+        "t1",
+        600,
+        Some("确保根分区低于 90%"),
+    );
+    insert_delivered_call(&connection, "c1", "m1", now() - 10);
+    let effect = machines::settle_call_result(
+        &connection,
+        "w1",
+        "c1",
+        &json!({"exit_code": 5, "stdout": "", "stderr": "no space"}).to_string(),
+        "completed",
+        None,
+    )
+    .unwrap();
+    let Some(MachineEffect::ThreadMessage { text, .. }) = effect else {
+        panic!("expected a repair request");
+    };
+    assert!(text.contains("意图：\n确保根分区低于 90%"));
+    assert!(text.contains("exit=5"));
 }
