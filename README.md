@@ -95,7 +95,11 @@ the first authenticated browser session initializes that key atomically.
   requests the Thread's image endpoint (`POST {upstream}/images/generations`
   with the configured model; the hosted gateway routes it over the upstream's
   image catalog, listed by `GET {upstream}/models?kind=image`) and appends the
-  generated image to the Thread. Models without either native tool (for
+  generated image to the Thread. A tool call may carry `reference_images` —
+  one-based positions of the pictures attached to the turn's input, at most 4 —
+  which the Controller resolves to their data URLs and forwards as the
+  endpoint's `reference_images`, so a generation can edit or derive from the
+  user's pictures. Models without either native tool (for
   example DeepSeek) use both capabilities through the same path.
 - `tools.json` is the single source for the upstream tool catalog. The request
   builder sends it and the Configuration → Tools page renders it, so the

@@ -167,13 +167,22 @@
     "normai_image_generation": {
       "type": "function",
       "name": "normai_image_generation",
-      "description": "Generate an image from a text prompt and attach it to this conversation for the user to see. Use it whenever the user asks for a picture, illustration, diagram, or any other visual. Describe the subject, style, colors, and composition fully in the prompt; it always creates a new image and cannot edit existing ones.",
+      "description": "Generate an image from a text prompt and attach it to this conversation for the user to see. Use it whenever the user asks for a picture, illustration, diagram, or any other visual. Describe the subject, style, colors, and composition fully in the prompt. To edit or derive from pictures the user attached to their input, pass the one-based positions of those pictures in reference_images (for example [1] for the first attached picture, at most 4); without reference_images it creates a new image from the prompt alone.",
       "parameters": {
         "type": "object",
         "properties": {
           "prompt": {
             "type": "string",
             "description": "Complete description of the image to generate."
+          },
+          "reference_images": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "One-based positions of the pictures attached to the user's input to use as references, for example [1] for the first attached picture. Omit to create a new image from the prompt alone."
           }
         },
         "required": [

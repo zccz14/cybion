@@ -21,6 +21,32 @@ async fn input_record(state: &AppState, user: &User, thread: &ThreadView) -> i64
     .unwrap()
 }
 
+/// An input record whose message carries the given image data URLs, the shape
+/// the composer produces for pasted pictures.
+async fn input_record_with_images(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    images: &[&str],
+) -> i64 {
+    let id = thread.id.clone();
+    let mut content = vec![json!({"type":"input_text","text":"make variants"})];
+    for image in images {
+        content.push(json!({"type":"input_image","image_url":image}));
+    }
+    user_db(state, user, false, move |connection| {
+        connection.execute("UPDATE threads SET status='running' WHERE id=?", [&id])?;
+        Ok(insert_record(
+            connection,
+            &id,
+            "input",
+            json!({"role":"user","content":content}),
+        ))
+    })
+    .await
+    .unwrap()
+}
+
 /// Sets the per-thread image generation model; an empty string disables the
 /// tool for the Thread even when the account default enables it.
 async fn set_thread_image_generation_model(
@@ -1878,6 +1904,159 @@ async fn image_generation_arguments_are_validated_before_the_image_request() {
             "{value}"
         );
     }
+}
+
+#[tokio::test]
+async fn image_generation_forwards_reference_images_from_the_input() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-generation-reference-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record_with_images(
+        &state,
+        &user,
+        &thread,
+        &["data:image/png;base64,AAAA", "data:image/jpeg;base64,BBBB"],
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (_headers, request) = read_http_request(&mut socket).await;
+        let body = json!({"data":[{"b64_json":"iVBORw0KGgo"}]}).to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        request
+    });
+    let upstream = insert_upstream(&state, &user, "images", &format!("http://{address}")).await;
+    bind_thread_upstream(&state, &user, &thread.id, &upstream.id).await;
+    set_thread_image_generation_model(&state, &user, &thread.id, "gpt-image-2").await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-image",
+        "call_id":"call-image",
+        "name":"normai_image_generation",
+        "arguments": json!({"prompt":"A watercolor variant.","reference_images":[1,2]}).to_string()
+    }))
+    .unwrap();
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    let request = server.await.unwrap();
+    assert_eq!(
+        request,
+        json!({
+            "model":"gpt-image-2",
+            "prompt":"A watercolor variant.",
+            "reference_images":["data:image/png;base64,AAAA","data:image/jpeg;base64,BBBB"]
+        })
+    );
+}
+
+#[tokio::test]
+async fn image_generation_reference_images_are_validated_against_the_input() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "image-generation-reference-error-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record_with_images(
+        &state,
+        &user,
+        &thread,
+        &["data:image/png;base64,AAAA", "data:image/jpeg;base64,BBBB"],
+    )
+    .await;
+    // No upstream fixture: invalid references must be answered to the model
+    // before any image request leaves the controller.
+    set_thread_image_generation_model(&state, &user, &thread.id, "gpt-image-2").await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    for (call_id, reference_images, expected) in [
+        (
+            "call-zero",
+            json!([0]),
+            "reference image position 0 is out of range",
+        ),
+        (
+            "call-beyond",
+            json!([3]),
+            "reference image position 3 is out of range",
+        ),
+        (
+            "call-many",
+            json!([1, 1, 1, 1, 1]),
+            "at most 4 reference images are supported",
+        ),
+    ] {
+        let tool = ResponseItem::from_value(json!({
+            "type":"function_call",
+            "id": format!("fc-{call_id}"),
+            "call_id": call_id,
+            "name": "normai_image_generation",
+            "arguments": json!({"prompt":"A red circle.","reference_images":reference_images}).to_string()
+        }))
+        .unwrap();
+        assert!(matches!(
+            start_response_tool(&state, &user, &thread, input, &tool)
+                .await
+                .unwrap(),
+            Some(PendingToolCall::Answered(_))
+        ));
+        let history = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        let output = history.last().unwrap();
+        assert_eq!(output.payload["type"], "function_call_output");
+        let value: Value =
+            serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap();
+        assert!(
+            value["error"].as_str().unwrap().contains(expected),
+            "{value}"
+        );
+    }
+
+    // A turn without attached pictures answers the same way through a
+    // dedicated message instead of a position error.
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    set_thread_image_generation_model(&state, &user, &thread.id, "gpt-image-2").await;
+    let thread = read_thread_for(&state, &user, thread.id).await.unwrap();
+    let tool = ResponseItem::from_value(json!({
+        "type":"function_call",
+        "id":"fc-no-images",
+        "call_id":"call-no-images",
+        "name":"normai_image_generation",
+        "arguments": json!({"prompt":"A red circle.","reference_images":[1]}).to_string()
+    }))
+    .unwrap();
+    assert!(matches!(
+        start_response_tool(&state, &user, &thread, input, &tool)
+            .await
+            .unwrap(),
+        Some(PendingToolCall::Answered(_))
+    ));
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let value: Value =
+        serde_json::from_str(history.last().unwrap().payload["output"].as_str().unwrap()).unwrap();
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("no attached images"),
+        "{value}"
+    );
 }
 
 #[tokio::test]
