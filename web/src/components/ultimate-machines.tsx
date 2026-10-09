@@ -18,6 +18,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
+import { UltimateMachineHelp } from "@/components/ultimate-machine-help"
 
 const copy = {
   en: {
@@ -212,6 +213,7 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
             <CardDescription>{t("newMachineHint")}</CardDescription>
           </div>
           <div className="flex items-center gap-2">
+            <UltimateMachineHelp language={language} />
             <Button variant="outline" size="sm" onClick={() => void machines.refetch()}>
               <RefreshCwIcon />{t("refresh")}
             </Button>
