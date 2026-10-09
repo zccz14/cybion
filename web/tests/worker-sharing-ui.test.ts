@@ -50,14 +50,14 @@ test("real grant panel picks recipients through the Linkit user picker and rende
     for (const text of ["recipient", "revoked-user", "Active", "Revoked", "Propagation pending", "Synced", "without a sandbox", "OS account", "audit commands and results", "Search the Linkit directory by username or UUID", "The recipient must have signed in to Cybion before"]) assert.ok(html.includes(text), text)
     assert.match(html, /class="linkit-user-picker linkit-user-picker--single"/)
     assert.match(html, /role="combobox"/)
-    assert.match(html, /placeholder="Search username or UUID"/)
+    assert.match(html, /placeholder="Search username, UUID or note"/)
     assert.equal(html.match(/>Revoke access</g)?.length, 1)
     assert.match(html, /type="checkbox"/)
     assert.match(html, /disabled=""[^>]*>Grant access</)
     const zh = render("zh")
     assert.match(zh, /没有沙箱/)
     assert.match(zh, /在 Linkit 目录中按用户名或 UUID 搜索/)
-    assert.match(zh, /placeholder="搜索用户名或 UUID"/)
+    assert.match(zh, /placeholder="搜索用户名、UUID 或备注"/)
   } finally { client.clear(); await server.close() }
 })
 
