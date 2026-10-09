@@ -784,7 +784,7 @@ fn current(c: &Connection, thread: &str, input: Option<i64>) -> Result<bool, Api
 // The owner transaction serializes grant revocation with delivery. The caller
 // read is a last safe gate, not distributed cancellation of device side effects.
 pub(super) fn gate(c: &Connection, id: &str) -> Result<bool, ApiError> {
-    let (worker,caller,grant,thread,input):(String,Option<String>,Option<String>,String,Option<i64>)=c.query_row("SELECT worker_id,caller_user_id,grant_id,thread_id,input_record_id FROM worker_calls WHERE id=?",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    let (worker,caller,grant,thread,input,machine):(String,Option<String>,Option<String>,String,Option<i64>,Option<String>)=c.query_row("SELECT worker_id,caller_user_id,grant_id,thread_id,input_record_id,machine_id FROM worker_calls WHERE id=?",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
     let active = if let Some(caller) = caller {
         if !grant_active(c, &worker, &caller, grant.as_deref().unwrap_or_default())? {
             false
@@ -806,7 +806,13 @@ pub(super) fn gate(c: &Connection, id: &str) -> Result<bool, ApiError> {
             [worker],
             |r| r.get(0),
         )?;
-        exists && current(c, &thread, input)?
+        // A machine call is dispatched by the Ultimate Machine scheduler, not
+        // by a Thread turn; its liveness is the Worker's, not a running request.
+        if machine.is_some() {
+            exists
+        } else {
+            exists && current(c, &thread, input)?
+        }
     };
     if !active {
         c.execute("UPDATE worker_calls SET status='cancelled',error='Worker authorization or caller request is no longer active',completed_at=? WHERE id=? AND status IN ('queued','delivered')",params![now(),id])?;

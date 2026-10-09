@@ -95,8 +95,9 @@ conversation controls do. Machine identity is always visible near the action.
 
 ### Navigation and configuration ownership
 
-- **Work** contains Threads, Contexts, and Workers. Device management belongs to
-  the user's work, alongside conversations and context.
+- **Work** contains Threads, Contexts, Workers, and Ultimate Machines. Device
+  management and scheduled machine checks belong to the user's work, alongside
+  conversations and context.
 - **Audit** contains usage statistics, reasoning requests, Worker calls,
   and history records. Usage statistics combines token accounting, request
   outcomes, Worker call duration and traffic, and the split of Thread running
