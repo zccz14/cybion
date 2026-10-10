@@ -4,15 +4,9 @@ export type ThreadResponseView = {
   started_at: number
   status: string
   response: {
-    response_id: string | null
     completed: boolean
     output: { item: Record<string, unknown>; done: boolean; record_id: number | null }[]
-    server_model: string | null
-    model_verifications: string[]
-    safety_buffering: { use_cases: string[]; reasons: string[]; show_buffering_ui: boolean; retry_model: string | null } | null
-    rate_limits: { limit_id: string | null; primary: { used_percent: number } | null; secondary: { used_percent: number } | null }[]
-    usage: { input_tokens: number; output_tokens: number; total_tokens: number } | null
-    error: { code: string; detail?: unknown } | null
+    safety_buffering: { reasons: string[]; show_buffering_ui: boolean } | null
   }
 }
 

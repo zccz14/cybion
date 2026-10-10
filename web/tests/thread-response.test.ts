@@ -6,7 +6,7 @@ test("streamed reasoning and messages become history rows without duplicating co
   const view: ThreadResponseView = {
     audit_id: 1, input_record_id: 10, started_at: 100, status: "in_flight",
     response: {
-      response_id: "r", completed: false, server_model: "model", model_verifications: [], safety_buffering: null, rate_limits: [], usage: null, error: null,
+      completed: false, safety_buffering: null,
       output: [
         { item: { type: "reasoning", summary: [{ type: "summary_text", text: "checking" }] }, done: true, record_id: 11 },
         { item: { type: "message", content: [{ type: "output_text", text: "hello" }] }, done: false, record_id: null },
