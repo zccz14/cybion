@@ -87,6 +87,7 @@ import { sharedThreadReturnHash } from "@/lib/thread-sharing"
 import { WorkerAudit } from "@/components/worker-audit"
 import { WorkerConnections } from "@/components/worker-connections"
 import { UltimateMachines } from "@/components/ultimate-machines"
+import { UltimateMachineHelp } from "@/components/ultimate-machine-help"
 import { AdminUsers } from "@/components/admin-users"
 import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
@@ -2366,7 +2367,7 @@ function WorkerAuditPage({ sdk }: { sdk: AuthMiniApi }) {
 
 function UltimateMachinesPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
-  return <Page title={t("machines")} description={t("machinesDescription")}><UltimateMachines language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
+  return <Page title={t("machines")} description={t("machinesDescription")} actions={<UltimateMachineHelp language={language} />}><UltimateMachines language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
 }
 
 function HistoryPage({ sdk }: { sdk: AuthMiniApi }) {
@@ -2845,8 +2846,8 @@ function RequestError({ error, onRetry }: { error: unknown; onRetry?: () => void
   return <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("loadError")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span className="break-words">{errorMessage(error)}</span>{onRetry && <Button size="sm" variant="outline" onClick={onRetry}>{t("retry")}</Button>}</AlertDescription></Alert>
 }
 
-function Page({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
-  return <main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><div><h1 className="font-heading text-2xl font-semibold text-balance">{title}</h1>{description && <p className="mt-1 max-w-3xl text-sm text-muted-foreground text-pretty">{description}</p>}</div>{children}</main>
+function Page({ title, description, actions, children }: { title: string; description: string; actions?: React.ReactNode; children: React.ReactNode }) {
+  return <main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><div><div className="flex items-center gap-2"><h1 className="font-heading text-2xl font-semibold text-balance">{title}</h1>{actions}</div>{description && <p className="mt-1 max-w-3xl text-sm text-muted-foreground text-pretty">{description}</p>}</div>{children}</main>
 }
 
 createRoot(document.getElementById("root")!).render(

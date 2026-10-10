@@ -68,6 +68,7 @@ test("payload trims name and intent and forwards an empty intent to clear it", (
 })
 
 const component = readFileSync(new URL("../src/components/ultimate-machines.tsx", import.meta.url), "utf8")
+const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const help = readFileSync(new URL("../src/components/ultimate-machine-help.tsx", import.meta.url), "utf8")
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
 
@@ -80,8 +81,12 @@ test("create and edit dialogs share one field group and one payload builder", ()
   assert.ok(component.includes('update.mutate(editDraft)'))
 })
 
+test("the help button sits beside the page title, not inside the machine card", () => {
+  assert.ok(main.includes("actions={<UltimateMachineHelp language={language} />}"))
+  assert.ok(!component.includes("UltimateMachineHelp"))
+})
+
 test("the help dialog explains the Shannon origin and loops the self-off machine", () => {
-  assert.ok(component.includes("<UltimateMachineHelp language={language} />"))
   assert.ok(help.includes("CircleHelpIcon"))
   assert.ok(help.includes("Claude Shannon"))
   assert.ok(help.includes("香农"))
@@ -113,14 +118,12 @@ test("real machine list renders edit, run and thread links from live data", asyn
       )
     const html = render("en")
     assert.ok(html.includes(">Edit<"))
-    assert.ok(html.includes('aria-label="About the Ultimate Machine"'))
     assert.match(html, /New machine/)
     assert.match(html, /Run now/)
     assert.match(html, /Linux US/)
     assert.match(html, /href="\/threads\/t1"/)
     const zh = render("zh")
     assert.ok(zh.includes(">编辑<"))
-    assert.ok(zh.includes('aria-label="关于「终极机器」"'))
     assert.match(zh, /新建机器/)
     assert.match(zh, /立即运行/)
   } finally {
