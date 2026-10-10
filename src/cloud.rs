@@ -77,7 +77,7 @@ const WORKER_RELEASE_BASE_URL: &str = "https://github.com/zccz14/cybion-worker/r
 const WORKER_ANDROID_RELEASE_BASE_URL: &str =
     "https://github.com/zccz14/cybion-worker-for-android/releases/download";
 const INTEGRATION_NAME: &str = "Cybion";
-const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+const DEFAULT_MODEL: &str = "deepseek-flash";
 // Intercepted web search calls the Thread's own upstream web-search endpoint;
 // hosted gateways route /web-search by the requested source, so the controller
 // pins this source (DeepSeek answers with titles and snippets the model can

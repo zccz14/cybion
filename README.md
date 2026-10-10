@@ -201,7 +201,7 @@ export CYBION_API_KEY='cyb_<user-id>_<secret>'
 curl -X POST https://cybion.ntnl.io/v1/threads \
   -H "Authorization: Bearer $CYBION_API_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"Summarize the release","model":"gpt-5.6-terra"}'
+  -d '{"title":"Summarize the release","model":"deepseek-flash"}'
 ```
 
 | Method | Path | Purpose |
