@@ -24,8 +24,7 @@ const liveItem = { id: "rs_live", type: "reasoning", summary: [{ text: "正在�
 const responseView: ThreadResponseView = {
   audit_id: 10, input_record_id: 1, started_at: base + 4000, status: "in_flight",
   response: {
-    response_id: "resp_10", completed: false, output: [{ item: liveItem, done: false, record_id: null }], server_model: null,
-    model_verifications: [], safety_buffering: null, rate_limits: [], usage: null, error: null,
+    completed: false, output: [{ item: liveItem, done: false, record_id: null }], safety_buffering: null,
   },
 }
 

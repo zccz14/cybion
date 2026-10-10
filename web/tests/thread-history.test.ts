@@ -129,7 +129,7 @@ test("persisted and pending process items join one group and the existing respon
   const view: ThreadResponseView = {
     audit_id: 1, input_record_id: 1, started_at: 100, status: "in_flight",
     response: {
-      response_id: "r", completed: false, server_model: "model", model_verifications: [], safety_buffering: null, rate_limits: [], usage: null, error: null,
+      completed: false, safety_buffering: null,
       output: [{ item: reasoning, done: true, record_id: 2 }, { item: call, done: false, record_id: null }],
     },
   }

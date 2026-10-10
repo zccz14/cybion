@@ -1779,7 +1779,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
               <ThreadHistory records={records} language={language} minimal={minimal} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} />} />
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
-              {liveResponse.data && <MessageScrollerItem><ResponseMetadata language={language} view={liveResponse.data} running={current.status === "running"} /></MessageScrollerItem>}
+              {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
             </MessageScrollerContent>
           </MessageScrollerViewport>
@@ -1814,16 +1814,11 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} />} />
 }
 
-function ResponseMetadata({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
+function SafetyBufferingAlert({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
   const response = view.response
-  const buffering = running && !response.completed && response.safety_buffering?.show_buffering_ui
-  return <div className="flex flex-col gap-2 py-2">
-    {buffering && <Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{response.safety_buffering?.reasons.join(" · ")}</AlertDescription></Alert>}
-    <details className="text-xs text-muted-foreground">
-      <summary className="cursor-pointer">{response.server_model ?? (language === "zh" ? "响应信息" : "Response details")}{response.usage ? ` · ${response.usage.input_tokens} → ${response.usage.output_tokens} tokens` : ""}</summary>
-      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify({ ...response, output: undefined }, null, 2)}</pre>
-    </details>
-  </div>
+  const buffering = response.safety_buffering
+  if (!running || response.completed || !buffering?.show_buffering_ui) return null
+  return <MessageScrollerItem><Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{buffering.reasons.join(" · ")}</AlertDescription></Alert></MessageScrollerItem>
 }
 
 const HistoryMessage = memo(function HistoryMessage({ language, record, workers }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined }) {
