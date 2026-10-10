@@ -29,11 +29,13 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   ArrowLeftIcon,
+  ChartColumnIcon,
   CheckIcon,
   CalendarDaysIcon,
   ChevronDownIcon,
   CircleAlertIcon,
   CopyIcon,
+  CpuIcon,
   Minimize2Icon,
   PlayIcon,
   SquareIcon,
@@ -41,13 +43,20 @@ import {
   DownloadIcon,
   ExternalLinkIcon,
   FileKey2Icon,
-  NetworkIcon,
+  FileSearchIcon,
+  FolderTreeIcon,
+  KeyRoundIcon,
+  LogsIcon,
+  MessagesSquareIcon,
+  MonitorIcon,
   PencilIcon,
   PlusIcon,
   PowerIcon,
   RefreshCwIcon,
   SendIcon,
   Settings2Icon,
+  SettingsIcon,
+  Share2Icon,
   SparklesIcon,
   TerminalSquareIcon,
   Trash2Icon,
@@ -1366,28 +1375,28 @@ function WorkspaceShell({
   const navigate = useNavigate()
   const routeTitle = location.pathname.startsWith("/shared-threads") ? (language === "zh" ? "分享给我" : "Shared with me") : pageTitle(location.pathname, t)
   const workNav = [
-    { to: "/threads", label: language === "zh" ? "我的 Thread" : "My Threads", icon: TerminalSquareIcon },
-    { to: "/shared-threads", label: language === "zh" ? "分享给我" : "Shared with me", icon: UsersIcon },
-    { to: "/contexts", label: t("contexts"), icon: NetworkIcon },
-    { to: "/workers", label: t("workers"), icon: NetworkIcon },
+    { to: "/threads", label: language === "zh" ? "我的 Thread" : "My Threads", icon: MessagesSquareIcon },
+    { to: "/shared-threads", label: language === "zh" ? "分享给我" : "Shared with me", icon: Share2Icon },
+    { to: "/contexts", label: t("contexts"), icon: FolderTreeIcon },
+    { to: "/workers", label: t("workers"), icon: MonitorIcon },
     { to: "/machines", label: t("machines"), icon: PowerIcon },
   ]
   const auditNav = [
-    { to: "/insights", label: t("usageStats"), icon: ActivityIcon },
-    { to: "/reasoning-audit", label: t("audit"), icon: ActivityIcon },
-    { to: "/worker-audit", label: t("workerAudit"), icon: WrenchIcon },
+    { to: "/insights", label: t("usageStats"), icon: ChartColumnIcon },
+    { to: "/reasoning-audit", label: t("audit"), icon: FileSearchIcon },
+    { to: "/worker-audit", label: t("workerAudit"), icon: LogsIcon },
     { to: "/history", label: t("history"), icon: DatabaseIcon },
   ]
   const administrationNav = isAdmin
     ? [
       { to: "/admin/users", label: t("users"), icon: UsersIcon },
-      { to: "/system", label: t("systemResources"), icon: ActivityIcon },
-      { to: "/admin/configuration", label: t("systemConfiguration"), icon: Settings2Icon },
+      { to: "/system", label: t("systemResources"), icon: CpuIcon },
+      { to: "/admin/configuration", label: t("systemConfiguration"), icon: SettingsIcon },
     ]
     : []
   const configurationNav = [
     { to: "/configuration", label: t("configuration"), icon: Settings2Icon },
-    { to: "/api", label: t("api"), icon: FileKey2Icon },
+    { to: "/api", label: t("api"), icon: KeyRoundIcon },
     { to: "/tools", label: t("tools"), icon: WrenchIcon },
   ]
   const workspaceNav: WorkspaceNavGroup[] = [
