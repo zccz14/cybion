@@ -70,7 +70,7 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples, Cont
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, serializeThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
-import { bashFunctionCall, historyPayloadObject, historyPayloadText, screenshotImageSource } from "@/lib/history-payload"
+import { bashFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { applyFavicon } from "@/lib/favicon"
@@ -106,6 +106,8 @@ import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
 import { HistoryRecordPayload } from "@/components/history-record-payload"
 import { BashCommand } from "@/components/bash-command"
+import { ImageGenerationCall } from "@/components/image-generation-call"
+import { WebSearchCall } from "@/components/web-search-call"
 import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
 import { ThreadHistory } from "@/components/thread-history"
@@ -1947,6 +1949,32 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
         <HistoryRecordPayload language={language} record={record} />
       </details>
     </BashCommand>
+  }
+
+  const searchCall = webSearchFunctionCall(payload)
+  if (searchCall) {
+    return <WebSearchCall language={language} call={searchCall} time={time}>
+      <details className="group mt-2">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+          <span>{t("recordPayload")}</span>
+          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <HistoryRecordPayload language={language} record={record} />
+      </details>
+    </WebSearchCall>
+  }
+
+  const imageCall = imageGenerationFunctionCall(payload)
+  if (imageCall) {
+    return <ImageGenerationCall language={language} call={imageCall} time={time}>
+      <details className="group mt-2">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+          <span>{t("recordPayload")}</span>
+          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <HistoryRecordPayload language={language} record={record} />
+      </details>
+    </ImageGenerationCall>
   }
 
   if (record.kind === "checkpoint") {

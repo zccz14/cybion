@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { bashFunctionCall, historyPayloadText, userInputView } from "../src/lib/history-payload.ts"
+import { bashFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, webSearchFunctionCall } from "../src/lib/history-payload.ts"
 
 test("conversation text is derived from stored protocol payloads", () => {
   for (const [payload, expected] of [
@@ -49,4 +49,55 @@ test("user input splits typed text from pasted images", () => {
   )
   assert.deepEqual(userInputView({ role: "user", content: [{ type: "input_image", image_url: png }] }), { text: "", images: [png] })
   assert.deepEqual(userInputView(null), { text: "", images: [] })
+})
+
+test("native search and image tool calls expose query, prompt and reference positions", () => {
+  assert.deepEqual(
+    webSearchFunctionCall({ type: "function_call", name: "normai_web_search", arguments: JSON.stringify({ query: "  rust release  " }) }),
+    { query: "rust release" },
+  )
+  assert.deepEqual(
+    imageGenerationFunctionCall({ type: "function_call", name: "normai_image_generation", arguments: JSON.stringify({ prompt: "  一只戴墨镜的柴犬  ", reference_images: [2, 1] }) }),
+    { prompt: "一只戴墨镜的柴犬", referenceImages: [2, 1] },
+  )
+  assert.deepEqual(
+    imageGenerationFunctionCall({ type: "function_call", name: "normai_image_generation", arguments: JSON.stringify({ prompt: "纯文生图" }) }),
+    { prompt: "纯文生图", referenceImages: [] },
+  )
+})
+
+test("unrelated events and malformed native tool arguments keep the generic protocol renderer", () => {
+  const search = { type: "function_call", name: "normai_web_search", arguments: '{"query":"rust"}' }
+  const image = { type: "function_call", name: "normai_image_generation", arguments: '{"prompt":"dog"}' }
+  for (const payload of [
+    null, [], "text", {},
+    { ...search, type: "function_call_output" },
+    { ...search, name: "bash" },
+    image,
+    ...[undefined, null, {}, "", "{\"query\":", "42", "[]", "{}",
+      '{"query":""}', '{"query":"   "}', '{"query":3}',
+    ].map((argumentsValue) => ({ ...search, arguments: argumentsValue })),
+  ]) {
+    assert.equal(webSearchFunctionCall(payload), null, JSON.stringify(payload))
+  }
+  for (const payload of [
+    null, [], "text", {},
+    { ...image, type: "function_call_output" },
+    { ...image, name: "normai_web_search" },
+    search,
+    ...[undefined, null, {}, "", "{\"prompt\":", "42", "[]", "{}",
+      '{"prompt":""}', '{"prompt":"   "}', '{"prompt":42}',
+    ].map((argumentsValue) => ({ ...image, arguments: argumentsValue })),
+  ]) {
+    assert.equal(imageGenerationFunctionCall(payload), null, JSON.stringify(payload))
+  }
+  // Positions that cannot name an attached picture drop out of the display line.
+  assert.deepEqual(
+    imageGenerationFunctionCall({ ...image, arguments: JSON.stringify({ prompt: "dog", reference_images: "1" }) }),
+    { prompt: "dog", referenceImages: [] },
+  )
+  assert.deepEqual(
+    imageGenerationFunctionCall({ ...image, arguments: JSON.stringify({ prompt: "dog", reference_images: [0, 1.5, "2", 3] }) }),
+    { prompt: "dog", referenceImages: [3] },
+  )
 })

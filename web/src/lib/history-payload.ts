@@ -56,6 +56,38 @@ export function bashFunctionCall(payload: unknown): BashFunctionCall | null {
   return { workerId: args.worker_id, command: args.command }
 }
 
+export type WebSearchFunctionCall = { query: string }
+
+// The intercepted `normai_web_search` call as stored in the Responses item: one
+// trimmed query. Incomplete or malformed arguments keep the generic rendering.
+export function webSearchFunctionCall(payload: unknown): WebSearchFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || object.name !== "normai_web_search" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  if (typeof args?.query !== "string" || args.query.trim() === "") return null
+  return { query: args.query.trim() }
+}
+
+export type ImageGenerationFunctionCall = { prompt: string; referenceImages: number[] }
+
+// The intercepted `normai_image_generation` call as stored in the Responses
+// item: one trimmed prompt plus the one-based positions of the pictures
+// attached to the turn's input that the call references.
+export function imageGenerationFunctionCall(payload: unknown): ImageGenerationFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || object.name !== "normai_image_generation" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  if (typeof args?.prompt !== "string" || args.prompt.trim() === "") return null
+  return { prompt: args.prompt.trim(), referenceImages: referenceImagePositions(args.reference_images) }
+}
+
+// Positions that cannot name an attached picture are left out of the display
+// line; the raw payload disclosure keeps the full attempted argument.
+function referenceImagePositions(value: unknown): number[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((position): position is number => typeof position === "number" && Number.isInteger(position) && position >= 1)
+}
+
 function parseFunctionArguments(value: string): Record<string, unknown> | null {
   try {
     return historyPayloadObject(JSON.parse(value))
