@@ -14,7 +14,7 @@ test("the list opens on my threads and search reports empty results with a reset
   await expect(page.getByRole("link")).toContainText("Worker 配对与导航")
   await page.getByRole("searchbox").fill("没有这个线程")
   await expect(page.getByRole("link")).toHaveCount(0)
-  await expect(page.getByText("没有匹配的线程")).toBeVisible()
+  await expect(page.getByText("没有匹配的对话")).toBeVisible()
   await page.getByRole("button", { name: "显示全部" }).click()
   await expect(page.getByRole("searchbox")).toHaveValue("")
   await expect(page.getByRole("link")).toHaveCount(3)
@@ -63,7 +63,7 @@ test("integration-created rows show their API origin chip", async ({ page }) => 
 
 test("the new thread action stays reachable next to the search field", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
-  await page.getByRole("button", { name: "新建线程" }).click()
+  await page.getByRole("button", { name: "新建对话" }).click()
   await expect(page.getByTestId("created")).toHaveText("1")
 })
 

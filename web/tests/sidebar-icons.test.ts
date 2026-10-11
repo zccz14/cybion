@@ -27,14 +27,15 @@ const approved = [
   ["/configuration", "Settings2Icon"],
   ["/api", "KeyRoundIcon"],
   ["/tools", "WrenchIcon"],
+  ["/help", "CircleHelpIcon"],
 ]
 
 test("sidebar routes use the approved semantic icons in their existing order", () => {
   assert.deepEqual(entries, approved)
 })
 
-test("all 15 sidebar destinations render distinct monochrome outlines, including Lucide aliases", () => {
-  assert.equal(entries.length, 15)
+test("all 16 sidebar destinations render distinct monochrome outlines, including Lucide aliases", () => {
+  assert.equal(entries.length, 16)
   const shapes = entries.map(([route, name]) => {
     const Icon = icons[name as keyof typeof icons] as icons.LucideIcon
     const svg = renderToStaticMarkup(createElement(Icon))

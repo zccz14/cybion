@@ -1,4 +1,4 @@
-import { memo, StrictMode, createContext, useContext, useCallback, useEffect, useMemo, useState } from "react"
+import { memo, StrictMode, createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import {
   HashRouter,
@@ -34,6 +34,7 @@ import {
   CalendarDaysIcon,
   ChevronDownIcon,
   CircleAlertIcon,
+  CircleHelpIcon,
   CopyIcon,
   CpuIcon,
   Minimize2Icon,
@@ -64,6 +65,8 @@ import {
   UsersIcon,
 } from "lucide-react"
 import toolCatalog from "../../tools.json"
+import { onboardingCopy, needsFirstConversationCheck, contextReferencePrompt } from "@/lib/onboarding"
+import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples, ContextReferenceIntro, ContextReferenceExamples } from "@/components/onboarding"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, serializeThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
@@ -356,11 +359,12 @@ type Context = {
 
 const copy = {
   en: {
-    threads: "Threads",
-    newThread: "New thread",
-    newThreadDescription: "Set the working context, then send the first instruction. Cybion will name the thread for you.",
+    threads: "Conversations",
+    help: onboardingCopy.en.helpTitle,
+    newThread: "New conversation",
+    newThreadDescription: "Send your first message to begin. Cybion will name this conversation (Thread) for you.",
     newThreadPrompt: "What should Cybion work on?",
-    startThread: "Start thread",
+    startThread: "Start conversation",
     startThreadHint: "Your first message creates the thread and starts the model request.",
     threadName: "Thread name",
     create: "Create",
@@ -400,11 +404,11 @@ const copy = {
     keyWarning: "This secret is shown only once.",
     revoke: "Revoke",
     noKeys: "No API keys yet.",
-    workers: "Workers",
+    workers: "Devices",
     machines: "Ultimate Machines",
     machinesDescription: "Scheduled checks on your Workers. A failing check asks its bound Thread to repair it; an offline Worker is reported through Linkit.",
     workersTitle: "Cybion Worker",
-    workersDescription: "Pair a personal device so a thread can run approved local tools.",
+    workersDescription: "Connect a Worker only when a task needs access to a device. Normal conversation does not require one.",
     workerDownloads: "Download Cybion Worker",
     workerDownloadsDescription: "Install the latest Worker release for your platform, then create a pairing below.",
     workerReleaseNotes: "View release notes",
@@ -438,15 +442,18 @@ const copy = {
     navWork: "Work",
     contexts: "Contexts",
     contextsTitle: "Contexts",
-    contextsDescription: "Organize reusable context as a tree. Content is loaded only when you open a context.",
-    contextEmpty: "No contexts yet.",
+    contextsDescription: "Tell Cybion where source material lives and how to read it, rather than copying a library into Cybion.",
+    contextListTitle: "References in this workspace",
+    contextListHint: "Names and purposes help Cybion discover the right source for each task.",
+    contextEditorHint: "Record a location and reading instructions. Keep original files at their source and credentials in the appropriate integration.",
+    contextEmpty: "No Context references yet. Add a location or start from an example.",
     contextName: "Context name",
-    contextDescription: "Description",
-    contextContent: "Content",
+    contextDescription: "Purpose — when to consult it",
+    contextContent: "Location and reading instructions",
     contextParent: "Parent context",
     contextRoot: "Top-level context",
-    newContext: "New context",
-    editContext: "Edit context",
+    newContext: "Add Context reference",
+    editContext: "Edit Context reference",
     createContext: "Create context",
     saveContext: "Save context",
     deleteContext: "Delete context",
@@ -601,8 +608,8 @@ const copy = {
     imageGenerationModel: "Image generation model",
     imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
     imageGenerationDisabled: "Disabled",
-    ctxIntegrationTitle: "CTX documents",
-    ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) so threads can read your top-level CTX documents as contexts. Cybion stores a dedicated API key you can revoke anytime.",
+    ctxIntegrationTitle: "CTX sources (optional)",
+    ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) to discover its documents alongside your Context references. Documents stay in CTX and are read as needed, not copied into this workspace. The dedicated access key can be revoked anytime.",
     ctxConnected: "Connected",
     ctxNotConnected: "Not connected",
     ctxConnect: "Connect CTX",
@@ -690,19 +697,20 @@ const copy = {
     loadingFailureUpgradeBrowser: "Your browser is too old to complete the session security check. Please upgrade it to the latest version, or switch to the latest Chrome / Edge / Firefox / Safari, then reload this page.",
   },
   zh: {
-    threads: "线程",
-    newThread: "新建线程",
-    newThreadDescription: "先设置工作上下文，再发送第一条指令。Cybion 会自动为线程命名。",
+    threads: "对话",
+    help: onboardingCopy.zh.helpTitle,
+    newThread: "新建对话",
+    newThreadDescription: "发送第一条消息即可开始，Cybion 会自动为这段对话（Thread）命名。",
     newThreadPrompt: "你希望 Cybion 处理什么？",
-    startThread: "开始线程",
+    startThread: "开始对话",
     startThreadHint: "发送第一条消息后才会创建线程并开始模型请求。",
-    threadName: "线程名称",
+    threadName: "对话名称",
     create: "创建",
     cancel: "取消",
     emptyTitle: "还没有线程",
     emptyDescription: "创建一个聚焦的线程。每个线程都拥有独立的历史和请求状态。",
-    chat: "线程",
-    backToThreads: "返回线程列表",
+    chat: "对话",
+    backToThreads: "返回对话列表",
     send: "发送",
     stopThread: "停止",
     stopThreadHint: "停止推理，保留已保存的记录",
@@ -713,7 +721,7 @@ const copy = {
     threadStopped: "推理已停止，已保存的记录保留。",
     threadContinued: "已直接继续推理，未发送新提示词。",
     threadCompactionRequested: "已请求压缩上下文，生成 checkpoint。",
-    input: "为这个线程追加下一条指令…",
+    input: "继续描述你的需求…",
     queued: "排队中",
     rename: "重命名",
     generateTitle: "引用全部上下文生成标题",
@@ -734,11 +742,11 @@ const copy = {
     keyWarning: "密钥只会显示一次。",
     revoke: "撤销",
     noKeys: "还没有 API Key。",
-    workers: "Worker",
+    workers: "设备",
     machines: "终极机器",
     machinesDescription: "在 Worker 上按间隔执行检查；失败时请绑定的 Thread 修复，Worker 离线时通过 Linkit 提醒。",
     workersTitle: "Cybion Worker",
-    workersDescription: "配对个人设备，让线程可以调用经过授权的本地工具。",
+    workersDescription: "需要访问设备资料或执行本地任务时，再连接 Worker；普通对话无需安装。",
     workerDownloads: "下载 Cybion Worker",
     workerDownloadsDescription: "先下载适合你平台的最新 Worker 版本，再在下方创建配对。",
     workerReleaseNotes: "查看发布说明",
@@ -772,15 +780,18 @@ const copy = {
     navWork: "工作",
     contexts: "上下文",
     contextsTitle: "上下文",
-    contextsDescription: "用树形结构组织可复用上下文。只有打开上下文时才加载内容。",
-    contextEmpty: "还没有上下文。",
+    contextsDescription: "告诉 Cybion 资料在哪里、怎样获取，而不是把整份资料库复制到 Cybion。",
+    contextListTitle: "当前工作区的引用",
+    contextListHint: "通过名称和用途，让 Cybion 发现与任务相关的资料入口。",
+    contextEditorHint: "记录位置和读取步骤；原始文件留在来源处，访问凭证请在相应集成中配置。",
+    contextEmpty: "还没有上下文引用。可以添加资料位置，或从示例开始。",
     contextName: "上下文名称",
-    contextDescription: "描述",
-    contextContent: "内容",
+    contextDescription: "用途 — 何时参考",
+    contextContent: "位置与获取说明",
     contextParent: "父级上下文",
     contextRoot: "顶层上下文",
-    newContext: "新建上下文",
-    editContext: "编辑上下文",
+    newContext: "添加上下文引用",
+    editContext: "编辑上下文引用",
     createContext: "创建上下文",
     saveContext: "保存上下文",
     deleteContext: "删除上下文",
@@ -935,8 +946,8 @@ const copy = {
     imageGenerationModel: "图像生成模型",
     imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
     imageGenerationDisabled: "关闭",
-    ctxIntegrationTitle: "CTX 文档",
-    ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，线程可以把你的一级 CTX 文档当作上下文读取。Cybion 会保存一把专用 API 密钥，可随时吊销。",
+    ctxIntegrationTitle: "CTX 来源（可选）",
+    ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，Cybion 可以一起发现其中的文档入口。文档留在 CTX 中，按需读取，不复制到工作区的引用列表。专用访问密钥可随时吊销。",
     ctxConnected: "已连接",
     ctxNotConnected: "未连接",
     ctxConnect: "连接 CTX",
@@ -1251,6 +1262,18 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   const threadItems = useMemo(() => mergeThreadPages(threads.data?.pages.map((page) => page.items) ?? []), [threads.data])
   const archivedItems = useMemo(() => mergeThreadPages(archivedThreads.data?.pages.map((page) => page.items) ?? []), [archivedThreads.data])
   const archivedTotal = archivedThreads.data?.pages[0]?.total ?? 0
+  const checkFirstConversation = needsFirstConversationCheck(
+    threadListFilters,
+    threads.isPlaceholderData ? undefined : threads.data?.pages[0]?.total,
+    archivedThreads.data?.pages[0]?.total,
+  )
+  const firstConversation = useQuery({
+    queryKey: ["threads", sdk.session.getState().sessionId, "first-conversation"],
+    queryFn: ({ signal }) => api<ThreadPage>(sdk, "/api/threads?limit=1", { signal }),
+    enabled: checkFirstConversation,
+    retry: false,
+  })
+  const emptyWorkspace = checkFirstConversation && firstConversation.data?.total === 0
   const threadsPagination: ThreadListPagination = {
     hasMore: threads.hasNextPage,
     loadingMore: threads.isFetchingNextPage,
@@ -1298,6 +1321,7 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
           sdk={sdk}
           userId={currentUser.data.user_id}
           isAdmin={currentUser.data.is_admin}
+          emptyWorkspace={emptyWorkspace}
           threads={threadItems}
           threadsLoading={threads.isLoading}
           threadsError={threads.error}
@@ -1343,6 +1367,7 @@ function WorkspaceShell({
   sdk,
   userId,
   isAdmin,
+  emptyWorkspace,
   threads,
   threadsLoading,
   threadsError,
@@ -1358,6 +1383,7 @@ function WorkspaceShell({
   sdk: AuthMiniApi
   userId: string
   isAdmin: boolean
+  emptyWorkspace: boolean
   threads: Thread[]
   threadsLoading: boolean
   threadsError: unknown
@@ -1375,7 +1401,7 @@ function WorkspaceShell({
   const navigate = useNavigate()
   const routeTitle = location.pathname.startsWith("/shared-threads") ? (language === "zh" ? "分享给我" : "Shared with me") : pageTitle(location.pathname, t)
   const workNav = [
-    { to: "/threads", label: language === "zh" ? "我的 Thread" : "My Threads", icon: MessagesSquareIcon },
+    { to: "/threads", label: language === "zh" ? "我的对话" : "My conversations", icon: MessagesSquareIcon },
     { to: "/shared-threads", label: language === "zh" ? "分享给我" : "Shared with me", icon: Share2Icon },
     { to: "/contexts", label: t("contexts"), icon: FolderTreeIcon },
     { to: "/workers", label: t("workers"), icon: MonitorIcon },
@@ -1398,6 +1424,7 @@ function WorkspaceShell({
     { to: "/configuration", label: t("configuration"), icon: Settings2Icon },
     { to: "/api", label: t("api"), icon: KeyRoundIcon },
     { to: "/tools", label: t("tools"), icon: WrenchIcon },
+    { to: "/help", label: t("help"), icon: CircleHelpIcon },
   ]
   const workspaceNav: WorkspaceNavGroup[] = [
     { id: "work", label: t("navWork"), items: workNav },
@@ -1432,7 +1459,7 @@ function WorkspaceShell({
           />}
         >
           <Routes>
-            <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
+            <Route path="/threads" element={<ThreadsHomePage emptyWorkspace={emptyWorkspace} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate({ pathname: "/threads", search: location.search })} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/shared-threads" element={<SharedThreadsPage language={language} userId={userId} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />} />
@@ -1453,6 +1480,7 @@ function WorkspaceShell({
             <Route path="/settings" element={<ConfigurationPage sdk={sdk} />} />
             <Route path="/api" element={<ApiKeysPage sdk={sdk} />} />
             <Route path="/tools" element={<ToolsPage />} />
+            <Route path="/help" element={<Page title={t("help")} description={onboardingCopy[language].helpDescription}><UsageHelp language={language} /></Page>} />
             <Route path="*" element={<Navigate to="/threads" replace />} />
           </Routes>
         </ErrorBoundary>
@@ -1473,12 +1501,13 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/configuration") || pathname.startsWith("/settings")) return t("configuration")
   if (pathname.startsWith("/api")) return t("api")
   if (pathname.startsWith("/tools")) return t("tools")
+  if (pathname.startsWith("/help")) return t("help")
   return t("threads")
 }
 
-function ThreadsHomePage({ sdk, userId, threads, threadsLoading, threadsError, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function ThreadsHomePage({ emptyWorkspace, sdk, userId, threads, threadsLoading, threadsError, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { emptyWorkspace: boolean; sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const desktop = useIsDesktopLayout()
-  if (desktop) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} threadsPagination={threadsPagination} archivedThreads={archivedThreads} archivedTotal={archivedTotal} archivedPagination={archivedPagination} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
+  if (desktop || emptyWorkspace) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} threadsPagination={threadsPagination} archivedThreads={archivedThreads} archivedTotal={archivedTotal} archivedPagination={archivedPagination} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
   return <ThreadListPage threads={threads} threadsLoading={threadsLoading} threadsPagination={threadsPagination} archivedThreads={archivedThreads} archivedTotal={archivedTotal} archivedPagination={archivedPagination} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
 }
 
@@ -1493,6 +1522,9 @@ function ThreadListPage({ threads, threadsLoading, threadsPagination, archivedTh
 
 function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
   const { t, language } = useUi()
+  const help = onboardingCopy[language]
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const connection = useNormaiConnection(sdk)
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
@@ -1543,7 +1575,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, thr
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="shrink-0 border-b px-4 py-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          <h1 className="text-lg font-semibold tracking-tight">{t("newThread")}</h1>
+          <div className="flex items-center gap-2"><h1 className="text-lg font-semibold tracking-tight">{t("newThread")}</h1><ConceptHelp topic="thread" language={language} /></div>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">{t("newThreadDescription")}</p>
         </div>
       </header>
@@ -1551,14 +1583,14 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, thr
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
           {defaults.error && <RequestError error={defaults.error} onRetry={() => void defaults.refetch()} />}
           {defaults.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-24" /><Skeleton className="h-20" /></div>}
-          <div className="rounded-xl border border-dashed bg-muted/20 p-5 sm:p-6">
-            <div className="flex items-start gap-3"><div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><SparklesIcon className="size-4" /></div><div><h2 className="text-sm font-semibold">{t("startThread")}</h2><p className="mt-1 text-sm leading-6 text-muted-foreground">{t("startThreadHint")}</p></div></div>
-          </div>
-          {start.error && <RequestError error={start.error} onRetry={submit} />}
+          <ConversationWelcome language={language} />
+          {connection.isPending && !value?.upstream_id && <p role="status" className="text-sm text-muted-foreground">{help.preparing}</p>}
+          {connection.error && <Alert><CircleAlertIcon /><AlertTitle>{help.connectionFailed}</AlertTitle><AlertDescription className="space-y-3"><p>{help.connectionRecovery}</p><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={connection.isFetching} onClick={() => void connection.refetch()}>{help.retryConnection}</Button><Button asChild size="sm" variant="outline"><Link to="/configuration">{help.modelAction}</Link></Button></div></AlertDescription></Alert>}
+          {start.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{help.startFailed}</AlertTitle><AlertDescription className="space-y-3"><p className="break-words">{errorMessage(start.error)}</p><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={start.isPending} onClick={submit}>{help.retrySend}</Button><Button asChild size="sm" variant="outline"><Link to="/configuration">{help.modelAction}</Link></Button></div></AlertDescription></Alert>}
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl"><FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || (!input.trim() && attachments.images.length === 0) || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || (!input.trim() && attachments.images.length === 0) || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -2015,7 +2047,8 @@ function contextDraft(context?: Context): ContextDraft {
 }
 
 function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
-  const { t } = useUi()
+  const { t, language } = useUi()
+  const help = onboardingCopy[language]
   const client = useQueryClient()
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts") })
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -2063,9 +2096,9 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     remove.reset()
   }
 
-  function createNew() {
+  function createNew(example: Partial<ContextDraft> = {}) {
     setSelectedId(null)
-    setDraft(contextDraft())
+    setDraft({ ...contextDraft(), ...example })
     save.reset()
     remove.reset()
   }
@@ -2080,12 +2113,13 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     remove.mutate(draft.id)
   }
 
-  return <Page title={t("contextsTitle")} description={t("contextsDescription")}>
+  return <Page title={t("contextsTitle")} description={t("contextsDescription")} actions={<ConceptHelp topic="context" language={language} />}>
+    <ContextReferenceIntro language={language} />
     <div className="grid gap-6 xl:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.6fr)]">
       <Card className="h-fit">
-        <CardHeader className="flex flex-row items-start justify-between gap-3">
-          <div><CardTitle>{t("contexts")}</CardTitle><CardDescription>{t("contextsDescription")}</CardDescription></div>
-          <Button size="sm" variant="outline" onClick={createNew}><PlusIcon data-icon="inline-start" />{t("newContext")}</Button>
+        <CardHeader className="flex flex-col items-start justify-between gap-3 sm:flex-row">
+          <div><CardTitle>{t("contextListTitle")}</CardTitle><CardDescription>{t("contextListHint")}</CardDescription></div>
+          <Button size="sm" variant="outline" onClick={() => createNew()}><PlusIcon data-icon="inline-start" />{t("newContext")}</Button>
         </CardHeader>
         <CardContent>
           {contexts.error && <RequestError error={contexts.error} onRetry={() => void contexts.refetch()} />}
@@ -2095,7 +2129,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
         </CardContent>
       </Card>
       <Card>
-        <CardHeader><CardTitle>{draft?.id ? t("editContext") : t("newContext")}</CardTitle><CardDescription>{t("contextsDescription")}</CardDescription></CardHeader>
+        <CardHeader><CardTitle>{draft ? (draft.id ? t("editContext") : t("newContext")) : help.examplesTitle}</CardTitle><CardDescription>{t("contextEditorHint")}</CardDescription></CardHeader>
         <CardContent>
           {draft ? <form className="flex flex-col gap-5" onSubmit={(event) => { event.preventDefault(); submit() }}>
             <FieldGroup>
@@ -2109,7 +2143,8 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
               </Field>
               <Field>
                 <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
-                <Textarea id="context-content" className="min-h-56 font-mono text-sm" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} />
+                <Textarea id="context-content" aria-describedby="context-reference-hint" placeholder={help.deviceContent} className="min-h-56 font-mono text-sm" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} />
+                <FieldDescription id="context-reference-hint">{t("contextEditorHint")}</FieldDescription>
               </Field>
               <Field>
                 <FieldLabel htmlFor="context-parent">{t("contextParent")}</FieldLabel>
@@ -2129,11 +2164,12 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
               {draft.id && <Button type="button" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
               {save.isSuccess && <span role="status" className="text-sm text-muted-foreground">{t("contextSaved")}</span>}
             </div>
-          </form> : <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">{t("contextEmpty")}</div>}
-          {selected && draft?.id === selected.id && <p className="mt-5 break-all font-mono text-xs text-muted-foreground">{selected.id}</p>}
+          </form> : <ContextReferenceExamples language={language} onChoose={createNew} />}
+          {selected && draft?.id === selected.id && <div className="mt-5 space-y-2 border-t pt-4"><Button asChild variant="outline"><Link to="/threads/new" state={{ initialInput: contextReferencePrompt(language, selected.name, selected.id) }}>{help.useReference}</Link></Button><p className="text-xs text-muted-foreground">{help.useReferenceHint}</p><p className="break-all font-mono text-xs text-muted-foreground">{selected.id}</p></div>}
         </CardContent>
       </Card>
     </div>
+    <CtxIntegrationCard sdk={sdk} />
   </Page>
 }
 
@@ -2591,7 +2627,8 @@ function NormaiUpstreamCard({ sdk }: { sdk: AuthMiniApi }) {
   const client = useQueryClient()
   const upstreams = useQuery({ queryKey: ["upstreams"], queryFn: ({ signal }) => api<Upstream[]>(sdk, "/api/integrations/upstreams", { signal }) })
   const connected = upstreams.data?.some((upstream) => isNormaiUpstream(upstream) && upstream.api_key_configured) === true
-  const refresh = () => {
+  const refresh = (upstream: Upstream) => {
+    client.setQueryData(["normai-connect", sdk.session.getState().sessionId], upstream)
     void client.invalidateQueries({ queryKey: ["upstreams"] })
     void client.invalidateQueries({ queryKey: ["upstream-models"] })
     void client.invalidateQueries({ queryKey: ["thread-defaults"] })
@@ -2632,12 +2669,7 @@ function NormaiUpstreamCard({ sdk }: { sdk: AuthMiniApi }) {
 // on first load and reissues the credential only while none is stored.
 function NormaiAutoConnect({ sdk }: { sdk: AuthMiniApi }) {
   const client = useQueryClient()
-  const connect = useQuery({
-    queryKey: ["normai-connect", sdk.session.getState().sessionId],
-    queryFn: () => api<Upstream>(sdk, "/api/integrations/normai", { method: "POST" }),
-    retry: false,
-    staleTime: Infinity,
-  })
+  const connect = useNormaiConnection(sdk)
   useEffect(() => {
     if (!connect.isSuccess) return
     void client.invalidateQueries({ queryKey: ["upstreams"] })
@@ -2645,6 +2677,16 @@ function NormaiAutoConnect({ sdk }: { sdk: AuthMiniApi }) {
     void client.invalidateQueries({ queryKey: ["thread-defaults"] })
   }, [client, connect.isSuccess])
   return null
+}
+
+function useNormaiConnection(sdk: AuthMiniApi) {
+  return useQuery({
+    queryKey: ["normai-connect", sdk.session.getState().sessionId],
+    queryFn: () => api<Upstream>(sdk, "/api/integrations/normai", { method: "POST" }),
+    retry: false,
+    retryOnMount: false,
+    staleTime: Infinity,
+  })
 }
 
 // The controller keeps one Linkit Bot per user; this silent call provisions or

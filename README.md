@@ -260,6 +260,13 @@ revocation semantics, schema migration, recovery, and storage/retention limits.
 See [Worker onboarding](docs/worker-onboarding.md) for the protocol, security,
 capability limits, manual configuration and release/test procedures.
 
+## First-use guidance
+
+Open **Using Cybion** in the sidebar (`/#/help`) for the conversation, Context
+reference and Worker concepts. Contexts record source locations and reading
+instructions; original material stays on devices or network sources such as CTX.
+See [First-use guidance](docs/onboarding.md) for behavior and verification.
+
 ## Development and release
 
 ```sh

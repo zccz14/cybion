@@ -23,8 +23,8 @@ export type ThreadListItem = {
 type ThreadListCopyKey = "threads" | "archivedThreads" | "restoreThread"
 
 const copy = {
-  en: { threads: "Threads", archivedThreads: "Archived", restoreThread: "Restore" },
-  zh: { threads: "线程", archivedThreads: "已归档", restoreThread: "恢复" },
+  en: { threads: "Conversations", archivedThreads: "Archived", restoreThread: "Restore" },
+  zh: { threads: "对话", archivedThreads: "已归档", restoreThread: "恢复" },
 } satisfies Record<"en" | "zh", Record<ThreadListCopyKey, string>>
 
 export function ArchivedThreadGroup({ threads, total, pagination, language, onRestore, restoringId }: { threads: ThreadListItem[]; total: number; pagination: ThreadListPagination; language: "en" | "zh"; onRestore: (id: string) => void; restoringId: string | null }) {

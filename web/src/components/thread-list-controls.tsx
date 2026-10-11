@@ -9,30 +9,30 @@ type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | 
 
 const copy = {
   en: {
-    newThread: "New thread",
+    newThread: "New conversation",
     searchThreads: "Search titles or external refs",
-    viewsLabel: "Thread views",
+    viewsLabel: "Conversation views",
     all: "All",
     mine: "Web",
     api: "API",
     running: "Running",
     failed: "Failed",
-    emptyTitle: "No threads yet",
-    emptyFiltered: "No threads match your filters",
+    emptyTitle: "No conversations yet",
+    emptyFiltered: "No conversations match your filters",
     resetFilters: "Show all",
     loadMore: "Load more",
   },
   zh: {
-    newThread: "新建线程",
+    newThread: "新建对话",
     searchThreads: "搜索标题或外部引用",
-    viewsLabel: "线程视图",
+    viewsLabel: "对话视图",
     all: "全部",
     mine: "网页创建",
     api: "API",
     running: "运行中",
     failed: "失败",
-    emptyTitle: "还没有线程",
-    emptyFiltered: "没有匹配的线程",
+    emptyTitle: "还没有对话。点击「新建对话」即可开始。",
+    emptyFiltered: "没有匹配的对话",
     resetFilters: "显示全部",
     loadMore: "加载更多",
   },
@@ -63,7 +63,7 @@ export function ThreadListControls({ filters, language, onFiltersChange, onNewTh
         <SearchIcon aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input type="search" aria-label={t.searchThreads} placeholder={t.searchThreads} className="pl-8" value={draft} onChange={(event) => setDraft(event.target.value)} />
       </div>
-      <Button size="icon-sm" variant="outline" aria-label={t.newThread} title={t.newThread} onClick={onNewThread}><PlusIcon /></Button>
+      <Button size="sm" className="shrink-0" variant="outline" aria-label={t.newThread} onClick={onNewThread}><PlusIcon />{t.newThread}</Button>
     </div>
     <div role="group" aria-label={t.viewsLabel} className="flex flex-wrap items-center gap-1">
       {views.map((view) => <Button key={view} type="button" size="xs" variant={filters.view === view ? "secondary" : "ghost"} aria-pressed={filters.view === view} className="rounded-full px-2" onClick={() => onFiltersChange({ ...filters, view })}>{t[view]}</Button>)}
