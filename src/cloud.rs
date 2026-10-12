@@ -33,6 +33,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod admin_users;
+mod common_contexts;
 mod ctx_contexts;
 mod custom_tools;
 mod history;
@@ -521,6 +522,7 @@ fn app(state: AppState) -> Router {
                 .patch(update_context)
                 .delete(delete_context),
         )
+        .route("/api/common-contexts", get(common_contexts::documents))
         .route(
             "/api/integrations/ctx",
             get(ctx_contexts::status)
@@ -3812,9 +3814,13 @@ async fn read_context_for(
     id: String,
 ) -> Result<ContextReadView, ApiError> {
     let id = context_id(&id)?;
-    local_context(state, user, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("context not found"))
+    if let Some(context) = local_context(state, user, id.clone()).await? {
+        return Ok(context);
+    }
+    if let Some(context) = common_contexts::read(&id) {
+        return Ok(context);
+    }
+    Err(ApiError::not_found("context not found"))
 }
 
 async fn local_context(
@@ -6609,6 +6615,9 @@ async fn read_context_tool_output(
     if let Some(context) = local_context(state, user, id.clone()).await? {
         return serde_json::to_value(context).map_err(ApiError::internal);
     }
+    if let Some(context) = common_contexts::read(&id) {
+        return serde_json::to_value(context).map_err(ApiError::internal);
+    }
     match ctx_contexts::read_context(state, user, &id).await {
         ctx_contexts::ReadOutcome::Found(context) => {
             serde_json::to_value(context).map_err(ApiError::internal)
@@ -6622,17 +6631,36 @@ async fn read_context_tool_output(
 }
 
 async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
-    let mut contexts = user_db(state, user, false, |connection| {
+    let mut contexts = vec![common_contexts::root_summary()];
+    let local = user_db(state, user, false, |connection| {
         context_summaries(connection, None)
     })
     .await?;
+    contexts.extend(
+        local
+            .iter()
+            .map(|summary| context_summary_item(summary, "local")),
+    );
     let (ctx_items, notice) = ctx_contexts::top_level_summaries(state, user).await;
-    contexts.extend(ctx_items);
+    contexts.extend(
+        ctx_items
+            .iter()
+            .map(|summary| context_summary_item(summary, "ctx")),
+    );
     let mut output = json!({ "contexts": contexts });
     if let Some(notice) = notice {
         output["notice"] = Value::String(notice);
     }
     Ok(output)
+}
+
+fn context_summary_item(summary: &ContextSummary, source: &str) -> Value {
+    json!({
+        "context_id": summary.context_id.as_str(),
+        "name": summary.name.as_str(),
+        "description": summary.description.as_str(),
+        "source": source,
+    })
 }
 
 async fn list_workers_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
@@ -7802,6 +7830,10 @@ mod traffic_tests;
 #[cfg(test)]
 #[path = "cloud_machine_tests.rs"]
 mod machine_tests;
+
+#[cfg(test)]
+#[path = "cloud_common_context_tests.rs"]
+mod common_context_tests;
 
 #[cfg(test)]
 mod tests {

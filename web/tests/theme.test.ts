@@ -79,7 +79,7 @@ test("message surfaces are separated from primary actions and Markdown is neutra
   assert.match(inputMessageSource, /bg-user-message[^"\n]+text-user-message-foreground/)
   assert.match(source, /border-primary\/20 bg-primary\/5[^"\n]+dark:border-border dark:bg-card/)
   const markdownSurfaces = [source, assistantMessageSource, checkpointMessageSource]
-  assert.equal(markdownSurfaces.reduce((count, text) => count + (text.match(/dark:prose-neutral dark:prose-invert/g)?.length ?? 0), 0), 3)
+  assert.equal(markdownSurfaces.reduce((count, text) => count + (text.match(/dark:prose-neutral dark:prose-invert/g)?.length ?? 0), 0), 4)
   for (const text of markdownSurfaces) assert.doesNotMatch(text, /\sprose-neutral\s/)
   assert.match(lightBlock, /color-scheme: light;/)
   assert.match(darkBlock, /color-scheme: dark;/)

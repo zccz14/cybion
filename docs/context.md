@@ -46,9 +46,10 @@ record range above. The compiler uses `kind` to select protocol records;
 
 Registered Contexts and Workers are disclosed through controller-answered
 tools instead of a replayed prefix. `cybion_list_contexts` returns only
-top-level Context metadata, ordered by name and ID; when the CTX integration
-is connected, the user's top-level CTX documents are appended after the local
-Contexts. `cybion_list_workers`
+top-level Context metadata, ordered by source: the Cybion Common Context root
+first, then the user's local Contexts by name and ID, then, when the CTX
+integration is connected, the user's top-level CTX documents. Every item
+carries a `source` field: `common`, `local`, or `ctx`. `cybion_list_workers`
 returns the registered Worker identities (`worker_id`, `label`), ordered by
 label and ID; runtime state such as online status, heartbeat timestamps, and
 resource reports is not listed.
@@ -89,10 +90,11 @@ unknown, so the model can clean up before continuing.
 
 ## Progressive Context discovery
 
-`cybion_list_contexts` lists only top-level Context metadata, ordered by name
-and ID. `read_context` and `GET /api/contexts/{id}` return the current node's
-existing `id`, `name`, `description`, `content`, and `parent_id` fields, plus
-`children`:
+`cybion_list_contexts` lists only top-level Context metadata. `read_context`
+resolves local Contexts first, then the compiled Cybion Common Context, then
+CTX documents; `GET /api/contexts/{id}` resolves the same local and common
+nodes. Both return the current node's existing `id`, `name`, `description`,
+`content`, and `parent_id` fields, plus `children`:
 
 ```json
 {
@@ -111,11 +113,25 @@ existing `id`, `name`, `description`, `content`, and `parent_id` fields, plus
 }
 ```
 
-Children contain only direct-child metadata (`context_id`, `name`, `description`),
-ordered by name and ID. A leaf always returns `children: []`. The current node and
-its child metadata are read in one transaction from the requesting user's database.
+Children contain only direct-child metadata (`context_id`, `name`, `description`);
+local and CTX children are ordered by name and ID while the Cybion Common
+Context keeps its authored order. A leaf always returns `children: []`. The
+current node and its child metadata are read in one transaction from the
+requesting user's database; common nodes come from the compiled tree instead.
 The model can pass a child's `context_id` to `read_context` to discover the next
 level. Child content and deeper descendants are disclosed only when read.
+
+## Cybion Common Context
+
+`common-contexts/` at the repository root holds the Cybion Common Context: a
+`tree.json` skeleton (each node carries a UUID, name, description, and
+`content_file`, under a `revision`) plus one Markdown file per node. Rust embeds
+both via `include_str!`, so the content is compiled into the controller, is
+identical for every user of a build, and is never stored, mutated, or
+synthesized at runtime; changes ship with releases. `cybion_list_contexts`
+lists the root first with `source: "common"`, and `GET /api/common-contexts`
+serves the same tree to the browser so Configuration → Contexts shows users
+exactly what Threads can read.
 
 ## CTX documents
 

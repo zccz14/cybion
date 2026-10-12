@@ -625,7 +625,10 @@ async fn registry_tools_list_top_level_contexts_and_registered_workers() {
     .await;
     assert_eq!(
         contexts,
-        json!({"contexts":[{"context_id":parent,"name":"Skills","description":"Reusable worker skills"}]})
+        json!({"contexts":[
+            common_contexts::root_summary(),
+            {"context_id":parent,"name":"Skills","description":"Reusable worker skills","source":"local"}
+        ]})
     );
     let workers = tool_output(
         &state,

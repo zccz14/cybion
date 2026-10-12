@@ -273,17 +273,20 @@ async fn list_tool_concatenates_local_contexts_and_ctx_top_level_documents() {
         .iter()
         .map(|context| context["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(names, ["Local", "Alpha", "Bravo"]);
-    assert_eq!(
-        contexts[0]["context_id"],
-        "11111111-1111-4111-8111-111111111111"
-    );
+    assert_eq!(names, ["Cybion Common Context", "Local", "Alpha", "Bravo"]);
+    assert_eq!(contexts[0], common_contexts::root_summary());
     assert_eq!(
         contexts[1]["context_id"],
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(contexts[1]["source"], "local");
+    assert_eq!(
+        contexts[2]["context_id"],
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     );
-    assert_eq!(contexts[1]["description"], "first");
-    assert_eq!(contexts[2]["description"], "");
+    assert_eq!(contexts[2]["source"], "ctx");
+    assert_eq!(contexts[2]["description"], "first");
+    assert_eq!(contexts[3]["description"], "");
     assert!(output.get("notice").is_none());
     assert_eq!(
         f.remote.lock().await.calls,
@@ -382,7 +385,10 @@ async fn list_tool_degrades_with_a_notice_when_ctx_is_unreachable() {
     let output = list_contexts_tool_output(&broken.state, &broken.user)
         .await
         .unwrap();
-    assert_eq!(output["contexts"].as_array().unwrap().len(), 1);
+    let contexts = output["contexts"].as_array().unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(contexts[0]["source"], "common");
+    assert_eq!(contexts[1]["name"], "Local");
     assert!(output["notice"].as_str().unwrap().contains("CTX"));
 
     let output = read_context_tool_output(

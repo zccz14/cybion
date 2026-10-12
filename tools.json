@@ -3,7 +3,7 @@
     {
       "type": "function",
       "name": "cybion_list_contexts",
-      "description": "List top-level Contexts (context_id, name, description) from the controller, including the user's top-level CTX (ctx.ntnl.io) documents when that integration is connected. Content is intentionally omitted; use read_context to read a context and discover its direct children.",
+      "description": "List top-level Contexts (context_id, name, description, source) from the controller: first the read-only Cybion Common Context (source \"common\"; product usage guidance compiled into the controller), then the user's own Contexts (source \"local\"), then the user's top-level CTX (ctx.ntnl.io) documents (source \"ctx\") when that integration is connected. Content is intentionally omitted; use read_context to read a context and discover its direct children.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -23,7 +23,7 @@
     {
       "type": "function",
       "name": "read_context",
-      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller. Start from a context_id listed by cybion_list_contexts; pass a returned child context_id to explore further levels.",
+      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller. Start from a context_id listed by cybion_list_contexts; pass a returned child context_id to explore further levels. Reads resolve local Contexts first, then the read-only Cybion Common Context, then CTX documents.",
       "parameters": {
         "type": "object",
         "properties": {

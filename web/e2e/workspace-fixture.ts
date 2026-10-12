@@ -87,6 +87,16 @@ export async function stubWorkspace(page: Page, options: {
         Object.assign(reference, request.postDataJSON())
         return json(reference)
       }
+      if (path === "/api/common-contexts") return json({
+        revision: 1,
+        root: {
+          id: "common-root",
+          name: "Cybion Common Context",
+          description: "Compiled into Cybion from its source tree, shared by every user, read-only",
+          content: "# Cybion Common Context\n\nFixture content.",
+          children: [],
+        },
+      })
       if (path === "/api/integrations/ctx") {
         if (request.method() === "POST") state.ctxConnected = true
         if (request.method() === "DELETE") state.ctxConnected = false

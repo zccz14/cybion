@@ -467,6 +467,8 @@ const copy = {
     contextDeleted: "Context deleted",
     contextCollapse: "Collapse context",
     contextExpand: "Expand context",
+    commonContextTitle: "Cybion Common Context",
+    commonContextHint: "Compiled into Cybion from its source tree and shared by every user, read-only. Threads read it progressively through the Contexts tools; it changes only with releases.",
     navAudit: "Audit",
     usageStats: "Usage statistics",
     navAdministration: "Administration",
@@ -805,6 +807,8 @@ const copy = {
     contextDeleted: "上下文已删除",
     contextCollapse: "收起上下文",
     contextExpand: "展开上下文",
+    commonContextTitle: "Cybion Common Context",
+    commonContextHint: "随 Cybion 源码编译发布、所有用户共享、只读；Thread 通过上下文工具按需渐进阅读，内容只随版本变化。",
     navAudit: "审计",
     usageStats: "用量统计",
     navAdministration: "管理员",
@@ -2197,6 +2201,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
         </CardContent>
       </Card>
     </div>
+    <CommonContextCard sdk={sdk} />
     <CtxIntegrationCard sdk={sdk} />
   </Page>
 }
@@ -2227,6 +2232,74 @@ function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabe
       </Button>
     </div>
     {expanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
+  </li>
+}
+
+type CommonContextNode = {
+  id: string
+  name: string
+  description: string
+  content: string
+  children: CommonContextNode[]
+}
+
+// The Cybion Common Context is compiled into the controller from
+// `common-contexts/`; this card shows users exactly what Threads can read.
+function CommonContextCard({ sdk }: { sdk: AuthMiniApi }) {
+  const { t } = useUi()
+  const query = useQuery({
+    queryKey: ["common-contexts"],
+    queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, "/api/common-contexts"),
+  })
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const root = query.data?.root ?? null
+  useEffect(() => {
+    if (root && selectedId === null) setSelectedId(root.id)
+  }, [root, selectedId])
+  const selected = root && selectedId ? findCommonContextNode(root, selectedId) : null
+  return <Card>
+    <CardHeader><CardTitle>{t("commonContextTitle")}</CardTitle><CardDescription>{t("commonContextHint")}</CardDescription></CardHeader>
+    <CardContent>
+      {query.error && <RequestError error={query.error as Error} onRetry={() => void query.refetch()} />}
+      {!root && !query.error && <div className="flex flex-col gap-2"><Skeleton className="h-8" /><Skeleton className="h-8" /></div>}
+      {root && <div className="grid gap-6 xl:grid-cols-[minmax(14rem,0.7fr)_minmax(0,1.6fr)]">
+        <ul role="tree" aria-label={t("commonContextTitle")} className="space-y-1">
+          <CommonContextBranch node={root} selectedId={selectedId} onSelect={(node) => setSelectedId(node.id)} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />
+        </ul>
+        {selected && <div className="min-w-0">
+          <p className="font-medium">{selected.name}</p>
+          {selected.description && <p className="mt-1 text-sm text-muted-foreground">{selected.description}</p>}
+          <div className="prose prose-sm mt-3 max-w-none break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">
+            <Markdown>{selected.content}</Markdown>
+          </div>
+        </div>}
+      </div>}
+    </CardContent>
+  </Card>
+}
+
+function findCommonContextNode(node: CommonContextNode, id: string): CommonContextNode | null {
+  if (node.id === id) return node
+  for (const child of node.children) {
+    const found = findCommonContextNode(child, id)
+    if (found) return found
+  }
+  return null
+}
+
+function CommonContextBranch({ node, selectedId, onSelect, collapseLabel, expandLabel }: { node: CommonContextNode; selectedId: string | null; onSelect: (node: CommonContextNode) => void; collapseLabel: string; expandLabel: string }) {
+  const [expanded, setExpanded] = useState(true)
+  return <li role="treeitem" aria-expanded={node.children.length > 0 ? expanded : undefined}>
+    <div className="flex items-center gap-1">
+      <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={expanded ? collapseLabel : expandLabel} disabled={node.children.length === 0} onClick={() => setExpanded((value) => !value)}>
+        {node.children.length > 0 && <ChevronDownIcon className={expanded ? "" : "-rotate-90"} />}
+      </Button>
+      <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === node.id ? "bg-accent" : ""}`} onClick={() => onSelect(node)}>
+        <span className="min-w-0 truncate font-medium">{node.name}</span>
+        {node.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{node.description}</span>}
+      </Button>
+    </div>
+    {expanded && node.children.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{node.children.map((child) => <CommonContextBranch key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
   </li>
 }
 
