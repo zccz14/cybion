@@ -84,6 +84,15 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
   })
 }
 
+test("personal settings manage the CTX connection without listing documents", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { ctxConnected: true })
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto("/#/configuration")
+  await expect(page.getByText("CTX 来源（可选）", { exact: true })).toBeVisible()
+  await expect(page.getByText("CTX project reference", { exact: true })).toHaveCount(0)
+  expect(fixture.unexpected).toEqual([])
+})
+
 test("using a reference preserves an existing conversation draft", async ({ page }) => {
   await stubWorkspace(page)
   await page.goto("/#/threads/new")

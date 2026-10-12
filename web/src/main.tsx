@@ -2208,7 +2208,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
       </Card>
     </div>
     <CommonContextCard sdk={sdk} />
-    <CtxIntegrationCard sdk={sdk} />
+    <CtxIntegrationCard sdk={sdk} withDocuments />
   </Page>
 }
 
@@ -2682,12 +2682,14 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
 type CtxIntegrationStatus = { connected: boolean; key_id: string | null }
 type CtxIntegrationDocuments = { connected: boolean; documents: { context_id: string; name: string; description: string }[]; notice: string | null }
 
-function CtxIntegrationCard({ sdk }: { sdk: AuthMiniApi }) {
+function CtxIntegrationCard({ sdk, withDocuments = false }: { sdk: AuthMiniApi; withDocuments?: boolean }) {
   const { t } = useUi()
   const client = useQueryClient()
   const status = useQuery({ queryKey: ["ctx-integration"], queryFn: ({ signal }) => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { signal }) })
   const connected = status.data?.connected === true
-  const documents = useQuery({ queryKey: ["ctx-documents"], queryFn: ({ signal }) => api<CtxIntegrationDocuments>(sdk, "/api/integrations/ctx/documents", { signal }), enabled: connected })
+  // Personal settings manages the connection only; the Contexts page opts into
+  // listing the user's top-level CTX documents for browsing.
+  const documents = useQuery({ queryKey: ["ctx-documents"], queryFn: ({ signal }) => api<CtxIntegrationDocuments>(sdk, "/api/integrations/ctx/documents", { signal }), enabled: connected && withDocuments })
   const refresh = () => { void client.invalidateQueries({ queryKey: ["ctx-integration"] }); void client.invalidateQueries({ queryKey: ["ctx-documents"] }) }
   const connect = useMutation({ mutationFn: () => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { method: "POST" }), onSuccess: refresh })
   const disconnect = useMutation({ mutationFn: () => api<unknown>(sdk, "/api/integrations/ctx", { method: "DELETE" }), onSuccess: refresh })
@@ -2704,7 +2706,7 @@ function CtxIntegrationCard({ sdk }: { sdk: AuthMiniApi }) {
           : <Button size="sm" disabled={connect.isPending} onClick={() => connect.mutate()}>{connect.isPending ? <Spinner /> : <FileKey2Icon data-icon="inline-start" />}{t("ctxConnect")}</Button>}
       </div>}
       {(connect.error || disconnect.error) && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("ctxRequestError")}</AlertTitle><AlertDescription>{errorMessage(connect.error ?? disconnect.error)}</AlertDescription></Alert>}
-      {connected && <div className="flex flex-col gap-2">
+      {withDocuments && connected && <div className="flex flex-col gap-2">
         <p className="text-sm font-medium">{t("ctxDocumentsTitle")}</p>
         {documents.isLoading && <Skeleton className="h-16" />}
         {documents.error && <RequestError error={documents.error} onRetry={() => void documents.refetch()} />}

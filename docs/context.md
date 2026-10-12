@@ -141,7 +141,9 @@ exactly what Threads can read.
 A user can connect CTX (ctx.ntnl.io) from Configuration → Integrations. Cybion
 mints a labeled API key inside CTX with the browser session and stores it in
 the user's database; every later CTX call uses that key, so the tools work
-while a Thread runs without the browser. `cybion_list_contexts` appends the
+while a Thread runs without the browser. Personal settings and the Contexts
+page both carry the connection card; only the Contexts page lists the user's
+top-level documents for browsing. `cybion_list_contexts` appends the
 user's top-level CTX documents (kind `article`, no parent) to the local
 top-level Contexts; `read_context` reads any id that is not a local Context
 from CTX, returning the document's current revision plus its direct

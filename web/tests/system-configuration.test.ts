@@ -14,6 +14,12 @@ test("personal configuration contains only personal controls, even for administr
   assert.match(main, /path="\/settings" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
 })
 
+test("the CTX document list lives on the Contexts page, not in personal configuration", () => {
+  assert.match(personal, /<CtxIntegrationCard key=\{session\?\.sessionId\} sdk=\{sdk\} \/>/)
+  assert.match(main, /\{ sdk, withDocuments = false \}/)
+  assert.match(main, /<CtxIntegrationCard sdk=\{sdk\} withDocuments \/>/)
+})
+
 test("the personal page reaches manual upstreams only through the NormAI card", () => {
   const page = personal.slice(0, personal.indexOf("function CtxIntegrationCard("))
   assert.match(page, /<NormaiUpstreamCard key=\{session\?\.sessionId\} sdk=\{sdk\} \/>/)

@@ -402,7 +402,7 @@ async fn list_tool_degrades_with_a_notice_when_ctx_is_unreachable() {
 }
 
 #[tokio::test]
-async fn documents_view_exposes_top_level_documents_for_the_configuration_page() {
+async fn documents_view_exposes_top_level_documents_for_the_contexts_page() {
     let f = fixture().await;
     store_key(&f, "ctx_key_1", "key-1").await;
     set_documents(

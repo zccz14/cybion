@@ -58,7 +58,7 @@ test("using a saved reference only seeds the ordinary composer, preserving exist
   assert.match(main, /seed\(initialInput\)/)
   assert.match(main, /seed\(example\); inputRef\.current\?\.focus\(\)/)
   const contexts = main.slice(main.indexOf("function ContextsPage("), main.indexOf("function ContextTree("))
-  assert.match(contexts, /<CtxIntegrationCard sdk=\{sdk\} \/>/)
+  assert.match(contexts, /<CtxIntegrationCard sdk=\{sdk\} withDocuments \/>/)
   assert.doesNotMatch(contexts, /type="file"|\/threads\/start/)
 })
 
