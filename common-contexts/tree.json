@@ -1,5 +1,5 @@
 {
-  "revision": 1,
+  "revision": 2,
   "root": {
     "id": "2b7b2b90-00a7-4c92-8b10-bee31b246e3a",
     "name": "Cybion Common Context",
@@ -23,6 +23,12 @@
             "name": "怎么写检查命令",
             "description": "检查命令的设计准则与示例：exit 0 语义、输出、幂等、超时与环境差异。",
             "content_file": "nodes/ultimate-machine/writing-checks.md"
+          },
+          {
+            "id": "2bd8a4fd-4b66-4d7f-bd89-d203b2918e6b",
+            "name": "管理工具（tool 套件）",
+            "description": "cybion_list_ultimate_machines / cybion_get_ultimate_machine / cybion_set_ultimate_machine 的使用套路。",
+            "content_file": "nodes/ultimate-machine/management-tools.md"
           },
           {
             "id": "b8e8735f-525f-41ed-8512-5b1fc1d3870d",

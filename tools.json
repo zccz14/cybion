@@ -37,6 +37,75 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "type": "function",
+      "name": "cybion_list_ultimate_machines",
+      "description": "List the user's Ultimate Machines (终极机器): scheduled self-checks that run one bash command on a Worker every interval and stay silent while the command exits 0. A failing run is delivered into the machine's repair Thread (终极机器 · <name>) as a user message asking to make the command return 0 — dropped, not queued, while that Thread is mid-turn; an offline or missing Worker is reported once per episode through Linkit; a run that never settles is declared lost after 15 minutes and reported once. Returns id, name, worker_id, worker_label, command, intent, interval_seconds, enabled, last_run_at, last_exit, thread_id, created_at. Use it to pick a machine_id for cybion_get_ultimate_machine or cybion_set_ultimate_machine.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "cybion_get_ultimate_machine",
+      "description": "Read one Ultimate Machine by machine_id: its definition (name, worker_id, command, intent, interval_seconds, enabled), its bound repair Thread, and the latest settled run — last_run_at plus last_exit, where 0 is healthy, any other number is the Unix exit code (a command killed without one counts as -1), and null means the latest run produced no exit code (no run yet, a run lost mid-flight, or an execution error reported through Linkit). Use it to inspect a machine before editing it, or to relate a 【终极机器·<name>】 repair request to the machine that sent it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "machine_id": {
+            "type": "string",
+            "description": "Exact machine id from cybion_list_ultimate_machines."
+          }
+        },
+        "required": [
+          "machine_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "cybion_set_ultimate_machine",
+      "description": "Create or update an Ultimate Machine (终极机器) — one bash command run on one Worker every interval_seconds, silent while the command exits 0. Omit machine_id to create: name, worker_id, command and interval_seconds are required, the first run starts right away, and a repair Thread named 终极机器 · <name> is created automatically. Pass machine_id to update — only the fields you give change, and: an empty intent clears it; enabled pauses or resumes; a new worker_id starts a fresh offline-notification episode; renaming retitles the repair Thread unless the user renamed it by hand. Machines cannot be deleted here: pause with enabled=false, or delete the bound Thread or its Worker. To validate a check immediately, run the same command with bash on the Worker — the next scheduled run re-verifies silently.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "machine_id": {
+            "type": "string",
+            "description": "Omit to create a new machine; pass the exact id from cybion_list_ultimate_machines to update that machine."
+          },
+          "name": {
+            "type": "string",
+            "description": "Label shown in the Ultimate Machines list, 1-120 characters, e.g. 磁盘检查. On create required."
+          },
+          "worker_id": {
+            "type": "string",
+            "description": "Exact worker_id from cybion_list_workers, of a Worker you own — shared Workers cannot run machines. The command runs there through the normal Worker protocol (bash with timeout_seconds=300). On create required; changing it moves the machine and restarts the offline-notification episode."
+          },
+          "command": {
+            "type": "string",
+            "description": "The single bash command run every interval; 1-4000 characters. Exit 0 means healthy and silent; any other result is sent to the repair Thread with the tail of stderr/stdout (up to 1500 characters), so make failures self-explanatory. Keep it cheap and safe to repeat. On create required. Example: test $(df -Pk / | awk 'NR==2 {print $5}' | tr -d %) -lt 90"
+          },
+          "intent": {
+            "type": "string",
+            "description": "Optional plain-language goal of the check, up to 2000 characters, e.g. 确保根分区低于 90%. Delivered with every repair request (意图) so the fixing agent knows what the check protects. On update, omit to keep it and pass an empty string to clear it."
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 2592000,
+            "description": "Seconds between runs, 10-2592000 (30 days). The first run starts right after creation; afterwards the next run starts one interval after the previous run settled, with at most one run in flight. On create required."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Update only: false pauses all runs and notices, true resumes. A new machine starts enabled."
+          }
+        },
+        "additionalProperties": false
+      }
     }
   ],
   "worker": [

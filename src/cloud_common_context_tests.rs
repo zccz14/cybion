@@ -80,7 +80,7 @@ async fn read_tool_reads_common_nodes_with_parent_and_children() {
     .await
     .unwrap();
     assert_eq!(child["parent_id"], Value::String(root_id));
-    assert_eq!(child["children"].as_array().unwrap().len(), 4);
+    assert_eq!(child["children"].as_array().unwrap().len(), 5);
     assert!(child["content"].as_str().unwrap().contains("终极机器"));
 }
 

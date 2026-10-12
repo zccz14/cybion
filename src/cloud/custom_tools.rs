@@ -932,6 +932,9 @@ mod tests {
             "read_context",
             "cybion_list_contexts",
             "cybion_list_workers",
+            "cybion_list_ultimate_machines",
+            "cybion_get_ultimate_machine",
+            "cybion_set_ultimate_machine",
         ]
         .into_iter()
         .map(str::to_owned)

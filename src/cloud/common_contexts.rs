@@ -49,6 +49,10 @@ const CONTENT: &[(&str, &str)] = &[
         include_str!("../../common-contexts/nodes/ultimate-machine/writing-checks.md"),
     ),
     (
+        "nodes/ultimate-machine/management-tools.md",
+        include_str!("../../common-contexts/nodes/ultimate-machine/management-tools.md"),
+    ),
+    (
         "nodes/ultimate-machine/after-failure.md",
         include_str!("../../common-contexts/nodes/ultimate-machine/after-failure.md"),
     ),

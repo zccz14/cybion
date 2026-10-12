@@ -7027,6 +7027,9 @@ async fn start_response_tool(
         "read_context" => Some(read_context_tool_output(state, user, input).await),
         "cybion_list_contexts" => Some(list_contexts_tool_output(state, user).await),
         "cybion_list_workers" => Some(list_workers_tool_output(state, user).await),
+        "cybion_list_ultimate_machines" => Some(machines::list_tool_output(state, user).await),
+        "cybion_get_ultimate_machine" => Some(machines::get_tool_output(state, user, input).await),
+        "cybion_set_ultimate_machine" => Some(machines::set_tool_output(state, user, input).await),
         _ => None,
     };
     if let Some(output) = controller_output {
@@ -7830,6 +7833,10 @@ mod traffic_tests;
 #[cfg(test)]
 #[path = "cloud_machine_tests.rs"]
 mod machine_tests;
+
+#[cfg(test)]
+#[path = "cloud_machine_tool_tests.rs"]
+mod machine_tool_tests;
 
 #[cfg(test)]
 #[path = "cloud_common_context_tests.rs"]
@@ -9535,7 +9542,7 @@ mod tests {
             true,
             true,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 11);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -9963,22 +9970,26 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, &[], true, true);
-        assert_eq!(tools.as_array().unwrap().len(), 5);
+        assert_eq!(tools.as_array().unwrap().len(), 8);
         assert_eq!(tools[0]["name"], "cybion_list_contexts");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[3], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[4], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[3]["name"], "cybion_list_ultimate_machines");
+        assert_eq!(tools[4]["name"], "cybion_get_ultimate_machine");
+        assert_eq!(tools[5]["name"], "cybion_set_ultimate_machine");
+        assert_eq!(tools[4]["parameters"]["required"], json!(["machine_id"]));
+        assert_eq!(tools[6], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, &[], true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 8);
-        assert_eq!(worker_and_native[3]["name"], "bash");
-        assert_eq!(worker_and_native[6]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[7]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 11);
+        assert_eq!(worker_and_native[6]["name"], "bash");
+        assert_eq!(worker_and_native[9]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[10]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, &[], true, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 4);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 7);
         assert_eq!(
-            web_search_only[3],
+            web_search_only[6],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, &[], false, false);
@@ -9992,7 +10003,10 @@ mod tests {
             [
                 "cybion_list_contexts",
                 "cybion_list_workers",
-                "read_context"
+                "read_context",
+                "cybion_list_ultimate_machines",
+                "cybion_get_ultimate_machine",
+                "cybion_set_ultimate_machine"
             ]
         );
         assert_eq!(responses_tools(false, false, &[], false, false), json!([]));
@@ -10013,7 +10027,10 @@ mod tests {
             [
                 "cybion_list_contexts",
                 "cybion_list_workers",
-                "read_context"
+                "read_context",
+                "cybion_list_ultimate_machines",
+                "cybion_get_ultimate_machine",
+                "cybion_set_ultimate_machine"
             ]
         );
         assert_eq!(
@@ -10230,12 +10247,15 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 8);
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
-        assert_eq!(tools[3], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[4], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[3], TOOL_CATALOG["context"][3]);
+        assert_eq!(tools[4], TOOL_CATALOG["context"][4]);
+        assert_eq!(tools[5], TOOL_CATALOG["context"][5]);
+        assert_eq!(tools[6], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

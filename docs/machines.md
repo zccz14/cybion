@@ -51,6 +51,23 @@ the Thread still carries its automatic title; a hand-renamed title is kept.
 Changing `worker_id` clears `offline_notified_at`, so the new Worker starts a
 fresh offline episode.
 
+## Model tools
+
+Threads manage machines through controller-answered tools with the same
+validation as the API:
+
+- `cybion_list_ultimate_machines` lists the user's machines — definition plus
+  the latest settled run (`last_run_at`, `last_exit`).
+- `cybion_get_ultimate_machine` reads one machine by id.
+- `cybion_set_ultimate_machine` creates a machine when `machine_id` is omitted
+  (name, worker_id, command and interval_seconds required) and otherwise
+  applies a partial update: only the fields given change, an empty `intent`
+  clears it, `enabled` pauses or resumes, a new `worker_id` resets the offline
+  episode and renaming retitles the repair Thread.
+
+The tools never delete a machine, bind owned Workers only and treat `enabled`
+as update-only, mirroring the page.
+
 ## Page
 
 `#/machines` (Work group) shows every machine with status, Worker, command,

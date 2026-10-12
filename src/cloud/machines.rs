@@ -94,14 +94,17 @@ pub(super) async fn list(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<Vec<MachineView>>, ApiError> {
-    let machines = user_db(&state, &identity.user, false, |connection| {
+    Ok(Json(list_for(&state, &identity.user).await?))
+}
+
+pub(super) async fn list_for(state: &AppState, user: &User) -> Result<Vec<MachineView>, ApiError> {
+    user_db(state, user, false, |connection| {
         let mut statement =
             connection.prepare(&format!("{MACHINE_VIEW_SELECT} ORDER BY m.created_at,m.id"))?;
         let rows = statement.query_map([], machine_view)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     })
-    .await?;
-    Ok(Json(machines))
+    .await
 }
 
 #[derive(Deserialize)]
@@ -119,14 +122,22 @@ pub(super) async fn create(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Json(input): Json<CreateMachineInput>,
 ) -> Result<Json<MachineView>, ApiError> {
+    Ok(Json(create_for(&state, &identity.user, input).await?))
+}
+
+pub(super) async fn create_for(
+    state: &AppState,
+    user: &User,
+    input: CreateMachineInput,
+) -> Result<MachineView, ApiError> {
     let name = label(&input.name, "name", NAME_MAX_CHARS)?;
     let command = machine_command(input.command)?;
     let intent = machine_intent(input.intent)?;
     let interval = validate_interval_seconds(input.interval_seconds)?;
     let worker_id = record_id(&input.worker_id)?;
     let thread = create_thread_for(
-        &state,
-        &identity.user,
+        state,
+        user,
         CreateThreadInput {
             title: Some(machine_thread_title(&name)),
             external_ref: None,
@@ -139,7 +150,7 @@ pub(super) async fn create(
     )
     .await?;
     let machine_id = Uuid::new_v4().to_string();
-    let machine = user_db(&state, &identity.user, true, {
+    user_db(state, user, true, {
         let machine_id = machine_id.clone();
         let thread_id = thread.id.clone();
         move |connection| {
@@ -158,8 +169,7 @@ pub(super) async fn create(
             load_machine(connection, &machine_id)
         }
     })
-    .await?;
-    Ok(Json(machine))
+    .await
 }
 
 #[derive(Deserialize)]
@@ -179,12 +189,139 @@ pub(super) async fn update(
     AxumPath(id): AxumPath<String>,
     Json(input): Json<UpdateMachineInput>,
 ) -> Result<Json<MachineView>, ApiError> {
-    let id = record_id(&id)?;
-    let machine = user_db(&state, &identity.user, true, move |connection| {
+    Ok(Json(update_for(&state, &identity.user, &id, input).await?))
+}
+
+pub(super) async fn update_for(
+    state: &AppState,
+    user: &User,
+    id: &str,
+    input: UpdateMachineInput,
+) -> Result<MachineView, ApiError> {
+    let id = record_id(id)?;
+    user_db(state, user, true, move |connection| {
         update_machine(connection, &id, input)
     })
-    .await?;
-    Ok(Json(machine))
+    .await
+}
+
+/// Loads one machine for the controller-answered tool calls.
+pub(super) async fn load_for(
+    state: &AppState,
+    user: &User,
+    id: &str,
+) -> Result<MachineView, ApiError> {
+    let id = record_id(id)?;
+    user_db(state, user, false, move |connection| {
+        load_machine(connection, &id)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetMachineArguments {
+    machine_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetMachineArguments {
+    #[serde(default)]
+    machine_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    interval_seconds: Option<i64>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// `cybion_list_ultimate_machines`: definitions plus the latest settled run.
+pub(super) async fn list_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
+    let machines =
+        serde_json::to_value(list_for(state, user).await?).map_err(ApiError::internal)?;
+    Ok(json!({ "machines": machines }))
+}
+
+/// `cybion_get_ultimate_machine`: one machine by id.
+pub(super) async fn get_tool_output(
+    state: &AppState,
+    user: &User,
+    input: &str,
+) -> Result<Value, ApiError> {
+    let arguments: GetMachineArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!(
+            "cybion_get_ultimate_machine arguments must contain an explicit machine_id: {error}"
+        ))
+    })?;
+    let machine = load_for(state, user, &arguments.machine_id).await?;
+    serde_json::to_value(machine).map_err(ApiError::internal)
+}
+
+/// `cybion_set_ultimate_machine`: create without `machine_id`, otherwise a
+/// partial update; only the fields given change.
+pub(super) async fn set_tool_output(
+    state: &AppState,
+    user: &User,
+    input: &str,
+) -> Result<Value, ApiError> {
+    let arguments: SetMachineArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!(
+            "cybion_set_ultimate_machine arguments are invalid: {error}"
+        ))
+    })?;
+    let machine = match arguments.machine_id {
+        Some(machine_id) => {
+            let update = UpdateMachineInput {
+                enabled: arguments.enabled,
+                name: arguments.name,
+                worker_id: arguments.worker_id,
+                command: arguments.command,
+                intent: arguments.intent,
+                interval_seconds: arguments.interval_seconds,
+            };
+            update_for(state, user, &machine_id, update).await?
+        }
+        None => {
+            if arguments.enabled.is_some() {
+                return Err(ApiError::bad_request(
+                    "enabled applies to updates only; a new machine starts enabled",
+                ));
+            }
+            let name = arguments
+                .name
+                .ok_or_else(|| ApiError::bad_request("creating a machine requires name"))?;
+            let worker_id = arguments
+                .worker_id
+                .ok_or_else(|| ApiError::bad_request("creating a machine requires worker_id"))?;
+            let command = arguments
+                .command
+                .ok_or_else(|| ApiError::bad_request("creating a machine requires command"))?;
+            let interval_seconds = arguments.interval_seconds.ok_or_else(|| {
+                ApiError::bad_request("creating a machine requires interval_seconds")
+            })?;
+            create_for(
+                state,
+                user,
+                CreateMachineInput {
+                    name,
+                    worker_id,
+                    command,
+                    intent: arguments.intent,
+                    interval_seconds,
+                },
+            )
+            .await?
+        }
+    };
+    serde_json::to_value(machine).map_err(ApiError::internal)
 }
 
 pub(super) type MachineEditRow = (String, String, String, Option<String>, i64, bool, String);
