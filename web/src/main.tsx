@@ -453,9 +453,6 @@ const copy = {
     contextSelectHint: "Select a node in the tree, or create a new context.",
     contextGlobalBadge: "Read-only",
     contextGlobalHint: "Compiled into Cybion with each release and shared by every user. The content below is what Threads read through the Contexts tools.",
-    contextCtxBadge: "Read-only",
-    contextCtxHint: "Stored in CTX; edit and publish it there. Threads read the current revision through the integration.",
-    ctxDocumentsDisconnected: "CTX is not connected. Connect it under Configuration to browse your CTX documents here.",
     contextName: "Context name",
     contextDescription: "Purpose — when to consult it",
     contextContent: "Location and reading instructions",
@@ -620,17 +617,6 @@ const copy = {
     imageGenerationModel: "Image generation model",
     imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
     imageGenerationDisabled: "Disabled",
-    ctxIntegrationTitle: "CTX sources (optional)",
-    ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) to browse its documents inside your Contexts. Documents stay in CTX and are read as needed, not copied into this workspace. The dedicated access key can be revoked anytime.",
-    ctxConnected: "Connected",
-    ctxNotConnected: "Not connected",
-    ctxConnect: "Connect CTX",
-    ctxDisconnect: "Disconnect",
-    ctxDisconnectConfirm: "Disconnect CTX? Cybion stops reading your CTX documents until you reconnect.",
-    ctxRequestError: "CTX request failed",
-    ctxDocumentsTitle: "Top-level CTX documents",
-    ctxDocumentsEmpty: "No top-level documents in CTX yet.",
-    ctxOpenDocument: "Open in CTX",
     normaiTitle: "NormAI upstream",
     normaiDescription: "Model inference runs through NormAI. Configure upstream providers and billing on NormAI; Cybion automatically issues and stores a dedicated consumer credential.",
     normaiConnected: "Connected",
@@ -801,9 +787,6 @@ const copy = {
     contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
     contextGlobalBadge: "只读",
     contextGlobalHint: "随 Cybion 版本编译发布、所有用户共享只读。下方内容即 Thread 通过上下文工具读到的正文。",
-    contextCtxBadge: "只读",
-    contextCtxHint: "内容存放在 CTX；编辑与发布请在 CTX 完成。Thread 通过集成读取当前修订。",
-    ctxDocumentsDisconnected: "尚未连接 CTX。可在「配置」中连接后在此浏览 CTX 文档。",
     contextName: "上下文名称",
     contextDescription: "用途 — 何时参考",
     contextContent: "位置与获取说明",
@@ -968,17 +951,6 @@ const copy = {
     imageGenerationModel: "图像生成模型",
     imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
     imageGenerationDisabled: "关闭",
-    ctxIntegrationTitle: "CTX 来源（可选）",
-    ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，可在上下文中浏览其中的文档。文档留在 CTX 中，按需读取，不复制到工作区。专用访问密钥可随时吊销。",
-    ctxConnected: "已连接",
-    ctxNotConnected: "未连接",
-    ctxConnect: "连接 CTX",
-    ctxDisconnect: "断开连接",
-    ctxDisconnectConfirm: "断开 CTX？重新连接之前，Cybion 将不再读取你的 CTX 文档。",
-    ctxRequestError: "CTX 请求失败",
-    ctxDocumentsTitle: "CTX 一级文档",
-    ctxDocumentsEmpty: "CTX 里还没有一级文档。",
-    ctxOpenDocument: "在 CTX 打开",
     normaiTitle: "NormAI 上游",
     normaiDescription: "模型推理经由 NormAI 完成；上游提供商与计费都在 NormAI 配置，Cybion 会自动签发并保存专用消费者密钥。",
     normaiConnected: "已连接",
@@ -2174,26 +2146,16 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const client = useQueryClient()
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts") })
   const common = useQuery({ queryKey: ["common-contexts"], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, "/api/common-contexts") })
-  const ctxStatus = useQuery({ queryKey: ["ctx-integration"], queryFn: ({ signal }) => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { signal }) })
-  const ctxConnected = ctxStatus.data?.connected === true
-  const ctxDocuments = useQuery({ queryKey: ["ctx-documents"], queryFn: ({ signal }) => api<CtxIntegrationDocuments>(sdk, "/api/integrations/ctx/documents", { signal }), enabled: ctxConnected })
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<ContextDraft | null>(null)
   const [initialized, setInitialized] = useState(false)
   const commonRoot = common.data?.root ?? null
   const commonNodes = useMemo(() => (commonRoot ? flattenTree(commonRoot) : []), [commonRoot])
-  const ctxRootDocuments = useMemo(() => ctxDocuments.data?.documents ?? [], [ctxDocuments.data])
-  const selectable = useMemo(() => ({
-    localIds: new Set((contexts.data ?? []).map((context) => context.id)),
-    commonIds: new Set(commonNodes.filter((node) => node.id !== commonRoot?.id).map((node) => node.id)),
-    ctxIds: new Set(ctxRootDocuments.map((document) => document.context_id)),
-  }), [contexts.data, commonNodes, commonRoot?.id, ctxRootDocuments])
 
   useEffect(() => {
     const ready = contexts.data !== undefined &&
-      (commonRoot !== null || common.error !== null) &&
-      (!ctxConnected || ctxDocuments.data !== undefined || ctxDocuments.error !== null)
+      (commonRoot !== null || common.error !== null)
     if (!ready || initialized) return
     setInitialized(true)
     const firstLocal = contexts.data?.[0]
@@ -2203,7 +2165,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     } else if (commonRoot) {
       setSelectedId(commonRoot.id)
     }
-  }, [contexts.data, commonRoot, common.error, ctxConnected, ctxDocuments.data, ctxDocuments.error, initialized])
+  }, [contexts.data, commonRoot, common.error, initialized])
 
   const save = useMutation({
     mutationFn: (value: ContextDraft) => api<Context>(sdk, value.id ? `/api/contexts/${encodeURIComponent(value.id)}` : "/api/contexts", {
@@ -2266,19 +2228,17 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     remove.mutate(draft.id)
   }
 
-  // Selection resolves by id across the three sources, mirroring the
-  // controller's read order: a local draft wins, then the common tree, then CTX.
+  // Selection resolves by id across the two sources, mirroring the
+  // controller's read order: a local draft wins, then the common tree.
   const localSelected = draft ? null : (contexts.data ?? []).find((context) => context.id === selectedId) ?? null
   const commonSelected = draft || localSelected ? null : commonNodes.find((node) => node.id === selectedId) ?? null
-  const remoteSelectedId = draft || localSelected || commonSelected ? null : selectedId
 
   const parentOptions = useMemo(() => {
     const options: { id: string; name: string }[] = [...(contexts.data ?? []).map((context) => ({ id: context.id, name: context.name }))]
     for (const node of commonNodes) if (node.id !== commonRoot?.id) options.push({ id: node.id, name: node.name })
-    for (const document of ctxRootDocuments) options.push({ id: document.context_id, name: document.name })
     options.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
     return options
-  }, [contexts.data, commonNodes, commonRoot?.id, ctxRootDocuments])
+  }, [contexts.data, commonNodes, commonRoot?.id])
 
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     <aside className="border-b bg-sidebar/40 p-3 lg:w-80 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -2302,15 +2262,6 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
               ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("contextEmpty")}</p>
               : <ContextTree contexts={contexts.data} selectedId={draft ? null : selectedId} onSelect={selectLocal} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
           </section>
-          <section>
-            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("ctxIntegrationTitle")}</p>
-            {!ctxStatus.isLoading && !ctxConnected && <p className="px-2 py-1 text-sm text-muted-foreground">{t("ctxDocumentsDisconnected")}</p>}
-            {ctxConnected && <ul role="tree" aria-label={t("ctxIntegrationTitle")} className="space-y-1">
-              {ctxRootDocuments.map((document) => <CtxBranch key={document.context_id} document={document} sdk={sdk} selectedId={draft ? null : selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />)}
-              {ctxRootDocuments.length === 0 && ctxDocuments.data && <li><p className="px-2 py-1 text-sm text-muted-foreground">{t("ctxDocumentsEmpty")}</p></li>}
-            </ul>}
-            {ctxDocuments.data?.notice && <p className="px-2 text-sm text-destructive">{ctxDocuments.data.notice}</p>}
-          </section>
         </>}
       </div>
     </aside>
@@ -2326,17 +2277,10 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
               content={commonSelected.content}
               language={language}
             />
-          : remoteSelectedId
-            ? <ContextRemotePane sdk={sdk} id={remoteSelectedId} language={language} />
-            : <ContextPane><p className="py-16 text-center text-sm text-muted-foreground">{t("contextSelectHint")}</p></ContextPane>}
+          : <ContextPane><p className="py-16 text-center text-sm text-muted-foreground">{t("contextSelectHint")}</p></ContextPane>}
     </section>
   </main>
 }
-
-const CTX_ORIGIN = "https://ctx.ntnl.io"
-
-type CtxDocumentSummary = { context_id: string; name: string; description: string }
-type CtxChildNode = { context_id: string; name: string; description: string }
 
 function ContextTree({ contexts, selectedId, onSelect, label, collapseLabel, expandLabel }: { contexts: Context[]; selectedId: string | null; onSelect: (context: Context) => void; label: string; collapseLabel: string; expandLabel: string }) {
   const grouped = useMemo(() => groupLocalContexts(contexts), [contexts])
@@ -2383,53 +2327,6 @@ function CommonBranch({ node, selectedId, onSelect, expanded, onToggle, collapse
   </li>
 }
 
-function CtxBranch({ document, sdk, selectedId, onSelect, expanded, onToggle, collapseLabel, expandLabel }: { document: CtxDocumentSummary; sdk: AuthMiniApi; selectedId: string | null; onSelect: (id: string) => void; expanded: ReadonlySet<string>; onToggle: (id: string, next: boolean) => void; collapseLabel: string; expandLabel: string }) {
-  const isExpanded = expanded.has(document.context_id)
-  return <li role="treeitem" aria-expanded={isExpanded}>
-    <div className="flex items-center gap-1">
-      <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} onClick={() => onToggle(document.context_id, !isExpanded)}>
-        <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />
-      </Button>
-      <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === document.context_id ? "bg-accent" : ""}`} onClick={() => onSelect(document.context_id)}>
-        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate font-medium">{document.name}</span>
-          {document.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{document.description}</span>}
-        </span>
-      </Button>
-    </div>
-    {isExpanded && <CtxNodeList parentId={document.context_id} sdk={sdk} selectedId={selectedId} onSelect={onSelect} expanded={expanded} onToggle={onToggle} collapseLabel={collapseLabel} expandLabel={expandLabel} />}
-  </li>
-}
-
-function CtxNodeList({ parentId, sdk, selectedId, onSelect, expanded, onToggle, collapseLabel, expandLabel }: { parentId: string; sdk: AuthMiniApi; selectedId: string | null; onSelect: (id: string) => void; expanded: ReadonlySet<string>; onToggle: (id: string, next: boolean) => void; collapseLabel: string; expandLabel: string }) {
-  const query = useQuery({
-    queryKey: ["ctx-context", parentId],
-    queryFn: () => api<{ children: CtxChildNode[] }>(sdk, `/api/contexts/${encodeURIComponent(parentId)}`),
-  })
-  const children = query.data?.children ?? []
-  return <ul role="group" className="ml-5 border-l pl-2">
-    {query.isLoading && <li><Skeleton className="h-6" /></li>}
-    {query.error && <li><RequestError error={query.error as Error} onRetry={() => void query.refetch()} /></li>}
-    {children.map((child) => {
-      const isExpanded = expanded.has(child.context_id)
-      return <li key={child.context_id} role="treeitem" aria-expanded={isExpanded}>
-        <div className="flex items-center gap-1">
-          <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} onClick={() => onToggle(child.context_id, !isExpanded)}>
-            <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />
-          </Button>
-          <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === child.context_id ? "bg-accent" : ""}`} onClick={() => onSelect(child.context_id)}>
-            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="truncate font-medium">{child.name}</span>
-              {child.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{child.description}</span>}
-            </span>
-          </Button>
-        </div>
-        {isExpanded && <CtxNodeList parentId={child.context_id} sdk={sdk} selectedId={selectedId} onSelect={onSelect} expanded={expanded} onToggle={onToggle} collapseLabel={collapseLabel} expandLabel={expandLabel} />}
-      </li>
-    })}
-  </ul>
-}
-
 // One reading and editing surface shared by the right column: the content
 // sits in a centered column and the pane scrolls inside the page at desktop.
 function ContextPane({ children }: { children: ReactNode }) {
@@ -2454,30 +2351,6 @@ function ContextReadOnlyPane({ title, description, badge, hint, content, languag
     {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
     <MarkdownEditor language={language} value={content} onChange={() => {}} readOnly />
   </ContextPane>
-}
-
-// Reads a CTX document through the Contexts API, which resolves local ids
-// first, then compiled common nodes, then CTX. The document stays owned by
-// CTX, so the pane is read-only and links back there for editing.
-function ContextRemotePane({ sdk, id, language }: { sdk: AuthMiniApi; id: string; language: "en" | "zh" }) {
-  const { t } = useUi()
-  const query = useQuery({
-    queryKey: ["ctx-context", id],
-    queryFn: () => api<{ id: string; name: string; description: string; content: string; children: CtxChildNode[] }>(sdk, `/api/contexts/${encodeURIComponent(id)}`),
-  })
-  if (query.isLoading) return <ContextPane><div className="flex flex-col gap-2"><Skeleton className="h-6 w-1/3" /><Skeleton className="h-4 w-2/3" /></div></ContextPane>
-  if (query.error) return <ContextPane><RequestError error={query.error as Error} onRetry={() => void query.refetch()} /></ContextPane>
-  if (!query.data) return null
-  const document = query.data
-  return <ContextReadOnlyPane
-    title={document.name}
-    description={document.description}
-    badge={t("contextCtxBadge")}
-    hint={t("contextCtxHint")}
-    content={document.content}
-    language={language}
-    meta={<Button asChild size="sm" variant="outline"><a href={`${CTX_ORIGIN}/#/documents/${document.id}`} target="_blank" rel="noreferrer"><ExternalLinkIcon data-icon="inline-start" />{t("ctxOpenDocument")}</a></Button>}
-  />
 }
 
 function ContextEditorForm({ draft, setDraft, parentOptions, save, remove, submit, deleteSelected, hasSelection }: {
@@ -2903,42 +2776,10 @@ function ConfigurationPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("configuration")} description={t("configurationDescription")}>
     <ThreadDefaultsCard key={session?.sessionId} sdk={sdk} />
     <NormaiUpstreamCard key={session?.sessionId} sdk={sdk} />
-    <CtxIntegrationCard key={session?.sessionId} sdk={sdk} />
     <LinkitNotifications language={language} sessionId={session?.sessionId} request={(path, init) => api(sdk, path, init)} />
     <Card><CardHeader><CardTitle>{t("api")}</CardTitle><CardDescription>{t("apiDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/api">{t("api")}</Link></Button></CardContent></Card>
     <Card><CardHeader><CardTitle>{t("workers")}</CardTitle><CardDescription>{t("workersDescription")}</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><Link to="/workers">{t("workers")}</Link></Button></CardContent></Card>
   </Page>
-}
-
-type CtxIntegrationStatus = { connected: boolean; key_id: string | null }
-type CtxIntegrationDocuments = { connected: boolean; documents: { context_id: string; name: string; description: string }[]; notice: string | null }
-
-// The card manages the CTX connection only. The Contexts page lists the
-// user's CTX documents in its unified tree and renders document bodies there,
-// so this card never carries an optional documents list.
-function CtxIntegrationCard({ sdk }: { sdk: AuthMiniApi }) {
-  const { t } = useUi()
-  const client = useQueryClient()
-  const status = useQuery({ queryKey: ["ctx-integration"], queryFn: ({ signal }) => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { signal }) })
-  const connected = status.data?.connected === true
-  const refresh = () => { void client.invalidateQueries({ queryKey: ["ctx-integration"] }); void client.invalidateQueries({ queryKey: ["ctx-documents"] }) }
-  const connect = useMutation({ mutationFn: () => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { method: "POST" }), onSuccess: refresh })
-  const disconnect = useMutation({ mutationFn: () => api<unknown>(sdk, "/api/integrations/ctx", { method: "DELETE" }), onSuccess: refresh })
-  return <Card>
-    <CardHeader><CardTitle>{t("ctxIntegrationTitle")}</CardTitle><CardDescription>{t("ctxIntegrationDescription")}</CardDescription></CardHeader>
-    <CardContent className="flex flex-col gap-4">
-      {status.error && <RequestError error={status.error} onRetry={() => void status.refetch()} />}
-      {status.isLoading && <Skeleton className="h-10" />}
-      {status.data && <div className="flex flex-wrap items-center gap-3">
-        <Badge variant={connected ? "secondary" : "outline"}>{connected ? t("ctxConnected") : t("ctxNotConnected")}</Badge>
-        {connected && status.data.key_id && <span className="font-mono text-xs text-muted-foreground">{status.data.key_id}</span>}
-        {connected
-          ? <Button size="sm" variant="outline" disabled={disconnect.isPending} onClick={() => { if (window.confirm(t("ctxDisconnectConfirm"))) disconnect.mutate() }}>{disconnect.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("ctxDisconnect")}</Button>
-          : <Button size="sm" disabled={connect.isPending} onClick={() => connect.mutate()}>{connect.isPending ? <Spinner /> : <FileKey2Icon data-icon="inline-start" />}{t("ctxConnect")}</Button>}
-      </div>}
-      {(connect.error || disconnect.error) && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("ctxRequestError")}</AlertTitle><AlertDescription>{errorMessage(connect.error ?? disconnect.error)}</AlertDescription></Alert>}
-    </CardContent>
-  </Card>
 }
 
 const NORMAI_HOST = "normai.ntnl.io"

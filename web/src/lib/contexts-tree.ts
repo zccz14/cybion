@@ -1,6 +1,6 @@
-// Pure tree helpers for the unified Contexts page: the Cybion Common Context,
-// the user's local Contexts, and connected CTX documents all render as
-// top-level branches of one tree, ordered common, local, then CTX.
+// Pure tree helpers for the unified Contexts page: the Cybion Common Context
+// and the user's local Contexts render as top-level branches of one tree,
+// ordered common, then local.
 
 export type CommonLikeNode = {
   id: string
@@ -23,9 +23,9 @@ export function groupLocalContexts<T extends LocalLikeContext>(contexts: T[]): M
 }
 
 /**
- * Local contexts whose parent is not another local context (a stray id, a
- * common node, or a CTX document) are roots of the local branch: the tree
- * never invents parents outside this list.
+ * Local contexts whose parent is not another local context (a stray id or a
+ * common node) are roots of the local branch: the tree never invents parents
+ * outside this list.
  */
 export function localRootContexts<T extends LocalLikeContext>(contexts: T[]): T[] {
   const ids = new Set(contexts.map((context) => context.id))
