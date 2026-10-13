@@ -160,3 +160,101 @@ test("context branches drag to reorder and nest with sort keys", async ({ page }
 
   expect(fixture.unexpected).toEqual([])
 })
+
+test("editing an existing context auto-saves on blur and offers no save button", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.goto("/#/contexts")
+
+  // creating stays an explicit action: typing a name alone writes nothing
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("项目手册")
+  await page.locator("main > section h2").click()
+  await page.waitForTimeout(300)
+  expect(fixture.references).toHaveLength(0)
+  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+  await expect(page.getByText("项目手册", { exact: true }).first()).toBeVisible()
+
+  // editing relies on auto-save: no save button remains, and a fresh draft reports saved
+  await expect(page.getByRole("button", { name: "保存上下文", exact: true })).toHaveCount(0)
+  await expect(page.getByText("所有修改已保存")).toBeVisible()
+
+  // a pending edit inside the form is not saved yet
+  await page.getByLabel("用途 — 何时参考", { exact: true }).fill("记录项目资料的存放位置")
+  await expect(page.getByText("修改等待保存")).toBeVisible()
+  expect(fixture.references[0].description).toBe("")
+
+  // leaving the form flushes the edit without any explicit save action; the
+  // short poll timeout proves the blur, not the 5s debounce, did the save
+  await page.locator("main > section h2").click()
+  await expect.poll(() => fixture.references[0]?.description, { timeout: 3500 }).toBe("记录项目资料的存放位置")
+  await expect(page.getByText("所有修改已保存")).toBeVisible()
+
+  expect(fixture.unexpected).toEqual([])
+})
+
+test("a typing pause saves automatically after the debounce", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.clock.install()
+  await page.goto("/#/contexts")
+
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("项目手册")
+  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+  await expect(page.getByText("所有修改已保存")).toBeVisible()
+
+  // the edit stays local until the debounce elapses, then saves on its own
+  await page.getByLabel("用途 — 何时参考", { exact: true }).fill("五秒后自动保存")
+  await page.clock.runFor(6000)
+  await expect.poll(() => fixture.references[0]?.description).toBe("五秒后自动保存")
+  await expect(page.getByText("所有修改已保存")).toBeVisible()
+
+  expect(fixture.unexpected).toEqual([])
+})
+
+test("an idle edit saves on the fixed interval, not only on the debounce", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.clock.install()
+  await page.goto("/#/contexts")
+
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("项目手册")
+  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+  await expect(page.getByText("所有修改已保存")).toBeVisible()
+
+  // Freeze time and remount the page so the interval baseline is exact:
+  // after 11s, edit, then let 4s pass. Only the interval (due at +4s) can
+  // save before the 5s debounce, so a saved edit proves the interval fired.
+  const pausedAt = await page.evaluate(() => Date.now())
+  await page.clock.pauseAt(pausedAt + 100)
+  await page.evaluate(() => { location.hash = "#/threads" })
+  await page.evaluate(() => { location.hash = "#/contexts" })
+  await expect(page.getByText("所有修改已保存")).toBeVisible()
+  await page.clock.runFor(11000)
+  await page.getByLabel("用途 — 何时参考", { exact: true }).fill("定时保存")
+  await page.clock.runFor(4000)
+  await expect.poll(() => fixture.references[0]?.description).toBe("定时保存")
+
+  expect(fixture.unexpected).toEqual([])
+})
+
+test("pending edits save when the page is hidden, covering refresh and close", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.goto("/#/contexts")
+
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("项目手册")
+  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+  await expect(page.getByText("所有修改已保存")).toBeVisible()
+
+  await page.getByLabel("上下文名称", { exact: true }).fill("项目手册·改")
+  await expect(page.getByText("修改等待保存")).toBeVisible()
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" })
+    document.dispatchEvent(new Event("visibilitychange"))
+  })
+  // the short poll timeout proves the hidden-page flush, not the debounce, saved
+  await expect.poll(() => fixture.references[0]?.name, { timeout: 3500 }).toBe("项目手册·改")
+
+  expect(fixture.unexpected).toEqual([])
+})

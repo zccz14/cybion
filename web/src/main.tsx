@@ -114,6 +114,7 @@ import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core"
 import { collectSubtreeIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, type ContextDropZone } from "@/lib/contexts-tree"
+import { contextDraft, draftsMatch, shouldAutosave, type ContextDraft } from "@/lib/context-drafts"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
@@ -450,7 +451,7 @@ const copy = {
     contexts: "Contexts",
     contextsTitle: "Contexts",
     contextLocalTitle: "Your contexts",
-    contextEditorHint: "Name, purpose, parent, and Markdown content. Threads can read saved contexts on demand.",
+    contextEditorHint: "Name, purpose, parent, and Markdown content. Edits save automatically; Threads can read saved contexts on demand.",
     contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
     contextSelectHint: "Select a node in the tree, or create a new context.",
     contextGlobalBadge: "Read-only",
@@ -464,11 +465,13 @@ const copy = {
     newContext: "New context",
     editContext: "Edit context",
     createContext: "Create context",
-    saveContext: "Save context",
+    contextAutosaving: "Saving changes…",
+    contextAutosavePending: "Changes waiting to save",
+    contextAutosaved: "All changes saved",
+    contextAutosaveFailed: "Save failed; it will retry automatically",
     deleteContext: "Delete context",
     deleteContextTitle: "Delete this context?",
     deleteContextDescription: "Child contexts will become top-level contexts.",
-    contextSaved: "Context saved",
     contextCreated: "Context created",
     contextUpdated: "Context updated",
     contextDeleted: "Context deleted",
@@ -784,7 +787,7 @@ const copy = {
     contexts: "上下文",
     contextsTitle: "上下文",
     contextLocalTitle: "你的上下文",
-    contextEditorHint: "名称、用途、父级与 Markdown 内容。保存后，对话可按需读取。",
+    contextEditorHint: "名称、用途、父级与 Markdown 内容。修改自动保存；对话可按需读取。",
     contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
     contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
     contextGlobalBadge: "只读",
@@ -798,11 +801,13 @@ const copy = {
     newContext: "新建上下文",
     editContext: "编辑上下文",
     createContext: "创建上下文",
-    saveContext: "保存上下文",
+    contextAutosaving: "正在保存修改…",
+    contextAutosavePending: "修改等待保存",
+    contextAutosaved: "所有修改已保存",
+    contextAutosaveFailed: "保存失败，将自动重试",
     deleteContext: "删除上下文",
     deleteContextTitle: "删除这个上下文？",
     deleteContextDescription: "子上下文会变成顶层上下文。",
-    contextSaved: "上下文已保存",
     contextCreated: "上下文已创建",
     contextUpdated: "上下文已更新",
     contextDeleted: "上下文已删除",
@@ -2051,25 +2056,7 @@ function historyRecordText(record: HistoryRecord) {
   return historyPayloadText(record.payload)
 }
 
-type ContextDraft = {
-  id: string | null
-  name: string
-  description: string
-  content: string
-  parent_id: string | null
-}
-
 const ROOT_CONTEXT_VALUE = "__root__"
-
-function contextDraft(context?: Context): ContextDraft {
-  return {
-    id: context?.id ?? null,
-    name: context?.name ?? "",
-    description: context?.description ?? "",
-    content: context?.content ?? "",
-    parent_id: context?.parent_id ?? null,
-  }
-}
 
 type CommonContextNode = {
   id: string
@@ -2143,6 +2130,12 @@ function findCommonContextNode(node: CommonContextNode, id: string): CommonConte
 }
 
 
+// Auto-save mirrors CTX: edits flush on a change debounce, a periodic
+// interval, focus leaving the form, hiding the page (refresh or close) and
+// leaving the page for another node. Creating a context stays explicit.
+const CONTEXT_AUTOSAVE_DEBOUNCE_MS = 5_000
+const CONTEXT_AUTOSAVE_INTERVAL_MS = 15_000
+
 function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const client = useQueryClient()
@@ -2151,9 +2144,33 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<ContextDraft | null>(null)
+  const [saved, setSaved] = useState<ContextDraft | null>(null)
+  const [pending, setPending] = useState<ReadonlySet<string | null>>(new Set<string | null>())
+  const [saveFailure, setSaveFailure] = useState<{ id: string | null; error: Error } | null>(null)
   const [initialized, setInitialized] = useState(false)
+  // The refs mirror the state for timer callbacks; `drafts` remembers the
+  // newest draft of each context for this session so switching back never
+  // reloads a stale server copy over edits that are still unsaved.
+  const draftRef = useRef<ContextDraft | null>(null)
+  const savedRef = useRef<ContextDraft | null>(null)
+  const pendingRef = useRef<ReadonlySet<string | null>>(new Set<string | null>())
+  const draftsRef = useRef(new Map<string, ContextDraft>())
+  const createTargetRef = useRef(false)
+  const sdkRef = useRef(sdk)
+  useEffect(() => { sdkRef.current = sdk }, [sdk])
   const commonRoot = common.data?.root ?? null
   const commonNodes = useMemo(() => (commonRoot ? flattenTree(commonRoot) : []), [commonRoot])
+
+  const rememberDraft = (next: ContextDraft | null) => { draftRef.current = next; setDraft(next) }
+  const rememberSaved = (next: ContextDraft | null) => { savedRef.current = next; setSaved(next) }
+  const markPending = (id: string | null, active: boolean) => {
+    const next = new Set(pendingRef.current)
+    if (active) next.add(id)
+    else next.delete(id)
+    pendingRef.current = next
+    setPending(next)
+  }
+  const loadDraft = (context: Context) => draftsRef.current.get(context.id) ?? contextDraft(context)
 
   useEffect(() => {
     const ready = contexts.data !== undefined &&
@@ -2163,33 +2180,85 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     const firstLocal = contexts.data?.[0]
     if (firstLocal) {
       setSelectedId(firstLocal.id)
-      setDraft(contextDraft(firstLocal))
+      rememberDraft(loadDraft(firstLocal))
+      rememberSaved(contextDraft(firstLocal))
     } else if (commonRoot) {
       setSelectedId(commonRoot.id)
     }
   }, [contexts.data, commonRoot, common.error, initialized])
 
-  const save = useMutation({
-    mutationFn: (value: ContextDraft) => api<Context>(sdk, value.id ? `/api/contexts/${encodeURIComponent(value.id)}` : "/api/contexts", {
-      method: value.id ? "PATCH" : "POST",
-      body: JSON.stringify({
-        name: value.name,
-        description: value.description,
-        content: value.content,
-        parent_id: value.parent_id,
-      }),
-    }),
-    onSuccess: (value) => {
+  useEffect(() => {
+    if (draft?.id) draftsRef.current.set(draft.id, draft)
+  }, [draft])
+
+  const finishSave = (value: Context, sent: ContextDraft) => {
+    void client.invalidateQueries({ queryKey: ["contexts"] })
+    setSaveFailure((failure) => failure && failure.id === sent.id ? null : failure)
+    const current = draftRef.current
+    if (sent.id === null) {
+      const creating = createTargetRef.current
+      createTargetRef.current = false
+      if (!creating || current === null || current.id !== null) return
+      if (draftsMatch(current, sent)) {
+        const next = contextDraft(value)
+        rememberDraft(next)
+        rememberSaved(next)
+      } else {
+        // Edits continued while the create was in flight: adopt the new id
+        // and let the pending changes auto-save right after.
+        rememberDraft({ ...current, id: value.id })
+        rememberSaved({ ...sent, id: value.id })
+      }
       setSelectedId(value.id)
-      setDraft(contextDraft(value))
-      void client.invalidateQueries({ queryKey: ["contexts"] })
-    },
-  })
+      return
+    }
+    if (current && current.id === sent.id) rememberSaved(sent)
+  }
+
+  const saveNow = useCallback((sent: ContextDraft) => {
+    if (pendingRef.current.has(sent.id)) return
+    markPending(sent.id, true)
+    void (async () => {
+      try {
+        const value = await api<Context>(sdkRef.current, sent.id ? `/api/contexts/${encodeURIComponent(sent.id)}` : "/api/contexts", {
+          method: sent.id ? "PATCH" : "POST",
+          body: JSON.stringify({
+            name: sent.name,
+            description: sent.description,
+            content: sent.content,
+            parent_id: sent.parent_id,
+          }),
+        })
+        finishSave(value, sent)
+      } catch (error) {
+        setSaveFailure({ id: sent.id, error: error as Error })
+      } finally {
+        markPending(sent.id, false)
+      }
+    })()
+  }, [])
+
+  const saveIfNeeded = useCallback(() => {
+    const current = draftRef.current
+    if (!current || !shouldAutosave(current, savedRef.current, pendingRef.current.has(current.id))) return
+    saveNow(current)
+  }, [saveNow])
+
+  const submitDraft = useCallback(() => {
+    const current = draftRef.current
+    if (!current || !current.name.trim() || pendingRef.current.has(current.id)) return
+    if (current.id === null) createTargetRef.current = true
+    else if (savedRef.current !== null && draftsMatch(current, savedRef.current)) return
+    saveNow(current)
+  }, [saveNow])
+
   const remove = useMutation({
     mutationFn: (id: string) => api<unknown>(sdk, `/api/contexts/${encodeURIComponent(id)}`, { method: "DELETE" }),
     onSuccess: (_value, id) => {
+      draftsRef.current.delete(id)
       setSelectedId((current) => current === id ? null : current)
-      setDraft(null)
+      if (draftRef.current?.id === id) { rememberDraft(null); rememberSaved(null) }
+      setSaveFailure((failure) => failure && failure.id === id ? null : failure)
       void client.invalidateQueries({ queryKey: ["contexts"] })
     },
   })
@@ -2202,6 +2271,14 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     onError: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
   })
 
+  const editDraft = useCallback((update: (current: ContextDraft) => ContextDraft) => {
+    const current = draftRef.current
+    if (!current) return
+    const next = update(current)
+    draftRef.current = next
+    setDraft(next)
+  }, [])
+
   const toggleExpanded = (id: string, next: boolean) => {
     setExpanded((current) => {
       const updated = new Set(current)
@@ -2210,33 +2287,51 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
       return updated
     })
   }
-  const clearFeedback = () => {
-    save.reset()
+  const selectLocal = (context: Context) => {
+    saveIfNeeded()
+    setSelectedId(context.id)
+    rememberDraft(loadDraft(context))
+    rememberSaved(contextDraft(context))
     remove.reset()
   }
-  const selectLocal = (context: Context) => {
-    setSelectedId(context.id)
-    setDraft(contextDraft(context))
-    clearFeedback()
-  }
   const selectNode = (id: string) => {
+    saveIfNeeded()
     setSelectedId(id)
-    setDraft(null)
-    clearFeedback()
+    rememberDraft(null)
+    rememberSaved(null)
+    remove.reset()
   }
   const createNew = (parentId: string | null = null) => {
+    saveIfNeeded()
+    createTargetRef.current = false
+    setSaveFailure((failure) => failure && failure.id === null ? null : failure)
     setSelectedId(null)
-    setDraft({ ...contextDraft(), parent_id: parentId })
-    clearFeedback()
-  }
-  const submit = () => {
-    if (!draft || !draft.name.trim() || save.isPending) return
-    save.mutate(draft)
+    rememberDraft({ ...contextDraft(), parent_id: parentId })
+    rememberSaved(null)
+    remove.reset()
   }
   const deleteSelected = () => {
-    if (!draft?.id || remove.isPending || !window.confirm(`${t("deleteContextTitle")}\n\n${t("deleteContextDescription")}`)) return
-    remove.mutate(draft.id)
+    const current = draftRef.current
+    if (!current?.id || remove.isPending || !window.confirm(`${t("deleteContextTitle")}\n\n${t("deleteContextDescription")}`)) return
+    remove.mutate(current.id)
   }
+
+  // Auto-save triggers, mirroring CTX: debounce after changes, periodic
+  // interval, leaving the form, hiding the page, and leaving the page itself.
+  useEffect(() => {
+    const timeout = window.setTimeout(() => saveIfNeeded(), CONTEXT_AUTOSAVE_DEBOUNCE_MS)
+    return () => window.clearTimeout(timeout)
+  }, [draft?.name, draft?.description, draft?.content, draft?.parent_id, saveIfNeeded])
+  useEffect(() => {
+    const interval = window.setInterval(() => saveIfNeeded(), CONTEXT_AUTOSAVE_INTERVAL_MS)
+    return () => window.clearInterval(interval)
+  }, [saveIfNeeded])
+  useEffect(() => {
+    const saveWhenHidden = () => { if (document.visibilityState === "hidden") saveIfNeeded() }
+    document.addEventListener("visibilitychange", saveWhenHidden)
+    return () => document.removeEventListener("visibilitychange", saveWhenHidden)
+  }, [saveIfNeeded])
+  useEffect(() => () => saveIfNeeded(), [saveIfNeeded])
 
   // Selection resolves by id across the two sources, mirroring the
   // controller's read order: a local draft wins, then the common tree.
@@ -2278,7 +2373,19 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     </aside>
     <section className="flex w-full min-w-0 flex-col lg:min-h-0 lg:flex-1">
       {draft
-        ? <ContextEditorForm draft={draft} setDraft={setDraft} parentOptions={parentOptions} save={save} remove={remove} submit={submit} deleteSelected={deleteSelected} hasSelection={selectedId !== null && draft.id === selectedId} />
+        ? <ContextEditorForm
+            draft={draft}
+            editDraft={editDraft}
+            parentOptions={parentOptions}
+            remove={remove}
+            submit={submitDraft}
+            flush={saveIfNeeded}
+            deleteSelected={deleteSelected}
+            hasSelection={selectedId !== null && draft.id === selectedId}
+            saving={pending.has(draft.id)}
+            dirty={saved !== null && !draftsMatch(draft, saved)}
+            saveError={saveFailure && saveFailure.id === draft.id ? saveFailure.error : null}
+          />
         : commonSelected
           ? <ContextReadOnlyPane
               title={commonSelected.name}
@@ -2452,32 +2559,40 @@ function ContextReadOnlyPane({ title, description, badge, hint, content, languag
   </ContextPane>
 }
 
-function ContextEditorForm({ draft, setDraft, parentOptions, save, remove, submit, deleteSelected, hasSelection }: {
+function ContextEditorForm({ draft, editDraft, parentOptions, remove, submit, flush, deleteSelected, hasSelection, saving, dirty, saveError }: {
   draft: ContextDraft
-  setDraft: React.Dispatch<React.SetStateAction<ContextDraft | null>>
+  editDraft: (update: (current: ContextDraft) => ContextDraft) => void
   parentOptions: { id: string; name: string }[]
-  save: UseMutationResult<Context, Error, ContextDraft>
   remove: UseMutationResult<unknown, Error, string>
   submit: () => void
+  flush: () => void
   deleteSelected: () => void
   hasSelection: boolean
+  saving: boolean
+  dirty: boolean
+  saveError: Error | null
 }) {
   const { t, language } = useUi()
   const help = onboardingCopy[language]
+  const autosaveStatus = saving ? t("contextAutosaving") : saveError ? t("contextAutosaveFailed") : dirty ? t("contextAutosavePending") : t("contextAutosaved")
   return <ContextPane>
     <div className="min-w-0">
       <h2 className="font-heading text-lg font-semibold">{draft.id ? t("editContext") : t("newContext")}</h2>
       <p className="mt-1 text-sm text-muted-foreground">{t("contextEditorHint")}</p>
     </div>
-    <form className="flex flex-col gap-5" onSubmit={(event) => { event.preventDefault(); submit() }}>
+    <form
+      className="flex flex-col gap-5"
+      onSubmit={(event) => { event.preventDefault(); submit() }}
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) window.setTimeout(flush, 0) }}
+    >
       <FieldGroup>
         <Field>
           <FieldLabel htmlFor="context-name">{t("contextName")}</FieldLabel>
-          <Input id="context-name" value={draft.name} onChange={(event) => setDraft((current) => current && { ...current, name: event.target.value })} placeholder={t("contextName")} />
+          <Input id="context-name" value={draft.name} onChange={(event) => editDraft((current) => ({ ...current, name: event.target.value }))} placeholder={t("contextName")} />
         </Field>
         <Field>
           <FieldLabel htmlFor="context-description">{t("contextDescription")}</FieldLabel>
-          <Textarea id="context-description" value={draft.description} onChange={(event) => setDraft((current) => current && { ...current, description: event.target.value })} rows={3} />
+          <Textarea id="context-description" value={draft.description} onChange={(event) => editDraft((current) => ({ ...current, description: event.target.value }))} rows={3} />
         </Field>
         <Field>
           <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
@@ -2485,13 +2600,13 @@ function ContextEditorForm({ draft, setDraft, parentOptions, save, remove, submi
             id="context-content"
             language={language}
             value={draft.content}
-            onChange={(content) => setDraft((current) => current && { ...current, content })}
+            onChange={(content) => editDraft((current) => ({ ...current, content }))}
           />
           <FieldDescription id="context-content-hint">{t("contextContentEditHint")}</FieldDescription>
         </Field>
         <Field>
           <FieldLabel htmlFor="context-parent">{t("contextParent")}</FieldLabel>
-          <Select value={draft.parent_id ?? ROOT_CONTEXT_VALUE} onValueChange={(value) => setDraft((current) => current && { ...current, parent_id: value === ROOT_CONTEXT_VALUE ? null : value })}>
+          <Select value={draft.parent_id ?? ROOT_CONTEXT_VALUE} onValueChange={(value) => editDraft((current) => ({ ...current, parent_id: value === ROOT_CONTEXT_VALUE ? null : value }))}>
             <SelectTrigger id="context-parent"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={ROOT_CONTEXT_VALUE}>{t("contextRoot")}</SelectItem>
@@ -2500,12 +2615,13 @@ function ContextEditorForm({ draft, setDraft, parentOptions, save, remove, submi
           </Select>
         </Field>
       </FieldGroup>
-      {save.error && <RequestError error={save.error} onRetry={submit} />}
+      {saveError && <RequestError error={saveError} onRetry={submit} />}
       {remove.error && <RequestError error={remove.error} />}
       <div className="flex flex-wrap items-center gap-3">
-        <Button disabled={!draft.name.trim() || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{draft.id ? t("saveContext") : t("createContext")}</Button>
+        {draft.id
+          ? <span role="status" className={`flex items-center gap-2 text-sm ${saveError && !saving ? "text-destructive" : "text-muted-foreground"}`}>{saving && <Spinner />}{autosaveStatus}</span>
+          : <Button type="submit" disabled={!draft.name.trim() || saving}>{saving ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("createContext")}</Button>}
         {draft.id && <Button type="button" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
-        {save.isSuccess && <span role="status" className="text-sm text-muted-foreground">{t("contextSaved")}</span>}
       </div>
     </form>
     {hasSelection && draft.id && <div className="space-y-2 border-t pt-4"><Button asChild variant="outline"><Link to="/threads/new" state={{ initialInput: contextReferencePrompt(language, draft.name, draft.id) }}>{help.useReference}</Link></Button><p className="text-xs text-muted-foreground">{help.useReferenceHint}</p><p className="break-all font-mono text-xs text-muted-foreground">{draft.id}</p></div>}
