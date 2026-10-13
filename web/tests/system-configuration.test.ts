@@ -16,7 +16,7 @@ test("personal configuration contains only personal controls, even for administr
 
 test("the CTX document list lives on the Contexts page, not in personal configuration", () => {
   assert.match(personal, /<CtxIntegrationCard key=\{session\?\.sessionId\} sdk=\{sdk\} \/>/)
-  assert.match(main, /\{ sdk, withDocuments = false \}/)
+  assert.match(main, /withDocuments: _withDocuments = false \}/)
   assert.match(main, /<CtxIntegrationCard sdk=\{sdk\} withDocuments \/>/)
 })
 

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test"
-import { fillContextMarkdown, stubWorkspace } from "./workspace-fixture"
+import { stubWorkspace } from "./workspace-fixture"
 
 test("a real new workspace opens the mobile composer and examples never send automatically", async ({ page }) => {
   const fixture = await stubWorkspace(page)
@@ -46,7 +46,7 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     const fixture = await stubWorkspace(page, { language, theme, ctxConnected: true })
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.goto("/#/contexts")
-    await expect(page.getByRole("heading", { name: language === "zh" ? "资料留在原处，上下文记录引用" : "Keep the material at its source" })).toBeVisible()
+    await expect(page.getByText(language === "zh" ? "资料留在原处，上下文记录引用" : "Keep the material at its source", { exact: true })).toBeVisible()
     await expect(page.getByText("CTX project reference", { exact: true })).toBeVisible()
     await expect(page.locator('input[type="file"]')).toHaveCount(0)
     if (theme === "dark") await expect(page.locator("html")).toHaveClass("dark")
@@ -58,10 +58,14 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     await expect(page.getByRole("dialog")).toHaveCount(0)
     await page.setViewportSize({ width: 320, height: 844 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await page.getByRole("button", { name: language === "zh" ? "使用设备示例" : "Use a device example" }).click()
+    await page.getByRole("button", { name: language === "zh" ? "添加上下文引用" : "Add Context reference", exact: true }).click()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await fillContextMarkdown(page, language, "# My project\n\nRead README.md first.")
-    await page.locator(".markdown-editor").getByRole("button", { name: language === "zh" ? "编辑" : "Write", exact: true }).click()
+    const editor = page.locator(".markdown-editor")
+    await editor.getByRole("button", { name: language === "zh" ? "源码" : "Markdown", exact: true }).click()
+    await editor.locator("textarea").fill("# My project\n\nRead README.md first.")
+    await editor.getByRole("button", { name: language === "zh" ? "编辑" : "Write", exact: true }).click()
+    await expect(editor.locator("textarea")).toHaveCount(0)
+    await expect(editor.locator(".markdown-editor__canvas h1")).toHaveText("My project")
     expect(fixture.references).toHaveLength(0)
     await page.getByLabel(language === "zh" ? "上下文名称" : "Context name", { exact: true }).fill("My project")
     await page.getByRole("button", { name: language === "zh" ? "创建上下文" : "Create context", exact: true }).click()
@@ -99,7 +103,8 @@ test("using a reference preserves an existing conversation draft", async ({ page
   await page.goto("/#/threads/new")
   await page.locator("#new-thread-input").fill("Do not replace my unsent draft")
   await page.goto("/#/contexts")
-  await page.getByRole("button", { name: "使用网络示例" }).click()
+  await page.getByRole("button", { name: "添加上下文引用", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("网络资料")
   await page.getByRole("button", { name: "创建上下文", exact: true }).click()
   await page.getByRole("link", { name: "在对话中使用", exact: true }).click()
   await expect(page.locator("#new-thread-input")).toHaveValue("Do not replace my unsent draft")

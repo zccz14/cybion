@@ -3,15 +3,6 @@ import { readFileSync } from "node:fs"
 import type { Page } from "@playwright/test"
 import { emptyThreadUsage } from "../src/lib/thread-usage"
 
-// The Context editor's content field is not a plain textarea: it is the
-// Markdown editor, defaulting to the WYSIWYG surface. Tests that type raw
-// Markdown (for example a device example) fill the source textarea instead.
-export async function fillContextMarkdown(page: Page, language: "zh" | "en", markdown: string) {
-  const editor = page.locator(".markdown-editor")
-  await editor.getByRole("button", { name: language === "zh" ? "源码" : "Markdown", exact: true }).click()
-  await editor.locator("textarea").fill(markdown)
-}
-
 // Exercise the real app, including Auth Mini verification, with a test-only
 
 // signing key and intercepted HTTP. No production credentials or calls escape.
@@ -92,6 +83,8 @@ export async function stubWorkspace(page: Page, options: {
         }
         return json(references)
       }
+      if (path === "/api/contexts/ctx-reference") return json({ id: "ctx-reference", name: "CTX project reference", description: "Source retained in CTX", content: "# CTX 正文\n\n来源文档内容。", parent_id: null, children: [{ context_id: "ctx-child", name: "子文档", description: "" }] })
+      if (path === "/api/contexts/ctx-child") return json({ id: "ctx-child", name: "子文档", description: "", content: "子文档正文。", parent_id: "ctx-reference", children: [] })
       if (path.startsWith("/api/contexts/")) {
         const reference = references.find((item) => item.id === path.split("/").at(-1))!
         Object.assign(reference, request.postDataJSON())

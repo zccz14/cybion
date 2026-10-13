@@ -43,3 +43,22 @@ test("source mode shows the raw Markdown and preview mode renders it instead of 
     await server.close()
   }
 })
+
+test("read-only Markdown surfaces render a preview without any editing affordance", async () => {
+  const server = await createTestServer(serverOptions)
+  try {
+    const { MarkdownEditor } = await server.ssrLoadModule("/src/components/markdown-editor.tsx")
+    const html = renderToStaticMarkup(
+      createElement(MarkdownEditor, { language: "zh", value: "# 只读内容", onChange: () => {}, readOnly: true })
+    )
+    assert.ok(html.includes('aria-readonly="true"'))
+    assert.ok(!html.includes('role="toolbar"'))
+    assert.ok(!html.includes(">编辑<"))
+    assert.ok(!html.includes(">源码<"))
+    assert.ok(!html.includes(">预览<"))
+    assert.ok(!html.includes("<textarea"))
+    assert.ok(html.includes("markdown-editor__preview"))
+  } finally {
+    await server.close()
+  }
+})

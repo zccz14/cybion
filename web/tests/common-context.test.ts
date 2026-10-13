@@ -8,7 +8,10 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const tree = JSON.parse(readFileSync(new URL("../../common-contexts/tree.json", import.meta.url), "utf8")) as { root: CommonNode }
 
 test("the Contexts page renders the compiled-in Cybion Common Context read-only", () => {
-  assert.match(source, /<CommonContextCard sdk=\{sdk\} \/>/)
+  const contexts = source.slice(source.indexOf("function ContextsPage("), source.indexOf("function ContextEditorForm("))
+  assert.match(contexts, /<CommonBranch node=\{commonRoot\}/)
+  assert.match(contexts, /content=\{commonSelected\.content\}/)
+  assert.match(source, /<MarkdownEditor language=\{language\} value=\{content\} onChange=\{\(\) => \{\}\} readOnly \/>/)
   assert.match(source, /"\/api\/common-contexts"/)
   assert.equal((source.match(/commonContextTitle:/g) ?? []).length, 2)
   assert.equal((source.match(/commonContextHint:/g) ?? []).length, 2)

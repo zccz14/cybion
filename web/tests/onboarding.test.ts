@@ -54,10 +54,10 @@ test("using a saved reference only seeds the ordinary composer, preserving exist
     assert.ok(prompt.includes("Project A"))
     assert.ok(prompt.includes("context_id: context-123"))
   }
-  assert.match(main, /initialInput: contextReferencePrompt\(language, selected\.name, selected\.id\)/)
+  assert.match(main, /initialInput: contextReferencePrompt\(language, draft\.name, draft\.id\)/)
   assert.match(main, /seed\(initialInput\)/)
   assert.match(main, /seed\(example\); inputRef\.current\?\.focus\(\)/)
-  const contexts = main.slice(main.indexOf("function ContextsPage("), main.indexOf("function ContextTree("))
+  const contexts = main.slice(main.indexOf("function ContextsPage("), main.indexOf("function ContextEditorForm("))
   assert.match(contexts, /<CtxIntegrationCard sdk=\{sdk\} withDocuments \/>/)
   assert.doesNotMatch(contexts, /type="file"|\/threads\/start/)
 })

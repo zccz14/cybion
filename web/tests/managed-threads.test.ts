@@ -33,7 +33,8 @@ test("new thread preparation waits for the first message before creating a threa
 test("CTX documents join threads through a user-scoped API key", () => {
   assert.match(source, /ctxIntegrationTitle/)
   assert.match(source, /\/api\/integrations\/ctx/)
-  assert.match(source, /https:\/\/ctx\.ntnl\.io\/#\/documents\//)
+  assert.match(source, /const CTX_ORIGIN = "https:\/\/ctx\.ntnl\.io"/)
+  assert.match(source, /href=\{`\$\{CTX_ORIGIN\}\/#\/documents\/\$\{document\.id\}`\}/)
 })
 
 test("contexts are managed through a progressive disclosure tree", () => {

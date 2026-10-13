@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom"
 import { CircleHelpIcon, FolderTreeIcon, MessagesSquareIcon, MonitorIcon } from "lucide-react"
-import { onboardingCopy, contextReferenceExample, type OnboardingLanguage, type ReferenceExample } from "@/lib/onboarding"
+import { onboardingCopy, type OnboardingLanguage } from "@/lib/onboarding"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
@@ -58,16 +58,4 @@ export function ConversationExamples({ language, onChoose }: { language: Onboard
     <Button type="button" size="sm" variant="outline" onClick={() => onChoose(text.planPrompt)}>{text.planExample}</Button>
     <Button type="button" size="sm" variant="outline" onClick={() => onChoose(text.rewritePrompt)}>{text.rewriteExample}</Button>
   </div><p className="text-xs leading-5 text-muted-foreground">{text.examplesHint}</p></div>
-}
-
-export function ContextReferenceIntro({ language }: { language: OnboardingLanguage }) {
-  const text = onboardingCopy[language]
-  return <div className="space-y-2 rounded-xl border bg-muted/20 p-4 sm:p-5"><h2 className="text-base font-semibold">{text.referencesTitle}</h2><p className="text-sm leading-6 text-muted-foreground">{text.referencesDescription}</p><p className="text-xs leading-5 text-muted-foreground">{text.contextBoundary}</p></div>
-}
-
-export function ContextReferenceExamples({ language, onChoose }: { language: OnboardingLanguage; onChoose: (example: ReferenceExample) => void }) {
-  const text = onboardingCopy[language]
-  return <div className="space-y-4"><p className="text-sm leading-6 text-muted-foreground">{text.examplesDescription}</p>
-    {(["device", "network"] as const).map((source) => <div key={source} className="space-y-3 rounded-lg border p-3"><pre className="whitespace-pre-wrap break-words text-xs leading-6 text-muted-foreground">{contextReferenceExample(language, source).content}</pre><Button type="button" size="sm" variant="outline" onClick={() => onChoose(contextReferenceExample(language, source))}>{text[`${source}Example`]}</Button></div>)}
-  </div>
 }

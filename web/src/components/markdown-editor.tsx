@@ -288,6 +288,7 @@ export function MarkdownEditor({
   value,
   onChange,
   disabled = false,
+  readOnly = false,
   defaultMode = "write",
   onImageUpload,
 }: {
@@ -296,12 +297,15 @@ export function MarkdownEditor({
   value: string
   onChange: (value: string) => void
   disabled?: boolean
+  /** Renders a preview-only surface: the toolbar is hidden and no editing mode is offered. */
+  readOnly?: boolean
   defaultMode?: EditorMode
   /** Uploads a pasted image and resolves to its public URL. */
   onImageUpload?: (image: File) => Promise<string>
 }) {
   const labels = copy[language]
-  const [mode, setMode] = useState<EditorMode>(defaultMode)
+  const [selectedMode, setMode] = useState<EditorMode>(defaultMode)
+  const mode = readOnly ? "preview" : selectedMode
   const toolbarId = id ? `${id}-toolbar` : undefined
   const [slashMenu, setSlashMenu] = useState<SlashMenu | null>(null)
   const [imageUploading, setImageUploading] = useState(false)
@@ -437,7 +441,8 @@ export function MarkdownEditor({
   )
 
   return (
-    <div className="markdown-editor min-w-0" data-mode={mode}>
+    <div className={"markdown-editor min-w-0" + (readOnly ? " markdown-editor--read-only" : "")} data-mode={mode} aria-readonly={readOnly || undefined}>
+      {readOnly ? null : (
       <div
         id={toolbarId}
         role="toolbar"
@@ -624,6 +629,7 @@ export function MarkdownEditor({
           </Button>
         </div>
       </div>
+      )}
 
       {imageUploadFailed ? (
         <p role="alert" className="border-b bg-destructive/5 px-3 py-2 text-sm text-destructive">
