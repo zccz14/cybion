@@ -3981,24 +3981,32 @@ async fn read_context_api(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<common_contexts::LanguageQuery>,
 ) -> Result<Json<ContextReadView>, ApiError> {
-    let context = read_context_for(&state, &identity.user, id).await?;
+    let context = read_context_for(
+        &state,
+        &identity.user,
+        id,
+        common_contexts::parse_language(query.lang.as_deref()),
+    )
+    .await?;
     Ok(Json(context))
 }
 
 // The browser reads every Context through this route: local contexts first,
 // then the compiled common nodes, matching the Contexts tools so the unified
-// tree can read both sources.
+// tree can read both sources. `language` selects the common copy.
 async fn read_context_for(
     state: &AppState,
     user: &User,
     id: String,
+    language: &str,
 ) -> Result<ContextReadView, ApiError> {
     let id = context_id(&id)?;
     if let Some(context) = local_context(state, user, id.clone()).await? {
         return Ok(context);
     }
-    if let Some(context) = common_contexts::read(&id) {
+    if let Some(context) = common_contexts::read(&id, language) {
         return Ok(context);
     }
     Err(ApiError::not_found("context not found"))
@@ -6783,14 +6791,16 @@ async fn read_context_tool_output(
     if let Some(context) = local_context(state, user, id.clone()).await? {
         return serde_json::to_value(context).map_err(ApiError::internal);
     }
-    if let Some(context) = common_contexts::read(&id) {
+    if let Some(context) = common_contexts::read(&id, common_contexts::SOURCE_LANGUAGE) {
         return serde_json::to_value(context).map_err(ApiError::internal);
     }
     Ok(json!({ "error": "context not found" }))
 }
 
 async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
-    let mut contexts = vec![common_contexts::root_summary()];
+    let mut contexts = vec![common_contexts::root_summary(
+        common_contexts::SOURCE_LANGUAGE,
+    )];
     let local = user_db(state, user, false, |connection| {
         context_summaries(connection, None)
     })

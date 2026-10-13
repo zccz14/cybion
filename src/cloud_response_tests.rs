@@ -483,6 +483,7 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
             bearer: String::new(),
         }),
         AxumPath(parent.to_owned()),
+        Query(common_contexts::LanguageQuery { lang: None }),
     )
     .await
     .unwrap();
@@ -624,7 +625,7 @@ async fn registry_tools_list_top_level_contexts_and_registered_workers() {
     assert_eq!(
         contexts,
         json!({"contexts":[
-            common_contexts::root_summary(),
+            common_contexts::root_summary(common_contexts::SOURCE_LANGUAGE),
             {"context_id":parent,"name":"Skills","description":"Reusable worker skills","source":"local"}
         ]})
     );

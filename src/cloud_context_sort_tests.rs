@@ -141,6 +141,7 @@ async fn context_moves_reorder_siblings_and_reparent_with_fractional_keys() {
         State(state.clone()),
         identity(&user),
         AxumPath(moved.id.clone()),
+        Query(common_contexts::LanguageQuery { lang: None }),
     )
     .await
     .unwrap();
