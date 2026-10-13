@@ -16,6 +16,18 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   await expect(page.getByText("CTX 来源（可选）", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("CTX project reference", { exact: true })).toBeVisible()
 
+  // node labels stack the name over the purpose instead of squeezing both into one row
+  const commonNode = page.getByRole("button", { name: /Cybion Common Context/ }).first()
+  const nameSpan = commonNode.locator("span span").nth(0)
+  const purposeSpan = commonNode.locator("span span").nth(1)
+  await expect(nameSpan).toHaveText("Cybion Common Context")
+  await expect(purposeSpan).toContainText("Compiled into Cybion")
+  const nameBox = await nameSpan.boundingBox()
+  const purposeBox = await purposeSpan.boundingBox()
+  expect(nameBox && purposeBox).toBeTruthy()
+  expect(purposeBox!.y).toBeGreaterThanOrEqual(nameBox!.y + nameBox!.height - 1)
+  expect(await nameSpan.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+
   // edge-to-edge columns: the tree sits flush at the app sidebar and the two columns share one boundary
   const sidebar = await page.locator(".ux-sidebar").boundingBox()
   const aside = await page.locator("main > aside").boundingBox()

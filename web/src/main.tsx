@@ -2116,8 +2116,10 @@ function CommonContextBranch({ node, selectedId, onSelect, collapseLabel, expand
         {node.children.length > 0 && <ChevronDownIcon className={expanded ? "" : "-rotate-90"} />}
       </Button>
       <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === node.id ? "bg-accent" : ""}`} onClick={() => onSelect(node)}>
-        <span className="min-w-0 truncate font-medium">{node.name}</span>
-        {node.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{node.description}</span>}
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate font-medium">{node.name}</span>
+          {node.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{node.description}</span>}
+        </span>
       </Button>
     </div>
     {expanded && node.children.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{node.children.map((child) => <CommonContextBranch key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
@@ -2353,8 +2355,10 @@ function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabe
         {nested.length > 0 && <ChevronDownIcon className={expanded ? "" : "-rotate-90"} />}
       </Button>
       <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === context.id ? "bg-accent" : ""}`} onClick={() => onSelect(context)}>
-        <span className="min-w-0 truncate font-medium">{context.name}</span>
-        {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate font-medium">{context.name}</span>
+          {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
+        </span>
       </Button>
     </div>
     {expanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
@@ -2370,8 +2374,10 @@ function CommonBranch({ node, selectedId, onSelect, expanded, onToggle, collapse
         {hasChildren && <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />}
       </Button>
       <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === node.id ? "bg-accent" : ""}`} onClick={() => onSelect(node.id)}>
-        <span className="min-w-0 truncate font-medium">{node.name}</span>
-        {node.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{node.description}</span>}
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate font-medium">{node.name}</span>
+          {node.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{node.description}</span>}
+        </span>
       </Button>
     </div>
     {isExpanded && hasChildren && <ul role="group" className="ml-5 border-l pl-2">{node.children.map((child) => <CommonBranch key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} expanded={expanded} onToggle={onToggle} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
@@ -2386,8 +2392,10 @@ function CtxBranch({ document, sdk, selectedId, onSelect, expanded, onToggle, co
         <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />
       </Button>
       <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === document.context_id ? "bg-accent" : ""}`} onClick={() => onSelect(document.context_id)}>
-        <span className="min-w-0 truncate font-medium">{document.name}</span>
-        {document.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{document.description}</span>}
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate font-medium">{document.name}</span>
+          {document.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{document.description}</span>}
+        </span>
       </Button>
     </div>
     {isExpanded && <CtxNodeList parentId={document.context_id} sdk={sdk} selectedId={selectedId} onSelect={onSelect} expanded={expanded} onToggle={onToggle} collapseLabel={collapseLabel} expandLabel={expandLabel} />}
@@ -2411,8 +2419,10 @@ function CtxNodeList({ parentId, sdk, selectedId, onSelect, expanded, onToggle, 
             <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />
           </Button>
           <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === child.context_id ? "bg-accent" : ""}`} onClick={() => onSelect(child.context_id)}>
-            <span className="min-w-0 truncate font-medium">{child.name}</span>
-            {child.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{child.description}</span>}
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="truncate font-medium">{child.name}</span>
+              {child.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{child.description}</span>}
+            </span>
           </Button>
         </div>
         {isExpanded && <CtxNodeList parentId={child.context_id} sdk={sdk} selectedId={selectedId} onSelect={onSelect} expanded={expanded} onToggle={onToggle} collapseLabel={collapseLabel} expandLabel={expandLabel} />}

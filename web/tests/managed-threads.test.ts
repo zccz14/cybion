@@ -46,6 +46,8 @@ test("contexts are managed through a progressive disclosure tree", () => {
   const nodes = source.slice(source.indexOf("function CtxNodeList("), source.indexOf("function ContextPane("))
   assert.match(nodes, /onSelect\(child\.context_id\)/)
   assert.doesNotMatch(nodes, /child\.id\b/)
+  assert.match(source, /<span className="flex min-w-0 flex-1 flex-col gap-0\.5">/)
+  assert.doesNotMatch(source, /min-w-0 truncate font-medium/)
 })
 
 test("the Contexts page is an edge-to-edge tree beside a full-width reading pane", () => {
