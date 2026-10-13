@@ -30,22 +30,14 @@ test("new thread preparation waits for the first message before creating a threa
   assert.match(source, /newThreadPrompt/)
 })
 
-test("CTX documents join threads through a user-scoped API key", () => {
-  assert.match(source, /ctxIntegrationTitle/)
-  assert.match(source, /\/api\/integrations\/ctx/)
-  assert.match(source, /const CTX_ORIGIN = "https:\/\/ctx\.ntnl\.io"/)
-  assert.match(source, /href=\{`\$\{CTX_ORIGIN\}\/#\/documents\/\$\{document\.id\}`\}/)
-})
-
 test("contexts are managed through a progressive disclosure tree", () => {
   assert.match(source, /path="\/contexts" element=\{<ContextsPage/)
   assert.match(source, /\/api\/contexts/)
   assert.match(source, /<ul role="tree"/)
   assert.match(source, /parent_id/)
   assert.match(source, /contextContent/)
-  const nodes = source.slice(source.indexOf("function CtxNodeList("), source.indexOf("function ContextPane("))
-  assert.match(nodes, /onSelect\(child\.context_id\)/)
-  assert.doesNotMatch(nodes, /child\.id\b/)
+  const nodes = source.slice(source.indexOf("function CommonBranch("), source.indexOf("function ContextPane("))
+  assert.match(nodes, /onSelect\(node\.id\)/)
   assert.match(source, /<span className="flex min-w-0 flex-1 flex-col gap-0\.5">/)
   assert.doesNotMatch(source, /min-w-0 truncate font-medium/)
   assert.match(source, /useState<ReadonlySet<string>>\(new Set\(\)\)/)
@@ -58,7 +50,7 @@ test("the Contexts page is an edge-to-edge tree beside a full-width reading pane
   assert.match(contexts, /<main className="flex min-h-\[calc\(100svh-3\.5rem\)\] flex-col lg:flex-row">/)
   assert.match(contexts, /<aside className="border-b bg-sidebar\/40 p-3 lg:w-80 lg:shrink-0 lg:border-b-0 lg:border-r">/)
   assert.match(contexts, /<section className="flex w-full min-w-0 flex-col lg:min-h-0 lg:flex-1">/)
-  assert.match(contexts, /content=\{document\.content\}/)
+  assert.match(contexts, /content=\{commonSelected\.content\}/)
   assert.doesNotMatch(contexts, /<Page |CtxIntegrationCard/)
 })
 

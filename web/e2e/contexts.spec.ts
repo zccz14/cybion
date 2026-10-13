@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test"
 import { stubWorkspace } from "./workspace-fixture"
 
 test("the Contexts page keeps an edge-to-edge tree beside a full-width reading pane", async ({ page }) => {
-  const fixture = await stubWorkspace(page, { language: "zh", theme: "light", ctxConnected: true })
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
   await page.setViewportSize({ width: 1440, height: 960 })
   await page.goto("/#/contexts")
   await expect(page.locator(".markdown-editor")).toBeVisible()
@@ -10,11 +10,9 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   // the page title lives in the shared app header; the page itself owns no title block
   await expect(page.locator(".ux-app-header__title")).toHaveText("上下文")
 
-  // unified tree: all three sources as top-level sections
+  // unified tree: both sources as top-level sections
   await expect(page.getByText("Cybion Common Context", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("你的上下文", { exact: true })).toBeVisible()
-  await expect(page.getByText("CTX 来源（可选）", { exact: true }).first()).toBeVisible()
-  await expect(page.getByText("CTX project reference", { exact: true })).toBeVisible()
 
   // node labels stack the name over the purpose instead of squeezing both into one row
   const commonNode = page.getByRole("button", { name: /Cybion Common Context/ }).first()
@@ -46,22 +44,6 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   expect(await page.locator(".markdown-editor[aria-readonly=true]").count()).toBe(1)
   expect(await page.locator(".markdown-editor__toolbar").count()).toBe(0)
   await page.screenshot({ path: "test-results/layout-common.png" })
-
-  // CTX document selected -> the pane renders the document body with the CTX badge and deep link
-  await page.getByRole("button", { name: /CTX project reference/ }).first().click()
-  await expect(page.getByText("内容存放在 CTX", { exact: false })).toBeVisible()
-  await expect(page.getByRole("link", { name: /在 CTX 打开/ })).toHaveAttribute("href", "https://ctx.ntnl.io/#/documents/ctx-reference")
-  await expect(page.locator(".markdown-editor")).toContainText("CTX 正文")
-  await page.screenshot({ path: "test-results/layout-ctx.png" })
-
-  // CTX children stay folded until the branch is opened by hand
-  await expect(page.getByRole("button", { name: /子文档/ })).toHaveCount(0)
-  await page.getByRole("tree", { name: "CTX 来源（可选）" }).getByRole("button", { name: "展开上下文" }).first().click()
-  await page.getByRole("button", { name: /子文档/ }).first().click()
-  await expect(page.locator(".markdown-editor")).toContainText("子文档正文")
-
-  // the CTX connection card stays on personal settings, not in the Contexts page
-  await expect(page.getByRole("button", { name: "断开连接" })).toHaveCount(0)
 
   // create a local context and edit Markdown through the editor
   await page.getByRole("button", { name: "新建上下文", exact: true }).click()

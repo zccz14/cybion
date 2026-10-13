@@ -43,11 +43,10 @@ for (const scenario of ["api-only", "archived", "search", "failed-filter", "unkn
 
 for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
   test(`context onboarding and accessible help work in ${language}/${theme}`, async ({ page }) => {
-    const fixture = await stubWorkspace(page, { language, theme, ctxConnected: true })
+    const fixture = await stubWorkspace(page, { language, theme })
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.goto("/#/contexts")
     await expect(page.locator(".ux-app-header__title")).toHaveText(language === "zh" ? "上下文" : "Contexts")
-    await expect(page.getByText("CTX project reference", { exact: true })).toBeVisible()
     await expect(page.locator('input[type="file"]')).toHaveCount(0)
     if (theme === "dark") await expect(page.locator("html")).toHaveClass("dark")
     else await expect(page.locator("html")).not.toHaveClass("dark")
@@ -88,15 +87,6 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     expect(fixture.unexpected).toEqual([])
   })
 }
-
-test("personal settings manage the CTX connection without listing documents", async ({ page }) => {
-  const fixture = await stubWorkspace(page, { ctxConnected: true })
-  await page.setViewportSize({ width: 1280, height: 900 })
-  await page.goto("/#/configuration")
-  await expect(page.getByText("CTX 来源（可选）", { exact: true })).toBeVisible()
-  await expect(page.getByText("CTX project reference", { exact: true })).toHaveCount(0)
-  expect(fixture.unexpected).toEqual([])
-})
 
 test("using a context preserves an existing conversation draft", async ({ page }) => {
   await stubWorkspace(page)

@@ -9,22 +9,14 @@ const personal = main.slice(main.indexOf("function ConfigurationPage("), main.in
 test("personal configuration contains only personal controls, even for administrators", () => {
   assert.match(personal, /function ConfigurationPage\(\{ sdk \}/)
   assert.doesNotMatch(personal, /isAdmin|ExperimentalFeatures|RequestHeaders|user_agent|originator|saveHeaders|SystemConfiguration/)
-  for (const feature of ["ThreadDefaultsCard", "NormaiUpstreamCard", "CtxIntegrationCard", "LinkitNotifications", "/api/integrations/upstreams", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
+  for (const feature of ["ThreadDefaultsCard", "NormaiUpstreamCard", "LinkitNotifications", "/api/integrations/upstreams", 'to="/api"', 'to="/workers"']) assert.ok(personal.includes(feature))
+  assert.doesNotMatch(personal, /CtxIntegration|integrations\/ctx/)
   assert.match(main, /path="\/configuration" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
   assert.match(main, /path="\/settings" element=\{<ConfigurationPage sdk=\{sdk\} \/>/)
 })
 
-test("the CTX document list lives on the Contexts page, not in personal configuration", () => {
-  assert.match(personal, /<CtxIntegrationCard key=\{session\?\.sessionId\} sdk=\{sdk\} \/>/)
-  assert.match(main, /function CtxIntegrationCard\(\{ sdk \}: \{ sdk: AuthMiniApi \}\) \{/)
-  const contexts = main.slice(main.indexOf("function ContextsPage("), main.indexOf("function ContextEditorForm("))
-  assert.match(contexts, /\/api\/integrations\/ctx\/documents/)
-  assert.match(contexts, /<CtxBranch key=\{document\.context_id\}/)
-  assert.doesNotMatch(contexts, /CtxIntegrationCard/)
-})
-
 test("the personal page reaches manual upstreams only through the NormAI card", () => {
-  const page = personal.slice(0, personal.indexOf("function CtxIntegrationCard("))
+  const page = personal.slice(0, personal.indexOf("const NORMAI_HOST"))
   assert.match(page, /<NormaiUpstreamCard key=\{session\?\.sessionId\} sdk=\{sdk\} \/>/)
   assert.doesNotMatch(page, /UpstreamsCard|UpstreamsManager/)
 })

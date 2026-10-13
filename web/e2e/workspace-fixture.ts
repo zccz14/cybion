@@ -8,7 +8,7 @@ import { emptyThreadUsage } from "../src/lib/thread-usage"
 // signing key and intercepted HTTP. No production credentials or calls escape.
 export async function stubWorkspace(page: Page, options: {
   language?: "zh" | "en"; theme?: "light" | "dark"; activeTotal?: number; webTotal?: number; archivedTotal?: number;
-  countFails?: boolean; connectionFails?: boolean; startFails?: boolean; fallbackReady?: boolean; ctxConnected?: boolean;
+  countFails?: boolean; connectionFails?: boolean; startFails?: boolean; fallbackReady?: boolean;
 } = {}) {
   const language = options.language ?? "zh", theme = options.theme ?? "light"
   const { publicKey, privateKey } = generateKeyPairSync("ed25519")
@@ -26,7 +26,7 @@ export async function stubWorkspace(page: Page, options: {
   const writes: { path: string; body: Record<string, unknown> }[] = []
   const requests: string[] = [], unexpected: string[] = []
   page.on("pageerror", (error) => unexpected.push(`Page error: ${error.message}`))
-  const state = { connectionFails: options.connectionFails ?? false, ctxConnected: options.ctxConnected ?? false }
+  const state = { connectionFails: options.connectionFails ?? false }
   const profile = { user_id: "onboarding-user", username: "onboarding", intro: "", lang: language, theme, avatar_url: null }
   const release = JSON.parse(readFileSync(new URL("../../worker-release.json", import.meta.url), "utf8"))
   const upstream = { id: options.fallbackReady ? "manual-upstream" : "normai-upstream", name: options.fallbackReady ? "Manual" : "NormAI", base_url: options.fallbackReady ? "https://model.fixture" : "https://normai.ntnl.io", api_key_configured: true }
@@ -83,8 +83,6 @@ export async function stubWorkspace(page: Page, options: {
         }
         return json(references)
       }
-      if (path === "/api/contexts/ctx-reference") return json({ id: "ctx-reference", name: "CTX project reference", description: "Source retained in CTX", content: "# CTX 正文\n\n来源文档内容。", parent_id: null, children: [{ context_id: "ctx-child", name: "子文档", description: "" }] })
-      if (path === "/api/contexts/ctx-child") return json({ id: "ctx-child", name: "子文档", description: "", content: "子文档正文。", parent_id: "ctx-reference", children: [] })
       if (path.startsWith("/api/contexts/")) {
         const reference = references.find((item) => item.id === path.split("/").at(-1))!
         Object.assign(reference, request.postDataJSON())
@@ -100,12 +98,6 @@ export async function stubWorkspace(page: Page, options: {
           children: [],
         },
       })
-      if (path === "/api/integrations/ctx") {
-        if (request.method() === "POST") state.ctxConnected = true
-        if (request.method() === "DELETE") state.ctxConnected = false
-        return json({ connected: state.ctxConnected, key_id: state.ctxConnected ? "fixture-ctx-key" : null })
-      }
-      if (path === "/api/integrations/ctx/documents") return json({ connected: state.ctxConnected, documents: [{ context_id: "ctx-reference", name: "CTX project reference", description: "Source retained in CTX" }], notice: null })
     }
     if (url.hostname === "127.0.0.1" && !path.startsWith("/api/")) return route.continue()
     unexpected.push(request.url())
