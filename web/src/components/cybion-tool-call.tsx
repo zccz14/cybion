@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 import { WrenchIcon } from "lucide-react"
+import { Link } from "react-router-dom"
 import type { CybionToolFunctionCall } from "@/lib/history-payload"
 
 const copy = {
@@ -17,10 +18,16 @@ const copy = {
 
 const monoBlock = "mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/60 px-3 py-2 font-mono text-xs leading-5"
 
-export function CybionToolCall({ language, call, workers, time, children }: {
+// A context id resolves to its title and its Use When description through the
+// same caches the Contexts page fills; an id that does not resolve keeps the
+// monospace id rendering.
+export type ContextSummary = { name: string; description: string }
+
+export function CybionToolCall({ language, call, workers, contexts, time, children }: {
   language: "en" | "zh"
   call: CybionToolFunctionCall
   workers: readonly { id: string; label: string }[] | undefined
+  contexts: ReadonlyMap<string, ContextSummary> | undefined
   time: string
   children: ReactNode
 }) {
@@ -44,21 +51,28 @@ export function CybionToolCall({ language, call, workers, time, children }: {
         <span className="text-sm font-medium">{title}</span>
         <time className="text-xs text-muted-foreground">{time}</time>
       </div>
-      <CybionToolDetail language={language} call={call} workers={workers} />
+      <CybionToolDetail language={language} call={call} workers={workers} contexts={contexts} />
       {children}
     </div>
   </div>
 }
 
-function CybionToolDetail({ language, call, workers }: {
+function CybionToolDetail({ language, call, workers, contexts }: {
   language: "en" | "zh"
   call: CybionToolFunctionCall
   workers: readonly { id: string; label: string }[] | undefined
+  contexts: ReadonlyMap<string, ContextSummary> | undefined
 }) {
   const text = copy[language]
   switch (call.tool) {
-    case "read_context":
-      return <pre className={monoBlock}>{call.contextId}</pre>
+    case "read_context": {
+      const context = contexts?.get(call.contextId) ?? null
+      if (context === null) return <pre className={monoBlock}>{call.contextId}</pre>
+      return <>
+        <Link className="mt-2 block w-fit text-sm font-medium hover:underline" title={call.contextId} to={`/contexts?context=${encodeURIComponent(call.contextId)}`}>{context.name}</Link>
+        {context.description !== "" && <p className="mt-1.5 text-xs text-muted-foreground">{context.description}</p>}
+      </>
+    }
     case "cybion_get_ultimate_machine":
       return <pre className={monoBlock}>{call.machineId}</pre>
     case "cybion_list_contexts":

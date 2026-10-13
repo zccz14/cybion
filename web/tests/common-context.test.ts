@@ -13,7 +13,7 @@ test("the Contexts page renders the compiled-in Cybion Common Context read-only"
   assert.match(contexts, /<CommonBranch node=\{commonRoot\}/)
   assert.match(contexts, /content=\{commonSelected\.content\}/)
   assert.match(source, /<MarkdownEditor language=\{language\} value=\{content\} onChange=\{\(\) => \{\}\} readOnly \/>/)
-  assert.equal((source.match(/\/api\/common-contexts\?lang=\$\{language\}/g) ?? []).length, 2)
+  assert.equal((source.match(/\/api\/common-contexts\?lang=\$\{language\}/g) ?? []).length, 3)
   assert.equal((source.match(/commonContextTitle:/g) ?? []).length, 2)
   assert.equal((source.match(/commonContextHint:/g) ?? []).length, 2)
 })

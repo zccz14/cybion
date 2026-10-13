@@ -112,7 +112,7 @@ import { ImageGenerationCall } from "@/components/image-generation-call"
 import { WebSearchCall } from "@/components/web-search-call"
 import { BrowserControlCall } from "@/components/browser-control-call"
 import { ComputerUseCall } from "@/components/computer-use-call"
-import { CybionToolCall } from "@/components/cybion-tool-call"
+import { CybionToolCall, type ContextSummary } from "@/components/cybion-tool-call"
 import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
@@ -1653,6 +1653,22 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     ...durableRecords,
     ...pendingResponseRecords(liveResponse.data, durableRecords, threadId),
   ], [durableRecords, liveResponse.data, threadId])
+  // A `read_context` card resolves the context's title and Use When
+  // description through the same caches the Contexts page fills; the fetches
+  // only start when the loaded history actually reads a context.
+  const readsContexts = useMemo(() => records.some((record) => {
+    const payload = historyPayloadObject(record.payload)
+    return payload?.type === "function_call" && payload.name === "read_context"
+  }), [records])
+  const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: readsContexts })
+  const commonContexts = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`), enabled: readsContexts })
+  const contextLookup = useMemo(() => {
+    const lookup = new Map<string, ContextSummary>()
+    for (const context of contexts.data ?? []) lookup.set(context.id, { name: context.name, description: context.description })
+    const root = commonContexts.data?.root
+    if (root) for (const node of flattenTree(root)) lookup.set(node.id, { name: node.name, description: node.description })
+    return lookup
+  }, [contexts.data, commonContexts.data])
   const hasOlder = olderPages[0]?.hasOlder ?? history.data?.hasOlder ?? false
   const loadEarlier = useMutation({
     mutationFn: async () => {
@@ -1815,7 +1831,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
             <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
               {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-              <ThreadHistory records={records} language={language} minimal={minimal} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} />} />
+              <ThreadHistory records={records} language={language} minimal={minimal} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} contexts={contextLookup} />} />
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
@@ -1849,7 +1865,7 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   const { language } = useUi()
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
-  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} />} />
+  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} contexts={undefined} />} />
 }
 
 function SafetyBufferingAlert({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
@@ -1859,7 +1875,7 @@ function SafetyBufferingAlert({ language, view, running }: { language: Language;
   return <MessageScrollerItem><Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{buffering.reasons.join(" · ")}</AlertDescription></Alert></MessageScrollerItem>
 }
 
-const HistoryMessage = memo(function HistoryMessage({ language, record, workers }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined }) {
+const HistoryMessage = memo(function HistoryMessage({ language, record, workers, contexts }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; contexts: ReadonlyMap<string, ContextSummary> | undefined }) {
   const { t } = useUi()
   const time = formattedTime(language, record.created_at)
   const action = threadControlAction(record)
@@ -2009,7 +2025,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
 
   const cybionCall = cybionToolFunctionCall(payload)
   if (cybionCall) {
-    return <CybionToolCall language={language} call={cybionCall} workers={workers} time={time}>
+    return <CybionToolCall language={language} call={cybionCall} workers={workers} contexts={contexts} time={time}>
       <details className="group mt-2">
         <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
           <span>{t("recordPayload")}</span>
@@ -2063,7 +2079,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
       </div>
     </div>
   </div>
-}, (previous, next) => previous.workers === next.workers && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
+}, (previous, next) => previous.workers === next.workers && previous.contexts === next.contexts && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")
