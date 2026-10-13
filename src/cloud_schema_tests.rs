@@ -264,6 +264,74 @@ fn schema_36_upgrade_drops_the_removed_ctx_columns_and_preserves_history() {
 }
 
 #[test]
+fn schema_38_upgrade_drops_the_removed_custom_tool_ledger_and_preserves_history() {
+    // A deployed schema 37 database: current tables plus the removed Custom
+    // Tools ledger (the declarative controller-side integration engine).
+    let mut connection = Connection::open_in_memory().unwrap();
+    ensure_user_schema(&mut connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('a','Alpha','model','idle',1,1);
+             INSERT INTO history_records(id,thread_id,kind,payload,created_at) VALUES(1,'a','input','{\"role\":\"user\",\"content\":\"keep\"}',101);
+             CREATE TABLE custom_tool_calls (
+               id TEXT PRIMARY KEY,
+               connector_id TEXT NOT NULL,
+               tool TEXT NOT NULL,
+               thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+               input_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
+               responses_call_id TEXT NOT NULL DEFAULT '',
+               effect TEXT NOT NULL CHECK(effect IN ('read','send')),
+               status TEXT NOT NULL CHECK(status IN ('running','completed','failed','sending','sent')),
+               arguments_json TEXT NOT NULL,
+               result_json TEXT,
+               output_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
+               created_at INTEGER NOT NULL,
+               completed_at INTEGER
+             );
+             CREATE UNIQUE INDEX custom_tool_calls_dedupe
+               ON custom_tool_calls(thread_id,input_record_id,responses_call_id);
+             CREATE TABLE custom_tool_settings (
+               connector_id TEXT PRIMARY KEY,
+               values_json TEXT NOT NULL DEFAULT '{}',
+               updated_at INTEGER NOT NULL
+             );
+             INSERT INTO custom_tool_calls(id,connector_id,tool,thread_id,effect,status,arguments_json,created_at)
+               VALUES('call','linkit','linkit_send_message','a','send','sent','{}',102);
+             PRAGMA user_version=37;",
+        )
+        .unwrap();
+    let original = history_snapshot(&connection);
+    for _ in 0..2 {
+        ensure_user_schema(&mut connection).unwrap();
+        assert_core_history_schema(&connection);
+        assert_eq!(history_snapshot(&connection), original);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('custom_tool_calls','custom_tool_settings','custom_tool_calls_dedupe')",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+    // A fresh database never had the tables; the same upgrade must pass.
+    let mut fresh = Connection::open_in_memory().unwrap();
+    ensure_user_schema(&mut fresh).unwrap();
+    assert_eq!(
+        fresh
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('custom_tool_calls','custom_tool_settings')",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn failed_history_schema_upgrade_rolls_back_columns_index_version_and_data() {
     let mut connection = legacy_database(8);
     let original = history_snapshot(&connection);

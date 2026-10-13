@@ -9,3 +9,4 @@
 当前主题：
 
 - **Ultimate Machine（终极机器）**：在 Worker 上按期执行一条检查命令、失败时请绑定的 Thread 修复的沉默看门机器。
+- **Linkit（通知与触达）**：Linkit 与 Cybion 的关系（身份、通知），以及为什么模型侧没有 linkit_* 工具。

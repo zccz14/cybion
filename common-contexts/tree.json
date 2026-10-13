@@ -1,5 +1,5 @@
 {
-  "revision": 2,
+  "revision": 3,
   "root": {
     "id": "2b7b2b90-00a7-4c92-8b10-bee31b246e3a",
     "name": "Cybion Common Context",
@@ -43,6 +43,12 @@
             "content_file": "nodes/ultimate-machine/pitfalls.md"
           }
         ]
+      },
+      {
+        "id": "1056ab49-33dd-4fda-9e54-3286e7afa943",
+        "name": "Linkit（通知与触达）",
+        "description": "Linkit 在 Cybion 中的角色：身份、通知与触达；为什么模型侧没有 linkit_* 工具。",
+        "content_file": "nodes/linkit/overview.md"
       }
     ]
   }

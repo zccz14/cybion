@@ -674,7 +674,6 @@ const copy = {
     toolImageGeneration: "Image generation",
     toolCybion: "Cybion",
     toolOpenAi: "OpenAI",
-    toolCustomTools: "Custom Tools",
     history: "History",
     historyDescription: "Browse the rows and stored fields in history_records across your workspace.",
     noHistory: "No messages in this thread yet.",
@@ -1008,7 +1007,6 @@ const copy = {
     toolImageGeneration: "图像生成",
     toolCybion: "Cybion",
     toolOpenAi: "OpenAI",
-    toolCustomTools: "Custom Tools",
     history: "历史",
     historyDescription: "查看当前工作区 history_records 表中的记录与原始字段。",
     noHistory: "这个线程还没有消息。",
@@ -3284,8 +3282,7 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
 }
 
 // INVARIANT: every built-in and Worker tool in tools.json needs a label here;
-// the web tests assert coverage in both languages. Custom Tools carry their
-// labels in the catalog (title.en / title.zh) and must not be added here.
+// the web tests assert coverage in both languages.
 const toolLabels: Record<string, CopyKey> = {
   cybion_list_contexts: "toolListContexts",
   cybion_list_workers: "toolListWorkers",
@@ -3301,18 +3298,7 @@ const toolLabels: Record<string, CopyKey> = {
 }
 
 function ToolsPage() {
-  const { t, language } = useUi()
-  const connectors = (toolCatalog.custom_tools ?? {}) as Record<
-    string,
-    { tools: { name: string; title?: { en?: string; zh?: string } }[] }
-  >
-  const customTools = Object.values(connectors).flatMap((connector) =>
-    connector.tools.map((tool) => ({
-      name: tool.name,
-      provider: t("toolCustomTools"),
-      title: language === "zh" ? tool.title?.zh ?? tool.title?.en : tool.title?.en,
-    })),
-  )
+  const { t } = useUi()
   const groups = [
     { names: toolCatalog.context.map((tool) => tool.name), provider: t("toolCybion") },
     { names: toolCatalog.worker.map((tool) => tool.name), provider: "Worker" },
@@ -3320,7 +3306,6 @@ function ToolsPage() {
   ]
   const tools = [
     ...groups.flatMap((group) => group.names.map((name) => ({ name, provider: group.provider, title: undefined as string | undefined }))),
-    ...customTools,
   ]
   return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.name}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.title ?? (toolLabels[tool.name] ? t(toolLabels[tool.name]) : tool.name)}</p><code className="text-xs text-muted-foreground">{tool.name}</code></div><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
 }

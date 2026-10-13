@@ -104,12 +104,6 @@ the first authenticated browser session initializes that key atomically.
   and Configuration → Contexts renders it from
   `GET /api/common-contexts`. The controller never stores or mutates it;
   content changes ship with releases.
-- [Custom Tools](docs/custom-tools.md) extend that catalog with declarative
-  controller-side integrations: each connector declares its base URL,
-  credential references, per-tool request bindings and response projections,
-  and the generic executor handles routing, credential injection, settlement
-  and rate limiting without per-integration code. Linkit is the first
-  connector.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record

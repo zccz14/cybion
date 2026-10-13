@@ -35,7 +35,6 @@ use uuid::Uuid;
 
 mod admin_users;
 mod common_contexts;
-mod custom_tools;
 mod history;
 mod linkit_notifications;
 mod machines;
@@ -133,7 +132,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 37;
+const USER_SCHEMA_VERSION: i64 = 38;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -158,7 +157,6 @@ struct AppState {
     admin_db_path: Arc<PathBuf>,
     client: reqwest::Client,
     linkit_api_url: String,
-    custom_tool_base_urls: Arc<Mutex<HashMap<String, String>>>,
     normai_api_url: String,
     worker_release_base: String,
     worker_android_release_base: String,
@@ -366,7 +364,6 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .timeout(Duration::from_secs(600))
             .build()?,
         linkit_api_url: LINKIT_API_URL.to_owned(),
-        custom_tool_base_urls: Arc::new(Mutex::new(HashMap::new())),
         normai_api_url: NORMAI_API_URL.to_owned(),
         worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
         worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
@@ -1106,30 +1103,6 @@ CREATE TABLE IF NOT EXISTS contexts (
   parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
   sort_key TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS custom_tool_calls (
-  id TEXT PRIMARY KEY,
-  connector_id TEXT NOT NULL,
-  tool TEXT NOT NULL,
-  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-  input_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
-  responses_call_id TEXT NOT NULL DEFAULT '',
-  effect TEXT NOT NULL CHECK(effect IN ('read','send')),
-  status TEXT NOT NULL CHECK(status IN ('running','completed','failed','sending','sent')),
-  arguments_json TEXT NOT NULL,
-  result_json TEXT,
-  output_record_id INTEGER REFERENCES history_records(id) ON DELETE SET NULL,
-  created_at INTEGER NOT NULL,
-  completed_at INTEGER
-);
-CREATE UNIQUE INDEX IF NOT EXISTS custom_tool_calls_dedupe
-  ON custom_tool_calls(thread_id,input_record_id,responses_call_id);
-CREATE INDEX IF NOT EXISTS custom_tool_calls_thread_created
-  ON custom_tool_calls(thread_id,created_at DESC);
-CREATE TABLE IF NOT EXISTS custom_tool_settings (
-  connector_id TEXT PRIMARY KEY,
-  values_json TEXT NOT NULL DEFAULT '{}',
-  updated_at INTEGER NOT NULL
-);
 "#;
 
 const USER_HISTORY_INDEXES: &str = r#"
@@ -1461,6 +1434,15 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                 .map_err(ApiError::internal)?;
         }
     }
+    // COMPATIBILITY: schema <=37 created the removed Custom Tools ledger
+    // tables; the declarative integration engine was removed. Retire this
+    // drop once every retained user database is schema 38+; retain the test.
+    transaction
+        .execute_batch(
+            "DROP TABLE IF EXISTS custom_tool_calls;
+             DROP TABLE IF EXISTS custom_tool_settings;",
+        )
+        .map_err(ApiError::internal)?;
     for (table, name, definition) in [
         (
             "threads",
@@ -5355,8 +5337,6 @@ async fn append_tool_output_item(
         }
         let existing:Option<i64>=transaction.query_row("SELECT output_record_id FROM worker_calls WHERE caller_user_id IS NULL AND thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NOT NULL",params![thread_id,input_record_id,call],|r|r.get(0)).optional()?;
         if let Some(id)=existing {return Ok(id);}
-        let existing:Option<i64>=transaction.query_row("SELECT output_record_id FROM custom_tool_calls WHERE thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NOT NULL",params![thread_id,input_record_id,call],|r|r.get(0)).optional()?;
-        if let Some(id)=existing {return Ok(id);}
         let superseded = request_superseded(&transaction, &thread_id, input_record_id)?;
         let kind = if superseded {
             "activity"
@@ -5376,7 +5356,6 @@ async fn append_tool_output_item(
             transaction.execute("UPDATE history_records SET worker_owner_user_id=?,worker_call_id=?,worker_output_phase='primary' WHERE id=?",params![owner,call,id])?;
         }
         transaction.execute("UPDATE worker_calls SET output_record_id=? WHERE caller_user_id IS NULL AND thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NULL",params![id,thread_id,input_record_id,call])?;
-        transaction.execute("UPDATE custom_tool_calls SET output_record_id=? WHERE thread_id=? AND input_record_id=? AND responses_call_id=? AND output_record_id IS NULL",params![id,thread_id,input_record_id,call])?;
         transaction.commit()?;
         Ok(id)
     })
@@ -5967,7 +5946,6 @@ async fn responses_request(
         input,
         include_tools,
         include_tools,
-        &[],
         false,
         false,
         None,
@@ -6004,11 +5982,6 @@ async fn responses_request_with_options(
         idx_head,
         idx_tail,
     };
-    let custom_tools = if request_kind == "inference" {
-        custom_tools::enabled_for(state, user).await?
-    } else {
-        Vec::new()
-    };
     let request = send_responses_request(
         state,
         Some(user),
@@ -6019,7 +5992,6 @@ async fn responses_request_with_options(
         input,
         include_worker_tools,
         request_kind == "inference",
-        &custom_tools,
         web_search,
         image_generation,
         Some((audit, cancellation)),
@@ -6038,7 +6010,6 @@ async fn send_responses_request(
     input: Value,
     include_worker_tools: bool,
     include_context_tools: bool,
-    custom_tools: &[String],
     web_search: bool,
     image_generation: bool,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
@@ -6050,7 +6021,6 @@ async fn send_responses_request(
         input,
         include_worker_tools,
         include_context_tools,
-        custom_tools,
         web_search,
         image_generation,
     );
@@ -6602,7 +6572,6 @@ fn responses_payload(model: &str, input: Value, include_tools: bool) -> Value {
         input,
         include_tools,
         include_tools,
-        &[],
         false,
         false,
     )
@@ -6616,7 +6585,6 @@ fn responses_payload_with_options(
     input: Value,
     include_worker_tools: bool,
     include_context_tools: bool,
-    custom_tools: &[String],
     web_search: bool,
     image_generation: bool,
 ) -> Value {
@@ -6633,7 +6601,6 @@ fn responses_payload_with_options(
     let tools = responses_tools(
         include_worker_tools,
         include_context_tools,
-        custom_tools,
         web_search,
         image_generation,
     );
@@ -6754,7 +6721,6 @@ fn is_worker_tool(name: &str) -> bool {
 fn responses_tools(
     include_worker_tools: bool,
     include_context_tools: bool,
-    custom_tools: &[String],
     web_search: bool,
     image_generation: bool,
 ) -> Value {
@@ -6765,7 +6731,6 @@ fn responses_tools(
     if include_worker_tools {
         tools.extend(worker_tools().as_array().cloned().unwrap_or_default());
     }
-    tools.extend(custom_tools::injected_tools(custom_tools));
     if web_search {
         tools.push(TOOL_CATALOG["native"]["normai_web_search"].clone());
     }
@@ -7218,27 +7183,6 @@ async fn start_response_tool(
     };
     if let Some(output) = controller_output {
         let output = match output {
-            Ok(output) => output,
-            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
-                json!({"error":error.message})
-            }
-            Err(error) => return Err(error),
-        };
-        let output = json!({
-            "type": output_type,
-            "call_id": call_id,
-            "output": serde_json::to_string(&output).map_err(ApiError::internal)?,
-        });
-        return Ok(Some(PendingToolCall::Answered(
-            append_tool_output_item(state, user, thread, input_id, &output).await?,
-        )));
-    }
-    if let Some(connector) = custom_tools::connector_of(name) {
-        let output = match custom_tools::execute(
-            state, user, &thread.id, input_id, call_id, connector, name, input,
-        )
-        .await
-        {
             Ok(output) => output,
             Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
                 json!({"error":error.message})
@@ -8047,7 +7991,6 @@ mod tests {
                     .build()
                     .unwrap(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
-                custom_tool_base_urls: Arc::new(Mutex::new(HashMap::new())),
                 normai_api_url: NORMAI_API_URL.to_owned(),
                 worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
                 worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
@@ -9728,7 +9671,6 @@ mod tests {
             json!([]),
             !workers.is_empty(),
             true,
-            &[],
             true,
             true,
         );
@@ -9744,7 +9686,6 @@ mod tests {
             json!([]),
             !workers.is_empty(),
             true,
-            &[],
             true,
             true,
         );
@@ -10159,7 +10100,7 @@ mod tests {
 
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
-        let tools = responses_tools(false, true, &[], true, true);
+        let tools = responses_tools(false, true, true, true);
         assert_eq!(tools.as_array().unwrap().len(), 8);
         assert_eq!(tools[0]["name"], "cybion_list_contexts");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
@@ -10171,18 +10112,18 @@ mod tests {
         assert_eq!(tools[4]["parameters"]["required"], json!(["machine_id"]));
         assert_eq!(tools[6], TOOL_CATALOG["native"]["normai_web_search"]);
         assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_image_generation"]);
-        let worker_and_native = responses_tools(true, true, &[], true, true);
+        let worker_and_native = responses_tools(true, true, true, true);
         assert_eq!(worker_and_native.as_array().unwrap().len(), 11);
         assert_eq!(worker_and_native[6]["name"], "bash");
         assert_eq!(worker_and_native[9]["name"], "normai_web_search");
         assert_eq!(worker_and_native[10]["name"], "normai_image_generation");
-        let web_search_only = responses_tools(false, true, &[], true, false);
+        let web_search_only = responses_tools(false, true, true, false);
         assert_eq!(web_search_only.as_array().unwrap().len(), 7);
         assert_eq!(
             web_search_only[6],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
-        let context_only = responses_tools(false, true, &[], false, false);
+        let context_only = responses_tools(false, true, false, false);
         assert_eq!(
             context_only
                 .as_array()
@@ -10199,7 +10140,7 @@ mod tests {
                 "cybion_set_ultimate_machine"
             ]
         );
-        assert_eq!(responses_tools(false, false, &[], false, false), json!([]));
+        assert_eq!(responses_tools(false, false, false, false), json!([]));
     }
 
     #[test]

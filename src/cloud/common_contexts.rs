@@ -60,6 +60,10 @@ const CONTENT: &[(&str, &str)] = &[
         "nodes/ultimate-machine/pitfalls.md",
         include_str!("../../common-contexts/nodes/ultimate-machine/pitfalls.md"),
     ),
+    (
+        "nodes/linkit/overview.md",
+        include_str!("../../common-contexts/nodes/linkit/overview.md"),
+    ),
 ];
 
 fn content(path: &str) -> &'static str {

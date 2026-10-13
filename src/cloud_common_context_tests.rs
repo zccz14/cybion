@@ -68,8 +68,9 @@ async fn read_tool_reads_common_nodes_with_parent_and_children() {
             .contains("common-contexts/")
     );
     let children = output["children"].as_array().unwrap();
-    assert_eq!(children.len(), 1);
+    assert_eq!(children.len(), 2);
     assert_eq!(children[0]["name"], "Ultimate Machine（终极机器）");
+    assert_eq!(children[1]["name"], "Linkit（通知与触达）");
 
     let child_id = children[0]["context_id"].as_str().unwrap().to_owned();
     let child = read_context_tool_output(
@@ -79,9 +80,26 @@ async fn read_tool_reads_common_nodes_with_parent_and_children() {
     )
     .await
     .unwrap();
-    assert_eq!(child["parent_id"], Value::String(root_id));
+    assert_eq!(child["parent_id"], Value::String(root_id.clone()));
     assert_eq!(child["children"].as_array().unwrap().len(), 5);
     assert!(child["content"].as_str().unwrap().contains("终极机器"));
+
+    let linkit_id = children[1]["context_id"].as_str().unwrap().to_owned();
+    let linkit = read_context_tool_output(
+        &state,
+        &user,
+        &json!({ "context_id": linkit_id.as_str() }).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(linkit["parent_id"], Value::String(root_id));
+    assert_eq!(linkit["children"].as_array().unwrap().len(), 0);
+    assert!(
+        linkit["content"]
+            .as_str()
+            .unwrap()
+            .contains("linkit.ntnl.io")
+    );
 }
 
 #[tokio::test]
@@ -124,5 +142,5 @@ async fn browser_read_resolves_common_nodes() {
     .await
     .unwrap();
     assert_eq!(view.context.name, "Cybion Common Context");
-    assert_eq!(view.children.len(), 1);
+    assert_eq!(view.children.len(), 2);
 }
