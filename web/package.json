@@ -28,7 +28,7 @@
     "@tiptap/markdown": "^3.31.3",
     "@tiptap/react": "^3.31.3",
     "@tiptap/starter-kit": "^3.31.3",
-    "@zccz14/ux": "0.1.4",
+    "@zccz14/ux": "0.1.6",
     "auth-mini": "^0.4.14",
     "auth-mini-react-components": "0.6.10",
     "class-variance-authority": "^0.7.1",
