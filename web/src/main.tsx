@@ -813,7 +813,7 @@ const copy = {
     contextDeleted: "上下文已删除",
     contextCollapse: "收起上下文",
     contextExpand: "展开上下文",
-    commonContextTitle: "Cybion Common Context",
+    commonContextTitle: "Cybion 公共上下文",
     commonContextHint: "随 Cybion 源码编译发布、所有用户共享、只读；Thread 通过上下文工具按需渐进阅读，内容只随版本变化。",
     navAudit: "审计",
     usageStats: "用量统计",
@@ -2085,10 +2085,10 @@ function CommonContextBranch({ node, selectedId, onSelect, collapseLabel, expand
 }
 
 function CommonContextCard({ sdk }: { sdk: AuthMiniApi }) {
-  const { t } = useUi()
+  const { t, language } = useUi()
   const query = useQuery({
-    queryKey: ["common-contexts"],
-    queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, "/api/common-contexts"),
+    queryKey: ["common-contexts", language],
+    queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`),
   })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const root = query.data?.root ?? null
@@ -2137,7 +2137,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const client = useQueryClient()
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts") })
-  const common = useQuery({ queryKey: ["common-contexts"], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, "/api/common-contexts") })
+  const common = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`) })
   const [searchParams, setSearchParams] = useSearchParams()
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get("context"))

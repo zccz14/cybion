@@ -34,15 +34,15 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   await expect(page.locator(".ux-app-header__title")).toHaveText("上下文")
 
   // unified tree: both sources as top-level sections
-  await expect(page.getByText("Cybion Common Context", { exact: true }).first()).toBeVisible()
+  await expect(page.getByText("Cybion 公共上下文", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("你的上下文", { exact: true })).toBeVisible()
 
   // node labels stack the name over the purpose instead of squeezing both into one row
-  const commonNode = page.getByRole("button", { name: /Cybion Common Context/ }).first()
+  const commonNode = page.getByRole("button", { name: /Cybion 公共上下文/ }).first()
   const nameSpan = commonNode.locator("span span").nth(0)
   const purposeSpan = commonNode.locator("span span").nth(1)
-  await expect(nameSpan).toHaveText("Cybion Common Context")
-  await expect(purposeSpan).toContainText("Compiled into Cybion")
+  await expect(nameSpan).toHaveText("Cybion 公共上下文")
+  await expect(purposeSpan).toContainText("随 Cybion 源码编译发布")
   const nameBox = await nameSpan.boundingBox()
   const purposeBox = await purposeSpan.boundingBox()
   expect(nameBox && purposeBox).toBeTruthy()
@@ -61,7 +61,7 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   await page.screenshot({ path: "test-results/layout-default.png" })
 
   // common context selected -> read-only preview
-  await page.getByRole("button", { name: /Cybion Common Context/ }).first().click()
+  await page.getByRole("button", { name: /Cybion 公共上下文/ }).first().click()
   await expect(page.getByText("只读", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("随 Cybion 版本编译发布", { exact: false })).toBeVisible()
   expect(await page.locator(".markdown-editor[aria-readonly=true]").count()).toBe(1)
@@ -324,6 +324,22 @@ test("the title edits inline and the field labels explain themselves", async ({ 
   await expect(page.getByRole("dialog")).toContainText("不会默认占用")
   await page.keyboard.press("Escape")
   await expect(page.getByRole("dialog")).toHaveCount(0)
+
+  expect(fixture.unexpected).toEqual([])
+})
+
+test("the common context copy follows the UI language", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "en", theme: "light" })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.goto("/#/contexts")
+
+  // the tree, the node purpose and the reading pane all serve the English copy
+  await expect(page.getByText("Cybion Common Context", { exact: true }).first()).toBeVisible()
+  const commonNode = page.getByRole("button", { name: /Cybion Common Context/ }).first()
+  await expect(commonNode.locator("span span").nth(1)).toContainText("Compiled into Cybion")
+  await commonNode.click()
+  await expect(page.getByText("Read-only", { exact: true }).first()).toBeVisible()
+  await expect(page.getByText("Fixture content.", { exact: false }).first()).toBeVisible()
 
   expect(fixture.unexpected).toEqual([])
 })

@@ -120,7 +120,13 @@ export async function stubWorkspace(page: Page, options: {
       }
       if (path === "/api/common-contexts") return json({
         revision: 1,
-        root: {
+        root: url.searchParams.get("lang") === "zh" ? {
+          id: "common-root",
+          name: "Cybion 公共上下文",
+          description: "随 Cybion 源码编译发布、所有用户共享、只读",
+          content: "# Cybion 公共上下文\n\n夹具内容。",
+          children: [],
+        } : {
           id: "common-root",
           name: "Cybion Common Context",
           description: "Compiled into Cybion from its source tree, shared by every user, read-only",
