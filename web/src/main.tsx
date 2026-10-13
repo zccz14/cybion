@@ -47,6 +47,7 @@ import {
   FileKey2Icon,
   FileSearchIcon,
   FolderTreeIcon,
+  InfoIcon,
   KeyRoundIcon,
   LogsIcon,
   MessagesSquareIcon,
@@ -451,15 +452,17 @@ const copy = {
     contexts: "Contexts",
     contextsTitle: "Contexts",
     contextLocalTitle: "Your contexts",
-    contextEditorHint: "Name, purpose, and Markdown content. Drag the tree to change nesting and order; edits save automatically and Threads can read saved contexts on demand.",
     contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
     contextSelectHint: "Select a node in the tree, or create a new context.",
     contextGlobalBadge: "Read-only",
     contextGlobalHint: "Compiled into Cybion with each release and shared by every user. The content below is what Threads read through the Contexts tools.",
     contextName: "Context name",
-    contextDescription: "Purpose — when to consult it",
-    contextContent: "Location and reading instructions",
+    contextDescription: "Use When",
+    contextContent: "Body",
     contextContentEditHint: "Write the context in Markdown. Toggle Write, Markdown, and Preview above the editor.",
+    contextUseWhenHelp: "Routes the AI: the condition for when this context should be read. Progressive disclosure reads this line first to decide whether to load the body — write when to look, not a summary of the content.",
+    contextBodyHelp: "Loaded on demand: the body never occupies the conversation context by default; the AI reads it only when a task needs it.",
+    contextFieldHelp: "Help",
     newContext: "New context",
     editContext: "Edit context",
     createContext: "Create context",
@@ -784,15 +787,17 @@ const copy = {
     contexts: "上下文",
     contextsTitle: "上下文",
     contextLocalTitle: "你的上下文",
-    contextEditorHint: "名称、用途与 Markdown 内容。拖动左栏调整层级与顺序；修改自动保存，对话可按需读取。",
     contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
     contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
     contextGlobalBadge: "只读",
     contextGlobalHint: "随 Cybion 版本编译发布、所有用户共享只读。下方内容即 Thread 通过上下文工具读到的正文。",
     contextName: "上下文名称",
-    contextDescription: "用途 — 何时参考",
-    contextContent: "位置与获取说明",
+    contextDescription: "用途 Use When",
+    contextContent: "正文",
     contextContentEditHint: "用 Markdown 编写上下文。可在编辑器上方切换编辑、源码和预览模式。",
+    contextUseWhenHelp: "用于引导 AI 路由：这是渐进式上下文的判定条件——「什么时候需要查看」。AI 先读这一行，再决定是否加载正文；请写判据，不要写内容摘要。",
+    contextBodyHelp: "正文按需加载：不会默认占用对话上下文，AI 只在需要时读取。",
+    contextFieldHelp: "说明",
     newContext: "新建上下文",
     editContext: "编辑上下文",
     createContext: "创建上下文",
@@ -2624,6 +2629,21 @@ function ContextReadOnlyPane({ title, description, badge, hint, content, languag
   </ContextPane>
 }
 
+function ContextFieldHelp({ label, help }: { label: string; help: string }) {
+  const { t } = useUi()
+  return <Dialog>
+    <DialogTrigger asChild>
+      <Button type="button" size="icon-sm" variant="ghost" className="size-5 text-muted-foreground" aria-label={`${label} ${t("contextFieldHelp")}`}><InfoIcon className="size-3.5" /></Button>
+    </DialogTrigger>
+    <DialogContent className="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>{label}</DialogTitle>
+        <DialogDescription className="text-pretty">{help}</DialogDescription>
+      </DialogHeader>
+    </DialogContent>
+  </Dialog>
+}
+
 function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSelected, saving, dirty, saveError }: {
   draft: ContextDraft
   editDraft: (update: (current: ContextDraft) => ContextDraft) => void
@@ -2637,13 +2657,20 @@ function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSele
 }) {
   const { t, language } = useUi()
   const autosaveStatus = saving ? t("contextAutosaving") : saveError ? t("contextAutosaveFailed") : dirty ? t("contextAutosavePending") : t("contextAutosaved")
+  // New drafts keep the title in editing until they exist — the name is what
+  // creates them; an existing context falls back to the display heading on
+  // blur, so the heading always shows the saved name.
+  const [renaming, setRenaming] = useState(draft.id === null)
+  useEffect(() => {
+    setRenaming(draft.id === null)
+  }, [draft.id])
   return <ContextPane>
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0">
-        <h2 className="font-heading text-lg font-semibold">{draft.id ? t("editContext") : t("newContext")}</h2>
-        <p className="mt-1 text-sm text-muted-foreground">{t("contextEditorHint")}</p>
-      </div>
-      {draft.id && <Button type="button" size="sm" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
+    <div className="flex min-w-0 items-center gap-2">
+      {renaming
+        ? <Input id="context-name" aria-label={t("contextName")} placeholder={t("contextName")} autoFocus className="min-w-0 flex-1 font-heading text-lg font-semibold" value={draft.name} onChange={(event) => editDraft((current) => ({ ...current, name: event.target.value }))} onBlur={() => { if (draft.id) setRenaming(false) }} onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); if (!draft.id) submit() } }} />
+        : <h2 className="min-w-0 flex-1 truncate font-heading text-lg font-semibold">{draft.name.trim() || t("newContext")}</h2>}
+      {!renaming && <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setRenaming(true)}><PencilIcon className="size-4" /></Button>}
+      {draft.id && <Button type="button" size="icon-sm" variant="ghost" aria-label={t("deleteContext")} title={t("deleteContext")} disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon />}</Button>}
     </div>
     <form
       className="flex flex-col gap-5"
@@ -2652,15 +2679,17 @@ function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSele
     >
       <FieldGroup>
         <Field>
-          <FieldLabel htmlFor="context-name">{t("contextName")}</FieldLabel>
-          <Input id="context-name" value={draft.name} onChange={(event) => editDraft((current) => ({ ...current, name: event.target.value }))} placeholder={t("contextName")} />
-        </Field>
-        <Field>
-          <FieldLabel htmlFor="context-description">{t("contextDescription")}</FieldLabel>
+          <div className="flex items-center gap-1">
+            <FieldLabel htmlFor="context-description">{t("contextDescription")}</FieldLabel>
+            <ContextFieldHelp label={t("contextDescription")} help={t("contextUseWhenHelp")} />
+          </div>
           <Textarea id="context-description" value={draft.description} onChange={(event) => editDraft((current) => ({ ...current, description: event.target.value }))} rows={3} />
         </Field>
         <Field>
-          <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
+          <div className="flex items-center gap-1">
+            <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
+            <ContextFieldHelp label={t("contextContent")} help={t("contextBodyHelp")} />
+          </div>
           <MarkdownEditor
             id="context-content"
             language={language}

@@ -173,7 +173,7 @@ test("editing an existing context auto-saves on blur and offers no save button",
   // creating stays an explicit action: typing a name alone writes nothing
   await page.getByRole("button", { name: "新建上下文", exact: true }).click()
   await page.getByLabel("上下文名称", { exact: true }).fill("项目手册")
-  await page.locator("main > section h2").click()
+  await page.keyboard.press("Escape")
   await page.waitForTimeout(300)
   expect(fixture.references).toHaveLength(0)
   await page.getByRole("button", { name: "创建上下文", exact: true }).click()
@@ -184,7 +184,7 @@ test("editing an existing context auto-saves on blur and offers no save button",
   await expect(page.getByText("所有修改已保存")).toBeVisible()
 
   // a pending edit inside the form is not saved yet
-  await page.getByLabel("用途 — 何时参考", { exact: true }).fill("记录项目资料的存放位置")
+  await page.getByLabel("用途 Use When", { exact: true }).fill("记录项目资料的存放位置")
   await expect(page.getByText("修改等待保存")).toBeVisible()
   expect(fixture.references[0].description).toBe("")
 
@@ -208,7 +208,7 @@ test("a typing pause saves automatically after the debounce", async ({ page }) =
   await expect(page.getByText("所有修改已保存")).toBeVisible()
 
   // the edit stays local until the debounce elapses, then saves on its own
-  await page.getByLabel("用途 — 何时参考", { exact: true }).fill("五秒后自动保存")
+  await page.getByLabel("用途 Use When", { exact: true }).fill("五秒后自动保存")
   await page.clock.runFor(6000)
   await expect.poll(() => fixture.references[0]?.description).toBe("五秒后自动保存")
   await expect(page.getByText("所有修改已保存")).toBeVisible()
@@ -235,7 +235,7 @@ test("an idle edit saves on the fixed interval, not only on the debounce", async
   await page.evaluate(() => { location.hash = "#/contexts" })
   await expect(page.getByText("所有修改已保存")).toBeVisible()
   await page.clock.runFor(11000)
-  await page.getByLabel("用途 — 何时参考", { exact: true }).fill("定时保存")
+  await page.getByLabel("用途 Use When", { exact: true }).fill("定时保存")
   await page.clock.runFor(4000)
   await expect.poll(() => fixture.references[0]?.description).toBe("定时保存")
 
@@ -251,6 +251,7 @@ test("pending edits save when the page is hidden, covering refresh and close", a
   await page.getByRole("button", { name: "创建上下文", exact: true }).click()
   await expect(page.getByText("所有修改已保存")).toBeVisible()
 
+  await page.getByRole("button", { name: "重命名", exact: true }).click()
   await page.getByLabel("上下文名称", { exact: true }).fill("项目手册·改")
   await expect(page.getByText("修改等待保存")).toBeVisible()
   await page.evaluate(() => {
@@ -278,16 +279,51 @@ test("the selected context lives in the URL and reload restores it with its ance
   await tree.locator('[data-context-id="parent-context"]').getByRole("button", { name: "展开上下文" }).click()
   await tree.getByRole("button", { name: /子上下文/ }).click()
   await expect(page).toHaveURL(/context=child-context/)
-  await expect(page.locator("#context-name")).toHaveValue("子上下文")
+  await expect(page.locator("main > section h2")).toHaveText("子上下文")
 
   // reload: the editor, the expanded ancestor and the scrolled-into-view row all return
   await page.reload()
-  await expect(page.locator("#context-name")).toHaveValue("子上下文")
+  await expect(page.locator("main > section h2")).toHaveText("子上下文")
   const childRow = tree.locator('[data-context-id="child-context"]')
   await expect(childRow).toBeVisible()
   await expect(childRow).toBeInViewport()
   await expect(tree.locator('[data-context-id="parent-context"]').getByRole("button", { name: "收起上下文" })).toBeVisible()
   await expect(page).toHaveURL(/context=child-context/)
   await page.screenshot({ path: "test-results/context-url-restore.png" })
+  expect(fixture.unexpected).toEqual([])
+})
+
+test("the title edits inline and the field labels explain themselves", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.goto("/#/contexts")
+  await createContext(page, "项目手册")
+
+  // the name is the heading itself, with rename and delete icons after it
+  const section = page.locator("main > section")
+  await expect(section.locator("h2")).toHaveText("项目手册")
+  await expect(section.getByRole("button", { name: "重命名", exact: true })).toBeVisible()
+  await expect(section.getByRole("button", { name: "删除上下文", exact: true })).toBeVisible()
+
+  // the edit icon swaps the title into an input; leaving it settles the name
+  await section.getByRole("button", { name: "重命名", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("项目手册·改")
+  await page.keyboard.press("Escape")
+  await expect(section.locator("h2")).toHaveText("项目手册·改")
+  await expect.poll(() => fixture.references[0]?.name, { timeout: 8000 }).toBe("项目手册·改")
+
+  // the field labels carry their own explanations, opened as click-to-read modals
+  await expect(section.getByText("用途 Use When", { exact: true })).toBeVisible()
+  await expect(section.getByText("正文", { exact: true })).toBeVisible()
+  await expect(section.getByText("名称、用途与 Markdown 内容", { exact: false })).toHaveCount(0)
+  await section.getByRole("button", { name: "用途 Use When 说明" }).click()
+  await expect(page.getByRole("dialog")).toContainText("判定条件")
+  await page.keyboard.press("Escape")
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  await section.getByRole("button", { name: "正文 说明" }).click()
+  await expect(page.getByRole("dialog")).toContainText("不会默认占用")
+  await page.keyboard.press("Escape")
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+
   expect(fixture.unexpected).toEqual([])
 })

@@ -56,6 +56,17 @@ test("contexts are managed through a progressive disclosure tree", () => {
   assert.doesNotMatch(form, /contextParent|context-parent/)
   assert.doesNotMatch(form, /useReference|contextReferencePrompt/)
   assert.match(form, /deleteSelected/)
+  // the name is the heading itself with rename and delete icons after it, and
+  // the fields carry their own click-to-open help modals; the old hint is gone
+  assert.doesNotMatch(source, /contextEditorHint/)
+  assert.match(form, /aria-label=\{t\("rename"\)\}/)
+  assert.match(form, /aria-label=\{t\("deleteContext"\)\}/)
+  assert.match(source, /function ContextFieldHelp\(\{ label, help \}/)
+  assert.match(form, /<ContextFieldHelp label=\{t\("contextDescription"\)\} help=\{t\("contextUseWhenHelp"\)\} \/>/)
+  assert.match(form, /<ContextFieldHelp label=\{t\("contextContent"\)\} help=\{t\("contextBodyHelp"\)\} \/>/)
+  assert.match(source, /<DialogTrigger asChild>/)
+  assert.match(source, /<DialogDescription className="text-pretty">/)
+  assert.match(form, /renaming/)
   // the local branch drags with the CTX interaction: dnd-kit sensors, three
   // drop zones, and a fractional-key move through /api/contexts/{id}/move
   assert.match(source, /from "@dnd-kit\/core"/)
@@ -166,7 +177,10 @@ test("the hosted shell keeps the outer navigation and Linkit account surface", (
 })
 
 test("the shadcn tooltip context and layered error boundaries protect the shell", () => {
+  // the shared provider still wraps the shell, but the editor reads no
+  // per-field tooltip parts any more: the field help is a modal
   assert.match(source, /import \{ TooltipProvider \} from "@\/components\/ui\/tooltip"/)
+  assert.doesNotMatch(source, /TooltipTrigger/)
   assert.match(source, /<TooltipProvider delayDuration=\{0\}>/)
   assert.match(source, /import \{ ErrorBoundary, ErrorBoundaryFallback \} from "@\/components\/error-boundary"/)
   assert.match(source, /resetKeys=\{\[location\.pathname\]\}/)

@@ -70,6 +70,8 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     await page.getByRole("button", { name: language === "zh" ? "创建上下文" : "Create context", exact: true }).click()
     // deletion now sits next to the editor heading; the old
     // use-in-conversation block and its seeded draft are gone
+    await expect(page.locator("main > section h2")).toHaveText("My project")
+    await expect(page.getByRole("button", { name: language === "zh" ? "重命名" : "Rename", exact: true })).toBeVisible()
     await expect(page.getByRole("button", { name: language === "zh" ? "删除上下文" : "Delete context", exact: true })).toBeVisible()
     await expect(page.getByRole("link", { name: /在对话中使用|Use in a conversation/ })).toHaveCount(0)
     expect(fixture.references).toHaveLength(1)
