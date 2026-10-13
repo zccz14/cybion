@@ -43,6 +43,19 @@ test("contexts are managed through a progressive disclosure tree", () => {
   assert.match(source, /useState<ReadonlySet<string>>\(new Set\(\)\)/)
   assert.doesNotMatch(source, /ctxSectionExpansionId/)
   assert.match(source, /const \[expanded, setExpanded\] = useState\(false\)\n  const nested = children\.get\(context\.id\)/)
+  // the local branch drags with the CTX interaction: dnd-kit sensors, three
+  // drop zones, and a fractional-key move through /api/contexts/{id}/move
+  assert.match(source, /from "@dnd-kit\/core"/)
+  assert.match(source, /<DndContext/)
+  assert.match(source, /MouseSensor, \{ activationConstraint: \{ distance: 4 \} \}/)
+  assert.match(source, /TouchSensor, \{ activationConstraint: \{ delay: 220, tolerance: 6 \} \}/)
+  assert.match(source, /useDraggable/)
+  assert.match(source, /useDroppable/)
+  assert.match(source, /contextTreeIndex\(contexts\)/)
+  assert.match(source, /contextPlacementFor\(index, moving, over, target\.zone\)/)
+  assert.match(source, /contextCurrentPlacement\(index, moving\)/)
+  assert.match(source, /\/api\/contexts\/\$\{encodeURIComponent\(input\.id\)\}\/move/)
+  assert.match(source, /sort_key: string/)
 })
 
 test("the Contexts page is an edge-to-edge tree beside a full-width reading pane", () => {

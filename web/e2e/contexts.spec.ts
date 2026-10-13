@@ -102,3 +102,61 @@ test("nested context branches start folded and open manually", async ({ page }) 
   expect(fixture.references[1].parent_id).toBe("saved-reference")
   expect(fixture.unexpected).toEqual([])
 })
+
+test("context branches drag to reorder and nest with sort keys", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.goto("/#/contexts")
+
+  const create = async (name: string) => {
+    await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+    await page.getByLabel("上下文名称", { exact: true }).fill(name)
+    await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+    await expect(page.getByText(name, { exact: true }).first()).toBeVisible()
+  }
+  await create("甲")
+  await create("乙")
+  await create("丙")
+
+  const tree = page.getByRole("tree", { name: "你的上下文" })
+  const rowOrder = () => tree.locator("[data-context-id]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-context-id")))
+  expect(await rowOrder()).toEqual(["saved-reference", "saved-reference-2", "saved-reference-3"])
+
+  const drag = async (sourceId: string, targetId: string, zone: "before" | "inside") => {
+    const sourceBox = await tree.locator(`[data-context-id="${sourceId}"]`).boundingBox()
+    const targetBox = await tree.locator(`[data-context-id="${targetId}"]`).boundingBox()
+    expect(sourceBox && targetBox).toBeTruthy()
+    const startX = sourceBox!.x + sourceBox!.width / 2
+    const startY = sourceBox!.y + sourceBox!.height / 2
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(startX, startY + 12, { steps: 4 })
+    const targetX = targetBox!.x + targetBox!.width / 2
+    const targetY = zone === "before" ? targetBox!.y + targetBox!.height * 0.15 : targetBox!.y + targetBox!.height * 0.5
+    await page.mouse.move(targetX, targetY, { steps: 10 })
+    await page.mouse.move(targetX, targetY, { steps: 2 })
+    await page.mouse.up()
+  }
+
+  // 丙 drops above 甲: the move write anchors on the front of the root group
+  await drag("saved-reference-3", "saved-reference", "before")
+  await expect.poll(rowOrder).toEqual(["saved-reference-3", "saved-reference", "saved-reference-2"])
+  expect(fixture.writes).toContainEqual({ path: "/api/contexts/saved-reference-3/move", body: { parent_id: null, after_id: null } })
+
+  // dropping a node on its current position stays local and writes nothing
+  await drag("saved-reference-3", "saved-reference", "before")
+  await page.waitForTimeout(300)
+  expect(fixture.writes.filter((write) => write.path.endsWith("/move"))).toHaveLength(1)
+  expect(await rowOrder()).toEqual(["saved-reference-3", "saved-reference", "saved-reference-2"])
+
+  // 乙 drops inside 甲 and nests under it
+  await drag("saved-reference-2", "saved-reference", "inside")
+  await expect.poll(rowOrder).toEqual(["saved-reference-3", "saved-reference"])
+  expect(fixture.writes).toContainEqual({ path: "/api/contexts/saved-reference-2/move", body: { parent_id: "saved-reference", after_id: null } })
+  expect(fixture.references.find((reference) => reference.id === "saved-reference-2")!.parent_id).toBe("saved-reference")
+  await tree.locator('[data-context-id="saved-reference"]').getByRole("button", { name: "展开上下文" }).click()
+  await expect.poll(rowOrder).toEqual(["saved-reference-3", "saved-reference", "saved-reference-2"])
+  await page.screenshot({ path: "test-results/layout-drag.png" })
+
+  expect(fixture.unexpected).toEqual([])
+})

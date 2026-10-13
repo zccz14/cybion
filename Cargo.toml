@@ -16,6 +16,7 @@ async-stream = "0.3"
 axum = { version = "0.8.4", features = ["macros", "multipart"] }
 chrono = { version = "0.4.41", features = ["serde"] }
 directories = "6.0.0"
+fractional_index = "2"
 futures-util = { version = "0.3.31", features = ["sink"] }
 hex = "0.4"
 mimalloc = { version = "0.1.52", default-features = false }

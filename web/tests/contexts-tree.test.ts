@@ -1,26 +1,63 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { flattenTree, groupLocalContexts, localRootContexts } from "../src/lib/contexts-tree.ts"
+import { collectSubtreeIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree } from "../src/lib/contexts-tree.ts"
 
 const contexts = [
-  { id: "b", name: "Beta", parent_id: null },
-  { id: "a", name: "Alpha", parent_id: null },
-  { id: "a-child", name: "Child", parent_id: "a" },
-  { id: "nested-child", name: "Grandchild", parent_id: "a-child" },
-  { id: "stray", name: "Stray", parent_id: "not-a-local-context" },
+  { id: "b", name: "Beta", parent_id: null, sort_key: "a2" },
+  { id: "a", name: "Alpha", parent_id: null, sort_key: "a1" },
+  { id: "a-child", name: "Child", parent_id: "a", sort_key: "a1" },
+  { id: "nested-child", name: "Grandchild", parent_id: "a-child", sort_key: "a1" },
+  { id: "stray", name: "Stray", parent_id: "not-a-local-context", sort_key: "a3" },
 ]
 
-test("local contexts nest under their parent and sort by name then id", () => {
-  const grouped = groupLocalContexts(contexts)
-  assert.deepEqual(grouped.get(null)?.map((context) => context.id), ["a", "b"])
-  assert.deepEqual(grouped.get("a")?.map((context) => context.id), ["a-child"])
-  assert.deepEqual(grouped.get("a-child")?.map((context) => context.id), ["nested-child"])
-  assert.deepEqual(grouped.get("not-a-local-context")?.map((context) => context.id), ["stray"])
+test("siblings follow their sort keys and stray parents join the root group", () => {
+  const index = contextTreeIndex(contexts)
+  assert.deepEqual(index.get(null)?.map((context) => context.id), ["a", "b", "stray"])
+  assert.deepEqual(index.get("a")?.map((context) => context.id), ["a-child"])
+  assert.deepEqual(index.get("a-child")?.map((context) => context.id), ["nested-child"])
+  assert.deepEqual(index.get("not-a-local-context") ?? [], [])
+  assert.deepEqual(index.get("stray") ?? [], [])
 })
 
-test("local contexts parented outside the local list stay roots of the local branch", () => {
-  assert.deepEqual(localRootContexts(contexts).map((context) => context.id), ["a", "b", "stray"])
+test("rows without sort keys fall back to name then id", () => {
+  const index = contextTreeIndex([
+    { id: "z", name: "Zulu", parent_id: null, sort_key: "" },
+    { id: "late", name: "Alpha", parent_id: null, sort_key: "" },
+    { id: "early", name: "Alpha", parent_id: null, sort_key: "" },
+  ])
+  assert.deepEqual(index.get(null)?.map((context) => context.id), ["early", "late", "z"])
+})
+
+test("a subtree collects depth-first without the node itself", () => {
+  const index = contextTreeIndex(contexts)
+  assert.deepEqual(collectSubtreeIds(index, "a"), ["a-child", "nested-child"])
+  assert.deepEqual(collectSubtreeIds(index, "nested-child"), [])
+})
+
+test("the current placement reads the previous sibling as its anchor", () => {
+  const index = contextTreeIndex(contexts)
+  assert.deepEqual(contextCurrentPlacement(index, contexts[0]), { parentId: null, afterId: "a" })
+  assert.deepEqual(contextCurrentPlacement(index, contexts[1]), { parentId: null, afterId: null })
+  assert.deepEqual(contextCurrentPlacement(index, contexts[4]), { parentId: null, afterId: "b" })
+})
+
+test("drop zones resolve into the parent and anchor a move writes", () => {
+  const index = contextTreeIndex(contexts)
+  const [beta, alpha] = contexts
+  // inside appends after the target's last child
+  assert.deepEqual(contextPlacementFor(index, beta, alpha, "inside"), { parentId: "a", afterId: "a-child" })
+  // inside a childless target starts the group
+  assert.deepEqual(contextPlacementFor(index, beta, contexts[3], "inside"), { parentId: "nested-child", afterId: null })
+  // inside never anchors on the moving node itself
+  assert.deepEqual(contextPlacementFor(index, contexts[2], alpha, "inside"), { parentId: "a", afterId: null })
+  // after anchors on the target itself
+  assert.deepEqual(contextPlacementFor(index, beta, alpha, "after"), { parentId: null, afterId: "a" })
+  // before anchors on the sibling that precedes the target once the moving
+  // node leaves the sequence (so re-dropping in place degrades to a no-op)
+  assert.deepEqual(contextPlacementFor(index, beta, contexts[4], "before"), { parentId: null, afterId: "a" })
+  // dropping a node after itself is rejected
+  assert.equal(contextPlacementFor(index, beta, beta, "after"), null)
 })
 
 test("flattening a recursive tree yields depth-first order", () => {

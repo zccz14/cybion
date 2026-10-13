@@ -112,7 +112,8 @@ import { WebSearchCall } from "@/components/web-search-call"
 import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
-import { flattenTree, groupLocalContexts, localRootContexts } from "@/lib/contexts-tree"
+import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core"
+import { collectSubtreeIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, type ContextDropZone } from "@/lib/contexts-tree"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
@@ -360,6 +361,7 @@ type Context = {
   description: string
   content: string
   parent_id: string | null
+  sort_key: string
 }
 
 const copy = {
@@ -2191,6 +2193,14 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
       void client.invalidateQueries({ queryKey: ["contexts"] })
     },
   })
+  const move = useMutation({
+    mutationFn: (input: { id: string; parentId: string | null; afterId: string | null }) => api<Context>(sdk, `/api/contexts/${encodeURIComponent(input.id)}/move`, {
+      method: "POST",
+      body: JSON.stringify({ parent_id: input.parentId, after_id: input.afterId }),
+    }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
+    onError: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
+  })
 
   const toggleExpanded = (id: string, next: boolean) => {
     setExpanded((current) => {
@@ -2260,7 +2270,8 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
             <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextLocalTitle")}</p>
             {contexts.data.length === 0
               ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("contextEmpty")}</p>
-              : <ContextTree contexts={contexts.data} selectedId={draft ? null : selectedId} onSelect={selectLocal} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
+              : <ContextTree contexts={contexts.data} selectedId={draft ? null : selectedId} onSelect={selectLocal} onMove={(input) => move.mutate(input)} movePending={move.isPending} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
+            {move.error && <RequestError error={move.error} onRetry={() => { if (move.variables) move.mutate(move.variables) }} />}
           </section>
         </>}
       </div>
@@ -2282,29 +2293,117 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   </main>
 }
 
-function ContextTree({ contexts, selectedId, onSelect, label, collapseLabel, expandLabel }: { contexts: Context[]; selectedId: string | null; onSelect: (context: Context) => void; label: string; collapseLabel: string; expandLabel: string }) {
-  const grouped = useMemo(() => groupLocalContexts(contexts), [contexts])
-  return <ul role="tree" aria-label={label} className="space-y-1">
-    {localRootContexts(contexts).map((context) => <ContextTreeNode key={context.id} context={context} children={grouped} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}
-  </ul>
+function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, label, collapseLabel, expandLabel }: {
+  contexts: Context[]
+  selectedId: string | null
+  onSelect: (context: Context) => void
+  onMove: (input: { id: string; parentId: string | null; afterId: string | null }) => void
+  movePending: boolean
+  label: string
+  collapseLabel: string
+  expandLabel: string
+}) {
+  const index = useMemo(() => contextTreeIndex(contexts), [contexts])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [dropTarget, setDropTarget] = useState<{ id: string; zone: ContextDropZone } | null>(null)
+  const invalidTargets = useMemo(() => new Set(activeId ? [activeId, ...collectSubtreeIds(index, activeId)] : []), [index, activeId])
+  const activeContext = contexts.find((context) => context.id === activeId) ?? null
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 6 } }),
+  )
+  const resetDrag = () => {
+    setActiveId(null)
+    setDropTarget(null)
+  }
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(String(event.active.id))
+    setDropTarget(null)
+  }
+  const handleDragMove = (event: DragMoveEvent) => {
+    const over = event.over
+    const translated = event.active.rect.current.translated
+    if (!over || !translated || invalidTargets.has(String(over.id))) {
+      setDropTarget(null)
+      return
+    }
+    const center = translated.top + translated.height / 2
+    const ratio = (center - over.rect.top) / over.rect.height
+    const zone: ContextDropZone = ratio < 0.3 ? "before" : ratio > 0.7 ? "after" : "inside"
+    const id = String(over.id)
+    setDropTarget((previous) => previous && previous.id === id && previous.zone === zone ? previous : { id, zone })
+  }
+  const handleDragEnd = (event: DragEndEvent) => {
+    const target = dropTarget
+    const id = String(event.active.id)
+    resetDrag()
+    if (!target) return
+    const moving = contexts.find((context) => context.id === id)
+    const over = contexts.find((context) => context.id === target.id)
+    if (!moving || !over) return
+    const placement = contextPlacementFor(index, moving, over, target.zone)
+    if (!placement) return
+    const current = contextCurrentPlacement(index, moving)
+    if (placement.parentId === current.parentId && placement.afterId === current.afterId) return
+    onMove({ id, ...placement })
+  }
+  return <DndContext
+    sensors={sensors}
+    collisionDetection={closestCenter}
+    onDragStart={handleDragStart}
+    onDragMove={handleDragMove}
+    onDragEnd={handleDragEnd}
+    onDragCancel={resetDrag}
+  >
+    <ul role="tree" aria-label={label} className="space-y-1">
+      {(index.get(null) ?? []).map((context) => <ContextTreeNode key={context.id} context={context} children={index} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={movePending} activeId={activeId} dropTarget={dropTarget} />)}
+    </ul>
+    <DragOverlay dropAnimation={null}>
+      {activeContext ? <div className="flex w-64 items-center gap-2 rounded-md border bg-background px-3 py-1.5 shadow-lg">
+        <span className="truncate text-sm">{activeContext.name}</span>
+      </div> : null}
+    </DragOverlay>
+  </DndContext>
 }
 
-function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabel, expandLabel }: { context: Context; children: Map<string | null, Context[]>; selectedId: string | null; onSelect: (context: Context) => void; collapseLabel: string; expandLabel: string }) {
+function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabel, expandLabel, disabled, activeId, dropTarget }: {
+  context: Context
+  children: Map<string | null, Context[]>
+  selectedId: string | null
+  onSelect: (context: Context) => void
+  collapseLabel: string
+  expandLabel: string
+  disabled: boolean
+  activeId: string | null
+  dropTarget: { id: string; zone: ContextDropZone } | null
+}) {
   const [expanded, setExpanded] = useState(false)
   const nested = children.get(context.id) ?? []
+  const isDragging = activeId === context.id
+  const dropZone = dropTarget && dropTarget.id === context.id ? dropTarget.zone : null
+  const { listeners, setNodeRef: setDraggableNode } = useDraggable({ id: context.id, disabled })
+  const { setNodeRef: setDroppableNode } = useDroppable({ id: context.id, disabled })
+  const setNodeRefs = (node: HTMLDivElement | null) => {
+    setDraggableNode(node)
+    setDroppableNode(node)
+  }
   return <li role="treeitem" aria-expanded={nested.length > 0 ? expanded : undefined}>
-    <div className="flex items-center gap-1">
-      <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={expanded ? collapseLabel : expandLabel} disabled={nested.length === 0} onClick={() => setExpanded((value) => !value)}>
-        {nested.length > 0 && <ChevronDownIcon className={expanded ? "" : "-rotate-90"} />}
-      </Button>
-      <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === context.id ? "bg-accent" : ""}`} onClick={() => onSelect(context)}>
-        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate font-medium">{context.name}</span>
-          {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
-        </span>
-      </Button>
+    <div ref={setNodeRefs} className="relative" data-context-id={context.id}>
+      {dropZone === "before" && <div aria-hidden="true" className="absolute inset-x-2 top-0 z-10 h-0.5 rounded-full bg-primary" />}
+      <div {...listeners} className={`flex cursor-grab items-center gap-1 rounded-md select-none ${isDragging ? "opacity-40" : ""} ${dropZone === "inside" ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}>
+        <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={expanded ? collapseLabel : expandLabel} disabled={nested.length === 0} onClick={() => setExpanded((value) => !value)}>
+          {nested.length > 0 && <ChevronDownIcon className={expanded ? "" : "-rotate-90"} />}
+        </Button>
+        <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === context.id ? "bg-accent" : ""}`} onClick={() => onSelect(context)}>
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate font-medium">{context.name}</span>
+            {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
+          </span>
+        </Button>
+      </div>
+      {dropZone === "after" && <div aria-hidden="true" className="absolute inset-x-2 bottom-0 z-10 h-0.5 rounded-full bg-primary" />}
     </div>
-    {expanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
+    {expanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={disabled} activeId={activeId} dropTarget={dropTarget} />)}</ul>}
   </li>
 }
 

@@ -22,7 +22,7 @@ export async function stubWorkspace(page: Page, options: {
     localStorage.setItem("cybion.language", language)
     localStorage.setItem("linkit.theme", theme)
   }, { token, language, theme })
-  const references: { id: string; name: string; description: string; content: string; parent_id: string | null }[] = []
+  const references: { id: string; name: string; description: string; content: string; parent_id: string | null; sort_key: string }[] = []
   const writes: { path: string; body: Record<string, unknown> }[] = []
   const requests: string[] = [], unexpected: string[] = []
   page.on("pageerror", (error) => unexpected.push(`Page error: ${error.message}`))
@@ -33,6 +33,15 @@ export async function stubWorkspace(page: Page, options: {
   const defaults = { model: "deepseek-flash", upstream_id: options.connectionFails && !options.fallbackReady ? null : upstream.id, reasoning_effort: "medium", service_tier_fast: false, context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "" }
   const thread = { ...defaults, id: "created-thread", title: "Fixture conversation", status: "idle", display_status: "ready", usage: emptyThreadUsage, context_tokens: 0, archived_at: null, created_at: now, updated_at: now, created_by: "web", external_ref: null }
   const notifications = { enabled: true, configured: true, bot_id: "fixture-bot", recipient_username: "onboarding", last_attempt_at: null, last_success_at: null, last_error: null, conversation_id: null, message_id: null }
+  // Mirror the controller: every group keeps fractional-style keys in array order.
+  const renumberContextSortKeys = () => {
+    const groups = new Map<string | null, typeof references>()
+    for (const reference of references) {
+      const key = reference.parent_id ?? null
+      groups.set(key, [...(groups.get(key) ?? []), reference])
+    }
+    for (const group of groups.values()) group.forEach((reference, index) => { reference.sort_key = String(index).padStart(2, "0") })
+  }
   await page.route("**/*", async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname
     const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS", "Access-Control-Allow-Headers": "authorization,content-type" }
@@ -77,11 +86,27 @@ export async function stubWorkspace(page: Page, options: {
       if (path === `/api/threads/${thread.id}/grants`) return json([])
       if (path === "/api/contexts") {
         if (request.method() === "POST") {
-          const reference = { ...request.postDataJSON(), id: references.length === 0 ? "saved-reference" : `saved-reference-${references.length + 1}` }
+          const reference = { ...request.postDataJSON(), id: references.length === 0 ? "saved-reference" : `saved-reference-${references.length + 1}`, sort_key: "" }
           references.push(reference)
+          renumberContextSortKeys()
           return json(reference)
         }
         return json(references)
+      }
+      if (/^\/api\/contexts\/[^/]+\/move$/.test(path)) {
+        const reference = references.find((item) => item.id === path.split("/").at(-2))!
+        const body = request.postDataJSON() as { parent_id: string | null; after_id: string | null }
+        references.splice(references.indexOf(reference), 1)
+        reference.parent_id = body.parent_id ?? null
+        if (body.after_id) {
+          const afterIndex = references.findIndex((item) => item.id === body.after_id)
+          references.splice(afterIndex + 1, 0, reference)
+        } else {
+          const firstIndex = references.findIndex((item) => (item.parent_id ?? null) === (body.parent_id ?? null))
+          references.splice(firstIndex === -1 ? references.length : firstIndex, 0, reference)
+        }
+        renumberContextSortKeys()
+        return json(reference)
       }
       if (path.startsWith("/api/contexts/")) {
         const reference = references.find((item) => item.id === path.split("/").at(-1))!

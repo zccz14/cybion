@@ -22,6 +22,7 @@ use axum::{
     },
     routing::{delete, get, post, put},
 };
+use fractional_index::FractionalIndex;
 use futures_util::StreamExt;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use rust_embed::RustEmbed;
@@ -132,7 +133,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 36;
+const USER_SCHEMA_VERSION: i64 = 37;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -512,6 +513,7 @@ fn app(state: AppState) -> Router {
             axum::routing::put(worker_sharing::grant).delete(worker_sharing::revoke),
         )
         .route("/api/contexts", get(list_contexts).post(create_context))
+        .route("/api/contexts/{id}/move", axum::routing::post(move_context))
         .route(
             "/api/contexts/{id}",
             get(read_context_api)
@@ -1101,9 +1103,9 @@ CREATE TABLE IF NOT EXISTS contexts (
   name TEXT NOT NULL,
   description TEXT NOT NULL,
   content TEXT NOT NULL,
-  parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL
+  parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
+  sort_key TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS contexts_parent_name ON contexts(parent_id,name,id);
 CREATE TABLE IF NOT EXISTS custom_tool_calls (
   id TEXT PRIMARY KEY,
   connector_id TEXT NOT NULL,
@@ -1597,6 +1599,13 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // background patrol; this adds the snapshot tables and the covering
         // indexes that keep the fold and tail recompute index-only.
         transaction.execute_batch(USER_STATS_SCHEMA)?;
+    }
+    if version < 37 {
+        // Contexts move to fractional sort keys so the tree keeps the order the
+        // user arranged; existing rows backfill in the order the tree showed
+        // before the upgrade. Retire this upgrade once every user database is
+        // audited at schema 37+; retain the backfill test.
+        migrate_context_sort_keys(&transaction)?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -2138,6 +2147,7 @@ struct ContextView {
     description: String,
     content: String,
     parent_id: Option<String>,
+    sort_key: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2177,6 +2187,15 @@ struct UpdateContextInput {
     content: Option<String>,
     #[serde(default)]
     parent_id: Option<Option<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveContextInput {
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    after_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2291,6 +2310,7 @@ fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextView> {
         description: row.get(2)?,
         content: row.get(3)?,
         parent_id: row.get(4)?,
+        sort_key: row.get(5)?,
     })
 }
 
@@ -3701,6 +3721,143 @@ async fn delete_api_key(
 
 use worker_sharing::list_workers;
 
+/// Moves the Contexts table to schema 37: adds the fractional `sort_key`
+/// column, swaps the sibling index, and backfills keys in the name order the
+/// tree showed before the upgrade.
+fn migrate_context_sort_keys(connection: &Connection) -> Result<(), ApiError> {
+    let has_sort_key: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('contexts') WHERE name='sort_key')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_sort_key {
+        connection
+            .execute_batch("ALTER TABLE contexts ADD COLUMN sort_key TEXT NOT NULL DEFAULT ''")
+            .map_err(ApiError::internal)?;
+    }
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS contexts_parent_name;
+             CREATE INDEX IF NOT EXISTS contexts_parent_sort ON contexts(parent_id,sort_key,name,id);",
+        )
+        .map_err(ApiError::internal)?;
+    backfill_context_sort_keys(connection)
+}
+
+/// Assigns keys to rows that predate the fractional order, preserving the
+/// historical sibling order (name then id) inside every parent group.
+fn backfill_context_sort_keys(connection: &Connection) -> Result<(), ApiError> {
+    let parents: Vec<Option<String>> = connection
+        .prepare("SELECT DISTINCT parent_id FROM contexts WHERE sort_key = ''")?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    for parent_id in parents {
+        let mut last = connection
+            .query_row(
+                "SELECT sort_key FROM contexts WHERE parent_id IS ?1 AND sort_key != '' ORDER BY sort_key DESC LIMIT 1",
+                [parent_id.as_deref()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|key| parse_context_sort_key(&key))
+            .transpose()?;
+        let ids: Vec<String> = connection
+            .prepare(
+                "SELECT id FROM contexts WHERE parent_id IS ?1 AND sort_key = '' ORDER BY name,id",
+            )?
+            .query_map([parent_id.as_deref()], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for id in ids {
+            let index = match &last {
+                Some(last) => FractionalIndex::new_after(last),
+                None => FractionalIndex::default(),
+            };
+            connection.execute(
+                "UPDATE contexts SET sort_key = ?2 WHERE id = ?1",
+                params![id, index.to_string()],
+            )?;
+            last = Some(index);
+        }
+    }
+    Ok(())
+}
+
+/// Keys a brand-new Context after the last sibling under the same parent.
+fn append_context_sort_key(
+    connection: &Connection,
+    parent_id: Option<&str>,
+) -> Result<String, ApiError> {
+    let last: Option<String> = connection
+        .query_row(
+            "SELECT sort_key FROM contexts WHERE parent_id IS ?1 AND sort_key != '' ORDER BY sort_key DESC LIMIT 1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let index = match last {
+        Some(key) => FractionalIndex::new_after(&parse_context_sort_key(&key)?),
+        None => FractionalIndex::default(),
+    };
+    Ok(index.to_string())
+}
+
+/// Keys the moved Context between `after_id` and its next sibling, the same
+/// placement model the CTX documents use.
+fn move_context_sort_key(
+    connection: &Connection,
+    parent_id: Option<&str>,
+    after_id: Option<&str>,
+    moving_id: &str,
+) -> Result<String, ApiError> {
+    let children: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT id,sort_key FROM contexts WHERE parent_id IS ?1 ORDER BY sort_key,name,id",
+        )?
+        .query_map([parent_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let after_position = match after_id {
+        None => None,
+        Some(after_id) if after_id == moving_id => {
+            return Err(ApiError::bad_request(
+                "a context cannot be moved after itself",
+            ));
+        }
+        Some(after_id) => match children.iter().position(|(id, _)| id == after_id) {
+            Some(position) => Some(position),
+            None => {
+                return Err(ApiError::bad_request(
+                    "the move target is not a sibling under the target parent",
+                ));
+            }
+        },
+    };
+    let (lower, upper_start) = match after_position {
+        Some(position) => (
+            Some(parse_context_sort_key(&children[position].1)?),
+            position + 1,
+        ),
+        None => (None, 0),
+    };
+    let upper = children[upper_start..]
+        .iter()
+        .find(|(id, _)| id != moving_id)
+        .map(|(_, key)| parse_context_sort_key(key))
+        .transpose()?;
+    let index = match (lower, upper) {
+        (Some(lower), Some(upper)) => FractionalIndex::new_between(&lower, &upper),
+        (Some(lower), None) => Some(FractionalIndex::new_after(&lower)),
+        (None, Some(upper)) => Some(FractionalIndex::new_before(&upper)),
+        (None, None) => Some(FractionalIndex::default()),
+    };
+    index.map(|index| index.to_string()).ok_or_else(|| {
+        ApiError::bad_request("the drop position has no room between its neighbours")
+    })
+}
+
+fn parse_context_sort_key(key: &str) -> Result<FractionalIndex, ApiError> {
+    FractionalIndex::from_string(key).map_err(|_| ApiError::internal("invalid context sort key"))
+}
+
 fn validate_context_parent(
     connection: &Connection,
     context_id: Option<&str>,
@@ -3744,7 +3901,7 @@ async fn list_contexts(
 ) -> Result<Json<Vec<ContextView>>, ApiError> {
     let contexts = user_db(&state, &identity.user, true, |connection| {
         let mut statement = connection.prepare(
-            "SELECT id,name,description,content,parent_id FROM contexts ORDER BY parent_id IS NOT NULL,name,id",
+            "SELECT id,name,description,content,parent_id,sort_key FROM contexts ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
         )?;
         let rows = statement.query_map([], context_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -3769,25 +3926,70 @@ async fn create_context(
     let context = user_db(&state, &identity.user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate_context_parent(&transaction, None, parent_id.as_deref())?;
+        let sort_key = append_context_sort_key(&transaction, parent_id.as_deref())?;
         let context = ContextView {
             id: Uuid::new_v4().to_string(),
             name,
             description,
             content,
             parent_id,
+            sort_key,
         };
         transaction.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+            "INSERT INTO contexts(id,name,description,content,parent_id,sort_key) VALUES(?,?,?,?,?,?)",
             params![
                 &context.id,
                 &context.name,
                 &context.description,
                 &context.content,
                 &context.parent_id,
+                &context.sort_key,
             ],
         )?;
         transaction.commit()?;
         Ok(context)
+    })
+    .await?;
+    Ok(Json(context))
+}
+
+async fn move_context(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<MoveContextInput>,
+) -> Result<Json<ContextView>, ApiError> {
+    let id = context_id(&id)?;
+    let parent_id = input
+        .parent_id
+        .map(|value| context_id(&value))
+        .transpose()?;
+    let after_id = input.after_id.map(|value| context_id(&value)).transpose()?;
+    let context = user_db(&state, &identity.user, true, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "SELECT id,name,description,content,parent_id,sort_key FROM contexts WHERE id=?",
+                [&id],
+                context_from_row,
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(ApiError::not_found("context not found"));
+        };
+        validate_context_parent(&transaction, Some(&id), parent_id.as_deref())?;
+        let sort_key =
+            move_context_sort_key(&transaction, parent_id.as_deref(), after_id.as_deref(), &id)?;
+        transaction.execute(
+            "UPDATE contexts SET parent_id=?,sort_key=? WHERE id=?",
+            params![&parent_id, &sort_key, &id],
+        )?;
+        transaction.commit()?;
+        Ok(ContextView {
+            parent_id,
+            sort_key,
+            ..current
+        })
     })
     .await?;
     Ok(Json(context))
@@ -3829,7 +4031,7 @@ async fn local_context(
         let transaction = connection.transaction()?;
         let context = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -3855,7 +4057,7 @@ async fn update_context(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -3882,11 +4084,18 @@ async fn update_context(
             .parent_id
             .map(|value| value.map(|value| context_id(&value)).transpose())
             .transpose()?
-            .unwrap_or(current.parent_id);
+            .unwrap_or_else(|| current.parent_id.clone());
         validate_context_parent(&transaction, Some(&id), parent_id.as_deref())?;
+        // Reparenting through the editor appends under the new parent; the
+        // drag interaction is the surface that chooses an exact position.
+        let sort_key = if parent_id == current.parent_id {
+            current.sort_key
+        } else {
+            append_context_sort_key(&transaction, parent_id.as_deref())?
+        };
         transaction.execute(
-            "UPDATE contexts SET name=?,description=?,content=?,parent_id=? WHERE id=?",
-            params![&name, &description, &content, &parent_id, &id],
+            "UPDATE contexts SET name=?,description=?,content=?,parent_id=?,sort_key=? WHERE id=?",
+            params![&name, &description, &content, &parent_id, &sort_key, &id],
         )?;
         transaction.commit()?;
         Ok(ContextView {
@@ -3895,6 +4104,7 @@ async fn update_context(
             description,
             content,
             parent_id,
+            sort_key,
         })
     })
     .await?;
@@ -4866,7 +5076,7 @@ fn context_summaries(
     parent_id: Option<&str>,
 ) -> Result<Vec<ContextSummary>, ApiError> {
     let mut statement = connection.prepare(
-        "SELECT id,name,description FROM contexts WHERE parent_id IS ? ORDER BY name,id",
+        "SELECT id,name,description FROM contexts WHERE parent_id IS ? ORDER BY sort_key,name,id",
     )?;
     let rows = statement.query_map([parent_id], |row| {
         Ok(ContextSummary {
@@ -7813,6 +8023,10 @@ mod machine_tool_tests;
 mod common_context_tests;
 
 #[cfg(test)]
+#[path = "cloud_context_sort_tests.rs"]
+mod context_sort_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9433,7 +9647,7 @@ mod tests {
         connection.execute_batch(USER_SCHEMA).unwrap();
         connection
             .execute_batch(
-                "DROP INDEX contexts_parent_name;
+                "DROP INDEX IF EXISTS contexts_parent_name;
                  DROP TABLE contexts;
                  PRAGMA user_version = 7;",
             )
@@ -9463,7 +9677,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             columns,
-            ["id", "name", "description", "content", "parent_id"]
+            [
+                "id",
+                "name",
+                "description",
+                "content",
+                "parent_id",
+                "sort_key"
+            ]
         );
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))

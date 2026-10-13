@@ -90,6 +90,7 @@ pub(super) fn read(id: &str) -> Option<ContextReadView> {
             description: node.description.clone(),
             content: content(&node.content_file).to_owned(),
             parent_id,
+            sort_key: String::new(),
         },
         children: node
             .children

@@ -468,6 +468,7 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
             "description":"Metadata for Root",
             "content":"Cybion user-authored content is preserved",
             "parent_id":null,
+            "sort_key":"",
             "children":[
                 {"context_id":child_a,"name":"Alpha","description":"Metadata for Alpha"},
                 {"context_id":child_b,"name":"Alpha","description":"Metadata for Alpha"},
