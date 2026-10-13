@@ -5,7 +5,7 @@ Cybion's onboarding teaches three separate concepts:
 - A **conversation (Thread)** keeps the messages and execution history for one task.
 - A **Context** is a lightweight reference: the source's purpose, location and
   reading instructions. Original files, books and project folders stay on Worker
-  devices or network services such as CTX. The model discovers references and
+  devices or network services. The model discovers references and
   accesses sources as the task requires; registration does not preload everything
   into every conversation.
 - A **Worker** connects a particular device for file access and execution. It is
@@ -17,8 +17,7 @@ The Context editor still stores the existing `name`, `description`, `content` an
 copy of the original material. It does not migrate existing content, add file
 uploads, index source files or change the model's tool protocol. Material read
 for a task may appear in its conversation history; the help explicitly distinguishes
-that from hosting the original library. CTX remains optional and has its existing
-connection card on the Contexts page as well as Personal settings.
+that from hosting the original library.
 
 ## Entry and recovery
 
@@ -54,7 +53,7 @@ Chinese/English copy, reference examples, saved-reference handoff and recovery.
 The onboarding Playwright suite loads the actual application entry point, verifies
 a test-only signed Auth Mini token against an intercepted JWKS, and intercepts all
 remote services. It covers first use, returning/filtered/unknown states, source
-references, CTX discovery, unchanged drafts, explicit sending, model failure,
+references, unchanged drafts, explicit sending, model failure,
 light/dark palettes and narrow screens. No real account, provider charge or device
 authorization is created by those tests.
 

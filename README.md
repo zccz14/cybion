@@ -50,13 +50,6 @@ the first authenticated browser session initializes that key atomically.
   Worker, Context, account-audit or API-key access. Revocation blocks new source
   reads independently of discovery sync; already read/copied content cannot be
   recalled. See [Thread sharing](docs/thread-sharing.md).
-- The optional CTX integration (Configuration → Integrations) mints a labeled
-  API key inside CTX (ctx.ntnl.io) with the browser session and stores it in
-  the user's database. While connected, `cybion_list_contexts` appends the
-  user's top-level CTX documents to the top-level Context list and
-  `read_context` reads those documents (current revision plus direct
-  sub-documents); a failing CTX call degrades the list with a `notice` and
-  answers reads with a tool `error` instead of failing the turn.
 - The thread list filters and paginates on the server. `GET /api/threads`
   accepts `status` (`idle`, `running`, `failed`), `origin` (`web`, `api`),
   and `q` (case-insensitive substring of the title or `external_ref`) next to
@@ -107,8 +100,8 @@ the first authenticated browser session initializes that key atomically.
 - The Cybion Common Context is compiled into the controller from
   `common-contexts/` (a `tree.json` skeleton plus Markdown nodes). Every user
   reads the same read-only tree: `cybion_list_contexts` lists its root first
-  with `source: "common"`, `read_context` resolves it after local Contexts and
-  before CTX documents, and Configuration → Contexts renders it from
+  with `source: "common"`, `read_context` resolves it after local Contexts,
+  and Configuration → Contexts renders it from
   `GET /api/common-contexts`. The controller never stores or mutates it;
   content changes ship with releases.
 - [Custom Tools](docs/custom-tools.md) extend that catalog with declarative
@@ -271,7 +264,7 @@ capability limits, manual configuration and release/test procedures.
 
 Open **Using Cybion** in the sidebar (`/#/help`) for the conversation, Context
 reference and Worker concepts. Contexts record source locations and reading
-instructions; original material stays on devices or network sources such as CTX.
+instructions; original material stays on devices or network sources.
 See [First-use guidance](docs/onboarding.md) for behavior and verification.
 
 ## Development and release
