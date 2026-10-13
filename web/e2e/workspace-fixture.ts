@@ -3,7 +3,17 @@ import { readFileSync } from "node:fs"
 import type { Page } from "@playwright/test"
 import { emptyThreadUsage } from "../src/lib/thread-usage"
 
+// The Context editor's content field is not a plain textarea: it is the
+// Markdown editor, defaulting to the WYSIWYG surface. Tests that type raw
+// Markdown (for example a device example) fill the source textarea instead.
+export async function fillContextMarkdown(page: Page, language: "zh" | "en", markdown: string) {
+  const editor = page.locator(".markdown-editor")
+  await editor.getByRole("button", { name: language === "zh" ? "源码" : "Markdown", exact: true }).click()
+  await editor.locator("textarea").fill(markdown)
+}
+
 // Exercise the real app, including Auth Mini verification, with a test-only
+
 // signing key and intercepted HTTP. No production credentials or calls escape.
 export async function stubWorkspace(page: Page, options: {
   language?: "zh" | "en"; theme?: "light" | "dark"; activeTotal?: number; webTotal?: number; archivedTotal?: number;

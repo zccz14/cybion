@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test"
-import { stubWorkspace } from "./workspace-fixture"
+import { fillContextMarkdown, stubWorkspace } from "./workspace-fixture"
 
 test("a real new workspace opens the mobile composer and examples never send automatically", async ({ page }) => {
   const fixture = await stubWorkspace(page)
@@ -60,13 +60,14 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.getByRole("button", { name: language === "zh" ? "使用设备示例" : "Use a device example" }).click()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await expect(page.getByLabel(language === "zh" ? "位置与获取说明" : "Location and reading instructions")).toHaveValue(/\/path\/to\/project\//)
+    await fillContextMarkdown(page, language, "# My project\n\nRead README.md first.")
+    await page.locator(".markdown-editor").getByRole("button", { name: language === "zh" ? "编辑" : "Write", exact: true }).click()
     expect(fixture.references).toHaveLength(0)
     await page.getByLabel(language === "zh" ? "上下文名称" : "Context name", { exact: true }).fill("My project")
     await page.getByRole("button", { name: language === "zh" ? "创建上下文" : "Create context", exact: true }).click()
     await expect(page.getByRole("link", { name: language === "zh" ? "在对话中使用" : "Use in a conversation" })).toBeVisible()
     expect(fixture.references).toHaveLength(1)
-    expect(fixture.references[0].content).toContain("README.md")
+    expect(fixture.references[0].content).toContain("# My project")
     await page.screenshot({ path: `test-results/onboarding-context-${language}-${theme}.png`, fullPage: true })
     await page.getByRole("link", { name: language === "zh" ? "在对话中使用" : "Use in a conversation" }).click()
     await expect(page.locator("#new-thread-input")).toHaveValue(/context_id: saved-reference/)
