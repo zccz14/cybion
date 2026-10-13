@@ -94,7 +94,8 @@ unknown, so the model can clean up before continuing.
 
 `cybion_list_contexts` lists only top-level Context metadata. `read_context`
 resolves local Contexts first, then the compiled Cybion Common Context;
-`GET /api/contexts/{id}` resolves the same local and common nodes. Both return the current node's existing `id`, `name`, `description`,
+`GET /api/contexts/{id}?lang=` resolves the same local and common nodes, with
+`lang` selecting the common copy (`zh` when absent). Both return the current node's existing `id`, `name`, `description`,
 `content`, and `parent_id` fields, plus `children`:
 
 ```json
@@ -125,14 +126,18 @@ level. Child content and deeper descendants are disclosed only when read.
 ## Cybion Common Context
 
 `common-contexts/` at the repository root holds the Cybion Common Context: a
-`tree.json` skeleton (each node carries a UUID, name, description, and
-`content_file`, under a `revision`) plus one Markdown file per node. Rust embeds
-both via `include_str!`, so the content is compiled into the controller, is
-identical for every user of a build, and is never stored, mutated, or
-synthesized at runtime; changes ship with releases. `cybion_list_contexts`
-lists the root first with `source: "common"`, and `GET /api/common-contexts`
-serves the same tree to the browser so Configuration → Contexts shows users
-exactly what Threads can read.
+`tree.json` skeleton (each node carries a UUID, plus `name`, `description`,
+and `content_file` as `{en, zh}` pairs, under a `revision`) and one Markdown
+file per node per language. Rust embeds both via `include_str!`, so the content
+is compiled into the controller, is identical for every user of a build, and is
+never stored, mutated, or synthesized at runtime; changes ship with releases.
+`cybion_list_contexts` lists the root first with `source: "common"`, and
+`GET /api/common-contexts?lang=` serves the same tree — in the requested
+language — to the browser so Configuration → Contexts shows users exactly what
+Threads can read. Language selection: the browser reads (`GET
+/api/common-contexts`, `GET /api/contexts/{id}`) take an optional
+`lang=zh|en` and fall back to the source language `zh`, which is also what
+model-side tool reads (`cybion_list_contexts`, `read_context`) use.
 
 ## Replay cleanup
 

@@ -98,12 +98,12 @@ the first authenticated browser session initializes that key atomically.
   builder sends it and the Configuration → Tools page renders it, so the
   capability list cannot drift from the tools a Thread can actually use.
 - The Cybion Common Context is compiled into the controller from
-  `common-contexts/` (a `tree.json` skeleton plus Markdown nodes). Every user
-  reads the same read-only tree: `cybion_list_contexts` lists its root first
-  with `source: "common"`, `read_context` resolves it after local Contexts,
-  and Configuration → Contexts renders it from
-  `GET /api/common-contexts`. The controller never stores or mutates it;
-  content changes ship with releases.
+  `common-contexts/` (a `tree.json` skeleton plus Markdown nodes, each node in
+  English and Simplified Chinese). Every user reads the same read-only tree:
+  `cybion_list_contexts` lists its root first with `source: "common"`,
+  `read_context` resolves it after local Contexts, and Configuration → Contexts
+  renders it from `GET /api/common-contexts?lang=` in the UI language. The
+  controller never stores or mutates it; content changes ship with releases.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record
