@@ -447,17 +447,14 @@ const copy = {
     navWork: "Work",
     contexts: "Contexts",
     contextsTitle: "Contexts",
-    contextsDescription: "Tell Cybion where source material lives and how to read it, rather than copying a library into Cybion.",
-    contextSectionsHint: "One tree: the Cybion Common Context, your Markdown contexts, and CTX documents. Select a node to read it; Markdown-carrying contexts stay editable.",
     contextLocalTitle: "Your contexts",
-    contextEditorHint: "Name, purpose, parent, and Markdown content. Markdown-carrying contexts stay editable; common and CTX nodes read-only.",
-    contextEmpty: "No Context references yet. Add a location or start from an example.",
+    contextEditorHint: "Name, purpose, parent, and Markdown content. Threads can read saved contexts on demand.",
+    contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
     contextSelectHint: "Select a node in the tree, or create a new context.",
     contextGlobalBadge: "Read-only",
     contextGlobalHint: "Compiled into Cybion with each release and shared by every user. The content below is what Threads read through the Contexts tools.",
     contextCtxBadge: "Read-only",
     contextCtxHint: "Stored in CTX; edit and publish it there. Threads read the current revision through the integration.",
-    contextPreviewTitle: "Preview",
     ctxDocumentsDisconnected: "CTX is not connected. Connect it under Configuration to browse your CTX documents here.",
     contextName: "Context name",
     contextDescription: "Purpose — when to consult it",
@@ -465,8 +462,8 @@ const copy = {
     contextContentEditHint: "Write the context in Markdown. Toggle Write, Markdown, and Preview above the editor.",
     contextParent: "Parent context",
     contextRoot: "Top-level context",
-    newContext: "Add Context reference",
-    editContext: "Edit Context reference",
+    newContext: "New context",
+    editContext: "Edit context",
     createContext: "Create context",
     saveContext: "Save context",
     deleteContext: "Delete context",
@@ -624,7 +621,7 @@ const copy = {
     imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
     imageGenerationDisabled: "Disabled",
     ctxIntegrationTitle: "CTX sources (optional)",
-    ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) to discover its documents alongside your Context references. Documents stay in CTX and are read as needed, not copied into this workspace. The dedicated access key can be revoked anytime.",
+    ctxIntegrationDescription: "Connect CTX (ctx.ntnl.io) to browse its documents inside your Contexts. Documents stay in CTX and are read as needed, not copied into this workspace. The dedicated access key can be revoked anytime.",
     ctxConnected: "Connected",
     ctxNotConnected: "Not connected",
     ctxConnect: "Connect CTX",
@@ -798,17 +795,14 @@ const copy = {
     navWork: "工作",
     contexts: "上下文",
     contextsTitle: "上下文",
-    contextsDescription: "告诉 Cybion 资料在哪里、怎样获取，而不是把整份资料库复制到 Cybion。",
-    contextSectionsHint: "一棵树：Cybion 公共上下文、你的 Markdown 上下文与 CTX 文档。点选节点即可阅读；承载 Markdown 的上下文可直接编辑。",
     contextLocalTitle: "你的上下文",
-    contextEditorHint: "名称、用途、父级与 Markdown 内容。承载 Markdown 的上下文可直接编辑；公共与 CTX 节点只读。",
-    contextEmpty: "还没有上下文引用。可以添加资料位置，或从示例开始。",
+    contextEditorHint: "名称、用途、父级与 Markdown 内容。保存后，对话可按需读取。",
+    contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
     contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
     contextGlobalBadge: "只读",
     contextGlobalHint: "随 Cybion 版本编译发布、所有用户共享只读。下方内容即 Thread 通过上下文工具读到的正文。",
     contextCtxBadge: "只读",
     contextCtxHint: "内容存放在 CTX；编辑与发布请在 CTX 完成。Thread 通过集成读取当前修订。",
-    contextPreviewTitle: "预览",
     ctxDocumentsDisconnected: "尚未连接 CTX。可在「配置」中连接后在此浏览 CTX 文档。",
     contextName: "上下文名称",
     contextDescription: "用途 — 何时参考",
@@ -816,8 +810,8 @@ const copy = {
     contextContentEditHint: "用 Markdown 编写上下文。可在编辑器上方切换编辑、源码和预览模式。",
     contextParent: "父级上下文",
     contextRoot: "顶层上下文",
-    newContext: "添加上下文引用",
-    editContext: "编辑上下文引用",
+    newContext: "新建上下文",
+    editContext: "编辑上下文",
     createContext: "创建上下文",
     saveContext: "保存上下文",
     deleteContext: "删除上下文",
@@ -975,7 +969,7 @@ const copy = {
     imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
     imageGenerationDisabled: "关闭",
     ctxIntegrationTitle: "CTX 来源（可选）",
-    ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，Cybion 可以一起发现其中的文档入口。文档留在 CTX 中，按需读取，不复制到工作区的引用列表。专用访问密钥可随时吊销。",
+    ctxIntegrationDescription: "连接 CTX（ctx.ntnl.io）后，可在上下文中浏览其中的文档。文档留在 CTX 中，按需读取，不复制到工作区。专用访问密钥可随时吊销。",
     ctxConnected: "已连接",
     ctxNotConnected: "未连接",
     ctxConnect: "连接 CTX",
@@ -2175,7 +2169,6 @@ function findCommonContextNode(node: CommonContextNode, id: string): CommonConte
 
 function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
-  const help = onboardingCopy[language]
   const client = useQueryClient()
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts") })
   const common = useQuery({ queryKey: ["common-contexts"], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, "/api/common-contexts") })
@@ -2285,74 +2278,64 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     return options
   }, [contexts.data, commonNodes, commonRoot?.id, ctxRootDocuments])
 
-  return <Page title={t("contextsTitle")} description={t("contextsDescription")} actions={<ConceptHelp topic="context" language={language} />}>
-    <div className="grid min-h-[32rem] gap-6 xl:grid-cols-[minmax(17rem,0.7fr)_minmax(0,1.6fr)]">
-      <Card className="h-fit">
-        <CardHeader className="flex flex-col items-start justify-between gap-3 sm:flex-row">
-          <div><CardTitle>{help.referencesTitle}</CardTitle><CardDescription>{t("contextSectionsHint")}</CardDescription></div>
-          <Button size="sm" variant="outline" onClick={() => createNew()}><PlusIcon data-icon="inline-start" />{t("newContext")}</Button>
-        </CardHeader>
-        <CardContent>
-          {contexts.error && <RequestError error={contexts.error} onRetry={() => void contexts.refetch()} />}
-          {contexts.isLoading && <div className="flex flex-col gap-2"><Skeleton className="h-8" /><Skeleton className="h-8" /><Skeleton className="h-8" /></div>}
-          {contexts.data && <div className="flex flex-col gap-4">
-            {commonRoot && <section>
-              <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("commonContextTitle")}</p>
-              <ul role="tree" aria-label={t("commonContextTitle")} className="space-y-1">
-                <CommonBranch node={commonRoot} selectedId={draft ? null : selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />
-              </ul>
-            </section>}
-            <section>
-              <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextLocalTitle")}</p>
-              {contexts.data.length === 0
-                ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("contextEmpty")}</p>
-                : <ContextTree contexts={contexts.data} selectedId={draft ? null : selectedId} onSelect={selectLocal} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
-            </section>
-            <section>
-              <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("ctxIntegrationTitle")}</p>
-              {!ctxStatus.isLoading && !ctxConnected && <p className="px-2 py-1 text-sm text-muted-foreground">{t("ctxDocumentsDisconnected")}</p>}
-              {ctxConnected && <ul role="tree" aria-label={t("ctxIntegrationTitle")} className="space-y-1">
-                {ctxRootDocuments.map((document) => <CtxBranch key={document.context_id} document={document} sdk={sdk} selectedId={draft ? null : selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />)}
-                {ctxRootDocuments.length === 0 && ctxDocuments.data && <li><p className="px-2 py-1 text-sm text-muted-foreground">{t("ctxDocumentsEmpty")}</p></li>}
-              </ul>}
-              {ctxDocuments.data?.notice && <p className="px-2 text-sm text-destructive">{ctxDocuments.data.notice}</p>}
-            </section>
-          </div>}
-        </CardContent>
-      </Card>
-      <div className="flex min-w-0 flex-col gap-4 rounded-xl bg-card py-4 text-sm text-card-foreground ring-1 ring-foreground/10">
-        {draft
-          ? <ContextEditorForm sdk={sdk} draft={draft} setDraft={setDraft} parentOptions={parentOptions} save={save} remove={remove} submit={submit} deleteSelected={deleteSelected} hasSelection={selectedId !== null && draft.id === selectedId} />
-          : commonSelected
-            ? <ContextReadOnlyPane
-                title={commonSelected.name}
-                description={commonSelected.description}
-                badge={t("contextGlobalBadge")}
-                hint={t("contextGlobalHint")}
-                content={commonSelected.content}
-                language={language}
-              />
-            : <ContextReadOnlyPane
-                title={t("contextPreviewTitle")}
-                description=""
-                badge={null}
-                hint={null}
-                content=""
-                language={language}
-                showEditor={remoteSelectedId !== null}
-                meta={<ContextRemotePane sdk={sdk} id={remoteSelectedId} language={language} />}
-              />}
+  return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
+    <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
+      <div className="flex items-center gap-2 pb-3">
+        <Button type="button" size="sm" variant="outline" className="min-w-0 flex-1 justify-start" onClick={() => createNew()}><PlusIcon data-icon="inline-start" /><span className="truncate">{t("newContext")}</span></Button>
+        <ConceptHelp topic="context" language={language} />
       </div>
-    </div>
-    <CtxIntegrationCard sdk={sdk} withDocuments />
-  </Page>
+      <div className="flex flex-col gap-4 lg:max-h-[calc(100svh-8rem)] lg:overflow-y-auto">
+        {contexts.error && <RequestError error={contexts.error} onRetry={() => void contexts.refetch()} />}
+        {contexts.isLoading && <div className="flex flex-col gap-2"><Skeleton className="h-8" /><Skeleton className="h-8" /><Skeleton className="h-8" /></div>}
+        {contexts.data && <>
+          {commonRoot && <section>
+            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("commonContextTitle")}</p>
+            <ul role="tree" aria-label={t("commonContextTitle")} className="space-y-1">
+              <CommonBranch node={commonRoot} selectedId={draft ? null : selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />
+            </ul>
+          </section>}
+          <section>
+            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextLocalTitle")}</p>
+            {contexts.data.length === 0
+              ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("contextEmpty")}</p>
+              : <ContextTree contexts={contexts.data} selectedId={draft ? null : selectedId} onSelect={selectLocal} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
+          </section>
+          <section>
+            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("ctxIntegrationTitle")}</p>
+            {!ctxStatus.isLoading && !ctxConnected && <p className="px-2 py-1 text-sm text-muted-foreground">{t("ctxDocumentsDisconnected")}</p>}
+            {ctxConnected && <ul role="tree" aria-label={t("ctxIntegrationTitle")} className="space-y-1">
+              {ctxRootDocuments.map((document) => <CtxBranch key={document.context_id} document={document} sdk={sdk} selectedId={draft ? null : selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />)}
+              {ctxRootDocuments.length === 0 && ctxDocuments.data && <li><p className="px-2 py-1 text-sm text-muted-foreground">{t("ctxDocumentsEmpty")}</p></li>}
+            </ul>}
+            {ctxDocuments.data?.notice && <p className="px-2 text-sm text-destructive">{ctxDocuments.data.notice}</p>}
+          </section>
+        </>}
+      </div>
+    </aside>
+    <section className="flex w-full min-w-0 flex-col lg:min-h-0 lg:flex-1">
+      {draft
+        ? <ContextEditorForm draft={draft} setDraft={setDraft} parentOptions={parentOptions} save={save} remove={remove} submit={submit} deleteSelected={deleteSelected} hasSelection={selectedId !== null && draft.id === selectedId} />
+        : commonSelected
+          ? <ContextReadOnlyPane
+              title={commonSelected.name}
+              description={commonSelected.description}
+              badge={t("contextGlobalBadge")}
+              hint={t("contextGlobalHint")}
+              content={commonSelected.content}
+              language={language}
+            />
+          : remoteSelectedId
+            ? <ContextRemotePane sdk={sdk} id={remoteSelectedId} language={language} />
+            : <ContextPane><p className="py-16 text-center text-sm text-muted-foreground">{t("contextSelectHint")}</p></ContextPane>}
+    </section>
+  </main>
 }
 
 const ctxSectionExpansionId = "__ctx_section__"
 const CTX_ORIGIN = "https://ctx.ntnl.io"
 
 type CtxDocumentSummary = { context_id: string; name: string; description: string }
-type CtxChildNode = { id: string; name: string; description: string }
+type CtxChildNode = { context_id: string; name: string; description: string }
 
 function ContextTree({ contexts, selectedId, onSelect, label, collapseLabel, expandLabel }: { contexts: Context[]; selectedId: string | null; onSelect: (context: Context) => void; label: string; collapseLabel: string; expandLabel: string }) {
   const grouped = useMemo(() => groupLocalContexts(contexts), [contexts])
@@ -2421,62 +2404,74 @@ function CtxNodeList({ parentId, sdk, selectedId, onSelect, expanded, onToggle, 
     {query.isLoading && <li><Skeleton className="h-6" /></li>}
     {query.error && <li><RequestError error={query.error as Error} onRetry={() => void query.refetch()} /></li>}
     {children.map((child) => {
-      const isExpanded = expanded.has(child.id)
-      return <li key={child.id} role="treeitem" aria-expanded={isExpanded}>
+      const isExpanded = expanded.has(child.context_id)
+      return <li key={child.context_id} role="treeitem" aria-expanded={isExpanded}>
         <div className="flex items-center gap-1">
-          <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} onClick={() => onToggle(child.id, !isExpanded)}>
+          <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} onClick={() => onToggle(child.context_id, !isExpanded)}>
             <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />
           </Button>
-          <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === child.id ? "bg-accent" : ""}`} onClick={() => onSelect(child.id)}>
+          <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === child.context_id ? "bg-accent" : ""}`} onClick={() => onSelect(child.context_id)}>
             <span className="min-w-0 truncate font-medium">{child.name}</span>
             {child.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{child.description}</span>}
           </Button>
         </div>
-        {isExpanded && <CtxNodeList parentId={child.id} sdk={sdk} selectedId={selectedId} onSelect={onSelect} expanded={expanded} onToggle={onToggle} collapseLabel={collapseLabel} expandLabel={expandLabel} />}
+        {isExpanded && <CtxNodeList parentId={child.context_id} sdk={sdk} selectedId={selectedId} onSelect={onSelect} expanded={expanded} onToggle={onToggle} collapseLabel={collapseLabel} expandLabel={expandLabel} />}
       </li>
     })}
   </ul>
 }
 
-function ContextReadOnlyPane({ title, description, badge, hint, content, language, meta, showEditor = true }: { title: string; description: string; badge: string | null; hint: string | null; content: string; language: "en" | "zh"; meta?: ReactNode; showEditor?: boolean }) {
-  return <>
-    <div className="flex flex-wrap items-center justify-between gap-3 px-4">
+// One reading and editing surface shared by the right column: the content
+// sits in a centered column and the pane scrolls inside the page at desktop.
+function ContextPane({ children }: { children: ReactNode }) {
+  // `relative` keeps absolutely positioned pane furniture (Select companion
+  // inputs and inline popovers) inside this scroll container instead of letting
+  // it stretch the shell's scroll area.
+  return <div className="relative flex flex-col lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4 text-sm sm:p-6">{children}</div>
+  </div>
+}
+
+function ContextReadOnlyPane({ title, description, badge, hint, content, language, meta }: { title: string; description: string; badge: string | null; hint: string | null; content: string; language: "en" | "zh"; meta?: ReactNode }) {
+  return <ContextPane>
+    <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0">
         <p className="truncate font-heading text-base font-medium">{title}</p>
         {description && <p className="mt-0.5 truncate text-sm text-muted-foreground">{description}</p>}
       </div>
       {badge ? <Badge variant="outline">{badge}</Badge> : null}
     </div>
-    {meta ? <div className="px-4">{meta}</div> : null}
-    {hint ? <p className="px-4 text-xs text-muted-foreground">{hint}</p> : null}
-    {showEditor ? <div className="px-4"><MarkdownEditor language={language} value={content} onChange={() => {}} readOnly /></div> : null}
-  </>
+    {meta ? <div className="flex flex-wrap items-center gap-3">{meta}</div> : null}
+    {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
+    <MarkdownEditor language={language} value={content} onChange={() => {}} readOnly />
+  </ContextPane>
 }
 
-// Reads a CTX document; the Context contexts API resolves local ids first,
-// then compiled common nodes, then CTX, so any id not matched locally is read
-// through the integration.
-function ContextRemotePane({ sdk, id, language }: { sdk: AuthMiniApi; id: string | null; language: "en" | "zh" }) {
+// Reads a CTX document through the Contexts API, which resolves local ids
+// first, then compiled common nodes, then CTX. The document stays owned by
+// CTX, so the pane is read-only and links back there for editing.
+function ContextRemotePane({ sdk, id, language }: { sdk: AuthMiniApi; id: string; language: "en" | "zh" }) {
   const { t } = useUi()
   const query = useQuery({
     queryKey: ["ctx-context", id],
-    queryFn: () => api<{ id: string; name: string; description: string; content: string; children: CtxChildNode[] }>(sdk, `/api/contexts/${encodeURIComponent(id!)}`),
-    enabled: id !== null,
+    queryFn: () => api<{ id: string; name: string; description: string; content: string; children: CtxChildNode[] }>(sdk, `/api/contexts/${encodeURIComponent(id)}`),
   })
-  if (!id) return <p className="text-sm text-muted-foreground">{t("contextSelectHint")}</p>
-  if (query.isLoading) return <div className="flex flex-col gap-2"><Skeleton className="h-6 w-1/3" /><Skeleton className="h-4 w-2/3" /></div>
-  if (query.error) return <RequestError error={query.error as Error} onRetry={() => void query.refetch()} />
+  if (query.isLoading) return <ContextPane><div className="flex flex-col gap-2"><Skeleton className="h-6 w-1/3" /><Skeleton className="h-4 w-2/3" /></div></ContextPane>
+  if (query.error) return <ContextPane><RequestError error={query.error as Error} onRetry={() => void query.refetch()} /></ContextPane>
   if (!query.data) return null
   const document = query.data
-  return <div className="flex flex-wrap items-center gap-3">
-    <Badge variant="outline">{t("contextCtxBadge")}</Badge>
-    <Button asChild size="sm" variant="outline"><a href={`${CTX_ORIGIN}/#/documents/${document.id}`} target="_blank" rel="noreferrer"><ExternalLinkIcon data-icon="inline-start" />{t("ctxOpenDocument")}</a></Button>
-    <span className="text-xs text-muted-foreground">{t("contextCtxHint")}</span>
-  </div>
+  return <ContextReadOnlyPane
+    title={document.name}
+    description={document.description}
+    badge={t("contextCtxBadge")}
+    hint={t("contextCtxHint")}
+    content={document.content}
+    language={language}
+    meta={<Button asChild size="sm" variant="outline"><a href={`${CTX_ORIGIN}/#/documents/${document.id}`} target="_blank" rel="noreferrer"><ExternalLinkIcon data-icon="inline-start" />{t("ctxOpenDocument")}</a></Button>}
+  />
 }
 
-function ContextEditorForm({ sdk, draft, setDraft, parentOptions, save, remove, submit, deleteSelected, hasSelection }: {
-  sdk: AuthMiniApi
+function ContextEditorForm({ draft, setDraft, parentOptions, save, remove, submit, deleteSelected, hasSelection }: {
   draft: ContextDraft
   setDraft: React.Dispatch<React.SetStateAction<ContextDraft | null>>
   parentOptions: { id: string; name: string }[]
@@ -2488,51 +2483,52 @@ function ContextEditorForm({ sdk, draft, setDraft, parentOptions, save, remove, 
 }) {
   const { t, language } = useUi()
   const help = onboardingCopy[language]
-  return <>
-    <CardHeader><CardTitle>{draft.id ? t("editContext") : t("newContext")}</CardTitle><CardDescription>{t("contextEditorHint")}</CardDescription></CardHeader>
-    <CardContent>
-      <form className="flex flex-col gap-5" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="context-name">{t("contextName")}</FieldLabel>
-            <Input id="context-name" value={draft.name} onChange={(event) => setDraft((current) => current && { ...current, name: event.target.value })} placeholder={t("contextName")} />
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="context-description">{t("contextDescription")}</FieldLabel>
-            <Textarea id="context-description" value={draft.description} onChange={(event) => setDraft((current) => current && { ...current, description: event.target.value })} rows={3} />
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
-            <MarkdownEditor
-              id="context-content"
-              language={language}
-              value={draft.content}
-              onChange={(content) => setDraft((current) => current && { ...current, content })}
-            />
-            <FieldDescription id="context-reference-hint">{t("contextContentEditHint")}</FieldDescription>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="context-parent">{t("contextParent")}</FieldLabel>
-            <Select value={draft.parent_id ?? ROOT_CONTEXT_VALUE} onValueChange={(value) => setDraft((current) => current && { ...current, parent_id: value === ROOT_CONTEXT_VALUE ? null : value })}>
-              <SelectTrigger id="context-parent"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ROOT_CONTEXT_VALUE}>{t("contextRoot")}</SelectItem>
-                {parentOptions.filter((option) => option.id !== draft.id).map((option) => <SelectItem key={option.id} value={option.id}>{option.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </Field>
-        </FieldGroup>
-        {save.error && <RequestError error={save.error} onRetry={submit} />}
-        {remove.error && <RequestError error={remove.error} />}
-        <div className="flex flex-wrap items-center gap-3">
-          <Button disabled={!draft.name.trim() || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{draft.id ? t("saveContext") : t("createContext")}</Button>
-          {draft.id && <Button type="button" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
-          {save.isSuccess && <span role="status" className="text-sm text-muted-foreground">{t("contextSaved")}</span>}
-        </div>
-      </form>
-      {hasSelection && draft.id && <div className="mt-5 space-y-2 border-t pt-4"><Button asChild variant="outline"><Link to="/threads/new" state={{ initialInput: contextReferencePrompt(language, draft.name, draft.id) }}>{help.useReference}</Link></Button><p className="text-xs text-muted-foreground">{help.useReferenceHint}</p><p className="break-all font-mono text-xs text-muted-foreground">{draft.id}</p></div>}
-    </CardContent>
-  </>
+  return <ContextPane>
+    <div className="min-w-0">
+      <h2 className="font-heading text-lg font-semibold">{draft.id ? t("editContext") : t("newContext")}</h2>
+      <p className="mt-1 text-sm text-muted-foreground">{t("contextEditorHint")}</p>
+    </div>
+    <form className="flex flex-col gap-5" onSubmit={(event) => { event.preventDefault(); submit() }}>
+      <FieldGroup>
+        <Field>
+          <FieldLabel htmlFor="context-name">{t("contextName")}</FieldLabel>
+          <Input id="context-name" value={draft.name} onChange={(event) => setDraft((current) => current && { ...current, name: event.target.value })} placeholder={t("contextName")} />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="context-description">{t("contextDescription")}</FieldLabel>
+          <Textarea id="context-description" value={draft.description} onChange={(event) => setDraft((current) => current && { ...current, description: event.target.value })} rows={3} />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
+          <MarkdownEditor
+            id="context-content"
+            language={language}
+            value={draft.content}
+            onChange={(content) => setDraft((current) => current && { ...current, content })}
+          />
+          <FieldDescription id="context-content-hint">{t("contextContentEditHint")}</FieldDescription>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="context-parent">{t("contextParent")}</FieldLabel>
+          <Select value={draft.parent_id ?? ROOT_CONTEXT_VALUE} onValueChange={(value) => setDraft((current) => current && { ...current, parent_id: value === ROOT_CONTEXT_VALUE ? null : value })}>
+            <SelectTrigger id="context-parent"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ROOT_CONTEXT_VALUE}>{t("contextRoot")}</SelectItem>
+              {parentOptions.filter((option) => option.id !== draft.id).map((option) => <SelectItem key={option.id} value={option.id}>{option.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
+      </FieldGroup>
+      {save.error && <RequestError error={save.error} onRetry={submit} />}
+      {remove.error && <RequestError error={remove.error} />}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button disabled={!draft.name.trim() || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{draft.id ? t("saveContext") : t("createContext")}</Button>
+        {draft.id && <Button type="button" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
+        {save.isSuccess && <span role="status" className="text-sm text-muted-foreground">{t("contextSaved")}</span>}
+      </div>
+    </form>
+    {hasSelection && draft.id && <div className="space-y-2 border-t pt-4"><Button asChild variant="outline"><Link to="/threads/new" state={{ initialInput: contextReferencePrompt(language, draft.name, draft.id) }}>{help.useReference}</Link></Button><p className="text-xs text-muted-foreground">{help.useReferenceHint}</p><p className="break-all font-mono text-xs text-muted-foreground">{draft.id}</p></div>}
+  </ContextPane>
 }
 
 function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
@@ -2909,12 +2905,9 @@ type CtxIntegrationStatus = { connected: boolean; key_id: string | null }
 type CtxIntegrationDocuments = { connected: boolean; documents: { context_id: string; name: string; description: string }[]; notice: string | null }
 
 // The card manages the CTX connection only. The Contexts page lists the
-// user's CTX documents in its unified tree, so the optional documents list
-// this card used to render no longer exists; `withDocuments` remains for the
-// Contexts page to declare that the tree owns discovery.
-// COMPATIBILITY: only tests pin `withDocuments`; remove it with the next
-// test update that drops the attribute.
-function CtxIntegrationCard({ sdk, withDocuments: _withDocuments = false }: { sdk: AuthMiniApi; withDocuments?: boolean }) {
+// user's CTX documents in its unified tree and renders document bodies there,
+// so this card never carries an optional documents list.
+function CtxIntegrationCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
   const client = useQueryClient()
   const status = useQuery({ queryKey: ["ctx-integration"], queryFn: ({ signal }) => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { signal }) })

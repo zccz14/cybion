@@ -363,6 +363,81 @@ async fn read_tool_reads_ctx_documents_with_children_and_prefers_local_contexts(
 }
 
 #[tokio::test]
+async fn browser_read_serves_ctx_documents_and_their_children() {
+    let f = fixture().await;
+    store_key(&f, "ctx_key_1", "key-1").await;
+    let alpha = article(
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "Alpha",
+        None,
+        "first",
+    );
+    set_documents(
+        &f,
+        vec![
+            alpha.clone(),
+            article(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "Child",
+                Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                "",
+            ),
+        ],
+    )
+    .await;
+    f.remote.lock().await.details = vec![detail(&alpha, "# Alpha\n\nbody")];
+
+    let view = read_context_for(
+        &f.state,
+        &f.user,
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.context.name, "Alpha");
+    assert_eq!(view.context.content, "# Alpha\n\nbody");
+    assert_eq!(view.children.len(), 1);
+    assert_eq!(
+        view.children[0].context_id,
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    );
+
+    let missing = read_context_for(
+        &f.state,
+        &f.user,
+        "33333333-3333-4333-8333-333333333333".to_owned(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn browser_read_reports_a_missing_connection_and_ctx_outages() {
+    let f = fixture().await;
+    let not_connected = read_context_for(
+        &f.state,
+        &f.user,
+        "33333333-3333-4333-8333-333333333333".to_owned(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(not_connected.status, StatusCode::NOT_FOUND);
+    assert!(not_connected.message.contains("not connected"));
+
+    store_key(&f, "ctx_key_1", "key-1").await;
+    let broken = fixture_with_url(&f, "http://127.0.0.1:9").await;
+    let unavailable = read_context_for(
+        &broken.state,
+        &broken.user,
+        "33333333-3333-4333-8333-333333333333".to_owned(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn read_tool_reports_not_connected_without_a_stored_key() {
     let f = fixture().await;
     let output = read_context_tool_output(

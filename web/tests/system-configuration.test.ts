@@ -16,8 +16,11 @@ test("personal configuration contains only personal controls, even for administr
 
 test("the CTX document list lives on the Contexts page, not in personal configuration", () => {
   assert.match(personal, /<CtxIntegrationCard key=\{session\?\.sessionId\} sdk=\{sdk\} \/>/)
-  assert.match(main, /withDocuments: _withDocuments = false \}/)
-  assert.match(main, /<CtxIntegrationCard sdk=\{sdk\} withDocuments \/>/)
+  assert.match(main, /function CtxIntegrationCard\(\{ sdk \}: \{ sdk: AuthMiniApi \}\) \{/)
+  const contexts = main.slice(main.indexOf("function ContextsPage("), main.indexOf("function ContextEditorForm("))
+  assert.match(contexts, /\/api\/integrations\/ctx\/documents/)
+  assert.match(contexts, /<CtxBranch key=\{document\.context_id\}/)
+  assert.doesNotMatch(contexts, /CtxIntegrationCard/)
 })
 
 test("the personal page reaches manual upstreams only through the NormAI card", () => {

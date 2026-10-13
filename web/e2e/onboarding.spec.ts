@@ -42,11 +42,11 @@ for (const scenario of ["api-only", "archived", "search", "failed-filter", "unkn
 }
 
 for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
-  test(`reference onboarding and accessible help work in ${language}/${theme}`, async ({ page }) => {
+  test(`context onboarding and accessible help work in ${language}/${theme}`, async ({ page }) => {
     const fixture = await stubWorkspace(page, { language, theme, ctxConnected: true })
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.goto("/#/contexts")
-    await expect(page.getByText(language === "zh" ? "资料留在原处，上下文记录引用" : "Keep the material at its source", { exact: true })).toBeVisible()
+    await expect(page.locator(".ux-app-header__title")).toHaveText(language === "zh" ? "上下文" : "Contexts")
     await expect(page.getByText("CTX project reference", { exact: true })).toBeVisible()
     await expect(page.locator('input[type="file"]')).toHaveCount(0)
     if (theme === "dark") await expect(page.locator("html")).toHaveClass("dark")
@@ -58,7 +58,7 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     await expect(page.getByRole("dialog")).toHaveCount(0)
     await page.setViewportSize({ width: 320, height: 844 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await page.getByRole("button", { name: language === "zh" ? "添加上下文引用" : "Add Context reference", exact: true }).click()
+    await page.getByRole("button", { name: language === "zh" ? "新建上下文" : "New context", exact: true }).click()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     const editor = page.locator(".markdown-editor")
     await editor.getByRole("button", { name: language === "zh" ? "源码" : "Markdown", exact: true }).click()
@@ -98,12 +98,12 @@ test("personal settings manage the CTX connection without listing documents", as
   expect(fixture.unexpected).toEqual([])
 })
 
-test("using a reference preserves an existing conversation draft", async ({ page }) => {
+test("using a context preserves an existing conversation draft", async ({ page }) => {
   await stubWorkspace(page)
   await page.goto("/#/threads/new")
   await page.locator("#new-thread-input").fill("Do not replace my unsent draft")
   await page.goto("/#/contexts")
-  await page.getByRole("button", { name: "添加上下文引用", exact: true }).click()
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
   await page.getByLabel("上下文名称", { exact: true }).fill("网络资料")
   await page.getByRole("button", { name: "创建上下文", exact: true }).click()
   await page.getByRole("link", { name: "在对话中使用", exact: true }).click()

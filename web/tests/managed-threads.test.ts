@@ -43,6 +43,18 @@ test("contexts are managed through a progressive disclosure tree", () => {
   assert.match(source, /<ul role="tree"/)
   assert.match(source, /parent_id/)
   assert.match(source, /contextContent/)
+  const nodes = source.slice(source.indexOf("function CtxNodeList("), source.indexOf("function ContextPane("))
+  assert.match(nodes, /onSelect\(child\.context_id\)/)
+  assert.doesNotMatch(nodes, /child\.id\b/)
+})
+
+test("the Contexts page is an edge-to-edge tree beside a full-width reading pane", () => {
+  const contexts = source.slice(source.indexOf("function ContextsPage("), source.indexOf("function ContextEditorForm("))
+  assert.match(contexts, /<main className="flex min-h-\[calc\(100svh-3\.5rem\)\] flex-col lg:flex-row">/)
+  assert.match(contexts, /<aside className="border-b bg-sidebar\/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">/)
+  assert.match(contexts, /<section className="flex w-full min-w-0 flex-col lg:min-h-0 lg:flex-1">/)
+  assert.match(contexts, /content=\{document\.content\}/)
+  assert.doesNotMatch(contexts, /<Page |CtxIntegrationCard/)
 })
 
 test("every thread renders through the shared chat primitives", () => {

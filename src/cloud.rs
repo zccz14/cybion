@@ -3808,6 +3808,9 @@ async fn read_context_api(
     Ok(Json(context))
 }
 
+// The browser reads every Context through this route: local contexts first,
+// then the compiled common nodes, then CTX documents through the integration,
+// matching the Contexts tools so the unified tree can read all three sources.
 async fn read_context_for(
     state: &AppState,
     user: &User,
@@ -3820,7 +3823,14 @@ async fn read_context_for(
     if let Some(context) = common_contexts::read(&id) {
         return Ok(context);
     }
-    Err(ApiError::not_found("context not found"))
+    match ctx_contexts::read_context(state, user, &id).await {
+        ctx_contexts::ReadOutcome::Found(context) => Ok(context),
+        ctx_contexts::ReadOutcome::NotConnected => Err(ApiError::not_found(
+            "context not found (the CTX integration is not connected)",
+        )),
+        ctx_contexts::ReadOutcome::NotFound => Err(ApiError::not_found("context not found")),
+        ctx_contexts::ReadOutcome::Unavailable(message) => Err(ApiError::unavailable(message)),
+    }
 }
 
 async fn local_context(

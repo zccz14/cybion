@@ -1,17 +1,29 @@
 import { expect, test } from "@playwright/test"
 import { stubWorkspace } from "./workspace-fixture"
 
-test("the unified Contexts tree spans common, local, and CTX sources with read-only previews", async ({ page }) => {
+test("the Contexts page keeps an edge-to-edge tree beside a full-width reading pane", async ({ page }) => {
   const fixture = await stubWorkspace(page, { language: "zh", theme: "light", ctxConnected: true })
   await page.setViewportSize({ width: 1440, height: 960 })
   await page.goto("/#/contexts")
   await expect(page.locator(".markdown-editor")).toBeVisible()
+
+  // the page title lives in the shared app header; the page itself owns no title block
+  await expect(page.locator(".ux-app-header__title")).toHaveText("上下文")
 
   // unified tree: all three sources as top-level sections
   await expect(page.getByText("Cybion Common Context", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("你的上下文", { exact: true })).toBeVisible()
   await expect(page.getByText("CTX 来源（可选）", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("CTX project reference", { exact: true })).toBeVisible()
+
+  // edge-to-edge columns: the tree sits flush at the app sidebar and the two columns share one boundary
+  const sidebar = await page.locator(".ux-sidebar").boundingBox()
+  const aside = await page.locator("main > aside").boundingBox()
+  const section = await page.locator("main > section").boundingBox()
+  expect(sidebar && aside && section).toBeTruthy()
+  expect(Math.abs(aside!.x - (sidebar!.x + sidebar!.width))).toBeLessThanOrEqual(1)
+  expect(Math.abs(aside!.x + aside!.width - section!.x)).toBeLessThanOrEqual(1)
+  expect(section!.width).toBeGreaterThan(aside!.width)
   await page.screenshot({ path: "test-results/layout-default.png" })
 
   // common context selected -> read-only preview
@@ -22,14 +34,23 @@ test("the unified Contexts tree spans common, local, and CTX sources with read-o
   expect(await page.locator(".markdown-editor__toolbar").count()).toBe(0)
   await page.screenshot({ path: "test-results/layout-common.png" })
 
-  // CTX document selected -> read-only pane with CTX badge and deep link
+  // CTX document selected -> the pane renders the document body with the CTX badge and deep link
   await page.getByRole("button", { name: /CTX project reference/ }).first().click()
   await expect(page.getByText("内容存放在 CTX", { exact: false })).toBeVisible()
   await expect(page.getByRole("link", { name: /在 CTX 打开/ })).toHaveAttribute("href", "https://ctx.ntnl.io/#/documents/ctx-reference")
+  await expect(page.locator(".markdown-editor")).toContainText("CTX 正文")
   await page.screenshot({ path: "test-results/layout-ctx.png" })
 
+  // CTX children load on demand and read in the same pane
+  await page.getByRole("tree", { name: "CTX 来源（可选）" }).getByRole("button", { name: "展开上下文" }).first().click()
+  await page.getByRole("button", { name: /子文档/ }).first().click()
+  await expect(page.locator(".markdown-editor")).toContainText("子文档正文")
+
+  // the CTX connection card stays on personal settings, not in the Contexts page
+  await expect(page.getByRole("button", { name: "断开连接" })).toHaveCount(0)
+
   // create a local context and edit Markdown through the editor
-  await page.getByRole("button", { name: "添加上下文引用", exact: true }).click()
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
   await page.getByLabel("上下文名称", { exact: true }).fill("项目手册")
   const editor = page.locator(".markdown-editor")
   await editor.getByRole("button", { name: "源码", exact: true }).click()
@@ -51,12 +72,6 @@ test("the unified Contexts tree spans common, local, and CTX sources with read-o
   expect(treeBox && editorBox).toBeTruthy()
   expect(editorBox!.x).toBeGreaterThan(treeBox!.x + treeBox!.width)
   expect(editorBox!.width).toBeGreaterThan(treeBox!.width)
-  const stacked = await page.evaluate(() => {
-    const editors = document.querySelectorAll(".markdown-editor")
-    const last = editors[editors.length - 1]
-    return last ? getComputedStyle(last).width : ""
-  })
-  expect(stacked).not.toBe("")
 
   // mobile: no horizontal overflow
   await page.setViewportSize({ width: 390, height: 844 })
