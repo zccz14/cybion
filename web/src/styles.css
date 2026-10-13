@@ -148,3 +148,206 @@
 @media (prefers-reduced-motion: reduce) {
   .um-scene * { animation: none !important; }
 }
+
+/* Context Markdown editor: write / source / preview surfaces. */
+
+.markdown-editor {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.markdown-editor__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklch, var(--background), var(--muted) 28%);
+  padding: 0.25rem 0.5rem;
+}
+
+.markdown-editor__canvas {
+  cursor: text;
+}
+
+.markdown-editor__canvas .tiptap {
+  min-height: 24rem;
+  padding: 1.25rem;
+  outline: none;
+}
+
+.markdown-editor__canvas .tiptap > * {
+  max-width: 72ch;
+  margin-inline: auto;
+}
+
+.markdown-editor__canvas .tiptap > * + * {
+  margin-top: 1rem;
+}
+
+.markdown-editor__canvas .tiptap h1,
+.markdown-editor__canvas .tiptap h2,
+.markdown-editor__canvas .tiptap h3 {
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.markdown-editor__canvas .tiptap h1 {
+  margin-top: 2.5rem;
+  font-size: 1.75rem;
+}
+
+.markdown-editor__canvas .tiptap h2 {
+  margin-top: 2rem;
+  font-size: 1.4rem;
+}
+
+.markdown-editor__canvas .tiptap h3 {
+  margin-top: 1.5rem;
+  font-size: 1.2rem;
+}
+
+.markdown-editor__canvas .tiptap ul,
+.markdown-editor__canvas .tiptap ol {
+  padding-left: 2.1rem;
+}
+
+.markdown-editor__canvas .tiptap ul {
+  list-style: disc;
+}
+
+.markdown-editor__canvas .tiptap ol {
+  list-style: decimal;
+}
+
+.markdown-editor__canvas .tiptap ul[data-type="taskList"] {
+  padding-left: 0;
+  list-style: none;
+}
+
+.markdown-editor__canvas .tiptap li[data-type="taskItem"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.markdown-editor__canvas .tiptap li[data-type="taskItem"] > label {
+  margin-top: 0.42rem;
+}
+
+.markdown-editor__canvas .tiptap a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.markdown-editor__canvas .tiptap blockquote {
+  border-left: 3px solid var(--border);
+  color: var(--muted-foreground);
+  padding-left: 1rem;
+}
+
+.markdown-editor__canvas .tiptap code {
+  border-radius: 0.25rem;
+  background: var(--muted);
+  padding: 0.1em 0.28em;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+.markdown-editor__canvas .tiptap pre {
+  overflow-x: auto;
+  border-radius: var(--radius-md);
+  background: var(--muted);
+  padding: 0.9rem 1.1rem;
+}
+
+.markdown-editor__canvas .tiptap pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.markdown-editor__canvas .tiptap hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin-block: 2rem;
+}
+
+.markdown-editor__canvas .tiptap img {
+  display: block;
+  height: auto;
+  max-width: min(100%, 46rem);
+  margin-block: 1.25rem;
+  border-radius: var(--radius-md);
+}
+
+.markdown-editor__canvas .tiptap table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-block: 1.25rem;
+  font-size: 0.9rem;
+}
+
+.markdown-editor__canvas .tiptap th,
+.markdown-editor__canvas .tiptap td {
+  min-width: 6rem;
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-editor__canvas .tiptap th {
+  background: var(--muted);
+  font-weight: 600;
+}
+
+.markdown-editor__canvas .tiptap p.is-editor-empty:first-child::before {
+  float: left;
+  height: 0;
+  color: var(--muted-foreground);
+  content: attr(data-placeholder);
+  pointer-events: none;
+}
+
+.markdown-editor__bubble-menu,
+.markdown-editor__slash-menu {
+  z-index: 50;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 0.25rem 0.5rem color-mix(in oklch, var(--foreground), transparent 88%);
+}
+
+.markdown-editor__bubble-menu {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.18rem;
+}
+
+.markdown-editor__slash-menu {
+  position: fixed;
+  width: 18rem;
+}
+
+.markdown-editor__source {
+  resize: vertical;
+  border-top: 1px solid var(--border);
+  padding: 1.25rem;
+}
+
+.markdown-editor__preview {
+  overflow-wrap: break-word;
+}
+
+@media (max-width: 40rem) {
+  .markdown-editor__canvas .tiptap {
+    min-height: 20rem;
+  }
+}

@@ -24,12 +24,13 @@ test("markdown links open off-site pages in a new tab and carry an external mark
 })
 
 test("every conversation markdown surface renders links through the shared component", () => {
-  const surfaces = ["../src/main.tsx", "../src/components/assistant-message.tsx", "../src/components/checkpoint-message.tsx"]
+  const surfaces = ["../src/main.tsx", "../src/components/assistant-message.tsx", "../src/components/checkpoint-message.tsx", "../src/components/markdown-editor.tsx"]
   const sources = surfaces.map((surface) => readFileSync(new URL(surface, import.meta.url), "utf8"))
   for (const source of sources) assert.doesNotMatch(source, /react-markdown|ReactMarkdown|remark-gfm|remarkGfm/)
   assert.equal(sources[0].match(/<Markdown>/g)?.length, 2)
   assert.equal(sources[1].match(/<Markdown>/g)?.length, 1)
   assert.equal(sources[2].match(/<Markdown>/g)?.length, 1)
+  assert.equal(sources[3].match(/<MarkdownPreview>/g)?.length, 1)
 })
 
 test("mermaid fenced blocks render through the shared Mermaid component", async () => {

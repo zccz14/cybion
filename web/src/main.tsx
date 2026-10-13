@@ -110,6 +110,7 @@ import { ImageGenerationCall } from "@/components/image-generation-call"
 import { WebSearchCall } from "@/components/web-search-call"
 import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
+import { MarkdownEditor } from "@/components/markdown-editor"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
@@ -452,6 +453,7 @@ const copy = {
     contextName: "Context name",
     contextDescription: "Purpose — when to consult it",
     contextContent: "Location and reading instructions",
+    contextContentEditHint: "Write the context in Markdown. Toggle Write, Markdown, and Preview above the editor.",
     contextParent: "Parent context",
     contextRoot: "Top-level context",
     newContext: "Add Context reference",
@@ -795,6 +797,7 @@ const copy = {
     contextName: "上下文名称",
     contextDescription: "用途 — 何时参考",
     contextContent: "位置与获取说明",
+    contextContentEditHint: "用 Markdown 编写上下文。可在编辑器上方切换编辑、源码和预览模式。",
     contextParent: "父级上下文",
     contextRoot: "顶层上下文",
     newContext: "添加上下文引用",
@@ -2181,8 +2184,13 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
               </Field>
               <Field>
                 <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
-                <Textarea id="context-content" aria-describedby="context-reference-hint" placeholder={help.deviceContent} className="min-h-56 font-mono text-sm" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} />
-                <FieldDescription id="context-reference-hint">{t("contextEditorHint")}</FieldDescription>
+                <MarkdownEditor
+                  id="context-content"
+                  language={language}
+                  value={draft.content}
+                  onChange={(content) => setDraft((current) => current && { ...current, content })}
+                />
+                <FieldDescription id="context-reference-hint">{t("contextContentEditHint")}</FieldDescription>
               </Field>
               <Field>
                 <FieldLabel htmlFor="context-parent">{t("contextParent")}</FieldLabel>
