@@ -1,4 +1,4 @@
-# Cybion Common Context
+# Cybion 公共上下文
 
 这是 Cybion 自带的操作指南：随 Cybion 源码（仓库 `common-contexts/` 目录）编译发布，所有用户共享、只读；控制器不存储、不在运行时修改它，内容变更只随版本发布——源码公开，可自行审阅修订历史。
 
@@ -8,5 +8,5 @@
 
 当前主题：
 
-- **Ultimate Machine（终极机器）**：在 Worker 上按期执行一条检查命令、失败时请绑定的 Thread 修复的沉默看门机器。
-- **Linkit（通知与触达）**：Linkit 与 Cybion 的关系（身份、通知），以及为什么模型侧没有 linkit_* 工具。
+- **终极机器**：在 Worker 上按期执行一条检查命令、失败时请绑定的 Thread 修复的沉默看门机器。
+- **Linkit**：Linkit 与 Cybion 的关系（身份、通知与触达），以及为什么模型侧没有 linkit_* 工具。

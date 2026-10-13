@@ -1,54 +1,49 @@
 {
-  "revision": 3,
+  "revision": 4,
   "root": {
     "id": "2b7b2b90-00a7-4c92-8b10-bee31b246e3a",
-    "name": "Cybion Common Context",
-    "description": "Cybion 自带的操作指南（随源码发布、所有用户共享、只读）：如何用终极机器等功能干活。需要操作指导时先读这里。",
-    "content_file": "nodes/overview.md",
+    "name": {
+      "en": "Cybion Common Context",
+      "zh": "Cybion 公共上下文"
+    },
+    "description": {
+      "en": "Cybion's built-in operating guide (shipped with the source, shared by every user, read-only): how to work with features like the Ultimate Machine. Read this first when you need operating guidance.",
+      "zh": "Cybion 自带的操作指南（随源码发布、所有用户共享、只读）：如何用终极机器等功能干活。需要操作指导时先读这里。"
+    },
+    "content_file": {
+      "en": "nodes/en/overview.md",
+      "zh": "nodes/zh/overview.md"
+    },
     "children": [
       {
         "id": "1eb7b1ea-d9fe-4348-8873-574b5b1c5c58",
-        "name": "Ultimate Machine（终极机器）",
-        "description": "终极机器：在 Worker 上按期执行一条 bash 检查命令，失败时请绑定的 Thread 修复；平时保持沉默。",
-        "content_file": "nodes/ultimate-machine/overview.md",
-        "children": [
-          {
-            "id": "ce60f309-946c-4457-a9f7-1262df35abfb",
-            "name": "何时开一台",
-            "description": "什么值得开一台检查、什么不该用终极机器，以及创建入口。",
-            "content_file": "nodes/ultimate-machine/when-to-create.md"
-          },
-          {
-            "id": "a4194091-9457-49e7-8ed7-74afb5dca5dc",
-            "name": "怎么写检查命令",
-            "description": "检查命令的设计准则与示例：exit 0 语义、输出、幂等、超时与环境差异。",
-            "content_file": "nodes/ultimate-machine/writing-checks.md"
-          },
-          {
-            "id": "2bd8a4fd-4b66-4d7f-bd89-d203b2918e6b",
-            "name": "管理工具（tool 套件）",
-            "description": "cybion_list_ultimate_machines / cybion_get_ultimate_machine / cybion_set_ultimate_machine 的使用套路。",
-            "content_file": "nodes/ultimate-machine/management-tools.md"
-          },
-          {
-            "id": "b8e8735f-525f-41ed-8512-5b1fc1d3870d",
-            "name": "失败之后",
-            "description": "修复 Thread 的套路：读证据 → 修环境或修检查 → 验证 → 静默等待复验。",
-            "content_file": "nodes/ultimate-machine/after-failure.md"
-          },
-          {
-            "id": "c91d4db8-33cd-4206-baba-d5b0d7639e3f",
-            "name": "边界与坑",
-            "description": "丢消息、离线与失联提醒、暂停与删除、敏感信息等边界。",
-            "content_file": "nodes/ultimate-machine/pitfalls.md"
-          }
-        ]
+        "name": {
+          "en": "Ultimate Machine",
+          "zh": "终极机器"
+        },
+        "description": {
+          "en": "The Ultimate Machine: runs one bash check on a Worker on schedule and asks its bound Thread to repair failures; quiet otherwise.",
+          "zh": "终极机器：在 Worker 上按期执行一条 bash 检查命令，失败时请绑定的 Thread 修复；平时保持沉默。"
+        },
+        "content_file": {
+          "en": "nodes/en/ultimate-machine.md",
+          "zh": "nodes/zh/ultimate-machine.md"
+        }
       },
       {
         "id": "1056ab49-33dd-4fda-9e54-3286e7afa943",
-        "name": "Linkit（通知与触达）",
-        "description": "Linkit 在 Cybion 中的角色：身份、通知与触达；为什么模型侧没有 linkit_* 工具。",
-        "content_file": "nodes/linkit/overview.md"
+        "name": {
+          "en": "Linkit",
+          "zh": "Linkit"
+        },
+        "description": {
+          "en": "Linkit's role in Cybion: identity, notifications and reach; why there are no linkit_* tools on the model side.",
+          "zh": "Linkit 在 Cybion 中的角色：身份、通知与触达；为什么模型侧没有 linkit_* 工具。"
+        },
+        "content_file": {
+          "en": "nodes/en/linkit.md",
+          "zh": "nodes/zh/linkit.md"
+        }
       }
     ]
   }
