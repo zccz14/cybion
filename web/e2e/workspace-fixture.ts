@@ -77,7 +77,7 @@ export async function stubWorkspace(page: Page, options: {
       if (path === `/api/threads/${thread.id}/grants`) return json([])
       if (path === "/api/contexts") {
         if (request.method() === "POST") {
-          const reference = { ...request.postDataJSON(), id: "saved-reference" }
+          const reference = { ...request.postDataJSON(), id: references.length === 0 ? "saved-reference" : `saved-reference-${references.length + 1}` }
           references.push(reference)
           return json(reference)
         }

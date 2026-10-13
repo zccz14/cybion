@@ -2177,7 +2177,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const ctxStatus = useQuery({ queryKey: ["ctx-integration"], queryFn: ({ signal }) => api<CtxIntegrationStatus>(sdk, "/api/integrations/ctx", { signal }) })
   const ctxConnected = ctxStatus.data?.connected === true
   const ctxDocuments = useQuery({ queryKey: ["ctx-documents"], queryFn: ({ signal }) => api<CtxIntegrationDocuments>(sdk, "/api/integrations/ctx/documents", { signal }), enabled: ctxConnected })
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set([ctxSectionExpansionId]))
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<ContextDraft | null>(null)
   const [initialized, setInitialized] = useState(false)
@@ -2281,7 +2281,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   }, [contexts.data, commonNodes, commonRoot?.id, ctxRootDocuments])
 
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
-    <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
+    <aside className="border-b bg-sidebar/40 p-3 lg:w-80 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center gap-2 pb-3">
         <Button type="button" size="sm" variant="outline" className="min-w-0 flex-1 justify-start" onClick={() => createNew()}><PlusIcon data-icon="inline-start" /><span className="truncate">{t("newContext")}</span></Button>
         <ConceptHelp topic="context" language={language} />
@@ -2333,7 +2333,6 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   </main>
 }
 
-const ctxSectionExpansionId = "__ctx_section__"
 const CTX_ORIGIN = "https://ctx.ntnl.io"
 
 type CtxDocumentSummary = { context_id: string; name: string; description: string }
@@ -2347,7 +2346,7 @@ function ContextTree({ contexts, selectedId, onSelect, label, collapseLabel, exp
 }
 
 function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabel, expandLabel }: { context: Context; children: Map<string | null, Context[]>; selectedId: string | null; onSelect: (context: Context) => void; collapseLabel: string; expandLabel: string }) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const nested = children.get(context.id) ?? []
   return <li role="treeitem" aria-expanded={nested.length > 0 ? expanded : undefined}>
     <div className="flex items-center gap-1">

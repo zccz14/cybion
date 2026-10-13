@@ -35,6 +35,7 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   expect(sidebar && aside && section).toBeTruthy()
   expect(Math.abs(aside!.x - (sidebar!.x + sidebar!.width))).toBeLessThanOrEqual(1)
   expect(Math.abs(aside!.x + aside!.width - section!.x)).toBeLessThanOrEqual(1)
+  expect(Math.round(aside!.width)).toBe(320)
   expect(section!.width).toBeGreaterThan(aside!.width)
   await page.screenshot({ path: "test-results/layout-default.png" })
 
@@ -53,7 +54,8 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   await expect(page.locator(".markdown-editor")).toContainText("CTX 正文")
   await page.screenshot({ path: "test-results/layout-ctx.png" })
 
-  // CTX children load on demand and read in the same pane
+  // CTX children stay folded until the branch is opened by hand
+  await expect(page.getByRole("button", { name: /子文档/ })).toHaveCount(0)
   await page.getByRole("tree", { name: "CTX 来源（可选）" }).getByRole("button", { name: "展开上下文" }).first().click()
   await page.getByRole("button", { name: /子文档/ }).first().click()
   await expect(page.locator(".markdown-editor")).toContainText("子文档正文")
@@ -90,5 +92,31 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: "test-results/layout-mobile.png" })
 
+  expect(fixture.unexpected).toEqual([])
+})
+
+test("nested context branches start folded and open manually", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.goto("/#/contexts")
+
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("父上下文")
+  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill("子上下文")
+  await page.locator("#context-parent").click()
+  await page.getByRole("option", { name: "父上下文" }).click()
+  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+
+  // the nested node stays folded until the branch is opened by hand
+  const tree = page.getByRole("tree", { name: "你的上下文" })
+  await expect(tree.getByRole("button", { name: "子上下文", exact: true })).toHaveCount(0)
+  await tree.getByRole("button", { name: "展开上下文" }).click()
+  await expect(tree.getByRole("button", { name: "子上下文", exact: true })).toBeVisible()
+  await expect(tree.getByRole("button", { name: "收起上下文" })).toBeVisible()
+
+  expect(fixture.references).toHaveLength(2)
+  expect(fixture.references[1].parent_id).toBe("saved-reference")
   expect(fixture.unexpected).toEqual([])
 })
