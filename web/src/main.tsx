@@ -72,7 +72,7 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } fro
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, serializeThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
-import { bashFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, webSearchFunctionCall } from "@/lib/history-payload"
+import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { applyFavicon } from "@/lib/favicon"
@@ -110,6 +110,9 @@ import { HistoryRecordPayload } from "@/components/history-record-payload"
 import { BashCommand } from "@/components/bash-command"
 import { ImageGenerationCall } from "@/components/image-generation-call"
 import { WebSearchCall } from "@/components/web-search-call"
+import { BrowserControlCall } from "@/components/browser-control-call"
+import { ComputerUseCall } from "@/components/computer-use-call"
+import { CybionToolCall } from "@/components/cybion-tool-call"
 import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
@@ -1976,6 +1979,45 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers 
         <HistoryRecordPayload language={language} record={record} />
       </details>
     </ImageGenerationCall>
+  }
+
+  const browserCall = browserControlFunctionCall(payload)
+  if (browserCall) {
+    return <BrowserControlCall language={language} call={browserCall} time={time}>
+      <details className="group mt-2">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+          <span>{t("recordPayload")}</span>
+          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <HistoryRecordPayload language={language} record={record} />
+      </details>
+    </BrowserControlCall>
+  }
+
+  const computerCall = computerUseFunctionCall(payload)
+  if (computerCall) {
+    return <ComputerUseCall language={language} call={computerCall} time={time}>
+      <details className="group mt-2">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+          <span>{t("recordPayload")}</span>
+          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <HistoryRecordPayload language={language} record={record} />
+      </details>
+    </ComputerUseCall>
+  }
+
+  const cybionCall = cybionToolFunctionCall(payload)
+  if (cybionCall) {
+    return <CybionToolCall language={language} call={cybionCall} workers={workers} time={time}>
+      <details className="group mt-2">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+          <span>{t("recordPayload")}</span>
+          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <HistoryRecordPayload language={language} record={record} />
+      </details>
+    </CybionToolCall>
   }
 
   if (record.kind === "checkpoint") {

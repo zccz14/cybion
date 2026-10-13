@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { bashFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, webSearchFunctionCall } from "../src/lib/history-payload.ts"
+import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, webSearchFunctionCall } from "../src/lib/history-payload.ts"
 
 test("conversation text is derived from stored protocol payloads", () => {
   for (const [payload, expected] of [
@@ -29,7 +29,7 @@ test("unrelated events and incomplete or malformed bash arguments retain the gen
   for (const payload of [
     null, [], "bash", {},
     { ...valid, type: "function_call_output" },
-    { ...valid, name: "browser_control" },
+    { ...valid, name: "unknown_tool" },
     ...[undefined, null, {}, "", "{", "null", "[]", "42", '"text"', "{}",
       '{"worker_id":"worker-1"}', '{"command":"pwd"}',
       '{"worker_id":3,"command":"pwd"}', '{"worker_id":"worker-1","command":[]}',
@@ -100,4 +100,90 @@ test("unrelated events and malformed native tool arguments keep the generic prot
     imageGenerationFunctionCall({ ...image, arguments: JSON.stringify({ prompt: "dog", reference_images: [0, 1.5, "2", 3] }) }),
     { prompt: "dog", referenceImages: [3] },
   )
+})
+
+test("browser and desktop calls expose their action payloads", () => {
+  const browser = (args: unknown) => ({ type: "function_call", name: "browser_control", arguments: JSON.stringify(args) })
+  for (const [payload, expected] of [
+    [browser({ action: "navigate", url: "https://example.com" }), { action: "navigate", url: "https://example.com" }],
+    [browser({ action: "open", url: "https://example.com" }), { action: "open", url: "https://example.com" }],
+    [browser({ action: "evaluate", text: " document.title " }), { action: "evaluate", text: "document.title" }],
+    [browser({ action: "click", selector: "#submit" }), { action: "click", selector: "#submit" }],
+    [browser({ action: "type", selector: "#q", text: "rust" }), { action: "type", selector: "#q", text: "rust" }],
+    [browser({ action: "screenshot" }), { action: "screenshot" }],
+  ] as const) {
+    assert.deepEqual(browserControlFunctionCall(payload), expected)
+  }
+  const computer = (args: unknown) => ({ type: "function_call", name: "computer_use", arguments: JSON.stringify(args) })
+  for (const [payload, expected] of [
+    [computer({ action: "move", x: 100, y: 200 }), { action: "move", x: 100, y: 200 }],
+    [computer({ action: "click", x: 30, y: 40 }), { action: "click", x: 30, y: 40 }],
+    [computer({ action: "type", text: " hello " }), { action: "type", text: "hello" }],
+    [computer({ action: "screenshot" }), { action: "screenshot" }],
+  ] as const) {
+    assert.deepEqual(computerUseFunctionCall(payload), expected)
+  }
+})
+
+test("incomplete or unknown worker actions retain the generic protocol renderer", () => {
+  for (const payload of [
+    null, [], "text", {},
+    { type: "function_call_output", name: "browser_control", arguments: '{"action":"screenshot"}' },
+    { type: "function_call", name: "bash", arguments: '{"action":"screenshot"}' },
+    { type: "function_call", name: "computer_use", arguments: '{"action":"screenshot"}' },
+    ...[undefined, null, {}, "", "{", "null", "[]", "42",
+      '{"action":""}', '{"action":"navigate"}', '{"action":"navigate","url":3}', '{"action":"navigate","url":"  "}',
+      '{"action":"click"}', '{"action":"click","selector":""}',
+      '{"action":"type","selector":"#q"}', '{"action":"type","text":"x"}',
+      '{"action":"scroll"}', '{"action":"SCREENSHOT"}',
+    ].map((argumentsValue) => ({ type: "function_call", name: "browser_control", arguments: argumentsValue })),
+  ]) {
+    assert.equal(browserControlFunctionCall(payload), null, JSON.stringify(payload))
+  }
+  for (const payload of [
+    null, [], "text", {},
+    { type: "function_call_output", name: "computer_use", arguments: '{"action":"screenshot"}' },
+    { type: "function_call", name: "browser_control", arguments: '{"action":"screenshot"}' },
+    ...[undefined, null, {}, "", "{", "null", "[]", "42",
+      '{"action":"move"}', '{"action":"move","x":1}', '{"action":"click","x":1.5,"y":2}', '{"action":"click","x":"1","y":2}',
+      '{"action":"type"}', '{"action":"type","text":""}',
+      '{"action":"keypress"}',
+    ].map((argumentsValue) => ({ type: "function_call", name: "computer_use", arguments: argumentsValue })),
+  ]) {
+    assert.equal(computerUseFunctionCall(payload), null, JSON.stringify(payload))
+  }
+})
+
+test("cybion tool calls expose context and machine arguments", () => {
+  const call = (name: string, args: unknown) => ({ type: "function_call", name, arguments: JSON.stringify(args) })
+  assert.deepEqual(cybionToolFunctionCall(call("read_context", { context_id: "  ctx-1  " })), { tool: "read_context", contextId: "ctx-1" })
+  assert.deepEqual(cybionToolFunctionCall(call("cybion_list_contexts", {})), { tool: "cybion_list_contexts" })
+  assert.deepEqual(cybionToolFunctionCall(call("cybion_list_workers", {})), { tool: "cybion_list_workers" })
+  assert.deepEqual(cybionToolFunctionCall(call("cybion_list_ultimate_machines", {})), { tool: "cybion_list_ultimate_machines" })
+  assert.deepEqual(cybionToolFunctionCall(call("cybion_get_ultimate_machine", { machine_id: "m-1" })), { tool: "cybion_get_ultimate_machine", machineId: "m-1" })
+  assert.deepEqual(
+    cybionToolFunctionCall(call("cybion_set_ultimate_machine", { machine_id: "m-1", name: " 磁盘检查 ", interval_seconds: 600, enabled: false, command: "df -h", intent: " 确保根分区低于 90% " })),
+    { tool: "cybion_set_ultimate_machine", machineId: "m-1", name: "磁盘检查", workerId: null, intervalSeconds: 600, enabled: false, command: "df -h", intent: "确保根分区低于 90%" },
+  )
+  assert.deepEqual(
+    cybionToolFunctionCall(call("cybion_set_ultimate_machine", { name: "磁盘检查", worker_id: "worker-1", command: "df -h", interval_seconds: 600 })),
+    { tool: "cybion_set_ultimate_machine", machineId: null, name: "磁盘检查", workerId: "worker-1", intervalSeconds: 600, enabled: null, command: "df -h", intent: null },
+  )
+})
+
+test("incomplete or unknown cybion tool arguments retain the generic protocol renderer", () => {
+  const call = (name: string, argumentsValue: unknown) => ({ type: "function_call", name, arguments: argumentsValue })
+  for (const payload of [
+    null, [], "text", {},
+    call("read_context", "{}"),
+    call("read_context", '{"context_id":""}'),
+    call("cybion_get_ultimate_machine", "{}"),
+    call("cybion_set_ultimate_machine", "{}"),
+    call("cybion_set_ultimate_machine", '{"enabled":"yes"}'),
+    call("cybion_list_contexts", "not json"),
+    { type: "function_call_output", name: "read_context", arguments: "{}" },
+    call("bash", '{"worker_id":"worker-1","command":"pwd"}'),
+  ] as const) {
+    assert.equal(cybionToolFunctionCall(payload), null, JSON.stringify(payload))
+  }
 })

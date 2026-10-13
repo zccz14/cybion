@@ -118,3 +118,138 @@ export function screenshotImageSource(payload: unknown): string | null {
     ? `data:image/png;base64,${data}`
     : null
 }
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null
+}
+
+function integerNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null
+}
+
+// The `browser_control` call as stored in the Responses item: the action plus
+// the argument fields that action carries. An unknown action or a missing
+// field keeps the generic protocol rendering.
+export type BrowserControlFunctionCall =
+  | { action: "navigate" | "open"; url: string }
+  | { action: "evaluate"; text: string }
+  | { action: "click"; selector: string }
+  | { action: "type"; selector: string; text: string }
+  | { action: "screenshot" }
+
+export function browserControlFunctionCall(payload: unknown): BrowserControlFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || object.name !== "browser_control" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  const action = nonEmptyString(args?.action)
+  if (action === null) return null
+  switch (action) {
+    case "navigate":
+    case "open": {
+      const url = nonEmptyString(args?.url)
+      return url === null ? null : { action, url }
+    }
+    case "evaluate": {
+      const script = nonEmptyString(args?.text)
+      return script === null ? null : { action, text: script }
+    }
+    case "click": {
+      const selector = nonEmptyString(args?.selector)
+      return selector === null ? null : { action, selector }
+    }
+    case "type": {
+      const selector = nonEmptyString(args?.selector)
+      const text = nonEmptyString(args?.text)
+      return selector === null || text === null ? null : { action, selector, text }
+    }
+    case "screenshot":
+      return { action }
+    default:
+      return null
+  }
+}
+
+// The `computer_use` call as stored in the Responses item: the action plus its
+// coordinates or text. An unknown action or a missing field keeps the generic
+// protocol rendering.
+export type ComputerUseFunctionCall =
+  | { action: "move"; x: number; y: number }
+  | { action: "click"; x: number; y: number }
+  | { action: "type"; text: string }
+  | { action: "screenshot" }
+
+export function computerUseFunctionCall(payload: unknown): ComputerUseFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || object.name !== "computer_use" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  const action = nonEmptyString(args?.action)
+  if (action === null) return null
+  switch (action) {
+    case "move":
+    case "click": {
+      const x = integerNumber(args?.x)
+      const y = integerNumber(args?.y)
+      return x === null || y === null ? null : { action, x, y }
+    }
+    case "type": {
+      const text = nonEmptyString(args?.text)
+      return text === null ? null : { action, text }
+    }
+    case "screenshot":
+      return { action }
+    default:
+      return null
+  }
+}
+
+// The six controller-side Cybion tools as stored in the Responses item. The
+// list tools carry no displayable arguments; a machine update is a call that
+// names its machine, and a create shows whichever fields it provides. Missing
+// identifiers keep the generic protocol rendering.
+export type CybionToolFunctionCall =
+  | { tool: "read_context"; contextId: string }
+  | { tool: "cybion_list_contexts" }
+  | { tool: "cybion_list_workers" }
+  | { tool: "cybion_list_ultimate_machines" }
+  | { tool: "cybion_get_ultimate_machine"; machineId: string }
+  | { tool: "cybion_set_ultimate_machine"; machineId: string | null; name: string | null; workerId: string | null; intervalSeconds: number | null; enabled: boolean | null; command: string | null; intent: string | null }
+
+export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || typeof object.name !== "string" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  if (args === null) return null
+  switch (object.name) {
+    case "read_context": {
+      const contextId = nonEmptyString(args.context_id)
+      return contextId === null ? null : { tool: "read_context", contextId }
+    }
+    case "cybion_list_contexts":
+      return { tool: "cybion_list_contexts" }
+    case "cybion_list_workers":
+      return { tool: "cybion_list_workers" }
+    case "cybion_list_ultimate_machines":
+      return { tool: "cybion_list_ultimate_machines" }
+    case "cybion_get_ultimate_machine": {
+      const machineId = nonEmptyString(args.machine_id)
+      return machineId === null ? null : { tool: "cybion_get_ultimate_machine", machineId }
+    }
+    case "cybion_set_ultimate_machine": {
+      const call: CybionToolFunctionCall = {
+        tool: "cybion_set_ultimate_machine",
+        machineId: nonEmptyString(args.machine_id),
+        name: nonEmptyString(args.name),
+        workerId: nonEmptyString(args.worker_id),
+        intervalSeconds: integerNumber(args.interval_seconds),
+        enabled: typeof args.enabled === "boolean" ? args.enabled : null,
+        command: nonEmptyString(args.command),
+        intent: nonEmptyString(args.intent),
+      }
+      const provided = call.machineId !== null || call.name !== null || call.workerId !== null
+        || call.intervalSeconds !== null || call.enabled !== null || call.command !== null || call.intent !== null
+      return provided ? call : null
+    }
+    default:
+      return null
+  }
+}
