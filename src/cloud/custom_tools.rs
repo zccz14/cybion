@@ -183,8 +183,6 @@ fn secret_value(
             "linkit_bot_id" => settings.linkit_bot_id.clone(),
             "linkit_bot_token" => settings.linkit_bot_token.clone(),
             "linkit_username" => settings.linkit_username.clone(),
-            "ctx_api_key" => settings.ctx_api_key.clone(),
-            "ctx_api_key_id" => settings.ctx_api_key_id.clone(),
             other => {
                 return Err(ApiError::internal(format!(
                     "custom tool references an unknown integration_settings field: {other}"

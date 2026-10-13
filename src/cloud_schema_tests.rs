@@ -229,6 +229,41 @@ fn schema_32_upgrade_drops_the_removed_request_header_columns_and_preserves_hist
 }
 
 #[test]
+fn schema_36_upgrade_drops_the_removed_ctx_columns_and_preserves_history() {
+    // A deployed schema 35 database: current tables plus the removed CTX
+    // integration's stored API key columns.
+    let mut connection = Connection::open_in_memory().unwrap();
+    ensure_user_schema(&mut connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('a','Alpha','model','idle',1,1);
+             INSERT INTO history_records(id,thread_id,kind,payload,created_at) VALUES(1,'a','input','{\"role\":\"user\",\"content\":\"keep\"}',101);
+             ALTER TABLE integration_settings ADD COLUMN ctx_api_key TEXT NOT NULL DEFAULT '';
+             ALTER TABLE integration_settings ADD COLUMN ctx_api_key_id TEXT NOT NULL DEFAULT '';
+             PRAGMA user_version=35;",
+        )
+        .unwrap();
+    let original = history_snapshot(&connection);
+    for _ in 0..2 {
+        ensure_user_schema(&mut connection).unwrap();
+        assert_core_history_schema(&connection);
+        assert_eq!(history_snapshot(&connection), original);
+        for name in ["ctx_api_key", "ctx_api_key_id"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('integration_settings') WHERE name=?",
+                        [name],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
 fn failed_history_schema_upgrade_rolls_back_columns_index_version_and_data() {
     let mut connection = legacy_database(8);
     let original = history_snapshot(&connection);

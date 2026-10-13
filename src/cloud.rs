@@ -34,7 +34,6 @@ use uuid::Uuid;
 
 mod admin_users;
 mod common_contexts;
-mod ctx_contexts;
 mod custom_tools;
 mod history;
 mod linkit_notifications;
@@ -72,7 +71,6 @@ const AUTH_AUDIENCES: [&str; 5] = [
 // endpoint; schema 16 materializes it into an upstream row.
 const OPENAI_BASE_URL: &str = "https://openai.ntnl.io/v1";
 const LINKIT_API_URL: &str = "https://linkit.ntnl.io";
-const CTX_API_URL: &str = "https://ctx.ntnl.io";
 const NORMAI_API_URL: &str = "https://normai.ntnl.io";
 const WORKER_RELEASE_BASE_URL: &str = "https://github.com/zccz14/cybion-worker/releases/download";
 const WORKER_ANDROID_RELEASE_BASE_URL: &str =
@@ -134,7 +132,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 35;
+const USER_SCHEMA_VERSION: i64 = 36;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -160,7 +158,6 @@ struct AppState {
     client: reqwest::Client,
     linkit_api_url: String,
     custom_tool_base_urls: Arc<Mutex<HashMap<String, String>>>,
-    ctx_api_url: String,
     normai_api_url: String,
     worker_release_base: String,
     worker_android_release_base: String,
@@ -369,7 +366,6 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .build()?,
         linkit_api_url: LINKIT_API_URL.to_owned(),
         custom_tool_base_urls: Arc::new(Mutex::new(HashMap::new())),
-        ctx_api_url: CTX_API_URL.to_owned(),
         normai_api_url: NORMAI_API_URL.to_owned(),
         worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
         worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
@@ -523,16 +519,6 @@ fn app(state: AppState) -> Router {
                 .delete(delete_context),
         )
         .route("/api/common-contexts", get(common_contexts::documents))
-        .route(
-            "/api/integrations/ctx",
-            get(ctx_contexts::status)
-                .post(ctx_contexts::connect)
-                .delete(ctx_contexts::disconnect),
-        )
-        .route(
-            "/api/integrations/ctx/documents",
-            get(ctx_contexts::documents),
-        )
         .route("/api/admin/users", get(admin_users::list))
         .route("/api/system/resources", get(system_resources))
         .route("/api/status", get(status))
@@ -1051,8 +1037,6 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   linkit_bot_id TEXT NOT NULL DEFAULT '',
   linkit_bot_token TEXT NOT NULL DEFAULT '',
   linkit_username TEXT NOT NULL DEFAULT '',
-  ctx_api_key TEXT NOT NULL DEFAULT '',
-  ctx_api_key_id TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS upstreams (
@@ -1427,29 +1411,41 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
              ON CONFLICT(id) DO NOTHING;",
         )?;
     }
-    for (name, definition) in [
-        ("api_key", "TEXT NOT NULL DEFAULT ''"),
-        ("ctx_api_key", "TEXT NOT NULL DEFAULT ''"),
-        ("ctx_api_key_id", "TEXT NOT NULL DEFAULT ''"),
-    ] {
-        let exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
-            [name],
-            |row| row.get(0),
-        )?;
-        if !exists {
-            transaction
-                .execute(
-                    &format!("ALTER TABLE integration_settings ADD COLUMN {name} {definition}"),
-                    [],
-                )
-                .map_err(ApiError::internal)?;
-        }
+    let (name, definition) = ("api_key", "TEXT NOT NULL DEFAULT ''");
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
+        [name],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        transaction
+            .execute(
+                &format!("ALTER TABLE integration_settings ADD COLUMN {name} {definition}"),
+                [],
+            )
+            .map_err(ApiError::internal)?;
     }
     for name in ["user_agent", "originator"] {
         // COMPATIBILITY: schema <=31 stored the removed global request-header
         // settings in this table; the feature was removed. Retire this drop
         // once every retained user database is schema 32+; retain the test.
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if exists {
+            transaction
+                .execute_batch(&format!(
+                    "ALTER TABLE integration_settings DROP COLUMN {name}"
+                ))
+                .map_err(ApiError::internal)?;
+        }
+    }
+    for name in ["ctx_api_key", "ctx_api_key_id"] {
+        // COMPATIBILITY: schema <=35 stored the removed CTX integration's API
+        // key in this table; the integration was removed. Retire this drop
+        // once every retained user database is schema 36+; retain the test.
         let exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
             [name],
@@ -2247,8 +2243,6 @@ struct IntegrationSettings {
     linkit_bot_id: String,
     linkit_bot_token: String,
     linkit_username: String,
-    ctx_api_key: String,
-    ctx_api_key_id: String,
 }
 
 fn now() -> i64 {
@@ -3809,8 +3803,8 @@ async fn read_context_api(
 }
 
 // The browser reads every Context through this route: local contexts first,
-// then the compiled common nodes, then CTX documents through the integration,
-// matching the Contexts tools so the unified tree can read all three sources.
+// then the compiled common nodes, matching the Contexts tools so the unified
+// tree can read both sources.
 async fn read_context_for(
     state: &AppState,
     user: &User,
@@ -3823,14 +3817,7 @@ async fn read_context_for(
     if let Some(context) = common_contexts::read(&id) {
         return Ok(context);
     }
-    match ctx_contexts::read_context(state, user, &id).await {
-        ctx_contexts::ReadOutcome::Found(context) => Ok(context),
-        ctx_contexts::ReadOutcome::NotConnected => Err(ApiError::not_found(
-            "context not found (the CTX integration is not connected)",
-        )),
-        ctx_contexts::ReadOutcome::NotFound => Err(ApiError::not_found("context not found")),
-        ctx_contexts::ReadOutcome::Unavailable(message) => Err(ApiError::unavailable(message)),
-    }
+    Err(ApiError::not_found("context not found"))
 }
 
 async fn local_context(
@@ -3967,15 +3954,13 @@ fn hash_secret(value: &str) -> String {
 fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, ApiError> {
     let settings = connection
         .query_row(
-            "SELECT linkit_bot_id,linkit_bot_token,linkit_username,ctx_api_key,ctx_api_key_id FROM integration_settings WHERE id=1",
+            "SELECT linkit_bot_id,linkit_bot_token,linkit_username FROM integration_settings WHERE id=1",
             [],
             |row| {
                 Ok(IntegrationSettings {
                     linkit_bot_id: row.get(0)?,
                     linkit_bot_token: row.get(1)?,
                     linkit_username: row.get(2)?,
-                    ctx_api_key: row.get(3)?,
-                    ctx_api_key_id: row.get(4)?,
                 })
             },
         )
@@ -3984,8 +3969,6 @@ fn integration_settings(connection: &Connection) -> Result<IntegrationSettings, 
             linkit_bot_id: String::new(),
             linkit_bot_token: String::new(),
             linkit_username: String::new(),
-            ctx_api_key: String::new(),
-            ctx_api_key_id: String::new(),
         });
     Ok(settings)
 }
@@ -6628,16 +6611,7 @@ async fn read_context_tool_output(
     if let Some(context) = common_contexts::read(&id) {
         return serde_json::to_value(context).map_err(ApiError::internal);
     }
-    match ctx_contexts::read_context(state, user, &id).await {
-        ctx_contexts::ReadOutcome::Found(context) => {
-            serde_json::to_value(context).map_err(ApiError::internal)
-        }
-        ctx_contexts::ReadOutcome::NotConnected => Ok(json!({
-            "error": "context not found (the CTX integration is not connected)"
-        })),
-        ctx_contexts::ReadOutcome::NotFound => Ok(json!({ "error": "context not found" })),
-        ctx_contexts::ReadOutcome::Unavailable(message) => Ok(json!({ "error": message })),
-    }
+    Ok(json!({ "error": "context not found" }))
 }
 
 async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
@@ -6651,17 +6625,7 @@ async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Valu
             .iter()
             .map(|summary| context_summary_item(summary, "local")),
     );
-    let (ctx_items, notice) = ctx_contexts::top_level_summaries(state, user).await;
-    contexts.extend(
-        ctx_items
-            .iter()
-            .map(|summary| context_summary_item(summary, "ctx")),
-    );
-    let mut output = json!({ "contexts": contexts });
-    if let Some(notice) = notice {
-        output["notice"] = Value::String(notice);
-    }
-    Ok(output)
+    Ok(json!({ "contexts": contexts }))
 }
 
 fn context_summary_item(summary: &ContextSummary, source: &str) -> Value {
@@ -7829,10 +7793,6 @@ mod settings_tests;
 mod schema_tests;
 
 #[cfg(test)]
-#[path = "cloud_ctx_tests.rs"]
-mod ctx_tests;
-
-#[cfg(test)]
 #[path = "cloud_normai_tests.rs"]
 mod normai_tests;
 
@@ -7874,7 +7834,6 @@ mod tests {
                     .unwrap(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
                 custom_tool_base_urls: Arc::new(Mutex::new(HashMap::new())),
-                ctx_api_url: CTX_API_URL.to_owned(),
                 normai_api_url: NORMAI_API_URL.to_owned(),
                 worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
                 worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
