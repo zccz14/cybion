@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { needsFirstConversationCheck, onboardingCopy, contextReferencePrompt } from "../src/lib/onboarding.ts"
+import { needsFirstConversationCheck, onboardingCopy } from "../src/lib/onboarding.ts"
 
 const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const onboarding = readFileSync(new URL("../src/lib/onboarding.ts", import.meta.url), "utf8")
@@ -35,15 +35,9 @@ test("Chinese and English help are complete, context-first and honest about reta
   assert.match(onboardingCopy.en.workerOptional, /Optional for normal conversation/)
 })
 
-test("using a saved context only seeds the ordinary composer, preserving existing drafts", () => {
-  for (const language of ["en", "zh"] as const) {
-    const prompt = contextReferencePrompt(language, "Project A", "context-123")
-    assert.ok(prompt.includes("Project A"))
-    assert.ok(prompt.includes("context_id: context-123"))
-  }
-  assert.match(main, /initialInput: contextReferencePrompt\(language, draft\.name, draft\.id\)/)
-  assert.match(main, /seed\(initialInput\)/)
-  assert.match(main, /seed\(example\); inputRef\.current\?\.focus\(\)/)
+test("the Contexts page never seeds conversations, uploads files or mentions references", () => {
+  assert.doesNotMatch(main, /useReference|contextReferencePrompt/)
+  assert.doesNotMatch(onboarding, /useReference|contextReferencePrompt/)
   const contexts = main.slice(main.indexOf("function ContextsPage("), main.indexOf("function ContextEditorForm("))
   assert.doesNotMatch(contexts, /CtxIntegrationCard|integrations\/ctx/)
   assert.doesNotMatch(contexts, /type="file"|\/threads\/start/)

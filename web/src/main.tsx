@@ -66,7 +66,7 @@ import {
   UsersIcon,
 } from "lucide-react"
 import toolCatalog from "../../tools.json"
-import { onboardingCopy, needsFirstConversationCheck, contextReferencePrompt } from "@/lib/onboarding"
+import { onboardingCopy, needsFirstConversationCheck } from "@/lib/onboarding"
 import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } from "@/components/onboarding"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
@@ -113,7 +113,7 @@ import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core"
-import { collectSubtreeIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, type ContextDropZone } from "@/lib/contexts-tree"
+import { collectSubtreeIds, commonAncestorIds, contextAncestorIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, type ContextDropZone } from "@/lib/contexts-tree"
 import { contextDraft, draftsMatch, shouldAutosave, type ContextDraft } from "@/lib/context-drafts"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
@@ -451,7 +451,7 @@ const copy = {
     contexts: "Contexts",
     contextsTitle: "Contexts",
     contextLocalTitle: "Your contexts",
-    contextEditorHint: "Name, purpose, parent, and Markdown content. Edits save automatically; Threads can read saved contexts on demand.",
+    contextEditorHint: "Name, purpose, and Markdown content. Drag the tree to change nesting and order; edits save automatically and Threads can read saved contexts on demand.",
     contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
     contextSelectHint: "Select a node in the tree, or create a new context.",
     contextGlobalBadge: "Read-only",
@@ -460,8 +460,6 @@ const copy = {
     contextDescription: "Purpose — when to consult it",
     contextContent: "Location and reading instructions",
     contextContentEditHint: "Write the context in Markdown. Toggle Write, Markdown, and Preview above the editor.",
-    contextParent: "Parent context",
-    contextRoot: "Top-level context",
     newContext: "New context",
     editContext: "Edit context",
     createContext: "Create context",
@@ -787,7 +785,7 @@ const copy = {
     contexts: "上下文",
     contextsTitle: "上下文",
     contextLocalTitle: "你的上下文",
-    contextEditorHint: "名称、用途、父级与 Markdown 内容。修改自动保存；对话可按需读取。",
+    contextEditorHint: "名称、用途与 Markdown 内容。拖动左栏调整层级与顺序；修改自动保存，对话可按需读取。",
     contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
     contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
     contextGlobalBadge: "只读",
@@ -796,8 +794,6 @@ const copy = {
     contextDescription: "用途 — 何时参考",
     contextContent: "位置与获取说明",
     contextContentEditHint: "用 Markdown 编写上下文。可在编辑器上方切换编辑、源码和预览模式。",
-    contextParent: "父级上下文",
-    contextRoot: "顶层上下文",
     newContext: "新建上下文",
     editContext: "编辑上下文",
     createContext: "创建上下文",
@@ -2056,8 +2052,6 @@ function historyRecordText(record: HistoryRecord) {
   return historyPayloadText(record.payload)
 }
 
-const ROOT_CONTEXT_VALUE = "__root__"
-
 type CommonContextNode = {
   id: string
   name: string
@@ -2141,8 +2135,9 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const client = useQueryClient()
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts") })
   const common = useQuery({ queryKey: ["common-contexts"], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, "/api/common-contexts") })
+  const [searchParams, setSearchParams] = useSearchParams()
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get("context"))
   const [draft, setDraft] = useState<ContextDraft | null>(null)
   const [saved, setSaved] = useState<ContextDraft | null>(null)
   const [pending, setPending] = useState<ReadonlySet<string | null>>(new Set<string | null>())
@@ -2172,11 +2167,49 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   }
   const loadDraft = (context: Context) => draftsRef.current.get(context.id) ?? contextDraft(context)
 
+  // The selected context id is URL state so a refresh restores the same pane;
+  // the history entry is replaced so tree clicks never pile up in the back stack.
+  const rememberSelection = (id: string | null) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      if (id === null) next.delete("context")
+      else next.set("context", id)
+      return next
+    }, { replace: true })
+  }
+
+  // Restoring a selection expands the common ancestors that hide it.
+  const commonIds = useMemo(() => new Set(commonNodes.map((node) => node.id)), [commonNodes])
+  const localIds = useMemo(() => new Set((contexts.data ?? []).map((context) => context.id)), [contexts.data])
+  const commonExpandedFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!selectedId || !commonRoot || commonExpandedFor.current === selectedId) return
+    if (localIds.has(selectedId) || !commonIds.has(selectedId)) return
+    commonExpandedFor.current = selectedId
+    const ancestors = commonAncestorIds(commonRoot, selectedId)
+    if (ancestors.length === 0) return
+    setExpanded((current) => {
+      const next = new Set(current)
+      for (const id of ancestors) next.add(id)
+      return next
+    })
+  }, [selectedId, commonRoot, commonIds, localIds])
+
   useEffect(() => {
     const ready = contexts.data !== undefined &&
       (commonRoot !== null || common.error !== null)
     if (!ready || initialized) return
     setInitialized(true)
+    // A context id carried in the URL wins over the default first selection.
+    if (selectedId !== null) {
+      const restored = (contexts.data ?? []).find((context) => context.id === selectedId)
+      if (restored) {
+        rememberDraft(loadDraft(restored))
+        rememberSaved(contextDraft(restored))
+        return
+      }
+      if (commonNodes.some((node) => node.id === selectedId)) return
+    }
     const firstLocal = contexts.data?.[0]
     if (firstLocal) {
       setSelectedId(firstLocal.id)
@@ -2210,6 +2243,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
         rememberSaved({ ...sent, id: value.id })
       }
       setSelectedId(value.id)
+      rememberSelection(value.id)
       return
     }
     if (current && current.id === sent.id) rememberSaved(sent)
@@ -2257,6 +2291,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     onSuccess: (_value, id) => {
       draftsRef.current.delete(id)
       setSelectedId((current) => current === id ? null : current)
+      rememberSelection(null)
       if (draftRef.current?.id === id) { rememberDraft(null); rememberSaved(null) }
       setSaveFailure((failure) => failure && failure.id === id ? null : failure)
       void client.invalidateQueries({ queryKey: ["contexts"] })
@@ -2290,6 +2325,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const selectLocal = (context: Context) => {
     saveIfNeeded()
     setSelectedId(context.id)
+    rememberSelection(context.id)
     rememberDraft(loadDraft(context))
     rememberSaved(contextDraft(context))
     remove.reset()
@@ -2297,16 +2333,18 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const selectNode = (id: string) => {
     saveIfNeeded()
     setSelectedId(id)
+    rememberSelection(id)
     rememberDraft(null)
     rememberSaved(null)
     remove.reset()
   }
-  const createNew = (parentId: string | null = null) => {
+  const createNew = () => {
     saveIfNeeded()
     createTargetRef.current = false
     setSaveFailure((failure) => failure && failure.id === null ? null : failure)
     setSelectedId(null)
-    rememberDraft({ ...contextDraft(), parent_id: parentId })
+    rememberSelection(null)
+    rememberDraft(contextDraft())
     rememberSaved(null)
     remove.reset()
   }
@@ -2338,13 +2376,6 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const localSelected = draft ? null : (contexts.data ?? []).find((context) => context.id === selectedId) ?? null
   const commonSelected = draft || localSelected ? null : commonNodes.find((node) => node.id === selectedId) ?? null
 
-  const parentOptions = useMemo(() => {
-    const options: { id: string; name: string }[] = [...(contexts.data ?? []).map((context) => ({ id: context.id, name: context.name }))]
-    for (const node of commonNodes) if (node.id !== commonRoot?.id) options.push({ id: node.id, name: node.name })
-    options.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
-    return options
-  }, [contexts.data, commonNodes, commonRoot?.id])
-
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     <aside className="border-b bg-sidebar/40 p-3 lg:w-80 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center gap-2 pb-3">
@@ -2358,14 +2389,14 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
           {commonRoot && <section>
             <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("commonContextTitle")}</p>
             <ul role="tree" aria-label={t("commonContextTitle")} className="space-y-1">
-              <CommonBranch node={commonRoot} selectedId={draft ? null : selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />
+              <CommonBranch node={commonRoot} selectedId={selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />
             </ul>
           </section>}
           <section>
             <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextLocalTitle")}</p>
             {contexts.data.length === 0
               ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("contextEmpty")}</p>
-              : <ContextTree contexts={contexts.data} selectedId={draft ? null : selectedId} onSelect={selectLocal} onMove={(input) => move.mutate(input)} movePending={move.isPending} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
+              : <ContextTree contexts={contexts.data} selectedId={selectedId} onSelect={selectLocal} onMove={(input) => move.mutate(input)} movePending={move.isPending} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
             {move.error && <RequestError error={move.error} onRetry={() => { if (move.variables) move.mutate(move.variables) }} />}
           </section>
         </>}
@@ -2376,12 +2407,10 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
         ? <ContextEditorForm
             draft={draft}
             editDraft={editDraft}
-            parentOptions={parentOptions}
             remove={remove}
             submit={submitDraft}
             flush={saveIfNeeded}
             deleteSelected={deleteSelected}
-            hasSelection={selectedId !== null && draft.id === selectedId}
             saving={pending.has(draft.id)}
             dirty={saved !== null && !draftsMatch(draft, saved)}
             saveError={saveFailure && saveFailure.id === draft.id ? saveFailure.error : null}
@@ -2411,10 +2440,33 @@ function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, labe
   expandLabel: string
 }) {
   const index = useMemo(() => contextTreeIndex(contexts), [contexts])
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [activeId, setActiveId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<{ id: string; zone: ContextDropZone } | null>(null)
   const invalidTargets = useMemo(() => new Set(activeId ? [activeId, ...collectSubtreeIds(index, activeId)] : []), [index, activeId])
   const activeContext = contexts.find((context) => context.id === activeId) ?? null
+  const localIds = useMemo(() => new Set(contexts.map((context) => context.id)), [contexts])
+  const expandedFor = useRef<string | null>(null)
+  // A restored selection expands the parent chain that hides its row.
+  useEffect(() => {
+    if (!selectedId || expandedFor.current === selectedId || !localIds.has(selectedId)) return
+    expandedFor.current = selectedId
+    const ancestors = contextAncestorIds(contexts, selectedId)
+    if (ancestors.length === 0) return
+    setExpanded((current) => {
+      const next = new Set(current)
+      for (const id of ancestors) next.add(id)
+      return next
+    })
+  }, [selectedId, contexts, localIds])
+  const toggleExpanded = (id: string) => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 6 } }),
@@ -2463,7 +2515,7 @@ function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, labe
     onDragCancel={resetDrag}
   >
     <ul role="tree" aria-label={label} className="space-y-1">
-      {(index.get(null) ?? []).map((context) => <ContextTreeNode key={context.id} context={context} children={index} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={movePending} activeId={activeId} dropTarget={dropTarget} />)}
+      {(index.get(null) ?? []).map((context) => <ContextTreeNode key={context.id} context={context} children={index} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={movePending} activeId={activeId} dropTarget={dropTarget} expanded={expanded} onToggleExpanded={toggleExpanded} />)}
     </ul>
     <DragOverlay dropAnimation={null}>
       {activeContext ? <div className="flex w-64 items-center gap-2 rounded-md border bg-background px-3 py-1.5 shadow-lg">
@@ -2473,7 +2525,7 @@ function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, labe
   </DndContext>
 }
 
-function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabel, expandLabel, disabled, activeId, dropTarget }: {
+function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabel, expandLabel, disabled, activeId, dropTarget, expanded, onToggleExpanded }: {
   context: Context
   children: Map<string | null, Context[]>
   selectedId: string | null
@@ -2483,23 +2535,32 @@ function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabe
   disabled: boolean
   activeId: string | null
   dropTarget: { id: string; zone: ContextDropZone } | null
+  expanded: ReadonlySet<string>
+  onToggleExpanded: (id: string) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
   const nested = children.get(context.id) ?? []
+  const isExpanded = expanded.has(context.id)
   const isDragging = activeId === context.id
   const dropZone = dropTarget && dropTarget.id === context.id ? dropTarget.zone : null
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  // A restored or fresh selection scrolls its row into the visible tree area.
+  useEffect(() => {
+    if (selectedId !== context.id) return
+    rowRef.current?.scrollIntoView({ block: "nearest" })
+  }, [selectedId, context.id])
   const { listeners, setNodeRef: setDraggableNode } = useDraggable({ id: context.id, disabled })
   const { setNodeRef: setDroppableNode } = useDroppable({ id: context.id, disabled })
   const setNodeRefs = (node: HTMLDivElement | null) => {
     setDraggableNode(node)
     setDroppableNode(node)
+    rowRef.current = node
   }
-  return <li role="treeitem" aria-expanded={nested.length > 0 ? expanded : undefined}>
+  return <li role="treeitem" aria-expanded={nested.length > 0 ? isExpanded : undefined}>
     <div ref={setNodeRefs} className="relative" data-context-id={context.id}>
       {dropZone === "before" && <div aria-hidden="true" className="absolute inset-x-2 top-0 z-10 h-0.5 rounded-full bg-primary" />}
       <div {...listeners} className={`flex cursor-grab items-center gap-1 rounded-md select-none ${isDragging ? "opacity-40" : ""} ${dropZone === "inside" ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}>
-        <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={expanded ? collapseLabel : expandLabel} disabled={nested.length === 0} onClick={() => setExpanded((value) => !value)}>
-          {nested.length > 0 && <ChevronDownIcon className={expanded ? "" : "-rotate-90"} />}
+        <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} disabled={nested.length === 0} onClick={() => onToggleExpanded(context.id)}>
+          {nested.length > 0 && <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />}
         </Button>
         <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === context.id ? "bg-accent" : ""}`} onClick={() => onSelect(context)}>
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -2510,15 +2571,21 @@ function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabe
       </div>
       {dropZone === "after" && <div aria-hidden="true" className="absolute inset-x-2 bottom-0 z-10 h-0.5 rounded-full bg-primary" />}
     </div>
-    {expanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={disabled} activeId={activeId} dropTarget={dropTarget} />)}</ul>}
+    {isExpanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={disabled} activeId={activeId} dropTarget={dropTarget} expanded={expanded} onToggleExpanded={onToggleExpanded} />)}</ul>}
   </li>
 }
 
 function CommonBranch({ node, selectedId, onSelect, expanded, onToggle, collapseLabel, expandLabel }: { node: CommonContextNode; selectedId: string | null; onSelect: (id: string) => void; expanded: ReadonlySet<string>; onToggle: (id: string, next: boolean) => void; collapseLabel: string; expandLabel: string }) {
   const isExpanded = expanded.has(node.id)
   const hasChildren = node.children.length > 0
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  // A restored selection scrolls its row into the visible tree area.
+  useEffect(() => {
+    if (selectedId !== node.id) return
+    rowRef.current?.scrollIntoView({ block: "nearest" })
+  }, [selectedId, node.id])
   return <li role="treeitem" aria-expanded={hasChildren ? isExpanded : undefined}>
-    <div className="flex items-center gap-1">
+    <div ref={rowRef} className="flex items-center gap-1">
       <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} disabled={!hasChildren} onClick={() => onToggle(node.id, !isExpanded)}>
         {hasChildren && <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />}
       </Button>
@@ -2559,26 +2626,26 @@ function ContextReadOnlyPane({ title, description, badge, hint, content, languag
   </ContextPane>
 }
 
-function ContextEditorForm({ draft, editDraft, parentOptions, remove, submit, flush, deleteSelected, hasSelection, saving, dirty, saveError }: {
+function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSelected, saving, dirty, saveError }: {
   draft: ContextDraft
   editDraft: (update: (current: ContextDraft) => ContextDraft) => void
-  parentOptions: { id: string; name: string }[]
   remove: UseMutationResult<unknown, Error, string>
   submit: () => void
   flush: () => void
   deleteSelected: () => void
-  hasSelection: boolean
   saving: boolean
   dirty: boolean
   saveError: Error | null
 }) {
   const { t, language } = useUi()
-  const help = onboardingCopy[language]
   const autosaveStatus = saving ? t("contextAutosaving") : saveError ? t("contextAutosaveFailed") : dirty ? t("contextAutosavePending") : t("contextAutosaved")
   return <ContextPane>
-    <div className="min-w-0">
-      <h2 className="font-heading text-lg font-semibold">{draft.id ? t("editContext") : t("newContext")}</h2>
-      <p className="mt-1 text-sm text-muted-foreground">{t("contextEditorHint")}</p>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="min-w-0">
+        <h2 className="font-heading text-lg font-semibold">{draft.id ? t("editContext") : t("newContext")}</h2>
+        <p className="mt-1 text-sm text-muted-foreground">{t("contextEditorHint")}</p>
+      </div>
+      {draft.id && <Button type="button" size="sm" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
     </div>
     <form
       className="flex flex-col gap-5"
@@ -2604,16 +2671,6 @@ function ContextEditorForm({ draft, editDraft, parentOptions, remove, submit, fl
           />
           <FieldDescription id="context-content-hint">{t("contextContentEditHint")}</FieldDescription>
         </Field>
-        <Field>
-          <FieldLabel htmlFor="context-parent">{t("contextParent")}</FieldLabel>
-          <Select value={draft.parent_id ?? ROOT_CONTEXT_VALUE} onValueChange={(value) => editDraft((current) => ({ ...current, parent_id: value === ROOT_CONTEXT_VALUE ? null : value }))}>
-            <SelectTrigger id="context-parent"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value={ROOT_CONTEXT_VALUE}>{t("contextRoot")}</SelectItem>
-              {parentOptions.filter((option) => option.id !== draft.id).map((option) => <SelectItem key={option.id} value={option.id}>{option.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </Field>
       </FieldGroup>
       {saveError && <RequestError error={saveError} onRetry={submit} />}
       {remove.error && <RequestError error={remove.error} />}
@@ -2621,10 +2678,8 @@ function ContextEditorForm({ draft, editDraft, parentOptions, remove, submit, fl
         {draft.id
           ? <span role="status" className={`flex items-center gap-2 text-sm ${saveError && !saving ? "text-destructive" : "text-muted-foreground"}`}>{saving && <Spinner />}{autosaveStatus}</span>
           : <Button type="submit" disabled={!draft.name.trim() || saving}>{saving ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("createContext")}</Button>}
-        {draft.id && <Button type="button" variant="destructive" disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("deleteContext")}</Button>}
       </div>
     </form>
-    {hasSelection && draft.id && <div className="space-y-2 border-t pt-4"><Button asChild variant="outline"><Link to="/threads/new" state={{ initialInput: contextReferencePrompt(language, draft.name, draft.id) }}>{help.useReference}</Link></Button><p className="text-xs text-muted-foreground">{help.useReferenceHint}</p><p className="break-all font-mono text-xs text-muted-foreground">{draft.id}</p></div>}
   </ContextPane>
 }
 

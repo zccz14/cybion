@@ -1,5 +1,28 @@
-import { expect, test } from "@playwright/test"
+import { expect, test, type Locator, type Page } from "@playwright/test"
 import { stubWorkspace } from "./workspace-fixture"
+
+const createContext = async (page: Page, name: string) => {
+  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
+  await page.getByLabel("上下文名称", { exact: true }).fill(name)
+  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+  await expect(page.getByText(name, { exact: true }).first()).toBeVisible()
+}
+
+const dragContextRow = async (page: Page, tree: Locator, sourceId: string, targetId: string, zone: "before" | "inside") => {
+  const sourceBox = await tree.locator(`[data-context-id="${sourceId}"]`).boundingBox()
+  const targetBox = await tree.locator(`[data-context-id="${targetId}"]`).boundingBox()
+  expect(sourceBox && targetBox).toBeTruthy()
+  const startX = sourceBox!.x + sourceBox!.width / 2
+  const startY = sourceBox!.y + sourceBox!.height / 2
+  await page.mouse.move(startX, startY)
+  await page.mouse.down()
+  await page.mouse.move(startX, startY + 12, { steps: 4 })
+  const targetX = targetBox!.x + targetBox!.width / 2
+  const targetY = zone === "before" ? targetBox!.y + targetBox!.height * 0.15 : targetBox!.y + targetBox!.height * 0.5
+  await page.mouse.move(targetX, targetY, { steps: 10 })
+  await page.mouse.move(targetX, targetY, { steps: 2 })
+  await page.mouse.up()
+}
 
 test("the Contexts page keeps an edge-to-edge tree beside a full-width reading pane", async ({ page }) => {
   const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
@@ -45,6 +68,11 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   expect(await page.locator(".markdown-editor__toolbar").count()).toBe(0)
   await page.screenshot({ path: "test-results/layout-common.png" })
 
+  // the selection is URL state: a refresh restores the same read-only pane
+  await expect(page).toHaveURL(/context=common-root/)
+  await page.reload()
+  await expect(page.getByText("只读", { exact: true }).first()).toBeVisible()
+
   // create a local context and edit Markdown through the editor
   await page.getByRole("button", { name: "新建上下文", exact: true }).click()
   await page.getByLabel("上下文名称", { exact: true }).fill("项目手册")
@@ -82,21 +110,19 @@ test("nested context branches start folded and open manually", async ({ page }) 
   await page.setViewportSize({ width: 1440, height: 960 })
   await page.goto("/#/contexts")
 
-  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
-  await page.getByLabel("上下文名称", { exact: true }).fill("父上下文")
-  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
-  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
-  await page.getByLabel("上下文名称", { exact: true }).fill("子上下文")
-  await page.locator("#context-parent").click()
-  await page.getByRole("option", { name: "父上下文" }).click()
-  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
+  await createContext(page, "父上下文")
+  await createContext(page, "子上下文")
+
+  // parenting happens on the tree itself: drop the sibling inside its parent
+  const tree = page.getByRole("tree", { name: "你的上下文" })
+  await dragContextRow(page, tree, "saved-reference-2", "saved-reference", "inside")
+  await expect.poll(() => fixture.references.find((reference) => reference.id === "saved-reference-2")!.parent_id).toBe("saved-reference")
 
   // the nested node stays folded until the branch is opened by hand
-  const tree = page.getByRole("tree", { name: "你的上下文" })
   await expect(tree.getByRole("button", { name: "子上下文", exact: true })).toHaveCount(0)
-  await tree.getByRole("button", { name: "展开上下文" }).click()
+  await tree.locator('[data-context-id="saved-reference"]').getByRole("button", { name: "展开上下文" }).click()
   await expect(tree.getByRole("button", { name: "子上下文", exact: true })).toBeVisible()
-  await expect(tree.getByRole("button", { name: "收起上下文" })).toBeVisible()
+  await expect(tree.locator('[data-context-id="saved-reference"]').getByRole("button", { name: "收起上下文" })).toBeVisible()
 
   expect(fixture.references).toHaveLength(2)
   expect(fixture.references[1].parent_id).toBe("saved-reference")
@@ -108,49 +134,27 @@ test("context branches drag to reorder and nest with sort keys", async ({ page }
   await page.setViewportSize({ width: 1440, height: 960 })
   await page.goto("/#/contexts")
 
-  const create = async (name: string) => {
-    await page.getByRole("button", { name: "新建上下文", exact: true }).click()
-    await page.getByLabel("上下文名称", { exact: true }).fill(name)
-    await page.getByRole("button", { name: "创建上下文", exact: true }).click()
-    await expect(page.getByText(name, { exact: true }).first()).toBeVisible()
-  }
-  await create("甲")
-  await create("乙")
-  await create("丙")
+  await createContext(page, "甲")
+  await createContext(page, "乙")
+  await createContext(page, "丙")
 
   const tree = page.getByRole("tree", { name: "你的上下文" })
   const rowOrder = () => tree.locator("[data-context-id]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-context-id")))
   expect(await rowOrder()).toEqual(["saved-reference", "saved-reference-2", "saved-reference-3"])
 
-  const drag = async (sourceId: string, targetId: string, zone: "before" | "inside") => {
-    const sourceBox = await tree.locator(`[data-context-id="${sourceId}"]`).boundingBox()
-    const targetBox = await tree.locator(`[data-context-id="${targetId}"]`).boundingBox()
-    expect(sourceBox && targetBox).toBeTruthy()
-    const startX = sourceBox!.x + sourceBox!.width / 2
-    const startY = sourceBox!.y + sourceBox!.height / 2
-    await page.mouse.move(startX, startY)
-    await page.mouse.down()
-    await page.mouse.move(startX, startY + 12, { steps: 4 })
-    const targetX = targetBox!.x + targetBox!.width / 2
-    const targetY = zone === "before" ? targetBox!.y + targetBox!.height * 0.15 : targetBox!.y + targetBox!.height * 0.5
-    await page.mouse.move(targetX, targetY, { steps: 10 })
-    await page.mouse.move(targetX, targetY, { steps: 2 })
-    await page.mouse.up()
-  }
-
   // 丙 drops above 甲: the move write anchors on the front of the root group
-  await drag("saved-reference-3", "saved-reference", "before")
+  await dragContextRow(page, tree, "saved-reference-3", "saved-reference", "before")
   await expect.poll(rowOrder).toEqual(["saved-reference-3", "saved-reference", "saved-reference-2"])
   expect(fixture.writes).toContainEqual({ path: "/api/contexts/saved-reference-3/move", body: { parent_id: null, after_id: null } })
 
   // dropping a node on its current position stays local and writes nothing
-  await drag("saved-reference-3", "saved-reference", "before")
+  await dragContextRow(page, tree, "saved-reference-3", "saved-reference", "before")
   await page.waitForTimeout(300)
   expect(fixture.writes.filter((write) => write.path.endsWith("/move"))).toHaveLength(1)
   expect(await rowOrder()).toEqual(["saved-reference-3", "saved-reference", "saved-reference-2"])
 
   // 乙 drops inside 甲 and nests under it
-  await drag("saved-reference-2", "saved-reference", "inside")
+  await dragContextRow(page, tree, "saved-reference-2", "saved-reference", "inside")
   await expect.poll(rowOrder).toEqual(["saved-reference-3", "saved-reference"])
   expect(fixture.writes).toContainEqual({ path: "/api/contexts/saved-reference-2/move", body: { parent_id: "saved-reference", after_id: null } })
   expect(fixture.references.find((reference) => reference.id === "saved-reference-2")!.parent_id).toBe("saved-reference")
@@ -256,5 +260,34 @@ test("pending edits save when the page is hidden, covering refresh and close", a
   // the short poll timeout proves the hidden-page flush, not the debounce, saved
   await expect.poll(() => fixture.references[0]?.name, { timeout: 3500 }).toBe("项目手册·改")
 
+  expect(fixture.unexpected).toEqual([])
+})
+
+test("the selected context lives in the URL and reload restores it with its ancestry", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light", contexts: [
+    ...Array.from({ length: 12 }, (_, index) => ({ id: `root-${index}`, name: `条目 ${String(index).padStart(2, "0")}` })),
+    { id: "parent-context", name: "父上下文" },
+    { id: "child-context", name: "子上下文", parent_id: "parent-context" },
+  ] })
+  await page.setViewportSize({ width: 1440, height: 640 })
+  await page.goto("/#/contexts")
+  const tree = page.getByRole("tree", { name: "你的上下文" })
+
+  // the nested child is folded away until its parent opens
+  await expect(tree.locator('[data-context-id="child-context"]')).toHaveCount(0)
+  await tree.locator('[data-context-id="parent-context"]').getByRole("button", { name: "展开上下文" }).click()
+  await tree.getByRole("button", { name: /子上下文/ }).click()
+  await expect(page).toHaveURL(/context=child-context/)
+  await expect(page.locator("#context-name")).toHaveValue("子上下文")
+
+  // reload: the editor, the expanded ancestor and the scrolled-into-view row all return
+  await page.reload()
+  await expect(page.locator("#context-name")).toHaveValue("子上下文")
+  const childRow = tree.locator('[data-context-id="child-context"]')
+  await expect(childRow).toBeVisible()
+  await expect(childRow).toBeInViewport()
+  await expect(tree.locator('[data-context-id="parent-context"]').getByRole("button", { name: "收起上下文" })).toBeVisible()
+  await expect(page).toHaveURL(/context=child-context/)
+  await page.screenshot({ path: "test-results/context-url-restore.png" })
   expect(fixture.unexpected).toEqual([])
 })

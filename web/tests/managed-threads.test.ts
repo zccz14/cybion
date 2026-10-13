@@ -42,7 +42,20 @@ test("contexts are managed through a progressive disclosure tree", () => {
   assert.doesNotMatch(source, /min-w-0 truncate font-medium/)
   assert.match(source, /useState<ReadonlySet<string>>\(new Set\(\)\)/)
   assert.doesNotMatch(source, /ctxSectionExpansionId/)
-  assert.match(source, /const \[expanded, setExpanded\] = useState\(false\)\n  const nested = children\.get\(context\.id\)/)
+  assert.match(source, /const nested = children\.get\(context\.id\) \?\? \[\]/)
+  assert.match(source, /const isExpanded = expanded\.has\(context\.id\)/)
+  // the selected context id lives in the URL: refresh restores the pane, and
+  // the tree expands the ancestor chain and scrolls the row into view
+  assert.match(source, /searchParams\.get\("context"\)/)
+  assert.match(source, /contextAncestorIds\(contexts, selectedId\)/)
+  assert.match(source, /commonAncestorIds\(commonRoot, selectedId\)/)
+  assert.match(source, /scrollIntoView\(\{ block: "nearest" \}\)/)
+  // the editor keeps parenting on the tree and moves deletion up next to the
+  // heading; the old parent selector and the use-in-conversation block are gone
+  const form = source.slice(source.indexOf("function ContextEditorForm("), source.indexOf("function InsightsPage("))
+  assert.doesNotMatch(form, /contextParent|context-parent/)
+  assert.doesNotMatch(form, /useReference|contextReferencePrompt/)
+  assert.match(form, /deleteSelected/)
   // the local branch drags with the CTX interaction: dnd-kit sensors, three
   // drop zones, and a fractional-key move through /api/contexts/{id}/move
   assert.match(source, /from "@dnd-kit\/core"/)

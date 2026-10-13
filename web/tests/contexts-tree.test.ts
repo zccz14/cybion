@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { collectSubtreeIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree } from "../src/lib/contexts-tree.ts"
+import { collectSubtreeIds, commonAncestorIds, contextAncestorIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree } from "../src/lib/contexts-tree.ts"
 
 const contexts = [
   { id: "b", name: "Beta", parent_id: null, sort_key: "a2" },
@@ -58,6 +58,29 @@ test("drop zones resolve into the parent and anchor a move writes", () => {
   assert.deepEqual(contextPlacementFor(index, beta, contexts[4], "before"), { parentId: null, afterId: "a" })
   // dropping a node after itself is rejected
   assert.equal(contextPlacementFor(index, beta, beta, "after"), null)
+})
+
+test("ancestor chains expand a restored selection from the top down", () => {
+  assert.deepEqual(contextAncestorIds(contexts, "nested-child"), ["a", "a-child"])
+  assert.deepEqual(contextAncestorIds(contexts, "a-child"), ["a"])
+  assert.deepEqual(contextAncestorIds(contexts, "a"), [])
+  // stray parents end the chain just like the root grouping does
+  assert.deepEqual(contextAncestorIds(contexts, "stray"), [])
+})
+
+test("common ancestor chains stop at the node itself", () => {
+  const tree = {
+    id: "root",
+    name: "Root",
+    children: [
+      { id: "one", name: "One", children: [{ id: "one-one", name: "One One", children: [] }] },
+      { id: "two", name: "Two", children: [] },
+    ],
+  }
+  assert.deepEqual(commonAncestorIds(tree, "one-one"), ["root", "one"])
+  assert.deepEqual(commonAncestorIds(tree, "two"), ["root"])
+  assert.deepEqual(commonAncestorIds(tree, "root"), [])
+  assert.deepEqual(commonAncestorIds(tree, "missing"), [])
 })
 
 test("flattening a recursive tree yields depth-first order", () => {

@@ -25,7 +25,7 @@ const en = {
   examplesHint: "Examples only fill your draft. Nothing is sent until you choose to send it.",
   planExample: "Turn an idea into a plan", planPrompt: "Help me turn the following idea into an actionable plan:\n\n",
   rewriteExample: "Improve a piece of writing", rewritePrompt: "Rewrite the following text to make it clearer:\n\n",
-  useReference: "Use in a conversation", useReferenceHint: "Uses the saved context and fills an empty draft; it never overwrites an existing draft or sends automatically.",
+
   chatQuestion: "Where is the chat box?", chatAnswer: "Open My conversations and choose New conversation. A confirmed empty workspace opens the composer directly, including on a phone.",
   libraryQuestion: "Where is the library?", libraryAnswer: "Cybion does not host a separate original-material library. Your material stays on devices or network sources. Contexts is where you describe your material sources.",
   budgetQuestion: "Is Context budget the same as Contexts?", budgetAnswer: "No. Contexts record where your material lives and how to read it. Context budget controls how much conversation information the model replays before automatic compaction; it is not a storage quota for your contexts.",
@@ -53,7 +53,7 @@ const zh: Record<keyof typeof en, string> = {
   examplesHint: "示例只填入草稿，由你确认发送，不会自动发起模型请求。",
   planExample: "把想法整理成计划", planPrompt: "帮我把下面的想法整理成可执行的计划：\n\n",
   rewriteExample: "让表达更清楚", rewritePrompt: "帮我改写下面这段文字，让表达更清楚：\n\n",
-  useReference: "在对话中使用", useReferenceHint: "使用已保存的上下文填入空白草稿；不会覆盖已有草稿，也不会自动发送。",
+
   chatQuestion: "对话框在哪里？", chatAnswer: "打开「我的对话」，点击「新建对话」。确认没有任何对话的工作区会直接显示输入框，手机也一样。",
   libraryQuestion: "资料库在哪里？", libraryAnswer: "Cybion 不托管独立的原始资料库。资料保存在设备或网络来源中；「上下文」用于记录资料在哪里。",
   budgetQuestion: "上下文预算和这里的上下文是一回事吗？", budgetAnswer: "不是。这里的上下文记录资料在哪里、怎样获取；上下文预算限制模型重放的对话信息量，超过后可自动压缩，并不是上下文的存储空间配额。",
@@ -64,8 +64,3 @@ const zh: Record<keyof typeof en, string> = {
 }
 export const onboardingCopy = { en, zh }
 export type OnboardingLanguage = keyof typeof onboardingCopy
-export function contextReferencePrompt(language: OnboardingLanguage, name: string, id: string) {
-  return language === "zh"
-    ? `请先列出我的上下文，找到「${name}」（context_id: ${id}）并阅读它的内容。根据任务需要访问其中的资料来源，不要一次性加载全部资料。\n\n我的任务：`
-    : `List my Contexts, find “${name}” (context_id: ${id}), and read its content. Access the source material as this task requires rather than loading everything at once.\n\nMy task: `
-}

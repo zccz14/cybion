@@ -9,6 +9,7 @@ import { emptyThreadUsage } from "../src/lib/thread-usage"
 export async function stubWorkspace(page: Page, options: {
   language?: "zh" | "en"; theme?: "light" | "dark"; activeTotal?: number; webTotal?: number; archivedTotal?: number;
   countFails?: boolean; connectionFails?: boolean; startFails?: boolean; fallbackReady?: boolean;
+  contexts?: { id: string; name: string; parent_id?: string | null }[];
 } = {}) {
   const language = options.language ?? "zh", theme = options.theme ?? "light"
   const { publicKey, privateKey } = generateKeyPairSync("ed25519")
@@ -42,6 +43,10 @@ export async function stubWorkspace(page: Page, options: {
     }
     for (const group of groups.values()) group.forEach((reference, index) => { reference.sort_key = String(index).padStart(2, "0") })
   }
+  for (const context of options.contexts ?? []) {
+    references.push({ id: context.id, name: context.name, description: `Metadata for ${context.name}`, content: `${context.name} content`, parent_id: context.parent_id ?? null, sort_key: "" })
+  }
+  renumberContextSortKeys()
   await page.route("**/*", async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname
     const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS", "Access-Control-Allow-Headers": "authorization,content-type" }

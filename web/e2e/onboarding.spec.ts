@@ -68,12 +68,13 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     expect(fixture.references).toHaveLength(0)
     await page.getByLabel(language === "zh" ? "上下文名称" : "Context name", { exact: true }).fill("My project")
     await page.getByRole("button", { name: language === "zh" ? "创建上下文" : "Create context", exact: true }).click()
-    await expect(page.getByRole("link", { name: language === "zh" ? "在对话中使用" : "Use in a conversation" })).toBeVisible()
+    // deletion now sits next to the editor heading; the old
+    // use-in-conversation block and its seeded draft are gone
+    await expect(page.getByRole("button", { name: language === "zh" ? "删除上下文" : "Delete context", exact: true })).toBeVisible()
+    await expect(page.getByRole("link", { name: /在对话中使用|Use in a conversation/ })).toHaveCount(0)
     expect(fixture.references).toHaveLength(1)
     expect(fixture.references[0].content).toContain("# My project")
     await page.screenshot({ path: `test-results/onboarding-context-${language}-${theme}.png`, fullPage: true })
-    await page.getByRole("link", { name: language === "zh" ? "在对话中使用" : "Use in a conversation" }).click()
-    await expect(page.locator("#new-thread-input")).toHaveValue(/context_id: saved-reference/)
     expect(fixture.writes.filter((entry) => entry.path === "/api/threads/start")).toHaveLength(0)
     await page.goto("/#/help")
     await expect(page.getByRole("heading", { name: language === "zh" ? "使用帮助" : "Using Cybion", exact: true })).toBeVisible()
@@ -87,18 +88,6 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     expect(fixture.unexpected).toEqual([])
   })
 }
-
-test("using a context preserves an existing conversation draft", async ({ page }) => {
-  await stubWorkspace(page)
-  await page.goto("/#/threads/new")
-  await page.locator("#new-thread-input").fill("Do not replace my unsent draft")
-  await page.goto("/#/contexts")
-  await page.getByRole("button", { name: "新建上下文", exact: true }).click()
-  await page.getByLabel("上下文名称", { exact: true }).fill("网络资料")
-  await page.getByRole("button", { name: "创建上下文", exact: true }).click()
-  await page.getByRole("link", { name: "在对话中使用", exact: true }).click()
-  await expect(page.locator("#new-thread-input")).toHaveValue("Do not replace my unsent draft")
-})
 
 test("model initialization failure exposes repair without blocking a configured fallback or static help", async ({ page }) => {
   const fixture = await stubWorkspace(page, { connectionFails: true, fallbackReady: true })

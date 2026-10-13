@@ -94,6 +94,39 @@ export function contextPlacementFor<T extends LocalLikeContext>(
   return { parentId, afterId: previous ? previous.id : null }
 }
 
+/**
+ * Ancestor ids of a local context inside the given list, top-most first, so a
+ * restored selection can expand its whole parent chain. Ids outside the local
+ * list (stray parents) end the chain, matching how the tree renders roots.
+ */
+export function contextAncestorIds<T extends LocalLikeContext>(contexts: T[], id: string): string[] {
+  const byId = new Map(contexts.map((context) => [context.id, context]))
+  const ancestors: string[] = []
+  const seen = new Set<string>([id])
+  let current = byId.get(id)
+  while (current && current.parent_id !== null && !seen.has(current.parent_id)) {
+    const parent = byId.get(current.parent_id)
+    if (!parent) break
+    seen.add(parent.id)
+    ancestors.unshift(parent.id)
+    current = parent
+  }
+  return ancestors
+}
+
+/** Ancestor ids of a common-context node, top-most first. */
+export function commonAncestorIds(root: CommonLikeNode, id: string): string[] {
+  const visit = (node: CommonLikeNode, trail: string[]): string[] | null => {
+    if (node.id === id) return trail
+    for (const child of node.children) {
+      const found = visit(child, [...trail, node.id])
+      if (found) return found
+    }
+    return null
+  }
+  return visit(root, []) ?? []
+}
+
 /** Flatten a recursive tree into depth-first order. */
 export function flattenTree<T extends CommonLikeNode>(root: T): T[] {
   const flattened: T[] = []
