@@ -40,10 +40,11 @@ messages, reasoning summaries, tool results, checkpoints, and runtime activity
 directly from `kind` and `payload`. Every built-in tool call renders through
 its own card: `bash` commands, `browser_control` actions, `computer_use`
 actions, `normai_web_search` queries, `normai_image_generation` prompts, and the
-six controller-side context and machine tools. A `read_context` card resolves
-the context title and its Use When description through the same caches the
-Contexts page fills and links to that context; an id that does not resolve
-keeps the monospace id. A call whose arguments are incomplete or whose action
+seven controller-side context and machine tools. A `read_context` card
+resolves the context title and its Use When description through the same caches
+the Contexts page fills and links to that context, and a `write_context` card
+resolves the same way and notes a move into the trash; an id that does not
+resolve keeps the monospace id. A call whose arguments are incomplete or whose action
 is unknown keeps the generic protocol rendering, and every card keeps its raw
 payload behind the existing disclosure. An input may carry pasted images as
 `input_image` content parts; the conversation shows them inside the user message

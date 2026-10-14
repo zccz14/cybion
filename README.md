@@ -104,6 +104,11 @@ the first authenticated browser session initializes that key atomically.
   `read_context` resolves it after local Contexts, and Configuration → Contexts
   renders it from `GET /api/common-contexts?lang=` in the UI language. The
   controller never stores or mutates it; content changes ship with releases.
+- Threads can edit the user's Contexts through `write_context`: title, Use
+  When description, body, and parent — an exact `context_id`, `null` for the
+  top level, or the literal `TRASH` to move the Context into a trash. A
+  trashed Context and its subtree leave every Context tool; the Contexts page
+  still shows it under Trash and restores it to its original place.
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record
