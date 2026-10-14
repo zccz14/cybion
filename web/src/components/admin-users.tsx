@@ -14,7 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 
 type Metrics = {
   requests: number; in_flight: number; input_tokens: number; output_tokens: number; total_tokens: number
-  cached_tokens: number; cache_hit_rate: number | null; history_records: number; threads: number
+  cached_tokens: number; cache_hit_rate: number | null; history_records: number; threads: number; workers: number
   sqlite_bytes: number; sqlite_main_bytes: number; sqlite_wal_bytes: number; sqlite_shm_bytes: number
 }
 type Traffic = {
@@ -23,13 +23,13 @@ type Traffic = {
 }
 type User = { user_id: string; is_admin: boolean; metrics: Metrics | null; traffic: Traffic | null; error: string | null }
 type Users = { items: User[]; generated_at: number }
-type Sort = "user_id" | "requests" | "total_tokens" | "cache_hit_rate" | "history_records" | "threads" | "in_flight" | "sqlite_bytes" | "worker" | "upstream"
+type Sort = "user_id" | "requests" | "total_tokens" | "cache_hit_rate" | "history_records" | "threads" | "in_flight" | "sqlite_bytes" | "workers" | "worker" | "upstream"
 type Language = "en" | "zh"
 
 const copy = {
   zh: {
     user: "用户", requests: "推理请求", tokens: "累计 Token", cache: "缓存率", history: "历史记录", threads: "线程",
-    inFlight: "在途请求", sqlite: "SQLite", worker: "Worker 流量", upstream: "上游流量", admin: "管理员",
+    inFlight: "在途请求", sqlite: "SQLite", workers: "Workers", worker: "Worker 流量", upstream: "上游流量", admin: "管理员",
     search: "搜索用户 ID", refresh: "刷新", loading: "正在读取用户…", error: "无法读取用户列表", retry: "重试",
     unavailable: "该用户的统计暂不可用", required: "仅管理员可查看用户列表。", empty: "暂无用户",
     noMatch: "没有匹配的用户", clear: "清空搜索", emptyHint: "用户首次登录 Cybion 后会显示在这里。",
@@ -38,11 +38,12 @@ const copy = {
     usageNote: "推理请求包含普通推理和上下文压缩，覆盖所有状态。Token 为上游已报告的输入与输出之和，缓存率 = 缓存输入 Token ÷ 输入 Token。无输入用量时显示 —。请求和 Token 基于保留的审计记录；删除线程会移除相关审计。",
     networkNote: "流量为累计值，分别显示 Cybion 向 Worker / 推理上游发送和接收的 HTTP 正文字节，包含 Worker 心跳和 SSE 帧，不含 HTTP 头与 TLS 开销。",
     sqliteNote: "SQLite 为该用户数据库主文件、WAL 与 SHM 文件的合计。",
+    workersNote: "Workers 为该用户名下未删除的设备数量；他人共享给该用户的设备不计入。",
     count: (visible: number, total: number) => `${visible} / ${total} 位用户`,
   },
   en: {
     user: "User", requests: "Requests", tokens: "Total tokens", cache: "Cache rate", history: "History", threads: "Threads",
-    inFlight: "In flight", sqlite: "SQLite", worker: "Worker traffic", upstream: "Upstream traffic", admin: "Admin",
+    inFlight: "In flight", sqlite: "SQLite", workers: "Workers", worker: "Worker traffic", upstream: "Upstream traffic", admin: "Admin",
     search: "Search user ID", refresh: "Refresh", loading: "Loading users…", error: "Could not load users", retry: "Retry",
     unavailable: "User metrics are unavailable", required: "Administrator access is required to view users.", empty: "No users yet",
     noMatch: "No matching users", clear: "Clear search", emptyHint: "Users appear here after their first Cybion sign-in.",
@@ -51,6 +52,7 @@ const copy = {
     usageNote: "Requests include inference and context compaction in every status. Tokens add reported input and output usage; cache rate = cached input tokens ÷ input tokens. No input usage displays —. Request and token totals use retained audits; deleting a thread removes its audits.",
     networkNote: "Traffic is a running total: sent and received HTTP body bytes between Cybion and Workers / inference upstreams, including Worker heartbeats and SSE framing, excluding HTTP headers and TLS overhead.",
     sqliteNote: "SQLite includes the user's main database, WAL and SHM files.",
+    workersNote: "Workers counts the user's devices that are not deleted; devices shared with the user are excluded.",
     count: (visible: number, total: number) => `${visible} / ${total} users`,
   },
 }
@@ -95,7 +97,7 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
   })
   const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / 25) - 1))
   const visible = filtered.slice(currentPage * 25, (currentPage + 1) * 25)
-  const columns: [Sort, string][] = [["user_id", t.user], ["requests", t.requests], ["total_tokens", t.tokens], ["cache_hit_rate", t.cache], ["history_records", t.history], ["threads", t.threads], ["in_flight", t.inFlight], ["sqlite_bytes", t.sqlite], ["worker", t.worker], ["upstream", t.upstream]]
+  const columns: [Sort, string][] = [["user_id", t.user], ["requests", t.requests], ["total_tokens", t.tokens], ["cache_hit_rate", t.cache], ["history_records", t.history], ["threads", t.threads], ["in_flight", t.inFlight], ["sqlite_bytes", t.sqlite], ["workers", t.workers], ["worker", t.worker], ["upstream", t.upstream]]
   function order(key: Sort) {
     setSort(key)
     setAscending(key === sort ? !ascending : key === "user_id")
@@ -126,7 +128,7 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
         <span>↑ {t.sent} · ↓ {t.received}</span>
       </div>
       <div className="min-w-0 rounded-lg border bg-card">
-        <Table className="min-w-[76rem]">
+        <Table className="min-w-[80rem]">
           <TableHeader><TableRow>{columns.map(([key, label]) => <TableHead key={key} className={key === "user_id" ? "w-72" : "text-right"} aria-sort={sort === key ? ascending ? "ascending" : "descending" : "none"}>
             <Button variant="ghost" size="sm" className="px-1" onClick={() => order(key)}>{label}{sort === key ? ascending ? <ArrowUpIcon data-icon="inline-end" /> : <ArrowDownIcon data-icon="inline-end" /> : <ArrowUpDownIcon data-icon="inline-end" />}</Button>
           </TableHead>)}</TableRow></TableHeader>
@@ -145,17 +147,18 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
                   <TableCell className="text-right tabular-nums">{number(m.threads)}</TableCell>
                   <TableCell className="text-right tabular-nums">{m.in_flight > 0 ? <Badge>{number(m.in_flight)}</Badge> : "0"}</TableCell>
                   <TableCell className="text-right tabular-nums" title={`DB ${bytes(m.sqlite_main_bytes)} · WAL ${bytes(m.sqlite_wal_bytes)} · SHM ${bytes(m.sqlite_shm_bytes)}`}>{bytes(m.sqlite_bytes)}</TableCell>
-                </> : <TableCell colSpan={7}><span role="status" className="text-destructive">{t.unavailable}</span></TableCell>}
+                  <TableCell className="text-right tabular-nums">{number(m.workers)}</TableCell>
+                </> : <TableCell colSpan={8}><span role="status" className="text-destructive">{t.unavailable}</span></TableCell>}
                 <TableCell>{trafficCell(traffic?.worker_sent_bytes ?? 0, traffic?.worker_received_bytes ?? 0)}</TableCell>
                 <TableCell>{trafficCell(traffic?.upstream_sent_bytes ?? 0, traffic?.upstream_received_bytes ?? 0)}</TableCell>
               </TableRow>
             })}
-            {visible.length === 0 && <TableRow><TableCell colSpan={10} className="h-36 text-center"><p>{search ? t.noMatch : t.empty}</p>{search ? <Button variant="ghost" onClick={() => { setSearch(""); setPage(0) }}>{t.clear}</Button> : <p className="mt-1 text-sm text-muted-foreground">{t.emptyHint}</p>}</TableCell></TableRow>}
+            {visible.length === 0 && <TableRow><TableCell colSpan={11} className="h-36 text-center"><p>{search ? t.noMatch : t.empty}</p>{search ? <Button variant="ghost" onClick={() => { setSearch(""); setPage(0) }}>{t.clear}</Button> : <p className="mt-1 text-sm text-muted-foreground">{t.emptyHint}</p>}</TableCell></TableRow>}
           </TableBody>
         </Table>
       </div>
       {filtered.length > 25 && <div className="flex items-center justify-end gap-3 text-sm"><span>{currentPage + 1} / {Math.ceil(filtered.length / 25)}</span><Button variant="outline" size="sm" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>{t.previous}</Button><Button variant="outline" size="sm" disabled={(currentPage + 1) * 25 >= filtered.length} onClick={() => setPage(currentPage + 1)}>{t.next}</Button></div>}
     </>}
-    <details className="text-sm text-muted-foreground"><summary className="cursor-pointer rounded-sm py-1 focus-visible:outline-2 focus-visible:outline-ring">{t.definitions}</summary><div className="mt-2 flex max-w-3xl flex-col gap-2"><p>{t.usageNote}</p><p>{t.networkNote}</p><p>{t.sqliteNote}</p></div></details>
+    <details className="text-sm text-muted-foreground"><summary className="cursor-pointer rounded-sm py-1 focus-visible:outline-2 focus-visible:outline-ring">{t.definitions}</summary><div className="mt-2 flex max-w-3xl flex-col gap-2"><p>{t.usageNote}</p><p>{t.networkNote}</p><p>{t.sqliteNote}</p><p>{t.workersNote}</p></div></details>
   </section>
 }
