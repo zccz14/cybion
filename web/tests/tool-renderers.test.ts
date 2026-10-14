@@ -10,6 +10,7 @@ const samples: Record<string, unknown> = {
   browser_control: { type: "function_call", name: "browser_control", arguments: '{"action":"screenshot"}' },
   computer_use: { type: "function_call", name: "computer_use", arguments: '{"action":"screenshot"}' },
   read_context: { type: "function_call", name: "read_context", arguments: '{"context_id":"ctx-1"}' },
+  write_context: { type: "function_call", name: "write_context", arguments: '{"context_id":"ctx-1","name":"Notes"}' },
   cybion_list_contexts: { type: "function_call", name: "cybion_list_contexts", arguments: "{}" },
   cybion_list_workers: { type: "function_call", name: "cybion_list_workers", arguments: "{}" },
   cybion_list_ultimate_machines: { type: "function_call", name: "cybion_list_ultimate_machines", arguments: "{}" },

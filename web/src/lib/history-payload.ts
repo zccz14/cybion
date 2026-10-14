@@ -202,12 +202,13 @@ export function computerUseFunctionCall(payload: unknown): ComputerUseFunctionCa
   }
 }
 
-// The six controller-side Cybion tools as stored in the Responses item. The
+// The seven controller-side Cybion tools as stored in the Responses item. The
 // list tools carry no displayable arguments; a machine update is a call that
 // names its machine, and a create shows whichever fields it provides. Missing
 // identifiers keep the generic protocol rendering.
 export type CybionToolFunctionCall =
   | { tool: "read_context"; contextId: string }
+  | { tool: "write_context"; contextId: string; trashed: boolean }
   | { tool: "cybion_list_contexts" }
   | { tool: "cybion_list_workers" }
   | { tool: "cybion_list_ultimate_machines" }
@@ -223,6 +224,10 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
     case "read_context": {
       const contextId = nonEmptyString(args.context_id)
       return contextId === null ? null : { tool: "read_context", contextId }
+    }
+    case "write_context": {
+      const contextId = nonEmptyString(args.context_id)
+      return contextId === null ? null : { tool: "write_context", contextId, trashed: args.parent_id === "TRASH" }
     }
     case "cybion_list_contexts":
       return { tool: "cybion_list_contexts" }

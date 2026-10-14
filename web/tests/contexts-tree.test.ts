@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { collectSubtreeIds, commonAncestorIds, contextAncestorIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree } from "../src/lib/contexts-tree.ts"
+import { collectSubtreeIds, commonAncestorIds, contextAncestorIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, trashedRoots, visibleContexts } from "../src/lib/contexts-tree.ts"
 
 const contexts = [
   { id: "b", name: "Beta", parent_id: null, sort_key: "a2" },
@@ -93,4 +93,31 @@ test("flattening a recursive tree yields depth-first order", () => {
     ],
   }
   assert.deepEqual(flattenTree(tree).map((node) => node.id), ["root", "one", "one-one", "two"])
+})
+
+test("trashed contexts and their subtrees leave the visible tree", () => {
+  const list = [
+    { id: "kept", name: "Kept", parent_id: null, sort_key: "a1" },
+    { id: "marked", name: "Marked", parent_id: null, sort_key: "a2", trashed_at: 10 },
+    { id: "marked-child", name: "Child", parent_id: "marked", sort_key: "a1" },
+    { id: "marked-deep", name: "Deep", parent_id: "marked-child", sort_key: "a1" },
+    { id: "kept-child", name: "Kept child", parent_id: "kept", sort_key: "a1" },
+  ]
+  assert.deepEqual(visibleContexts(list).map((context) => context.id), ["kept", "kept-child"])
+})
+
+test("the trash lists trashed roots newest first and re-exposes nested rows", () => {
+  const list = [
+    { id: "kept", name: "Kept", parent_id: null, sort_key: "a1" },
+    { id: "older", name: "Older", parent_id: null, sort_key: "a2", trashed_at: 10 },
+    { id: "newer", name: "Newer", parent_id: "kept", sort_key: "a1", trashed_at: 20 },
+    { id: "inside", name: "Inside", parent_id: "older", sort_key: "a1", trashed_at: 30 },
+    { id: "stray-child", name: "Stray", parent_id: "older", sort_key: "a2" },
+  ]
+  // A trashed node inside another trashed subtree waits for its ancestor.
+  assert.deepEqual(trashedRoots(list).map((context) => context.id), ["newer", "older"])
+  // Restoring the ancestor exposes the nested row again, still trashed.
+  const restored = list.map((context) =>
+    context.id === "older" ? { ...context, trashed_at: undefined } : context)
+  assert.deepEqual(trashedRoots(restored).map((context) => context.id), ["inside", "newer"])
 })

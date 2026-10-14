@@ -80,6 +80,32 @@ test("read context calls link to the context page with the title and Use When", 
   }
 })
 
+test("write context calls link to the context and flag a move to the trash", async () => {
+  const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
+  try {
+    const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
+    const render = (trashed: boolean, contexts: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
+      language: "zh", call: { tool: "write_context", contextId: "ctx-1", trashed }, workers: undefined, contexts, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+    }))
+    const contexts = new Map([["ctx-1", { name: "项目手册", description: "记录资料位置时使用" }]])
+    const updated = render(false, contexts)
+    assert.ok(updated.includes("编辑上下文"))
+    assert.ok(updated.includes("项目手册"))
+    assert.ok(updated.includes("记录资料位置时使用"))
+    assert.match(updated, /<a[^>]*href="\/contexts\?context=ctx-1"[^>]*>/)
+    assert.ok(!updated.includes("已移入回收站"))
+    assert.ok(updated.includes("<details>Raw protocol</details>"))
+    const trashed = render(true, contexts)
+    assert.ok(trashed.includes("项目手册"))
+    assert.ok(trashed.includes("已移入回收站"))
+    const unresolved = render(true, undefined)
+    assert.ok(unresolved.includes("ctx-1</pre>"))
+    assert.ok(unresolved.includes("已移入回收站"))
+  } finally {
+    await server.close()
+  }
+})
+
 test("thread view renders cybion tool calls before the generic protocol renderer", () => {
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   assert.ok(source.indexOf("const cybionCall = cybionToolFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))

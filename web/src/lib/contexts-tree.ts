@@ -14,6 +14,7 @@ export type LocalLikeContext = {
   name: string
   parent_id: string | null
   sort_key: string
+  trashed_at?: number | null
 }
 
 export type ContextDropZone = "before" | "inside" | "after"
@@ -136,4 +137,44 @@ export function flattenTree<T extends CommonLikeNode>(root: T): T[] {
   }
   visit(root)
   return flattened
+}
+
+/**
+ * The rows a trash-free tree shows: a row stays visible while its own trash
+ * marker is unset and every ancestor stays untrashed, so trashing a subtree
+ * root takes the whole subtree out of the normal tree at once.
+ */
+export function visibleContexts<T extends LocalLikeContext>(contexts: T[]): T[] {
+  const byId = new Map(contexts.map((context) => [context.id, context]))
+  const hidden = new Map<string, boolean>()
+  const isHidden = (context: T): boolean => {
+    const cached = hidden.get(context.id)
+    if (cached !== undefined) return cached
+    const parent = context.parent_id === null ? undefined : byId.get(context.parent_id)
+    const value = context.trashed_at != null || (parent !== undefined && isHidden(parent))
+    hidden.set(context.id, value)
+    return value
+  }
+  return contexts.filter((context) => !isHidden(context))
+}
+
+/**
+ * The rows the trash section lists, newest first: trashed contexts without a
+ * trashed ancestor. A marked node inside another trashed subtree joins this
+ * list again only after its ancestor is restored.
+ */
+export function trashedRoots<T extends LocalLikeContext>(contexts: T[]): T[] {
+  const byId = new Map(contexts.map((context) => [context.id, context]))
+  const markedAncestor = new Map<string, boolean>()
+  const hasMarkedAncestor = (context: T): boolean => {
+    const cached = markedAncestor.get(context.id)
+    if (cached !== undefined) return cached
+    const parent = context.parent_id === null ? undefined : byId.get(context.parent_id)
+    const value = parent !== undefined && (parent.trashed_at != null || hasMarkedAncestor(parent))
+    markedAncestor.set(context.id, value)
+    return value
+  }
+  return contexts
+    .filter((context) => context.trashed_at != null && !hasMarkedAncestor(context))
+    .sort((left, right) => (right.trashed_at ?? 0) - (left.trashed_at ?? 0) || left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
 }

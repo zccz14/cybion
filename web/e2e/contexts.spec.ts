@@ -343,3 +343,51 @@ test("the common context copy follows the UI language", async ({ page }) => {
 
   expect(fixture.unexpected).toEqual([])
 })
+
+test("trashed contexts leave the tree, stay in the trash section, and restore", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light", contexts: [
+    { id: "kept-context", name: "保留手册" },
+    { id: "trashed-parent", name: "旧手册", trashed_at: 1 },
+    { id: "trashed-child", name: "旧手册·附录", parent_id: "trashed-parent" },
+    { id: "kept-parent", name: "在读手册" },
+    { id: "trashed-in-kept", name: "在读手册·废页", parent_id: "kept-parent", trashed_at: 2 },
+  ] })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.goto("/#/contexts")
+
+  const tree = page.getByRole("tree", { name: "你的上下文" })
+  // A trashed subtree leaves the tree whole; its unmarked child is parked
+  // with it instead of surfacing anywhere else.
+  await expect(tree.getByText("保留手册", { exact: true })).toBeVisible()
+  await expect(tree.getByText("在读手册", { exact: true })).toBeVisible()
+  await expect(tree.getByText("旧手册", { exact: true })).toHaveCount(0)
+  await expect(tree.getByText("旧手册·附录", { exact: true })).toHaveCount(0)
+  // A trashed child leaves its parent without expandable children.
+  const keptRow = tree.locator('[data-context-id="kept-parent"]')
+  await expect(keptRow.getByRole("button", { name: "展开上下文" })).toBeDisabled()
+
+  // The trash section lists the trashed roots; the child under 旧手册 stays
+  // with its parent instead of listing on its own.
+  const trash = page.getByRole("list", { name: "回收站" })
+  await expect(trash.getByText("旧手册", { exact: true })).toBeVisible()
+  await expect(trash.getByText("在读手册·废页", { exact: true })).toBeVisible()
+  await expect(trash.getByText("旧手册·附录", { exact: true })).toHaveCount(0)
+
+  // Restoring the parent returns the subtree exactly where it sat.
+  await trash.locator("li", { hasText: "旧手册" }).getByRole("button", { name: "还原" }).click()
+  await expect.poll(() => fixture.references.find((reference) => reference.id === "trashed-parent")!.trashed_at).toBe(undefined)
+  await expect(tree.getByText("旧手册", { exact: true })).toBeVisible()
+  await expect(trash.getByText("旧手册", { exact: true })).toHaveCount(0)
+  await tree.locator('[data-context-id="trashed-parent"]').getByRole("button", { name: "展开上下文" }).click()
+  await expect(tree.getByText("旧手册·附录", { exact: true })).toBeVisible()
+
+  // Restoring the child returns it under its parent, and empties the trash.
+  await trash.locator("li", { hasText: "在读手册·废页" }).getByRole("button", { name: "还原" }).click()
+  await expect(trash).toHaveCount(0)
+  await keptRow.getByRole("button", { name: "展开上下文" }).click()
+  await expect(tree.getByText("在读手册·废页", { exact: true })).toBeVisible()
+  expect(fixture.writes).toContainEqual({ path: "/api/contexts/trashed-parent/restore", body: {} })
+  expect(fixture.writes).toContainEqual({ path: "/api/contexts/trashed-in-kept/restore", body: {} })
+
+  expect(fixture.unexpected).toEqual([])
+})

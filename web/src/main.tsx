@@ -117,7 +117,7 @@ import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core"
-import { collectSubtreeIds, commonAncestorIds, contextAncestorIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, type ContextDropZone } from "@/lib/contexts-tree"
+import { collectSubtreeIds, commonAncestorIds, contextAncestorIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, trashedRoots, visibleContexts, type ContextDropZone } from "@/lib/contexts-tree"
 import { contextDraft, draftsMatch, shouldAutosave, type ContextDraft } from "@/lib/context-drafts"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
@@ -367,6 +367,8 @@ type Context = {
   content: string
   parent_id: string | null
   sort_key: string
+  // Present only while the context sits in the trash.
+  trashed_at?: number
 }
 
 const copy = {
@@ -456,6 +458,8 @@ const copy = {
     contextsTitle: "Contexts",
     contextLocalTitle: "Your contexts",
     contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
+    contextTrashTitle: "Trash",
+    contextRestore: "Restore",
     contextSelectHint: "Select a node in the tree, or create a new context.",
     contextGlobalBadge: "Read-only",
     contextGlobalHint: "Compiled into Cybion with each release and shared by every user. The content below is what Threads read through the Contexts tools.",
@@ -671,6 +675,7 @@ const copy = {
     toolBrowserControl: "Control a browser",
     toolComputerUse: "Control the desktop",
     toolReadContext: "Read contexts",
+    toolWriteContext: "Edit contexts",
     toolListContexts: "List contexts",
     toolListWorkers: "List Workers",
     toolListUltimateMachines: "List Ultimate Machines",
@@ -791,6 +796,8 @@ const copy = {
     contextsTitle: "上下文",
     contextLocalTitle: "你的上下文",
     contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
+    contextTrashTitle: "回收站",
+    contextRestore: "还原",
     contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
     contextGlobalBadge: "只读",
     contextGlobalHint: "随 Cybion 版本编译发布、所有用户共享只读。下方内容即 Thread 通过上下文工具读到的正文。",
@@ -1006,6 +1013,7 @@ const copy = {
     toolBrowserControl: "控制浏览器",
     toolComputerUse: "控制桌面",
     toolReadContext: "读取上下文",
+    toolWriteContext: "编辑上下文",
     toolListContexts: "列出上下文",
     toolListWorkers: "列出 Worker",
     toolListUltimateMachines: "列出终极机器",
@@ -1653,12 +1661,12 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     ...durableRecords,
     ...pendingResponseRecords(liveResponse.data, durableRecords, threadId),
   ], [durableRecords, liveResponse.data, threadId])
-  // A `read_context` card resolves the context's title and Use When
-  // description through the same caches the Contexts page fills; the fetches
-  // only start when the loaded history actually reads a context.
+  // A `read_context`/`write_context` card resolves the context's title and Use
+  // When description through the same caches the Contexts page fills; the
+  // fetches only start when the loaded history actually touches a context.
   const readsContexts = useMemo(() => records.some((record) => {
     const payload = historyPayloadObject(record.payload)
-    return payload?.type === "function_call" && payload.name === "read_context"
+    return payload?.type === "function_call" && (payload.name === "read_context" || payload.name === "write_context")
   }), [records])
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: readsContexts })
   const commonContexts = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`), enabled: readsContexts })
@@ -2216,6 +2224,10 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   useEffect(() => { sdkRef.current = sdk }, [sdk])
   const commonRoot = common.data?.root ?? null
   const commonNodes = useMemo(() => (commonRoot ? flattenTree(commonRoot) : []), [commonRoot])
+  // Trash is a display split of the same list: the tree renders only visible
+  // rows, and the trash section offers the marked roots back for restore.
+  const visible = useMemo(() => visibleContexts(contexts.data ?? []), [contexts.data])
+  const trashed = useMemo(() => trashedRoots(contexts.data ?? []), [contexts.data])
 
   const rememberDraft = (next: ContextDraft | null) => { draftRef.current = next; setDraft(next) }
   const rememberSaved = (next: ContextDraft | null) => { savedRef.current = next; setSaved(next) }
@@ -2241,7 +2253,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
 
   // Restoring a selection expands the common ancestors that hide it.
   const commonIds = useMemo(() => new Set(commonNodes.map((node) => node.id)), [commonNodes])
-  const localIds = useMemo(() => new Set((contexts.data ?? []).map((context) => context.id)), [contexts.data])
+  const localIds = useMemo(() => new Set(visible.map((context) => context.id)), [visible])
   const commonExpandedFor = useRef<string | null>(null)
   useEffect(() => {
     if (!selectedId || !commonRoot || commonExpandedFor.current === selectedId) return
@@ -2263,7 +2275,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     setInitialized(true)
     // A context id carried in the URL wins over the default first selection.
     if (selectedId !== null) {
-      const restored = (contexts.data ?? []).find((context) => context.id === selectedId)
+      const restored = visible.find((context) => context.id === selectedId)
       if (restored) {
         rememberDraft(loadDraft(restored))
         rememberSaved(contextDraft(restored))
@@ -2271,7 +2283,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
       }
       if (commonNodes.some((node) => node.id === selectedId)) return
     }
-    const firstLocal = contexts.data?.[0]
+    const firstLocal = visible[0]
     if (firstLocal) {
       setSelectedId(firstLocal.id)
       rememberDraft(loadDraft(firstLocal))
@@ -2279,7 +2291,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     } else if (commonRoot) {
       setSelectedId(commonRoot.id)
     }
-  }, [contexts.data, commonRoot, common.error, initialized])
+  }, [visible, commonRoot, common.error, initialized])
 
   useEffect(() => {
     if (draft?.id) draftsRef.current.set(draft.id, draft)
@@ -2366,6 +2378,10 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
     onError: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
   })
+  const restore = useMutation({
+    mutationFn: (id: string) => api<Context>(sdk, `/api/contexts/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
+  })
 
   const editDraft = useCallback((update: (current: ContextDraft) => ContextDraft) => {
     const current = draftRef.current
@@ -2434,7 +2450,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
 
   // Selection resolves by id across the two sources, mirroring the
   // controller's read order: a local draft wins, then the common tree.
-  const localSelected = draft ? null : (contexts.data ?? []).find((context) => context.id === selectedId) ?? null
+  const localSelected = draft ? null : visible.find((context) => context.id === selectedId) ?? null
   const commonSelected = draft || localSelected ? null : commonNodes.find((node) => node.id === selectedId) ?? null
 
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
@@ -2455,11 +2471,28 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
           </section>}
           <section>
             <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextLocalTitle")}</p>
-            {contexts.data.length === 0
+            {visible.length === 0
               ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("contextEmpty")}</p>
-              : <ContextTree contexts={contexts.data} selectedId={selectedId} onSelect={selectLocal} onMove={(input) => move.mutate(input)} movePending={move.isPending} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
+              : <ContextTree contexts={visible} selectedId={selectedId} onSelect={selectLocal} onMove={(input) => move.mutate(input)} movePending={move.isPending} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
             {move.error && <RequestError error={move.error} onRetry={() => { if (move.variables) move.mutate(move.variables) }} />}
           </section>
+          {trashed.length > 0 && <section>
+            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextTrashTitle")}</p>
+            <ul aria-label={t("contextTrashTitle")} className="space-y-1">
+              {trashed.map((context) => <li key={context.id}>
+                <div className="flex items-center gap-1">
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5 px-2 py-2">
+                    <span className="truncate font-medium">{context.name}</span>
+                    {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
+                  </span>
+                  <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={t("contextRestore")} title={t("contextRestore")} disabled={restore.isPending} onClick={() => restore.mutate(context.id)}>
+                    {restore.isPending && restore.variables === context.id ? <Spinner /> : <ArchiveRestoreIcon className="size-4" />}
+                  </Button>
+                </div>
+              </li>)}
+            </ul>
+            {restore.error && <RequestError error={restore.error} onRetry={() => { if (restore.variables) restore.mutate(restore.variables) }} />}
+          </section>}
         </>}
       </div>
     </aside>
@@ -3374,6 +3407,7 @@ const toolLabels: Record<string, CopyKey> = {
   cybion_list_contexts: "toolListContexts",
   cybion_list_workers: "toolListWorkers",
   read_context: "toolReadContext",
+  write_context: "toolWriteContext",
   cybion_list_ultimate_machines: "toolListUltimateMachines",
   cybion_get_ultimate_machine: "toolGetUltimateMachine",
   cybion_set_ultimate_machine: "toolSetUltimateMachine",
