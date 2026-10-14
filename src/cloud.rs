@@ -132,7 +132,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 38;
+const USER_SCHEMA_VERSION: i64 = 39;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -511,6 +511,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/contexts", get(list_contexts).post(create_context))
         .route("/api/contexts/{id}/move", axum::routing::post(move_context))
+        .route(
+            "/api/contexts/{id}/restore",
+            axum::routing::post(restore_context),
+        )
         .route(
             "/api/contexts/{id}",
             get(read_context_api)
@@ -1101,7 +1105,8 @@ CREATE TABLE IF NOT EXISTS contexts (
   description TEXT NOT NULL,
   content TEXT NOT NULL,
   parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
-  sort_key TEXT NOT NULL DEFAULT ''
+  sort_key TEXT NOT NULL DEFAULT '',
+  trashed_at INTEGER
 );
 "#;
 
@@ -1588,6 +1593,13 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // before the upgrade. Retire this upgrade once every user database is
         // audited at schema 37+; retain the backfill test.
         migrate_context_sort_keys(&transaction)?;
+    }
+    if version < 39 {
+        // Contexts gain the trash marker: a trashed Context stays restorable
+        // from the Contexts page and hidden from the Context tools. Retire this
+        // upgrade once every user database is audited at schema 39+; retain the
+        // column test.
+        migrate_context_trash(&transaction)?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -2130,6 +2142,10 @@ struct ContextView {
     content: String,
     parent_id: Option<String>,
     sort_key: String,
+    // Only trashed rows carry the marker; live Context reads keep their
+    // existing wire shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trashed_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2293,6 +2309,7 @@ fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextView> {
         content: row.get(3)?,
         parent_id: row.get(4)?,
         sort_key: row.get(5)?,
+        trashed_at: row.get(6)?,
     })
 }
 
@@ -3764,6 +3781,21 @@ fn backfill_context_sort_keys(connection: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Moves the Contexts table to schema 39: adds the nullable trash marker.
+fn migrate_context_trash(connection: &Connection) -> Result<(), ApiError> {
+    let has_trashed_at: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('contexts') WHERE name='trashed_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_trashed_at {
+        connection
+            .execute_batch("ALTER TABLE contexts ADD COLUMN trashed_at INTEGER")
+            .map_err(ApiError::internal)?;
+    }
+    Ok(())
+}
+
 /// Keys a brand-new Context after the last sibling under the same parent.
 fn append_context_sort_key(
     connection: &Connection,
@@ -3877,13 +3909,31 @@ fn validate_context_parent(
     Ok(())
 }
 
+/// A Context is hidden when it or any ancestor sits in the trash. Tools treat
+/// hidden Contexts as missing, and the Contexts page keeps their subtrees out
+/// of the normal tree.
+fn context_hidden(connection: &Connection, id: &str) -> Result<bool, ApiError> {
+    let hidden: bool = connection.query_row(
+        "WITH RECURSIVE ancestors(id,parent_id,trashed_at) AS (
+           SELECT id,parent_id,trashed_at FROM contexts WHERE id=?1
+           UNION ALL
+           SELECT contexts.id,contexts.parent_id,contexts.trashed_at
+           FROM contexts JOIN ancestors ON contexts.id=ancestors.parent_id
+         )
+         SELECT EXISTS(SELECT 1 FROM ancestors WHERE trashed_at IS NOT NULL)",
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(hidden)
+}
+
 async fn list_contexts(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
 ) -> Result<Json<Vec<ContextView>>, ApiError> {
     let contexts = user_db(&state, &identity.user, true, |connection| {
         let mut statement = connection.prepare(
-            "SELECT id,name,description,content,parent_id,sort_key FROM contexts ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
+            "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
         )?;
         let rows = statement.query_map([], context_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -3916,6 +3966,7 @@ async fn create_context(
             content,
             parent_id,
             sort_key,
+            trashed_at: None,
         };
         transaction.execute(
             "INSERT INTO contexts(id,name,description,content,parent_id,sort_key) VALUES(?,?,?,?,?,?)",
@@ -3951,7 +4002,7 @@ async fn move_context(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -3972,6 +4023,32 @@ async fn move_context(
             sort_key,
             ..current
         })
+    })
+    .await?;
+    Ok(Json(context))
+}
+
+async fn restore_context(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ContextView>, ApiError> {
+    let id = context_id(&id)?;
+    let context = user_db(&state, &identity.user, true, move |connection| {
+        let changed = connection.execute(
+            "UPDATE contexts SET trashed_at=NULL WHERE id=? AND trashed_at IS NOT NULL",
+            [&id],
+        )?;
+        if changed == 0 {
+            return Err(ApiError::not_found("trashed context not found"));
+        }
+        connection
+            .query_row(
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
+                [&id],
+                context_from_row,
+            )
+            .map_err(Into::into)
     })
     .await?;
     Ok(Json(context))
@@ -4021,7 +4098,7 @@ async fn local_context(
         let transaction = connection.transaction()?;
         let context = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -4029,6 +4106,9 @@ async fn local_context(
         let Some(context) = context else {
             return Ok(None);
         };
+        if context_hidden(&transaction, &id)? {
+            return Ok(None);
+        }
         let children = context_summaries(&transaction, Some(&id))?;
         transaction.commit()?;
         Ok(Some(ContextReadView { context, children }))
@@ -4047,7 +4127,7 @@ async fn update_context(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -4095,6 +4175,7 @@ async fn update_context(
             content,
             parent_id,
             sort_key,
+            trashed_at: current.trashed_at,
         })
     })
     .await?;
@@ -5066,7 +5147,7 @@ fn context_summaries(
     parent_id: Option<&str>,
 ) -> Result<Vec<ContextSummary>, ApiError> {
     let mut statement = connection.prepare(
-        "SELECT id,name,description FROM contexts WHERE parent_id IS ? ORDER BY sort_key,name,id",
+        "SELECT id,name,description FROM contexts WHERE parent_id IS ? AND trashed_at IS NULL ORDER BY sort_key,name,id",
     )?;
     let rows = statement.query_map([parent_id], |row| {
         Ok(ContextSummary {
@@ -6797,6 +6878,129 @@ async fn read_context_tool_output(
     Ok(json!({ "error": "context not found" }))
 }
 
+/// The one parent value write_context reads as the trash: pointing a Context's
+/// parent at TRASH hides it until the user restores it from the Contexts page.
+const TRASH_CONTEXT_ID: &str = "TRASH";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteContextArguments {
+    context_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default, deserialize_with = "explicit_option")]
+    parent_id: Option<Option<String>>,
+}
+
+/// Distinguishes an omitted parent_id from an explicit null: plain serde reads
+/// both as `None` for `Option<Option<String>>`, so only a parent present in the
+/// arguments at all reaches this conversion.
+fn explicit_option<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+enum WriteContextParent {
+    Keep,
+    TopLevel,
+    Trash,
+    Context(String),
+}
+
+async fn write_context_tool_output(
+    state: &AppState,
+    user: &User,
+    input: &str,
+) -> Result<Value, ApiError> {
+    let arguments: WriteContextArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!("write_context arguments are invalid: {error}"))
+    })?;
+    let id = context_id(&arguments.context_id)?;
+    let parent = match arguments.parent_id {
+        None => WriteContextParent::Keep,
+        Some(None) => WriteContextParent::TopLevel,
+        Some(Some(value)) if value == TRASH_CONTEXT_ID => WriteContextParent::Trash,
+        Some(Some(value)) => WriteContextParent::Context(context_id(&value)?),
+    };
+    let requested_id = id.clone();
+    let summary = user_db(state, user, true, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
+                [&id],
+                context_from_row,
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        if context_hidden(&transaction, &id)? {
+            return Ok(None);
+        }
+        let name = arguments
+            .name
+            .map(context_name)
+            .transpose()?
+            .unwrap_or(current.name);
+        let description = arguments
+            .description
+            .map(context_description)
+            .transpose()?
+            .unwrap_or(current.description);
+        let content = arguments
+            .content
+            .map(context_content)
+            .transpose()?
+            .unwrap_or(current.content);
+        let (parent_id, trashed_at) = match parent {
+            WriteContextParent::Keep => (current.parent_id.clone(), current.trashed_at),
+            WriteContextParent::Trash => (current.parent_id.clone(), Some(now())),
+            WriteContextParent::TopLevel => (None, current.trashed_at),
+            WriteContextParent::Context(parent_id) => {
+                validate_context_parent(&transaction, Some(&id), Some(&parent_id))?;
+                if context_hidden(&transaction, &parent_id)? {
+                    return Err(ApiError::not_found("parent context not found"));
+                }
+                (Some(parent_id), current.trashed_at)
+            }
+        };
+        let sort_key = if parent_id == current.parent_id {
+            current.sort_key
+        } else {
+            append_context_sort_key(&transaction, parent_id.as_deref())?
+        };
+        transaction.execute(
+            "UPDATE contexts SET name=?,description=?,content=?,parent_id=?,sort_key=?,trashed_at=? WHERE id=?",
+            params![&name, &description, &content, &parent_id, &sort_key, &trashed_at, &id],
+        )?;
+        transaction.commit()?;
+        Ok(Some(json!({
+            "id": id,
+            "name": name,
+            "description": description,
+            "parent_id": parent_id,
+            "trashed": trashed_at.is_some(),
+        })))
+    })
+    .await?;
+    let Some(summary) = summary else {
+        if common_contexts::read(&requested_id, common_contexts::SOURCE_LANGUAGE).is_some() {
+            return Err(ApiError::bad_request(
+                "the Cybion Common Context is read-only",
+            ));
+        }
+        return Err(ApiError::not_found("context not found"));
+    };
+    Ok(summary)
+}
+
 async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
     let mut contexts = vec![common_contexts::root_summary(
         common_contexts::SOURCE_LANGUAGE,
@@ -7184,6 +7388,7 @@ async fn start_response_tool(
     }
     let controller_output = match name.as_str() {
         "read_context" => Some(read_context_tool_output(state, user, input).await),
+        "write_context" => Some(write_context_tool_output(state, user, input).await),
         "cybion_list_contexts" => Some(list_contexts_tool_output(state, user).await),
         "cybion_list_workers" => Some(list_workers_tool_output(state, user).await),
         "cybion_list_ultimate_machines" => Some(machines::list_tool_output(state, user).await),
@@ -9636,9 +9841,48 @@ mod tests {
                 "description",
                 "content",
                 "parent_id",
-                "sort_key"
+                "sort_key",
+                "trashed_at"
             ]
         );
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, USER_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn context_trash_marker_upgrades_an_existing_database() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("v38.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE contexts (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   content TEXT NOT NULL,
+                   parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
+                   sort_key TEXT NOT NULL DEFAULT ''
+                 );
+                 INSERT INTO contexts(id,name,description,content,parent_id,sort_key)
+                 VALUES('kept','Kept','Read when kept','Kept content',NULL,'a1');
+                 PRAGMA user_version = 38;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        let (name, trashed_at): (String, Option<i64>) = connection
+            .query_row(
+                "SELECT name,trashed_at FROM contexts WHERE id='kept'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Kept");
+        assert_eq!(trashed_at, None);
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -9684,7 +9928,7 @@ mod tests {
             true,
             true,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 12);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -10111,26 +10355,28 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
-        assert_eq!(tools.as_array().unwrap().len(), 8);
+        assert_eq!(tools.as_array().unwrap().len(), 9);
         assert_eq!(tools[0]["name"], "cybion_list_contexts");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[3]["name"], "cybion_list_ultimate_machines");
-        assert_eq!(tools[4]["name"], "cybion_get_ultimate_machine");
-        assert_eq!(tools[5]["name"], "cybion_set_ultimate_machine");
-        assert_eq!(tools[4]["parameters"]["required"], json!(["machine_id"]));
-        assert_eq!(tools[6], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[3]["name"], "write_context");
+        assert_eq!(tools[3]["parameters"]["required"], json!(["context_id"]));
+        assert_eq!(tools[4]["name"], "cybion_list_ultimate_machines");
+        assert_eq!(tools[5]["name"], "cybion_get_ultimate_machine");
+        assert_eq!(tools[6]["name"], "cybion_set_ultimate_machine");
+        assert_eq!(tools[5]["parameters"]["required"], json!(["machine_id"]));
+        assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[8], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 11);
-        assert_eq!(worker_and_native[6]["name"], "bash");
-        assert_eq!(worker_and_native[9]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[10]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 12);
+        assert_eq!(worker_and_native[7]["name"], "bash");
+        assert_eq!(worker_and_native[10]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[11]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 7);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 8);
         assert_eq!(
-            web_search_only[6],
+            web_search_only[7],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false);
@@ -10145,6 +10391,7 @@ mod tests {
                 "cybion_list_contexts",
                 "cybion_list_workers",
                 "read_context",
+                "write_context",
                 "cybion_list_ultimate_machines",
                 "cybion_get_ultimate_machine",
                 "cybion_set_ultimate_machine"
@@ -10169,6 +10416,7 @@ mod tests {
                 "cybion_list_contexts",
                 "cybion_list_workers",
                 "read_context",
+                "write_context",
                 "cybion_list_ultimate_machines",
                 "cybion_get_ultimate_machine",
                 "cybion_set_ultimate_machine"
@@ -10196,6 +10444,22 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("children returned by a previous read_context call")
+        );
+        let write_context = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "write_context")
+            .unwrap();
+        assert!(
+            write_context["description"]
+                .as_str()
+                .unwrap()
+                .contains("trash")
+        );
+        assert_eq!(
+            write_context["parameters"]["required"],
+            json!(["context_id"])
         );
         let workers = worker_tools();
         for tool in workers.as_array().unwrap() {
@@ -10388,15 +10652,16 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
         assert_eq!(tools[3], TOOL_CATALOG["context"][3]);
         assert_eq!(tools[4], TOOL_CATALOG["context"][4]);
         assert_eq!(tools[5], TOOL_CATALOG["context"][5]);
-        assert_eq!(tools[6], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[6], TOOL_CATALOG["context"][6]);
+        assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[8], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

@@ -40,6 +40,38 @@
     },
     {
       "type": "function",
+      "name": "write_context",
+      "description": "Edit one of the user's local Contexts from the controller — its title, its Use When description, its body, and its parent. Omit a field to keep its current value; parent_id takes an exact context_id, null to move the Context to the top level, or the special value \"TRASH\" to move it into the trash. A trashed Context disappears from every Context tool, while the user still sees it in the Contexts page and can restore it. Returns the updated Context metadata. The read-only Cybion Common Context cannot be written, and a Context hidden by the trash cannot be written until it is restored.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "context_id": {
+            "type": "string",
+            "description": "Exact context_id of the local Context to edit, from cybion_list_contexts or a child listed by read_context."
+          },
+          "name": {
+            "type": "string",
+            "description": "New title, 1-160 characters. Omit to keep the current title."
+          },
+          "description": {
+            "type": "string",
+            "description": "New Use When description — the condition for when this Context should be read (up to 10,000 characters). Omit to keep the current description."
+          },
+          "content": {
+            "type": "string",
+            "description": "New Markdown body (up to 200,000 characters). Omit to keep the current body."
+          },
+          "parent_id": {
+            "type": ["string", "null"],
+            "description": "New parent: an exact context_id to become a child of that Context, null to move to the top level, or \"TRASH\" to move the Context into the trash where the user can still see and restore it. Omit to keep the current parent."
+          }
+        },
+        "required": ["context_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
       "name": "cybion_list_ultimate_machines",
       "description": "List the user's Ultimate Machines (终极机器): scheduled self-checks that run one bash command on a Worker every interval and stay silent while the command exits 0. A failing run is delivered into the machine's repair Thread (终极机器 · <name>) as a user message asking to make the command return 0 — dropped, not queued, while that Thread is mid-turn; an offline or missing Worker is reported once per episode through Linkit; a run that never settles is declared lost after 15 minutes and reported once. Returns id, name, worker_id, worker_label, command, intent, interval_seconds, enabled, last_run_at, last_exit, thread_id, created_at. Use it to pick a machine_id for cybion_get_ultimate_machine or cybion_set_ultimate_machine.",
       "parameters": {

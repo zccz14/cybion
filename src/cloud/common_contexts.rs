@@ -120,6 +120,7 @@ pub(super) fn read(id: &str, language: &str) -> Option<ContextReadView> {
             content: content(node.content_file.get(language)).to_owned(),
             parent_id,
             sort_key: String::new(),
+            trashed_at: None,
         },
         children: node
             .children

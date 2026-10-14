@@ -572,6 +572,387 @@ async fn read_context_cannot_disclose_another_users_nodes() {
     assert!(output.get("children").is_none());
 }
 
+async fn context_place(state: &AppState, user: &User, id: &str) -> (Option<String>, String) {
+    let id = id.to_owned();
+    user_db(state, user, false, move |connection| {
+        connection
+            .query_row(
+                "SELECT parent_id,sort_key FROM contexts WHERE id=?",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(Into::into)
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn write_context_edits_fields_and_reparents() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "write-context-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let parent = "00000000-0000-4000-8000-0000000000c0";
+    let child = "00000000-0000-4000-8000-0000000000c1";
+    user_db(&state, &user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
+            [parent],
+        )?;
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Notes','Read when notes matter','old body')",
+            [child],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let written = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-fields",
+        "write_context",
+        json!({
+            "context_id": child,
+            "name": "Notes v2",
+            "description": "Read when notes changed",
+            "content": "new body",
+            "parent_id": parent,
+        }),
+    )
+    .await;
+    assert_eq!(
+        written,
+        json!({
+            "id": child,
+            "name": "Notes v2",
+            "description": "Read when notes changed",
+            "parent_id": parent,
+            "trashed": false,
+        })
+    );
+    let stored = user_db(&state, &user, false, move |connection| {
+        connection
+            .query_row(
+                "SELECT name,description,content,parent_id,trashed_at FROM contexts WHERE id=?",
+                [child],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        (
+            "Notes v2".to_owned(),
+            "Read when notes changed".to_owned(),
+            "new body".to_owned(),
+            Some(parent.to_owned()),
+            None,
+        )
+    );
+
+    // Omitted fields keep their value; an explicit null parent moves the
+    // Context back to the top level.
+    let top_level = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-root",
+        "write_context",
+        json!({"context_id": child, "parent_id": null}),
+    )
+    .await;
+    assert_eq!(
+        top_level,
+        json!({
+            "id": child,
+            "name": "Notes v2",
+            "description": "Read when notes changed",
+            "parent_id": null,
+            "trashed": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "context-trash-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let parent = "00000000-0000-4000-8000-0000000000d0";
+    let child = "00000000-0000-4000-8000-0000000000d1";
+    let sibling = "00000000-0000-4000-8000-0000000000d2";
+    user_db(&state, &user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Trashed parent','Read when trashed','parent body')",
+            [parent],
+        )?;
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,'Trashed child','Read when nested','child body',?)",
+            params![child, parent],
+        )?;
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Kept sibling','Read when kept','sibling body')",
+            [sibling],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let trashed = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "trash-write",
+        "write_context",
+        json!({"context_id": parent, "parent_id": "TRASH"}),
+    )
+    .await;
+    assert_eq!(
+        trashed,
+        json!({
+            "id": parent,
+            "name": "Trashed parent",
+            "description": "Read when trashed",
+            "parent_id": null,
+            "trashed": true
+        })
+    );
+
+    let listed = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "trash-list",
+        "cybion_list_contexts",
+        json!({}),
+    )
+    .await;
+    let names: Vec<&str> = listed["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Kept sibling"));
+    assert!(!names.contains(&"Trashed parent"));
+    assert!(!names.contains(&"Trashed child"));
+
+    for id in [parent, child] {
+        let output = tool_output(
+            &state,
+            &user,
+            &thread,
+            input,
+            &format!("trash-read-{id}"),
+            "read_context",
+            json!({"context_id": id}),
+        )
+        .await;
+        assert_eq!(output, json!({"error": "context not found"}));
+    }
+    let write_again = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "trash-write-again",
+        "write_context",
+        json!({"context_id": parent, "name": "Nope"}),
+    )
+    .await;
+    assert_eq!(write_again, json!({"error": "context not found"}));
+    let trashed_at: Option<i64> = user_db(&state, &user, false, move |connection| {
+        connection
+            .query_row(
+                "SELECT trashed_at FROM contexts WHERE id=?",
+                [parent],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    })
+    .await
+    .unwrap();
+    assert!(trashed_at.is_some());
+}
+
+#[tokio::test]
+async fn write_context_trash_keeps_the_original_place_for_restore() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "context-restore-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let parent = "00000000-0000-4000-8000-0000000000e0";
+    let child = "00000000-0000-4000-8000-0000000000e1";
+    let other = "00000000-0000-4000-8000-0000000000e2";
+    user_db(&state, &user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Parent','Read when parent matters','parent body')",
+            [parent],
+        )?;
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,'Child','Read when child matters','child body',?)",
+            params![child, parent],
+        )?;
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Other','Read when other matters','other body')",
+            [other],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let before = context_place(&state, &user, child).await;
+
+    // Trashing the child hides it from the parent's children while the row
+    // stays on the page's list, trash marker included.
+    let trashed = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "restore-trash",
+        "write_context",
+        json!({"context_id": child, "parent_id": "TRASH"}),
+    )
+    .await;
+    assert_eq!(trashed["trashed"], json!(true));
+    assert_eq!(context_place(&state, &user, child).await, before);
+    let children = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "restore-read",
+        "read_context",
+        json!({"context_id": parent}),
+    )
+    .await;
+    assert_eq!(children["children"], json!([]));
+    let Json(views) = list_contexts(
+        State(state.clone()),
+        axum::Extension(BrowserIdentity {
+            user: user.clone(),
+            bearer: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let listed = views.iter().find(|view| view.id == child).unwrap();
+    assert!(listed.trashed_at.is_some());
+
+    // A Context cannot move under a hidden one.
+    let blocked = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "restore-blocked",
+        "write_context",
+        json!({"context_id": other, "parent_id": child}),
+    )
+    .await;
+    assert_eq!(blocked, json!({"error": "parent context not found"}));
+
+    // Restore returns the row to the tree exactly where it sat.
+    let Json(restored) = restore_context(
+        State(state.clone()),
+        axum::Extension(BrowserIdentity {
+            user: user.clone(),
+            bearer: String::new(),
+        }),
+        AxumPath(child.to_owned()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.parent_id, Some(parent.to_owned()));
+    assert_eq!(restored.trashed_at, None);
+    assert_eq!(context_place(&state, &user, child).await, before);
+    let children = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "restore-read-again",
+        "read_context",
+        json!({"context_id": parent}),
+    )
+    .await;
+    assert_eq!(children["children"][0]["context_id"], json!(child));
+    let error = restore_context(
+        State(state.clone()),
+        axum::Extension(BrowserIdentity {
+            user: user.clone(),
+            bearer: String::new(),
+        }),
+        AxumPath(child.to_owned()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn write_context_refuses_common_contexts_and_malformed_arguments() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "write-context-common").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let common_id = common_contexts::root_summary(common_contexts::SOURCE_LANGUAGE)["context_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let output = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-common",
+        "write_context",
+        json!({"context_id": common_id, "name": "Rewrite"}),
+    )
+    .await;
+    assert!(
+        output["error"].as_str().unwrap().contains("read-only"),
+        "unexpected output: {output}"
+    );
+    let unknown = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-unknown-field",
+        "write_context",
+        json!({"context_id": common_id, "body": "x"}),
+    )
+    .await;
+    assert!(
+        unknown["error"]
+            .as_str()
+            .unwrap()
+            .contains("write_context arguments are invalid")
+    );
+}
+
 #[tokio::test]
 async fn registry_tools_list_top_level_contexts_and_registered_workers() {
     let (_root, state) = test_state();
@@ -995,7 +1376,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 11);
     let names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -1075,6 +1456,7 @@ async fn inference_injects_web_search_and_the_configured_image_tool() {
             "cybion_list_contexts",
             "cybion_list_workers",
             "read_context",
+            "write_context",
             "cybion_list_ultimate_machines",
             "cybion_get_ultimate_machine",
             "cybion_set_ultimate_machine",
