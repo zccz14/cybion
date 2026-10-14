@@ -912,6 +912,150 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
 }
 
 #[tokio::test]
+async fn write_context_creates_new_contexts() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "create-context-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let parent = "00000000-0000-4000-8000-0000000000f0";
+    user_db(&state, &user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
+            [parent],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // Omitting context_id creates a child under the given parent.
+    let created = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-child",
+        "write_context",
+        json!({
+            "name": "Release notes",
+            "description": "Read when a release ships",
+            "content": "# v1",
+            "parent_id": parent,
+        }),
+    )
+    .await;
+    assert_eq!(created["name"], json!("Release notes"));
+    assert_eq!(created["description"], json!("Read when a release ships"));
+    assert_eq!(created["parent_id"], json!(parent));
+    assert_eq!(created["trashed"], json!(false));
+    let created_id = created["id"].as_str().unwrap().to_owned();
+    assert!(Uuid::parse_str(&created_id).is_ok());
+    let read = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-read",
+        "read_context",
+        json!({"context_id": parent}),
+    )
+    .await;
+    assert_eq!(
+        read["children"],
+        json!([{
+            "context_id": created_id,
+            "name": "Release notes",
+            "description": "Read when a release ships",
+        }])
+    );
+
+    // A create without a parent starts at the top level with empty extras.
+    let top = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-top",
+        "write_context",
+        json!({"name": "Scratch"}),
+    )
+    .await;
+    assert_eq!(top["parent_id"], json!(null));
+    assert_eq!(top["description"], json!(""));
+    let listed = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-list",
+        "cybion_list_contexts",
+        json!({}),
+    )
+    .await;
+    let names: Vec<&str> = listed["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Scratch"));
+
+    // Creation needs a name, and TRASH is not a create target.
+    let unnamed = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-unnamed",
+        "write_context",
+        json!({"description": "no title"}),
+    )
+    .await;
+    assert_eq!(
+        unnamed,
+        json!({"error": "creating a context requires name"})
+    );
+    let trashed = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-trash",
+        "write_context",
+        json!({"name": "Nope", "parent_id": "TRASH"}),
+    )
+    .await;
+    assert!(
+        trashed["error"].as_str().unwrap().contains("updates only"),
+        "unexpected output: {trashed}"
+    );
+
+    // A hidden parent is no create target.
+    let blocked = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-blocked",
+        "write_context",
+        json!({"context_id": parent, "parent_id": "TRASH"}),
+    )
+    .await;
+    assert_eq!(blocked["trashed"], json!(true));
+    let hidden = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-create-hidden",
+        "write_context",
+        json!({"name": "Orphan", "parent_id": parent}),
+    )
+    .await;
+    assert_eq!(hidden, json!({"error": "parent context not found"}));
+}
+
+#[tokio::test]
 async fn write_context_refuses_common_contexts_and_malformed_arguments() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "write-context-common").unwrap();

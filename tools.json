@@ -41,32 +41,31 @@
     {
       "type": "function",
       "name": "write_context",
-      "description": "Edit one of the user's local Contexts from the controller — its title, its Use When description, its body, and its parent. Omit a field to keep its current value; parent_id takes an exact context_id, null to move the Context to the top level, or the special value \"TRASH\" to move it into the trash. A trashed Context disappears from every Context tool, while the user still sees it in the Contexts page and can restore it. Returns the updated Context metadata. The read-only Cybion Common Context cannot be written, and a Context hidden by the trash cannot be written until it is restored.",
+      "description": "Create or edit one of the user's local Contexts from the controller — title, Use When description, body, and parent. Omit context_id to create a new Context: name is required and it starts at the top level or under parent_id. Pass context_id to edit that Context; omitted fields keep their current values, and parent_id takes an exact context_id, null for the top level, or the special value \"TRASH\" to move the Context into the trash (updates only). A trashed Context disappears from every Context tool, while the user still sees it in the Contexts page and can restore it. Returns the Context metadata. The read-only Cybion Common Context cannot be written, and a Context hidden by the trash cannot be written until it is restored.",
       "parameters": {
         "type": "object",
         "properties": {
           "context_id": {
             "type": "string",
-            "description": "Exact context_id of the local Context to edit, from cybion_list_contexts or a child listed by read_context."
+            "description": "Omit to create a new Context; pass the exact id of an existing local Context to edit it, from cybion_list_contexts or a child listed by read_context."
           },
           "name": {
             "type": "string",
-            "description": "New title, 1-160 characters. Omit to keep the current title."
+            "description": "Title, 1-160 characters. Required when creating; omit to keep the current title when editing."
           },
           "description": {
             "type": "string",
-            "description": "New Use When description — the condition for when this Context should be read (up to 10,000 characters). Omit to keep the current description."
+            "description": "Use When description — the condition for when this Context should be read (up to 10,000 characters). Omit to keep the current description, or for an empty one when creating."
           },
           "content": {
             "type": "string",
-            "description": "New Markdown body (up to 200,000 characters). Omit to keep the current body."
+            "description": "Markdown body (up to 200,000 characters). Omit to keep the current body, or for an empty one when creating."
           },
           "parent_id": {
             "type": ["string", "null"],
-            "description": "New parent: an exact context_id to become a child of that Context, null to move to the top level, or \"TRASH\" to move the Context into the trash where the user can still see and restore it. Omit to keep the current parent."
+            "description": "Parent: an exact context_id to become a child of that Context, null for the top level, or \"TRASH\" to move the Context into the trash where the user can still see and restore it (updates only). Omit to keep the current parent, or to create at the top level."
           }
         },
-        "required": ["context_id"],
         "additionalProperties": false
       }
     },

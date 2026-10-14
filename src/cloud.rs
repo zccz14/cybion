@@ -6885,7 +6885,8 @@ const TRASH_CONTEXT_ID: &str = "TRASH";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WriteContextArguments {
-    context_id: String,
+    #[serde(default)]
+    context_id: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -6921,13 +6922,104 @@ async fn write_context_tool_output(
     let arguments: WriteContextArguments = serde_json::from_str(input).map_err(|error| {
         ApiError::bad_request(format!("write_context arguments are invalid: {error}"))
     })?;
-    let id = context_id(&arguments.context_id)?;
     let parent = match arguments.parent_id {
         None => WriteContextParent::Keep,
         Some(None) => WriteContextParent::TopLevel,
         Some(Some(value)) if value == TRASH_CONTEXT_ID => WriteContextParent::Trash,
         Some(Some(value)) => WriteContextParent::Context(context_id(&value)?),
     };
+    let context = match arguments.context_id {
+        Some(value) => {
+            let id = context_id(&value)?;
+            edit_context_tool_output(
+                state,
+                user,
+                id,
+                arguments.name,
+                arguments.description,
+                arguments.content,
+                parent,
+            )
+            .await?
+        }
+        None => {
+            create_context_tool_output(
+                state,
+                user,
+                arguments.name,
+                arguments.description,
+                arguments.content,
+                parent,
+            )
+            .await?
+        }
+    };
+    Ok(context)
+}
+
+/// The create half of write_context: a new Context starts visible, at the top
+/// level or under a visible parent; the trash marker is an update-only value.
+async fn create_context_tool_output(
+    state: &AppState,
+    user: &User,
+    name: Option<String>,
+    description: Option<String>,
+    content: Option<String>,
+    parent: WriteContextParent,
+) -> Result<Value, ApiError> {
+    let name = name
+        .ok_or_else(|| ApiError::bad_request("creating a context requires name"))
+        .and_then(context_name)?;
+    let description = context_description(description.unwrap_or_default())?;
+    let content = context_content(content.unwrap_or_default())?;
+    let parent_id = match parent {
+        WriteContextParent::Keep | WriteContextParent::TopLevel => None,
+        WriteContextParent::Trash => {
+            return Err(ApiError::bad_request(
+                "TRASH applies to updates only; a new Context starts at the top level or under a parent",
+            ));
+        }
+        WriteContextParent::Context(parent_id) => Some(parent_id),
+    };
+    let context = user_db(state, user, true, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(parent_id) = parent_id.as_deref() {
+            validate_context_parent(&transaction, None, Some(parent_id))?;
+            if context_hidden(&transaction, parent_id)? {
+                return Err(ApiError::not_found("parent context not found"));
+            }
+        }
+        let sort_key = append_context_sort_key(&transaction, parent_id.as_deref())?;
+        let id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO contexts(id,name,description,content,parent_id,sort_key) VALUES(?,?,?,?,?,?)",
+            params![&id, &name, &description, &content, &parent_id, &sort_key],
+        )?;
+        transaction.commit()?;
+        Ok(json!({
+            "id": id,
+            "name": name,
+            "description": description,
+            "parent_id": parent_id,
+            "trashed": false,
+        }))
+    })
+    .await?;
+    Ok(context)
+}
+
+/// The edit half of write_context: the current row loads inside the write
+/// transaction, omitted fields keep their values, and an explicit null parent
+/// moves the Context to the top level.
+async fn edit_context_tool_output(
+    state: &AppState,
+    user: &User,
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    content: Option<String>,
+    parent: WriteContextParent,
+) -> Result<Value, ApiError> {
     let requested_id = id.clone();
     let summary = user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -6944,18 +7036,12 @@ async fn write_context_tool_output(
         if context_hidden(&transaction, &id)? {
             return Ok(None);
         }
-        let name = arguments
-            .name
-            .map(context_name)
-            .transpose()?
-            .unwrap_or(current.name);
-        let description = arguments
-            .description
+        let name = name.map(context_name).transpose()?.unwrap_or(current.name);
+        let description = description
             .map(context_description)
             .transpose()?
             .unwrap_or(current.description);
-        let content = arguments
-            .content
+        let content = content
             .map(context_content)
             .transpose()?
             .unwrap_or(current.content);
@@ -10361,7 +10447,7 @@ mod tests {
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
         assert_eq!(tools[3]["name"], "write_context");
-        assert_eq!(tools[3]["parameters"]["required"], json!(["context_id"]));
+        assert_eq!(tools[3]["parameters"]["required"], json!(null));
         assert_eq!(tools[4]["name"], "cybion_list_ultimate_machines");
         assert_eq!(tools[5]["name"], "cybion_get_ultimate_machine");
         assert_eq!(tools[6]["name"], "cybion_set_ultimate_machine");
@@ -10457,9 +10543,12 @@ mod tests {
                 .unwrap()
                 .contains("trash")
         );
-        assert_eq!(
-            write_context["parameters"]["required"],
-            json!(["context_id"])
+        assert_eq!(write_context["parameters"]["required"], json!(null));
+        assert!(
+            write_context["parameters"]["properties"]["context_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Omit to create")
         );
         let workers = worker_tools();
         for tool in workers.as_array().unwrap() {
