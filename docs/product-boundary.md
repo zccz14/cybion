@@ -1,0 +1,220 @@
+# Product boundary
+
+Detailed behavior reference for the hosted service, split out of the README
+so the README can stay a product page. Content is unchanged from the former
+README ("Product boundary" and storage notes); the Worker notes that used to
+live in the README are kept below.
+
+## Storage
+
+Each user is stored in one SQLite database:
+
+```text
+~/.cybion/users/<auth-mini-user-id>.sqlite3
+```
+
+The databases use WAL mode, foreign keys, and owner-only file permissions.
+
+Administrator metadata is stored separately in `~/.cybion/default.sqlite3`.
+Its `app_meta` table contains the single `root_user_id` key used to expose the
+administrator navigation and system resource monitor. On a fresh installation,
+the first authenticated browser session initializes that key atomically.
+
+## Boundaries
+
+
+- Auth is fixed to `https://auth.ntnl.io`. The browser obtains one token for
+  `cybion.ntnl.io`, `linkit.ntnl.io`, `openai.ntnl.io`, `ctx.ntnl.io`, and
+  `normai.ntnl.io`; each service checks its own audience. The Auth Mini
+  provider deletes a session whose token does not cover every audience and
+  re-logs in — a login mints audiences once and refresh keeps them — so the
+  flow re-mints a complete session before the automatic NormAI connect runs.
+- Controller restarts automatically resume `running` Threads from committed
+  history and original Worker calls. Transient model failures retry within a
+  persisted five-attempt budget; stopped/completed Threads stay stopped. A
+  delivered Worker call that outlives its own timeout is cancelled on the
+  Worker; when no confirmation arrives within 30 seconds the Controller
+  answers the call itself with an outcome-unknown
+  `timeout_cancel_unconfirmed` failure that asks the model to clean up a
+  possibly leaked execution before continuing.
+- Threads record their creation origin: `web` for the browser and `api` for
+  `/v1/threads` calls, where the creating API key id is stored and an optional
+  caller-supplied `external_ref` can map the Thread to the integration's own
+  identifier. The web UI marks API Threads in the thread list and header.
+- Threads are independent. A user can create, rename, inspect, archive, and
+  delete them from the web UI. Archiving hides a Thread from the thread list
+  without deleting its history; archived Threads stay readable, remain
+  available through the archived group, and can be restored from the list or
+  the conversation header.
+- Owners can grant another Cybion user read-only access to a Thread, whether or
+  not the recipient has signed in before: a share silently creates their account
+  and waits at their first sign-in.
+  **Share Thread** picks the recipient from the Linkit directory; **Shared with
+  me** shows received live shares. History and future updates are included, without granting model,
+  Worker, Context, account-audit or API-key access. Revocation blocks new source
+  reads independently of discovery sync; already read/copied content cannot be
+  recalled. See [Thread sharing](thread-sharing.md).
+- The thread list filters and paginates on the server. `GET /api/threads`
+  accepts `status` (`idle`, `running`, `failed`), `origin` (`web`, `api`),
+  and `q` (case-insensitive substring of the title or `external_ref`) next to
+  `archived`, plus `limit` (1-100, default 30) and a keyset `cursor` returned
+  as `next_cursor`. The web UI exposes them through one control bar that
+  opens on Web (the user's own web Threads) with single-select All / Web /
+  API / Running / Failed view chips and a debounced search box; the selection
+  lives in the page URL, so it is shareable, survives reloads, and steps with
+  browser back/forward. More pages load when the list footer scrolls into
+  view; the archived group stays outside the filter.
+- Configuration lets each user save the default model, reasoning effort,
+  Fast mode, the context budget, and the image generation model for new
+  threads. These defaults are stored in the user's database and apply to both
+  web and API creation. An explicit API `model` overrides the default model;
+  existing threads keep their own settings. The context budget is the token
+  threshold for proactive compaction; each thread may override it, `0`
+  disables it, and the built-in default is 200,000. The image generation model
+  is the image model threads without an override use; empty disables image
+  generation. Threads without an override follow later default changes.
+- The conversation supports a minimal mode that folds every turn down to its
+  input plus one tail item: the turn's last AI reply or its last activity
+  line, whichever came later; all other replies, activities, and protocol
+  records stay collapsed, while the turn's images (generated images and
+  ledger-marked screenshots) surface as one image group with the tail item.
+  The personal default lives in Configuration →
+  Personal settings; a per-thread override in the thread settings takes
+  precedence. It is a display preference stored with the user's settings, and
+  it changes neither inference nor history records.
+- Thread turns always include the `normai_web_search` tool; the
+  `normai_image_generation` tool joins while an image generation model is
+  configured (per-thread override, otherwise the account default; empty
+  disables it). The Controller intercepts both: web search
+  requests the Thread's search endpoint (`POST {upstream}/web-search`; the
+  hosted gateway routes the pinned `deepseek` source to a load-balancing
+  upstream) and answers the model with the result sources; image generation
+  requests the Thread's image endpoint (`POST {upstream}/images/generations`
+  with the configured model; the hosted gateway routes it over the upstream's
+  image catalog, listed by `GET {upstream}/models?kind=image`) and appends the
+  generated image to the Thread. A tool call may carry `reference_images` —
+  one-based positions of the pictures attached to the turn's input, at most 4 —
+  which the Controller resolves to their data URLs and forwards as the
+  endpoint's `reference_images`, so a generation can edit or derive from the
+  user's pictures. Models without either native tool (for
+  example DeepSeek) use both capabilities through the same path.
+- `tools.json` is the single source for the upstream tool catalog. The request
+  builder sends it and the Configuration → Tools page renders it, so the
+  capability list cannot drift from the tools a Thread can actually use.
+- The Cybion Common Context is compiled into the controller from
+  `common-contexts/` (a `tree.json` skeleton plus Markdown nodes, each node in
+  English and Simplified Chinese). Every user reads the same read-only tree:
+  `cybion_list_contexts` lists its root first with `source: "common"`,
+  `read_context` resolves it after local Contexts, and Configuration → Contexts
+  renders it from `GET /api/common-contexts?lang=` in the UI language. The
+  controller never stores or mutates it; content changes ship with releases.
+- Threads create and edit the user's Contexts through `write_context`: title,
+  Use When description, body, and parent — an exact `context_id`, `null` for
+  the top level, or the literal `TRASH` to move the Context into a trash.
+  Omitting `context_id` creates a new Context (a `name` is required) at the
+  top level or under `parent_id`; a trashed Context and its subtree leave
+  every Context tool, while the Contexts page still shows it under Trash and
+  restores it to its original place.
+- `history_records` is the append-only per-thread protocol log. It stores the
+  user input, every upstream Responses output item, Worker output, checkpoint,
+  and activity record. The auto-incrementing `history_records.id` is the record
+  index and the sole context ordering key.
+- The composer accepts pasted images (png/jpeg/webp/gif, at most 4 per input).
+  The browser downsizes larger files, the input record stores each image as an
+  `input_image` data URL next to the typed text, and replay sends it to the
+  model unchanged. Text inputs stay plain strings.
+- Before each Responses request, Cybion reads the same thread's latest
+  checkpoint at or before the selected record index, then replays the remaining
+  protocol records in index order. A fresh request therefore reconstructs its
+  context from SQLite rather than an in-memory conversation or an upstream
+  response chain.
+- Threads keep a context budget: before inference, an estimated replayed
+  context above the effective budget is compacted into a fresh checkpoint, so
+  long threads never reach the upstream window before compacting. The
+  conversation header shows the latest inference context size against that
+  budget.
+- Every user gets a **NormAI** upstream (normai.ntnl.io) automatically. On
+  the first workspace load the controller issues — or rotates, when the user
+  already owns a `Cybion` consumer — a consumer credential through NormAI's
+  user API with the browser session, stores the key as the user's `NormAI`
+  upstream, and binds it as the default upstream while no other default was
+  chosen. Upstream providers and billing live on NormAI; the Configuration
+  page links there and can reissue the credential (normai.ntnl.io/#/providers).
+- The NormAI card keeps the manual fallback surface: **Fallback upstreams**
+  opens a dialog — only needed while NormAI is unavailable — where each user
+  manages several named Responses-compatible upstreams, each with its own
+  `base_url` and `api_key`. Keys are stored in that user's SQLite database and
+  are never returned to the browser. Cybion sends model requests to
+  `{base_url}/responses` of the upstream a Thread selected, preserving the
+  existing streaming, tool-call, context replay, and audit behavior. Each
+  upstream owns its model catalog: Cybion reads `GET {base_url}/models` per
+  upstream, and the model pickers group the catalogs by upstream name. A
+  Thread keeps its own upstream and model selectable even after a catalog
+  stops reporting it, and an upstream can be deleted even while Threads or
+  defaults still reference it — those Threads fail at their next use until
+  the owner points them at another upstream. Schema 16 converts the single
+  legacy configuration (an explicit key, or an OpenAI-LB consumer credential)
+  into one upstream and binds existing Threads to it.
+- Linkit task notifications ride on an automatically maintained Linkit
+  connection — the owner's username, an owned `Cybion` Bot, and a valid Bot
+  token — and stay independent of model inference, external API requests, and
+  API-key creation. Every workspace load silently ensures that connection,
+  repairing stale credentials to completion without replacing a healthy Bot.
+- **Configuration → Linkit task notifications** exposes the notification
+  switch, the recipient and delivery status, and **Send test notification**. A
+  **Repair connection** button appears only while the connection is incomplete
+  (for example, before the owner sets a Linkit username). Bot credentials are
+  checked using Linkit's current user APIs. Notifications use
+  `POST /api/conversations/direct/{username}` followed by
+  `POST /api/conversations/{id}/messages`. The stable recipient UUID is verified
+  before sending Thread content. The removed `/bot/v1/messages` route is not used.
+- Delivery results persist per user, including the last error and successful
+  conversation/message receipt. Delivery failure does not change the Thread
+  outcome. Sends have a 15-second per-request timeout and are not blindly retried
+  because message creation is not idempotent. A receipt means stored in Linkit,
+  not device push or human read confirmation. Successful inference and terminal
+  failures notify; cancelled/superseded requests and successful compaction do not.
+- New users start with notifications off; the switch is the only notification
+  control and never triggers the connection ensure. Schema 14 preserves
+  notification intent for existing users with saved Bot credentials. Switching
+  notifications off retains those credentials and the remote Bot; a manual test
+  does not turn notifications on.
+- **Ultimate machines** run one bash command on a Worker on a fixed interval and
+  stay silent while it returns 0. A non-zero result — or a run the Worker never
+  settles — is delivered into the machine's bound Thread as a user message
+  asking to make the command return 0 again, echoing the machine's optional
+  command intent; while that Thread is running, further failure messages are
+  dropped rather than queued. A Worker that is offline (or missing) reports
+  through the Linkit notification channel instead, once per offline episode.
+  Each machine owns the Thread created with it; the Machines page (`#/machines`)
+  lists every machine with its Worker, interval, latest result, and Thread link,
+  and can pause, run once immediately, or edit a machine (name, Worker, command,
+  intent, interval); a `?` button explains where the name comes from — the Bell
+  Labs box that only switches itself off — with a small animation. Machine runs
+  stay out of usage statistics. See
+  [Ultimate machines](machines.md).
+- A paired Worker performs Bash, Browser Control, and Computer Use on the
+  user's device. It keeps no model credential or SQLite database.
+
+
+## Worker notes
+
+Worker install and version notes from the former README:
+
+On Windows PowerShell use `.\cybion-worker.exe run --background`. With no config,
+Worker opens browser authorization and prints a short-lived pairing code for
+headless devices. Match the device/code and explicitly authorize in Cybion;
+configuration is written on the device automatically. The guide verifies task
+delivery, fixed command execution and result upload before reporting readiness.
+Existing configuration is reused. Worker 0.2.x keeps call deduplication and
+result retries in memory across network reconnects, and 0.2.1 adds delivery
+receipts so acknowledged calls are not replayed; Worker restarts may lose
+state. Worker 0.2.7 aborts a call the Controller cancels: a running Bash or
+Computer Use process tree is terminated and a queued execution never starts.
+The device page shows the reported version and lets the owner request
+a newer recommended official release after current work drains; Worker 0.2.4+
+downloads those upgrades through the same mirror with a direct GitHub fallback,
+so a device that cannot reach GitHub installs 0.2.4 once through the
+Controller-served download and upgrades remotely from then on. A 0.1.x Worker
+needs a one-time manual installation of 0.2.x. Background mode does not install automatic
+startup. `status`, `doctor` and the guide provide diagnostics and recovery.
