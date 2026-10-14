@@ -26,6 +26,7 @@ struct Metrics {
     cache_hit_rate: Option<f64>,
     history_records: i64,
     threads: i64,
+    workers: i64,
     sqlite_bytes: u64,
     sqlite_main_bytes: u64,
     sqlite_wal_bytes: u64,
@@ -98,7 +99,8 @@ fn metrics(path: &Path) -> Result<Metrics> {
     let mut metrics = connection.query_row("SELECT COUNT(*),
         COALESCE(SUM(status='in_flight'),0),
         COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_tokens),0),
-        (SELECT COUNT(*) FROM history_records), (SELECT COUNT(*) FROM threads)
+        (SELECT COUNT(*) FROM history_records), (SELECT COUNT(*) FROM threads),
+        (SELECT COUNT(*) FROM workers WHERE deleted_at IS NULL)
         FROM reasoning_audits", [], |row| {
         let input_tokens: i64 = row.get(2)?;
         let output_tokens: i64 = row.get(3)?;
@@ -107,7 +109,7 @@ fn metrics(path: &Path) -> Result<Metrics> {
             requests: row.get(0)?, in_flight: row.get(1)?, input_tokens, output_tokens,
             total_tokens: input_tokens + output_tokens, cached_tokens,
             cache_hit_rate: (input_tokens > 0).then(|| cached_tokens as f64 / input_tokens as f64),
-            history_records: row.get(5)?, threads: row.get(6)?,
+            history_records: row.get(5)?, threads: row.get(6)?, workers: row.get(7)?,
             sqlite_bytes: 0, sqlite_main_bytes: 0, sqlite_wal_bytes: 0, sqlite_shm_bytes: 0,
         })
     })?;
@@ -118,3 +120,6 @@ fn metrics(path: &Path) -> Result<Metrics> {
         metrics.sqlite_main_bytes + metrics.sqlite_wal_bytes + metrics.sqlite_shm_bytes;
     Ok(metrics)
 }
+
+#[cfg(test)]
+mod tests;
