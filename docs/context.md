@@ -56,16 +56,18 @@ resource reports is not listed. The Ultimate Machine tools
 `cybion_set_ultimate_machine`) are answered the same way; see
 [Ultimate machines](machines.md).
 
-`write_context` edits one of the user's local Contexts — title, Use When
-description, body, and parent — with omitted fields keeping their current
-values. A parent is an exact `context_id`, `null` for the top level, or the
-literal `TRASH`, which moves the Context into the trash: the Context and its
-subtree disappear from every Context tool (`read_context` reports them as
-missing) while `GET /api/contexts` still returns the row, so the Contexts page
-shows each trashed root under Trash. `POST /api/contexts/{id}/restore` clears
-the marker and the row returns to its original place. The read-only Cybion
-Common Context cannot be written, and a hidden Context cannot be written until
-it is restored.
+`write_context` creates or edits one of the user's local Contexts — title, Use
+When description, body, and parent. Omitting `context_id` creates a new
+Context: `name` is required, and it starts at the top level or under
+`parent_id`. Editing keeps omitted fields at their current values; on either
+path a parent is an exact `context_id` or `null` for the top level, and an
+edit may also pass the literal `TRASH`, which moves the Context into the
+trash: the Context and its subtree disappear from every Context tool
+(`read_context` reports them as missing) while `GET /api/contexts` still
+returns the row, so the Contexts page shows each trashed root under Trash.
+`POST /api/contexts/{id}/restore` clears the marker and the row returns to its
+original place. The read-only Cybion Common Context cannot be written, and a
+hidden Context cannot be written until it is restored.
 
 Every Worker tool call must include an exact `worker_id` from
 `cybion_list_workers`; a Worker is never chosen implicitly. Registration does
