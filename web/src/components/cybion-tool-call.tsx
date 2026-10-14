@@ -5,12 +5,12 @@ import type { CybionToolFunctionCall } from "@/lib/history-payload"
 
 const copy = {
   en: {
-    listContexts: "List contexts", listWorkers: "List Workers", readContext: "Read context", writeContext: "Edit context", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
+    listContexts: "List contexts", listWorkers: "List Workers", readContext: "Read context", writeContext: "Edit context", createContext: "Create context", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
     getMachine: "Read Ultimate Machine", updateMachine: "Update Ultimate Machine", createMachine: "Create Ultimate Machine",
     name: "Name", worker: "Worker", interval: "Interval", state: "State", enabled: "Enabled", paused: "Paused", command: "Command", intent: "Intent",
   },
   zh: {
-    listContexts: "列出上下文", listWorkers: "列出 Worker", readContext: "读取上下文", writeContext: "编辑上下文", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
+    listContexts: "列出上下文", listWorkers: "列出 Worker", readContext: "读取上下文", writeContext: "编辑上下文", createContext: "新建上下文", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
     getMachine: "读取终极机器", updateMachine: "更新终极机器", createMachine: "创建终极机器",
     name: "名称", worker: "Worker", interval: "间隔", state: "状态", enabled: "启用", paused: "已暂停", command: "命令", intent: "意图",
   },
@@ -35,7 +35,7 @@ export function CybionToolCall({ language, call, workers, contexts, time, childr
   const title = (() => {
     switch (call.tool) {
       case "read_context": return text.readContext
-      case "write_context": return text.writeContext
+      case "write_context": return call.contextId !== null ? text.writeContext : text.createContext
       case "cybion_list_contexts": return text.listContexts
       case "cybion_list_workers": return text.listWorkers
       case "cybion_list_ultimate_machines": return text.listMachines
@@ -75,6 +75,15 @@ function CybionToolDetail({ language, call, workers, contexts }: {
       </>
     }
     case "write_context": {
+      if (call.contextId === null) {
+        const parent = call.parentId === null ? null : contexts?.get(call.parentId) ?? null
+        return <>
+          {call.name !== null && <p className="mt-2 text-sm font-medium">{call.name}</p>}
+          {call.parentId !== null && (parent === null
+            ? <pre className={monoBlock}>{call.parentId}</pre>
+            : <Link className="mt-1.5 block w-fit text-xs text-muted-foreground hover:underline" to={`/contexts?context=${encodeURIComponent(call.parentId)}`}>{text.parent}{language === "zh" ? "：" : ": "}{parent.name}</Link>)}
+        </>
+      }
       const context = contexts?.get(call.contextId) ?? null
       return <>
         {context === null

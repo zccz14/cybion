@@ -80,27 +80,36 @@ test("read context calls link to the context page with the title and Use When", 
   }
 })
 
-test("write context calls link to the context and flag a move to the trash", async () => {
+test("write context calls link to the context, flag the trash, and show creates", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
-    const render = (trashed: boolean, contexts: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
-      language: "zh", call: { tool: "write_context", contextId: "ctx-1", trashed }, workers: undefined, contexts, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+    const render = (call: unknown, contexts: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
+      language: "zh", call, workers: undefined, contexts, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
     const contexts = new Map([["ctx-1", { name: "项目手册", description: "记录资料位置时使用" }]])
-    const updated = render(false, contexts)
+    const edit = { tool: "write_context", contextId: "ctx-1", trashed: false, name: null, parentId: null }
+    const updated = render(edit, contexts)
     assert.ok(updated.includes("编辑上下文"))
     assert.ok(updated.includes("项目手册"))
     assert.ok(updated.includes("记录资料位置时使用"))
     assert.match(updated, /<a[^>]*href="\/contexts\?context=ctx-1"[^>]*>/)
     assert.ok(!updated.includes("已移入回收站"))
     assert.ok(updated.includes("<details>Raw protocol</details>"))
-    const trashed = render(true, contexts)
+    const trashed = render({ ...edit, trashed: true }, contexts)
     assert.ok(trashed.includes("项目手册"))
     assert.ok(trashed.includes("已移入回收站"))
-    const unresolved = render(true, undefined)
+    const unresolved = render({ ...edit, trashed: true }, undefined)
     assert.ok(unresolved.includes("ctx-1</pre>"))
     assert.ok(unresolved.includes("已移入回收站"))
+    const created = render({ tool: "write_context", contextId: null, trashed: false, name: "新笔记", parentId: "ctx-1" }, contexts)
+    assert.ok(created.includes("新建上下文"))
+    assert.ok(created.includes("新笔记"))
+    assert.ok(created.includes("父级：项目手册"))
+    assert.ok(!created.includes("已移入回收站"))
+    const createdTopLevel = render({ tool: "write_context", contextId: null, trashed: false, name: "新笔记", parentId: null }, contexts)
+    assert.ok(createdTopLevel.includes("新笔记"))
+    assert.ok(!createdTopLevel.includes("父级"))
   } finally {
     await server.close()
   }
