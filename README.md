@@ -118,7 +118,10 @@ flowchart LR
 
 Each user's state lives in an isolated SQLite database, and Workers reach the
 controller over a single outbound connection — no listening ports, no model
-credentials, no local database on the device.
+credentials, no local database on the device. Binary media (pasted and
+generated images) lives outside the database in a content-addressed object
+store under `~/.cybion/objects/`, and records reference it; see
+[docs/objects.md](docs/objects.md).
 
 ## Integration API
 

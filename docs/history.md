@@ -49,10 +49,13 @@ is unknown keeps the generic protocol rendering, and every card keeps its raw
 payload behind the existing disclosure. An input may carry pasted images as
 `input_image` content parts; the conversation shows them inside the user message
 with an open-image dialog, while the History table keeps exposing the raw
-payload. A generated image (`image_generation_call` with a base64 result)
-renders as an image inline, and a marked screenshot output that carries PNG
-data renders its capture with the same open-image dialog; a capture without PNG
-data — a failed one, for example — keeps the ordinary tool output rendering.
+stored payload. Records may carry object references (`image_ref`,
+`result_ref`); the conversation and window endpoints resolve them to inline
+media, the History table does not. A generated image (`image_generation_call`
+with its resolved base64 result) renders as an image inline, and a marked
+screenshot output that carries PNG data renders its capture with the same
+open-image dialog; a capture without PNG data — a failed one, for example —
+keeps the ordinary tool output rendering.
 Thread naming reads the input text from its payload.
 
 The conversation opens on a bounded window instead of the whole thread. The
@@ -121,7 +124,10 @@ collapsed groups.
 
 Schema 9 contains exactly `id`, `thread_id`, `kind`, `payload`, and `created_at`.
 All runtime appends use one writer accepting the latter four fields; SQLite
-assigns `id`. Display text and roles are derived from the protocol payload.
+assigns `id`. Binary media is not part of the schema: records reference
+content-addressed objects under `~/.cybion/objects/`, and the read endpoints
+resolve references to inline media (see [objects.md](objects.md)). Records
+written before the object store keep their inline base64. Display text and roles are derived from the protocol payload.
 Current-request checks use the input record's ID without storing an additional
 association on each history row.
 

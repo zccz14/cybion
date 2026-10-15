@@ -168,6 +168,12 @@ Cleanup works on a request copy:
 Within those rules other items keep their stored order. Tool output is bounded
 only in the request copy; the complete output stays in `history_records.payload`.
 
+Stored media references resolve while the request copy is compiled: a
+`result_ref` becomes the `image_generation_call`'s base64 `result`, and an
+`image_ref` part becomes its `input_image` data URL. Replay therefore sends the
+same inline media it sent before the object store existed; only the stored
+record shows the reference.
+
 Screenshots replay as images when the Worker call ledger says so: a `tool_output`
 whose call is `browser_control`/`computer_use` with `action = "screenshot"` and
 whose result carries PNG data replays as a real `input_image` part instead of

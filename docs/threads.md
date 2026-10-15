@@ -16,8 +16,8 @@ image model (the hosted gateway routes it over the upstream's image catalog;
 `GET {upstream}/models?kind=image` lists the callable image models) and the
 `reference_images` the call selected — one-based positions of the pictures
 attached to the turn's input, at most 4, resolved to their data URLs — then
-appends the tool output and the generated image to the Thread in one
-transaction, and the turn continues. The per-thread image generation model
+appends the tool output and the generated image (as an object reference) to
+the Thread in one transaction, and the turn continues. The per-thread image generation model
 wins over the account default, and an empty choice at either level keeps the
 tool out of the request. Failures answer the model instead of failing the
 turn, and a superseded request keeps the outcome as activity like a late
@@ -30,6 +30,9 @@ user database
         └── history_records (ordered by id)
 ```
 
+Binary media is stored outside the database; records reference it (see
+[objects.md](objects.md)).
+
 An input record is written before inference begins. Responses output items and
 Worker results are appended as they arrive, so a later request can reconstruct
 the thread from durable records after a process restart. A context checkpoint
@@ -38,11 +41,13 @@ the source records.
 
 An input is one Responses `input` item. Text stays a plain string; a pasted
 image makes it a message whose `content` array holds an `input_text` part and
-one `input_image` data URL per image. The append endpoints accept optional
-`images`, at most 4 per input and each a png/jpeg/webp/gif base64 data URL of
-at most 4 MiB of characters. The browser downsizes larger pastes before
-sending, and the estimate prices each stored image at a bounded token cost
-instead of its base64 length.
+one `input_image` part per image. The record keeps an `image_ref` (the bytes
+live in the object store); replay resolves it to the same data URL it always
+sent. The append endpoints accept optional `images`, at most 4 per input and
+each a png/jpeg/webp/gif base64 data URL of at most 4 MiB of characters. The
+browser downsizes larger pastes before sending, and the estimate prices each
+stored image - inline or referenced - at a bounded token cost instead of its
+base64 length.
 
 The UI exposes `idle`, `running`, and `failed` thread states. Failures append
 an activity record and leave the thread ready for a later input.
