@@ -34,8 +34,10 @@ OpenAI-Responses-compatible providers.
 **One lightweight Worker per device.** A device joins Cybion with a single
 small binary (`./cybion-worker run --background`, a 2–3 MB download) that
 keeps no database and no model credential: it opens one outbound connection
-and executes what the controller sends. Pairing is an in-browser authorization
-with a short code, configuration is written on the device, and upgrades ship
+and executes what the controller sends. It is ≈10–19 MB resident (private
+footprint ~5–7 MB) and stays flat while executing tasks — [see the
+measurements](#device-footprint). Pairing is an in-browser authorization with
+a short code, configuration is written on the device, and upgrades ship
 through the controller's download mirror for networks that cannot reach
 GitHub. Builds cover macOS (Apple Silicon / Intel), Linux (x86_64 / ARM64),
 Windows, and Android (early development) — iOS is coming soon. Bash, Browser
@@ -74,6 +76,27 @@ test $(df -Pk / | awk 'NR==2 {print $5}' | tr -d %) -lt 90
 The name comes from the Bell Labs joke box whose only function is to switch
 itself off; Cybion's version keeps your services running instead. See
 [Ultimate machines](docs/machines.md).
+
+## Device footprint
+
+The Worker is small, and stays small under load. Measured on three machines
+(macOS 26.5 and Debian 13; October 2026, idle and while executing a task):
+**≈10–19 MB resident** — private footprint ~5–7 MB — from a single
+process that holds no local database and no model credentials.
+
+![Device-side memory: empty vs under load — Cybion Worker vs public data](docs/images/worker-footprint.png)
+
+For scale, public single-session numbers for other harnesses: Codex CLI ~15 MB,
+OpenCode ~130 MB, Claude Code ~360–750 MB, ChatGPT Desktop 0.5–3.9 GB —
+different machines, versions and methods, so treat it as a magnitude
+comparison only. Sources: [HN](https://news.ycombinator.com/item?id=46904791),
+[aiya.de5.net](https://aiya.de5.net/t/topic/197),
+[openai/codex#38404](https://github.com/openai/codex/issues/38404).
+
+"Resident" here is RSS ≈ Activity Monitor's "Real Memory". The virtual
+address space macOS reports for the Worker (466 GB) is reserved address space,
+not memory usage. Task processes spawned while working, and the separate
+Chrome instance that Browser Control launches, are counted separately.
 
 ## Quick start
 
