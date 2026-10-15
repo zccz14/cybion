@@ -400,6 +400,7 @@ dependencies = [
  "async-stream",
  "auth-mini-axum",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "directories",
  "ed25519-dalek",

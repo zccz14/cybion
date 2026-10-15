@@ -22,6 +22,7 @@ use axum::{
     },
     routing::{delete, get, post, put},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fractional_index::FractionalIndex;
 use futures_util::StreamExt;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
@@ -39,6 +40,7 @@ mod history;
 mod linkit_notifications;
 mod machines;
 mod normai;
+mod objects;
 mod recovery;
 mod stats;
 mod thread_controls;
@@ -123,8 +125,9 @@ const PROACTIVE_COMPACTION_RETRY_LIMIT: usize = 2;
 // Record payload bytes per estimated token, used only for appended deltas and
 // for ranges without a measured anchor; conservative for CJK-heavy content.
 const CONTEXT_ESTIMATE_BYTES_PER_TOKEN: i64 = 4;
-// Binary media inside a record (a pasted image data URL) is priced as a fixed
-// token cost; its base64 characters would otherwise dwarf every text record.
+// Binary media inside a record (a pasted or generated image, whether stored
+// inline or as an object reference) is priced as a fixed token cost; its base64
+// characters would otherwise dwarf every text record.
 const CONTEXT_MEDIA_ESTIMATE_TOKENS: i64 = 1_600;
 const CHECKPOINT_RETRY_LIMIT: usize = 2;
 const CHECKPOINT_FRAGMENT_BYTES: usize = 24 * 1024;
@@ -2597,7 +2600,7 @@ fn input_message(input: String, images: Vec<String>) -> Result<Value, ApiError> 
         )));
     }
     for image in &images {
-        input_image(image)?;
+        input_image_data(image)?;
     }
     if images.is_empty() {
         if text.is_empty() {
@@ -2617,24 +2620,49 @@ fn input_message(input: String, images: Vec<String>) -> Result<Value, ApiError> 
     Ok(json!({"role":"user","content":content}))
 }
 
-fn input_image(image: &str) -> Result<(), ApiError> {
-    let supported = [
-        "data:image/png;base64,",
-        "data:image/jpeg;base64,",
-        "data:image/webp;base64,",
-        "data:image/gif;base64,",
-    ]
-    .iter()
-    .any(|prefix| image.starts_with(prefix));
-    if !supported {
-        return Err(ApiError::bad_request(
-            "images must be base64 data URLs of type png, jpeg, webp, or gif",
-        ));
+/// Validates one pasted image data URL and splits it into its media type and
+/// base64 characters.
+fn input_image_data(image: &str) -> Result<(&'static str, &str), ApiError> {
+    for (prefix, media_type) in [
+        ("data:image/png;base64,", "image/png"),
+        ("data:image/jpeg;base64,", "image/jpeg"),
+        ("data:image/webp;base64,", "image/webp"),
+        ("data:image/gif;base64,", "image/gif"),
+    ] {
+        let Some(data) = image.strip_prefix(prefix) else {
+            continue;
+        };
+        if image.len() > MAX_INPUT_IMAGE_CHARS {
+            return Err(ApiError::bad_request(format!(
+                "each image must be at most {MAX_INPUT_IMAGE_CHARS} data URL characters"
+            )));
+        }
+        return Ok((media_type, data));
     }
-    if image.len() > MAX_INPUT_IMAGE_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "each image must be at most {MAX_INPUT_IMAGE_CHARS} data URL characters"
-        )));
+    Err(ApiError::bad_request(
+        "images must be base64 data URLs of type png, jpeg, webp, or gif",
+    ))
+}
+
+/// Moves a fresh input item's pasted images into the object store, leaving
+/// `image_ref` parts behind; replay and every history projection resolve them
+/// back to inline data URLs.
+fn externalize_input_images(data_dir: &Path, input: &mut Value) -> Result<(), ApiError> {
+    let Some(content) = input.get_mut("content").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for part in content {
+        if part.get("type").and_then(Value::as_str) != Some("input_image") {
+            continue;
+        }
+        let Some(image) = part.get("image_url").and_then(Value::as_str) else {
+            continue;
+        };
+        let (media_type, encoded) = input_image_data(image)?;
+        let bytes = decode_base64(encoded)
+            .ok_or_else(|| ApiError::bad_request("images must contain valid base64 data"))?;
+        let object = objects::put(data_dir, &bytes)?;
+        *part = json!({"type": "input_image", "image_ref": object, "media_type": media_type});
     }
     Ok(())
 }
@@ -3340,9 +3368,10 @@ async fn request_thread_title(
 ) -> Result<String, ApiError> {
     let context = user_db(state, user, false, {
         let thread_id = thread.id.clone();
+        let data_dir = state.data_dir.clone();
         move |connection| {
             let tail = latest_protocol_record_id(connection, &thread_id)?;
-            compile_thread_context(connection, &thread_id, tail)
+            compile_thread_context(connection, &data_dir, &thread_id, tail)
         }
     })
     .await?;
@@ -3499,14 +3528,16 @@ async fn history_for(
     id: String,
     after: i64,
 ) -> Result<Vec<HistoryRecord>, ApiError> {
+    let data_dir = state.data_dir.clone();
     user_db(state, user, true, move |connection| {
-        load_history(connection, &id, after)
+        load_history(connection, &data_dir, &id, after)
     })
     .await
 }
 
 fn load_history(
     connection: &Connection,
+    data_dir: &Path,
     id: &str,
     after: i64,
 ) -> Result<Vec<HistoryRecord>, ApiError> {
@@ -3519,6 +3550,9 @@ fn load_history(
     let mut records = Vec::new();
     for row in rows {
         records.push(row?);
+    }
+    for record in &mut records {
+        materialize_media(data_dir, &mut record.payload)?;
     }
     mark_screenshot_records(connection, id, &mut records)?;
     Ok(records)
@@ -3552,17 +3586,22 @@ async fn history_window_for(
     id: String,
     query: ThreadHistoryWindowQuery,
 ) -> Result<ThreadHistoryWindow, ApiError> {
+    let data_dir = state.data_dir.clone();
     user_db(state, user, true, move |connection| {
         load_thread(connection, &id)?;
         match query.before {
-            None => thread_history_tail(connection, &id),
-            Some(before) => thread_history_older_page(connection, &id, before),
+            None => thread_history_tail(connection, &data_dir, &id),
+            Some(before) => thread_history_older_page(connection, &data_dir, &id, before),
         }
     })
     .await
 }
 
-fn thread_history_tail(connection: &Connection, id: &str) -> Result<ThreadHistoryWindow, ApiError> {
+fn thread_history_tail(
+    connection: &Connection,
+    data_dir: &Path,
+    id: &str,
+) -> Result<ThreadHistoryWindow, ApiError> {
     // ASSUMPTION: every thread writes an input record before inference starts, so the newest
     // input record is the first record of the thread's last turn. If a thread held records but
     // no input, the anchor falls back to 0 and the window degrades to a full read; the response
@@ -3581,6 +3620,9 @@ fn thread_history_tail(connection: &Connection, id: &str) -> Result<ThreadHistor
     for row in rows {
         records.push(row?);
     }
+    for record in &mut records {
+        materialize_media(data_dir, &mut record.payload)?;
+    }
     mark_screenshot_records(connection, id, &mut records)?;
     let has_older: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM history_records WHERE thread_id=? AND id<?)",
@@ -3592,6 +3634,7 @@ fn thread_history_tail(connection: &Connection, id: &str) -> Result<ThreadHistor
 
 fn thread_history_older_page(
     connection: &Connection,
+    data_dir: &Path,
     id: &str,
     before: i64,
 ) -> Result<ThreadHistoryWindow, ApiError> {
@@ -3616,6 +3659,9 @@ fn thread_history_older_page(
     let mut records = Vec::new();
     for row in rows {
         records.push(row?);
+    }
+    for record in &mut records {
+        materialize_media(data_dir, &mut record.payload)?;
     }
     mark_screenshot_records(connection, id, &mut records)?;
     let has_older: bool = connection.query_row(
@@ -4765,11 +4811,14 @@ fn estimated_screenshot_bytes(payload: &str, reinjected: bool) -> i64 {
 }
 
 /// One record's estimated replay bytes: its stored character count, except that
-/// embedded binary media (a data URL or a generated image's base64 result) is
-/// priced at a bounded cost instead of its raw base64 characters.
+/// embedded binary media - inline base64 or the object reference that restores
+/// it - is priced at a bounded cost instead of its raw base64 characters.
 fn estimated_payload_bytes(payload: &str) -> i64 {
     let bytes = payload.chars().count() as i64;
-    if !payload.contains("\"data:") && !payload.contains("\"image_generation_call\"") {
+    if !payload.contains("\"data:")
+        && !payload.contains("\"image_generation_call\"")
+        && !payload.contains("\"input_image\"")
+    {
         return bytes;
     }
     let Ok(value) = serde_json::from_str::<Value>(payload) else {
@@ -4791,10 +4840,21 @@ fn accumulate_media_savings(value: &Value, savings: &mut i64) {
             .iter()
             .for_each(|value| accumulate_media_savings(value, savings)),
         Value::Object(object) => {
-            if object.get("type").and_then(Value::as_str) == Some("image_generation_call")
-                && let Some(Value::String(result)) = object.get("result")
-            {
-                *savings += savings_for(result);
+            match object.get("type").and_then(Value::as_str) {
+                Some("image_generation_call") => {
+                    if let Some(Value::String(result)) = object.get("result") {
+                        *savings += savings_for(result);
+                    }
+                    if let Some(Value::String(id)) = object.get("result_ref") {
+                        *savings += reference_savings(id, capped);
+                    }
+                }
+                Some("input_image") => {
+                    if let Some(Value::String(id)) = object.get("image_ref") {
+                        *savings += reference_savings(id, capped);
+                    }
+                }
+                _ => {}
             }
             object
                 .values()
@@ -4802,6 +4862,12 @@ fn accumulate_media_savings(value: &Value, savings: &mut i64) {
         }
         _ => {}
     }
+}
+
+/// An object reference replays as the image it restores, so it prices at the
+/// bounded media cost less the short reference characters themselves.
+fn reference_savings(id: &str, capped: i64) -> i64 {
+    id.chars().count() as i64 - capped
 }
 
 fn context_idx_head(
@@ -4832,8 +4898,80 @@ fn context_idx_head(
         .ok_or_else(|| ApiError::conflict("thread has no context head"))
 }
 
+/// Resolves the object references stored in one durable record back into the
+/// inline media that replay and the history projections carry. Records written
+/// before object storage keep their inline media and pass through unchanged.
+/// COMPATIBILITY: inline media exists only in records written before the object
+/// store shipped; a backfill that moves them into objects can delete the inline
+/// branches, verifiable by no remaining record carrying inline media.
+fn materialize_media(data_dir: &Path, payload: &mut Value) -> Result<(), ApiError> {
+    resolve_generated_image(data_dir, payload)?;
+    if let Some(content) = payload.get_mut("content").and_then(Value::as_array_mut) {
+        for part in content {
+            resolve_input_image(data_dir, part)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_generated_image(data_dir: &Path, item: &mut Value) -> Result<(), ApiError> {
+    let Some(object) = item.as_object_mut() else {
+        return Ok(());
+    };
+    if object.get("type").and_then(Value::as_str) != Some("image_generation_call") {
+        return Ok(());
+    }
+    let Some(Value::String(id)) = object.remove("result_ref") else {
+        return Ok(());
+    };
+    object.insert(
+        "result".to_owned(),
+        json!(encode_base64(&objects::read(data_dir, &id)?)),
+    );
+    Ok(())
+}
+
+fn resolve_input_image(data_dir: &Path, part: &mut Value) -> Result<(), ApiError> {
+    let Some(object) = part.as_object_mut() else {
+        return Ok(());
+    };
+    if object.get("type").and_then(Value::as_str) != Some("input_image") {
+        return Ok(());
+    }
+    let Some(Value::String(id)) = object.remove("image_ref") else {
+        return Ok(());
+    };
+    let media_type = object
+        .remove("media_type")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| ApiError::internal("stored input image is missing its media type"))?;
+    object.insert(
+        "image_url".to_owned(),
+        json!(format!(
+            "data:{media_type};base64,{}",
+            encode_base64(&objects::read(data_dir, &id)?)
+        )),
+    );
+    Ok(())
+}
+
+/// The one base64 codec the controller stores media with.
+fn encode_base64(bytes: &[u8]) -> String {
+    STANDARD.encode(bytes)
+}
+
+/// Decodes stored media; upstreams may wrap base64 in line breaks.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let text: String = text
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    STANDARD.decode(text).ok()
+}
+
 fn load_protocol_items(
     connection: &Connection,
+    data_dir: &Path,
     thread_id: &str,
     idx_head: i64,
     idx_tail: i64,
@@ -4867,11 +5005,12 @@ fn load_protocol_items(
     for (id, created_at, kind, payload) in rows {
         let item: Value =
             serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let item = if reinjected.contains(&id) {
+        let mut item = if reinjected.contains(&id) {
             screenshot_replay_item(&item)
         } else {
             context_protocol_item(&item)
         };
+        materialize_media(data_dir, &mut item)?;
         records.push((id, created_at, kind, item));
     }
     Ok(records)
@@ -4879,12 +5018,13 @@ fn load_protocol_items(
 
 fn compile_thread_context(
     connection: &Connection,
+    data_dir: &Path,
     thread_id: &str,
     idx_tail: i64,
 ) -> Result<CompiledThreadContext, ApiError> {
     validate_protocol_record(connection, thread_id, idx_tail)?;
     let idx_head = context_idx_head(connection, thread_id, idx_tail)?;
-    let records = load_protocol_items(connection, thread_id, idx_head, idx_tail)?;
+    let records = load_protocol_items(connection, data_dir, thread_id, idx_head, idx_tail)?;
     if records.is_empty() {
         return Err(ApiError::conflict("thread has no replayable history"));
     }
@@ -5209,7 +5349,8 @@ async fn request_agent(
         let thread = &current;
         let context = user_db(state, user, false, {
             let id = thread.id.clone();
-            move |c| recovery::current_context(c, &id, source_record_idx)
+            let data_dir = state.data_dir.clone();
+            move |c| recovery::current_context(c, &data_dir, &id, source_record_idx)
         })
         .await
         .map_err(|e| (thread.clone(), Box::new(e)))?;
@@ -7224,8 +7365,9 @@ fn effective_image_generation_model(
 }
 
 /// Executes one intercepted `normai_image_generation` call: the controller asks the
-/// Thread's upstream image endpoint with the Thread's configured image model and
-/// returns the model-facing tool output plus the generated image item. Argument
+/// Thread's upstream image endpoint with the Thread's configured image model,
+/// stores the generated image as an object reference, and returns the
+/// model-facing tool output plus the generated image item. Argument
 /// problems and upstream failures are answered to the model instead of failing
 /// the turn; `reference_images` positions resolve against the pictures attached
 /// to the request's input record.
@@ -7312,11 +7454,21 @@ async fn image_generation_tool_output(
         .and_then(Value::as_str)
         .filter(|result| !result.is_empty())
         .ok_or_else(|| ApiError::unavailable("image generation returned no image"))?;
+    let Some(bytes) = decode_base64(result) else {
+        return Ok((
+            json!({ "error": "image generation returned an unreadable image" }),
+            None,
+        ));
+    };
+    let data_dir = state.data_dir.clone();
+    let object = tokio::task::spawn_blocking(move || objects::put(&data_dir, &bytes))
+        .await
+        .map_err(ApiError::internal)??;
     let mut output = json!({ "status": "completed" });
     let mut image = json!({
         "type": "image_generation_call",
         "status": "completed",
-        "result": result,
+        "result_ref": object,
         "output_format": "png",
     });
     if let Some(revised_prompt) = data.get("revised_prompt").and_then(Value::as_str)
@@ -7344,8 +7496,9 @@ async fn resolve_reference_images(
         )));
     }
     let thread_id = thread.id.clone();
+    let data_dir = state.data_dir.clone();
     let images = user_db(state, user, false, move |connection| {
-        input_record_images(connection, &thread_id, input_record_id)
+        input_record_images(connection, &data_dir, &thread_id, input_record_id)
     })
     .await?;
     if images.is_empty() {
@@ -7370,9 +7523,10 @@ async fn resolve_reference_images(
 }
 
 /// The pictures attached to one input record: its stored `input_image` parts in
-/// order, exactly as replay sends them to the model.
+/// order, resolved to the data URLs replay sends to the model.
 fn input_record_images(
     connection: &Connection,
+    data_dir: &Path,
     thread_id: &str,
     record_id: i64,
 ) -> Result<Vec<String>, ApiError> {
@@ -7386,9 +7540,10 @@ fn input_record_images(
     let Some(payload) = payload else {
         return Err(ApiError::not_found("input record not found"));
     };
-    let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+    let Ok(mut value) = serde_json::from_str::<Value>(&payload) else {
         return Ok(Vec::new());
     };
+    materialize_media(data_dir, &mut value)?;
     let Some(content) = value.get("content").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
@@ -8270,6 +8425,10 @@ mod common_context_tests;
 #[cfg(test)]
 #[path = "cloud_context_sort_tests.rs"]
 mod context_sort_tests;
+
+#[cfg(test)]
+#[path = "cloud_objects_tests.rs"]
+mod objects_tests;
 
 #[cfg(test)]
 mod tests {
@@ -10121,9 +10280,10 @@ mod tests {
         })
         .await
         .unwrap();
+        let data_dir = state.data_dir.clone();
         let context = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
-            move |connection| compile_thread_context(connection, &thread_id, ids.2)
+            move |connection| compile_thread_context(connection, &data_dir, &thread_id, ids.2)
         })
         .await
         .unwrap();
@@ -10146,7 +10306,8 @@ mod tests {
         assert!(
             user_db(&state, &user, false, {
                 let thread_id = thread.id.clone();
-                move |connection| compile_thread_context(connection, &thread_id, ids.3)
+                let data_dir = state.data_dir.clone();
+                move |connection| compile_thread_context(connection, &data_dir, &thread_id, ids.3)
             })
             .await
             .is_ok()
@@ -10190,7 +10351,10 @@ mod tests {
         assert!(
             user_db(&state, &user, false, {
                 let thread_id = thread.id.clone();
-                move |connection| compile_thread_context(connection, &thread_id, activity)
+                let data_dir = state.data_dir.clone();
+                move |connection| {
+                    compile_thread_context(connection, &data_dir, &thread_id, activity)
+                }
             })
             .await
             .is_err()
@@ -10198,14 +10362,18 @@ mod tests {
         assert!(
             user_db(&state, &user, false, {
                 let thread_id = thread.id.clone();
-                move |connection| compile_thread_context(connection, &thread_id, sibling_input)
+                let data_dir = state.data_dir.clone();
+                move |connection| {
+                    compile_thread_context(connection, &data_dir, &thread_id, sibling_input)
+                }
             })
             .await
             .is_err()
         );
+        let data_dir = state.data_dir.clone();
         let context = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
-            move |connection| compile_thread_context(connection, &thread_id, input)
+            move |connection| compile_thread_context(connection, &data_dir, &thread_id, input)
         })
         .await
         .unwrap();
@@ -10280,9 +10448,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored_kind, "activity");
+        let data_dir = state.data_dir.clone();
         let context = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
-            move |connection| compile_thread_context(connection, &thread_id, third_input)
+            move |connection| compile_thread_context(connection, &data_dir, &thread_id, third_input)
         })
         .await
         .unwrap();
@@ -11002,6 +11171,7 @@ mod tests {
         let thread = create_test_thread(&state, &user).await;
         let context = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
+            let data_dir = state.data_dir.clone();
             move |connection| {
                 connection.execute(
                     "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES('screenshot-worker','fixture',?,?,?,'online')",
@@ -11038,7 +11208,7 @@ mod tests {
                     )?;
                     tail = output_record;
                 }
-                compile_thread_context(connection, &thread_id, tail)
+                compile_thread_context(connection, &data_dir, &thread_id, tail)
             }
         })
         .await

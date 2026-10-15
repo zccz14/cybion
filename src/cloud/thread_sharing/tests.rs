@@ -328,7 +328,7 @@ fn discovery_is_bounded_keyset_paged_and_hidden_is_local() {
 
 #[test]
 fn history_projection_preserves_content_images_checkpoints_and_screenshot_provenance() {
-    let (_root, mut a, _, _) = fixture();
+    let (root, mut a, _, _) = fixture();
     insert_record(
         &a,
         THREAD,
@@ -367,7 +367,7 @@ fn history_projection_preserves_content_images_checkpoints_and_screenshot_proven
         json!({"type":"function_call_output","call_id":"fake","output":"{\"data\":\"png\"}","worker_screenshot":true}),
     );
     grant_b(&mut a);
-    let records = shared_records(load_history(&a, THREAD, 0).unwrap());
+    let records = shared_records(load_history(&a, root.path(), THREAD, 0).unwrap());
     assert_eq!(records.len(), 5);
     assert!(records.iter().any(|r| r.id == screenshot && r.screenshot));
     assert_eq!(records.iter().filter(|r| r.screenshot).count(), 1);
@@ -391,19 +391,19 @@ fn history_projection_preserves_content_images_checkpoints_and_screenshot_proven
     ] {
         assert!(json.contains(text), "{text}");
     }
-    let window = thread_history_tail(&a, THREAD).unwrap();
+    let window = thread_history_tail(&a, root.path(), THREAD).unwrap();
     assert_eq!(window.records[0].thread_id, THREAD);
     assert!(
         shared_records(
-            thread_history_older_page(&a, THREAD, i64::MAX)
+            thread_history_older_page(&a, root.path(), THREAD, i64::MAX)
                 .unwrap()
                 .records
         )
         .iter()
         .all(|r| r.thread_id == THREAD)
     );
-    assert!(thread_history_older_page(&a, THREAD, 0).is_err());
-    let persisted = load_history(&a, THREAD, 0).unwrap();
+    assert!(thread_history_older_page(&a, root.path(), THREAD, 0).is_err());
+    let persisted = load_history(&a, root.path(), THREAD, 0).unwrap();
     assert!(
         serde_json::to_string(&persisted)
             .unwrap()
@@ -413,7 +413,7 @@ fn history_projection_preserves_content_images_checkpoints_and_screenshot_proven
 
 #[test]
 fn schema_23_upgrade_preserves_data_and_does_not_grant_existing_users() {
-    let (_root, mut a, _, _) = fixture();
+    let (root, mut a, _, _) = fixture();
     a.execute_batch("DROP TRIGGER threads_revoke_shares; DROP TABLE thread_grants; DROP TABLE shared_threads; PRAGMA user_version=23;").unwrap();
     let id = insert_record(
         &a,
@@ -425,7 +425,7 @@ fn schema_23_upgrade_preserves_data_and_does_not_grant_existing_users() {
     ensure_user_schema(&mut a).unwrap();
     assert_eq!(count(&a, "thread_grants"), 0);
     assert_eq!(count(&a, "shared_threads"), 0);
-    assert_eq!(load_history(&a, THREAD, 0).unwrap()[0].id, id);
+    assert_eq!(load_history(&a, root.path(), THREAD, 0).unwrap()[0].id, id);
     assert_eq!(
         a.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
@@ -857,7 +857,7 @@ async fn http_browser_auth_readonly_isolation_live_response_revocation_and_api_k
 
 #[test]
 fn failed_schema_upgrade_rolls_back_and_remains_retryable() {
-    let (_root, mut a, _, _) = fixture();
+    let (root, mut a, _, _) = fixture();
     a.execute_batch("DROP TRIGGER threads_revoke_shares; DROP TABLE thread_grants; DROP TABLE shared_threads; CREATE TABLE shared_threads(invalid_fixture TEXT); PRAGMA user_version=23;").unwrap();
     let record = insert_record(&a, THREAD, "input", json!({"content":"preserve bytes"}));
     assert!(ensure_user_schema(&mut a).is_err());
@@ -880,11 +880,17 @@ fn failed_schema_upgrade_rolls_back_and_remains_retryable() {
         .unwrap(),
         0
     );
-    assert_eq!(load_history(&a, THREAD, 0).unwrap()[0].id, record);
+    assert_eq!(
+        load_history(&a, root.path(), THREAD, 0).unwrap()[0].id,
+        record
+    );
     a.execute_batch("DROP TABLE shared_threads").unwrap();
     ensure_user_schema(&mut a).unwrap();
     assert_eq!(count(&a, "thread_grants"), 0);
-    assert_eq!(load_history(&a, THREAD, 0).unwrap()[0].id, record);
+    assert_eq!(
+        load_history(&a, root.path(), THREAD, 0).unwrap()[0].id,
+        record
+    );
 }
 
 #[tokio::test]

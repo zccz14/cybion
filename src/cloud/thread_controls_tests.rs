@@ -11,8 +11,9 @@ fn user_text(text: &str) -> Value {
 
 async fn record(state: &AppState, user: &User, thread: &ThreadView, input: RequestInput) -> i64 {
     let id = thread.id.clone();
+    let data_dir = state.data_dir.clone();
     user_db(state, user, false, move |connection| {
-        record_request(connection, &id, input).map(|(id, _)| id)
+        record_request(connection, &data_dir, &id, input).map(|(id, _)| id)
     })
     .await
     .unwrap()
@@ -256,6 +257,37 @@ async fn pasted_image_input_replays_as_an_upstream_input_image_part() {
         .unwrap();
     let input = stored.iter().find(|record| record.kind == "input").unwrap();
     assert_eq!(input.payload["content"][1]["image_url"], image);
+    // The persisted record keeps a reference; the projection inlines it again.
+    let stored_raw: String = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            Ok(connection.query_row(
+                "SELECT payload FROM history_records WHERE thread_id=? AND kind='input'",
+                [&thread_id],
+                |row| row.get(0),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    let stored_raw: Value = serde_json::from_str(&stored_raw).unwrap();
+    assert!(stored_raw["content"][1].get("image_url").is_none());
+    assert_eq!(stored_raw["content"][1]["media_type"], "image/png");
+    let reference = stored_raw["content"][1]["image_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        std::fs::read(
+            state
+                .data_dir
+                .join("objects")
+                .join(&reference[..2])
+                .join(&reference)
+        )
+        .unwrap(),
+        decode_base64("UC5ORw==").unwrap()
+    );
 }
 
 #[tokio::test]
@@ -538,9 +570,10 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
         "idle"
     );
     let next = record(&state, &user, &thread, RequestInput::Continue).await;
+    let data_dir = state.data_dir.clone();
     let replay = user_db(&state, &user, false, move |connection| {
         let tail = request_context_tail(connection, &thread.id, next)?;
-        compile_thread_context(connection, &thread.id, tail)
+        compile_thread_context(connection, &data_dir, &thread.id, tail)
     })
     .await
     .unwrap();

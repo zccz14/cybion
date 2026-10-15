@@ -1859,6 +1859,7 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
             .unwrap()
             .contains("late result")
     );
+    let data_dir = state.data_dir.clone();
     user_db(&state, &user, false, move |connection| {
         let (status, output_id): (String, i64) = connection.query_row(
             "SELECT status,output_record_id FROM worker_calls WHERE id=?",
@@ -1867,7 +1868,7 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
         )?;
         assert_eq!(status, "cancelled");
         assert_eq!(output_id, history[2].id);
-        let context = compile_thread_context(connection, &thread.id, second)?;
+        let context = compile_thread_context(connection, &data_dir, &thread.id, second)?;
         assert_eq!(context.record_ids, [first, second]);
         assert!(
             context
@@ -2203,7 +2204,7 @@ async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_ima
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let (headers, request) = read_http_request(&mut socket).await;
-        let body = json!({"data":[{"b64_json":"iVBORw0KGgo","revised_prompt":"A red circle."}]})
+        let body = json!({"data":[{"b64_json":"iVBORw0KGgo=","revised_prompt":"A red circle."}]})
             .to_string();
         socket
             .write_all(
@@ -2271,8 +2272,35 @@ async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_ima
     assert_eq!(image.kind, "tool_output");
     assert_eq!(image.payload["type"], "image_generation_call");
     assert_eq!(image.payload["status"], "completed");
-    assert_eq!(image.payload["result"], "iVBORw0KGgo");
+    assert_eq!(image.payload["result"], "iVBORw0KGgo=");
     assert_eq!(image.payload["output_format"], "png");
+    // Stored records reference the object store; the read projections inline it.
+    let stored: Vec<String> = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT payload FROM history_records WHERE thread_id=? AND kind='tool_output' ORDER BY id",
+            )?;
+            let rows = statement.query_map([&thread_id], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        }
+    })
+    .await
+    .unwrap();
+    let stored_image: Value = serde_json::from_str(stored.last().unwrap()).unwrap();
+    assert!(stored_image.get("result").is_none());
+    assert_eq!(stored_image["output_format"], "png");
+    let reference = stored_image["result_ref"].as_str().unwrap().to_owned();
+    assert_eq!(reference.len(), 64);
+    let object = std::fs::read(
+        state
+            .data_dir
+            .join("objects")
+            .join(&reference[..2])
+            .join(&reference),
+    )
+    .unwrap();
+    assert_eq!(encode_base64(&object), "iVBORw0KGgo=");
     // The settled call and its image replay together as one turn.
     let items = vec![tool.value(), output.payload.clone(), image.payload.clone()];
     assert_eq!(replayable_context_items(&items).len(), 3);
@@ -2454,7 +2482,7 @@ async fn image_generation_forwards_reference_images_from_the_input() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let (_headers, request) = read_http_request(&mut socket).await;
-        let body = json!({"data":[{"b64_json":"iVBORw0KGgo"}]}).to_string();
+        let body = json!({"data":[{"b64_json":"iVBORw0KGgo="}]}).to_string();
         socket
             .write_all(
                 format!(
@@ -2600,7 +2628,7 @@ async fn superseded_image_generation_outcomes_are_activity() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let body = json!({"data":[{"b64_json":"iVBORw0KGgo"}]}).to_string();
+        let body = json!({"data":[{"b64_json":"iVBORw0KGgo="}]}).to_string();
         socket
             .write_all(
                 format!(

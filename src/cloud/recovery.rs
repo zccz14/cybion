@@ -95,6 +95,7 @@ pub(super) async fn ensure_thread_loop(
 
 pub(super) fn current_context(
     c: &mut Connection,
+    data_dir: &Path,
     thread: &str,
     input: i64,
 ) -> Result<CompiledThreadContext, ApiError> {
@@ -105,7 +106,7 @@ pub(super) fn current_context(
         return Err(ApiError::cancelled());
     }
     let tail = latest_protocol_record_id(&tx, thread)?;
-    let context = compile_thread_context(&tx, thread, tail)?;
+    let context = compile_thread_context(&tx, data_dir, thread, tail)?;
     tx.commit()?;
     Ok(context)
 }

@@ -290,7 +290,9 @@ mod tests {
                 .len(),
             COLUMNS.len()
         );
-        let context = cloud::compile_thread_context(&connection, "thread", 3).unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let context =
+            cloud::compile_thread_context(&connection, data_dir.path(), "thread", 3).unwrap();
         assert_eq!(context.record_ids, [1, 3]);
     }
 

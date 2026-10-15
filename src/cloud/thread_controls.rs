@@ -65,13 +65,15 @@ fn control_record(connection: &Connection, thread_id: &str, action: &str) -> Res
 
 fn record_request(
     connection: &mut Connection,
+    data_dir: &Path,
     thread_id: &str,
     input: RequestInput,
 ) -> Result<(i64, RequestOperation), ApiError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let thread = load_thread(&transaction, thread_id)?;
     let (record_idx, operation) = match input {
-        RequestInput::Prompt(input) => {
+        RequestInput::Prompt(mut input) => {
+            externalize_input_images(data_dir, &mut input)?;
             let id = persist_history_record(
                 &transaction,
                 HistoryRecordInsert {
@@ -115,8 +117,9 @@ pub(super) async fn enqueue(
     // request boundary and its cancellation sender become visible together.
     let mut active = state.active_requests.lock().await;
     let queued_thread_id = thread_id.clone();
+    let data_dir = state.data_dir.clone();
     let (record_idx, operation) = user_db(&state, &user, true, move |connection| {
-        record_request(connection, &queued_thread_id, input)
+        record_request(connection, &data_dir, &queued_thread_id, input)
     })
     .await?;
     if active
@@ -245,9 +248,10 @@ pub(super) async fn compact_request(
         let result = async {
             let context = user_db(state, user, false, {
                 let thread_id = thread.id.clone();
+                let data_dir = state.data_dir.clone();
                 move |connection| {
                     let tail = request_context_tail(connection, &thread_id, record_idx)?;
-                    compile_thread_context(connection, &thread_id, tail)
+                    compile_thread_context(connection, &data_dir, &thread_id, tail)
                 }
             })
             .await?;

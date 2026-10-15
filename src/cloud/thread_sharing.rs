@@ -532,10 +532,11 @@ async fn history_window(
     Query(query): Query<ThreadHistoryWindowQuery>,
 ) -> Result<Json<ThreadHistoryWindow>, ApiError> {
     let id = thread_id(&id)?;
+    let data_dir = state.data_dir.clone();
     shared_db(&state, &identity.user, owner, id.clone(), move |c, _| {
         let window = match query.before {
-            None => thread_history_tail(c, &id)?,
-            Some(before) => thread_history_older_page(c, &id, before)?,
+            None => thread_history_tail(c, &data_dir, &id)?,
+            Some(before) => thread_history_older_page(c, &data_dir, &id, before)?,
         };
         Ok(ThreadHistoryWindow {
             records: shared_records(window.records),
@@ -556,8 +557,9 @@ async fn history(
     if after < 0 {
         return Err(ApiError::bad_request("after must not be negative"));
     }
+    let data_dir = state.data_dir.clone();
     shared_db(&state, &identity.user, owner, id.clone(), move |c, _| {
-        Ok(shared_records(load_history(c, &id, after)?))
+        Ok(shared_records(load_history(c, &data_dir, &id, after)?))
     })
     .await
     .map(Json)

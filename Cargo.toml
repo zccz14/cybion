@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow = "1.0.98"
 auth-mini-axum = "=0.1.2"
 async-stream = "0.3"
+base64 = "0.22.1"
 axum = { version = "0.8.4", features = ["macros", "multipart"] }
 chrono = { version = "0.4.41", features = ["serde"] }
 directories = "6.0.0"

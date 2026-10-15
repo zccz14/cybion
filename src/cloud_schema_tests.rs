@@ -447,10 +447,11 @@ async fn history_appends_and_restart_recovery_use_only_core_columns() {
         records[6].payload["content"],
         "Request interrupted by a Cybion restart"
     );
+    let data_dir = state.data_dir.clone();
     user_db(&state, &user, false, move |connection| {
         assert_core_history_schema(connection);
         assert_eq!(load_thread(connection, &thread.id)?.status, "running");
-        let context = compile_thread_context(connection, &thread.id, checkpoint)?;
+        let context = compile_thread_context(connection, &data_dir, &thread.id, checkpoint)?;
         assert_eq!(
             context.items,
             vec![json!({"role":"developer","content":"Checkpoint"})]
