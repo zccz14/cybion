@@ -243,7 +243,7 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
     assert_eq!(output.payload["type"], "custom_tool_call_output");
     assert_eq!(output.payload["call_id"], "custom-1");
     let replay = replayable_context_items(
-        &history
+        history
             .iter()
             .map(|r| r.payload.clone())
             .collect::<Vec<_>>(),
@@ -2084,7 +2084,7 @@ fn replayed_tool_calls_regroup_before_their_outputs_within_a_thinking_turn() {
         json!({"type":"function_call","id":"fc-2","name":"bash","call_id":"call-b","arguments":"{\"command\":\"curl\"}"}),
         json!({"type":"function_call_output","call_id":"call-b","output":"{\"stdout\":\"ok\"}"}),
     ];
-    let replay = replayable_context_items(&items);
+    let replay = replayable_context_items(items);
     assert_eq!(replay[0]["type"], "reasoning");
     assert_eq!(replay[1]["type"], "message");
     assert_eq!(replay.len(), 6);
@@ -2117,7 +2117,7 @@ fn replayed_tool_items_stay_paired_with_outputs_after_the_call() {
         json!({"type":"function_call","id":"fc-dup-2","name":"bash","call_id":"call-d","arguments":"{}"}),
         json!({"type":"function_call_output","call_id":"call-d","output":"{}"}),
     ];
-    let replay = replayable_context_items(&items);
+    let replay = replayable_context_items(items);
     for (index, item) in replay.iter().enumerate() {
         let Some((_, false)) = tool_pair(item) else {
             continue;
@@ -2157,7 +2157,7 @@ fn replayed_tool_calls_without_reasoning_group_before_their_outputs() {
         json!({"type":"function_call","id":"fc-2","name":"bash","call_id":"call-b","arguments":"{}"}),
         json!({"type":"function_call_output","call_id":"call-b","output":"{}"}),
     ];
-    let replay = replayable_context_items(&items);
+    let replay = replayable_context_items(items);
     let call_ids = replay
         .iter()
         .map(|item| item["call_id"].as_str().unwrap_or_default().to_owned())
@@ -2183,7 +2183,7 @@ fn replayed_tool_calls_move_messages_out_of_the_pending_batch() {
         json!({"type":"function_call_output","call_id":"call-a","output":"{}"}),
         json!({"type":"function_call_output","call_id":"call-b","output":"{}"}),
     ];
-    let replay = replayable_context_items(&items);
+    let replay = replayable_context_items(items);
     let call_ids = replay
         .iter()
         .map(|item| item["call_id"].as_str().unwrap_or_default().to_owned())
@@ -2304,7 +2304,7 @@ async fn image_generation_calls_the_upstream_image_endpoint_and_attaches_the_ima
     assert_eq!(encode_base64(&object), "iVBORw0KGgo=");
     // The settled call and its image replay together as one turn.
     let items = vec![tool.value(), output.payload.clone(), image.payload.clone()];
-    assert_eq!(replayable_context_items(&items).len(), 3);
+    assert_eq!(replayable_context_items(items).len(), 3);
 }
 
 #[tokio::test]
@@ -2774,7 +2774,7 @@ async fn web_search_calls_the_upstream_web_search_endpoint_and_returns_sources()
     );
     // The settled call and its sources replay together as one turn.
     let items = vec![tool.value(), output.payload.clone()];
-    assert_eq!(replayable_context_items(&items).len(), 2);
+    assert_eq!(replayable_context_items(items).len(), 2);
 }
 
 #[tokio::test]

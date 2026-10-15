@@ -167,7 +167,7 @@ async fn stored_references_resolve_for_history_and_replay() {
     .await
     .unwrap();
     let replayed = context
-        .protocol_items
+        .items
         .iter()
         .find(|item| item["type"] == "image_generation_call")
         .unwrap();

@@ -3375,21 +3375,26 @@ async fn request_thread_title(
         }
     })
     .await?;
-    let mut input = context.items.clone();
-    input.push(json!({"role": "user", "content": THREAD_TITLE_PROMPT}));
+    let CompiledThreadContext {
+        mut items,
+        idx_head,
+        idx_tail,
+        ..
+    } = context;
+    items.push(json!({"role": "user", "content": THREAD_TITLE_PROMPT}));
     let response = responses_request_with_options(
         state,
         user,
         &thread.id,
         None,
         "title_generation",
-        context.idx_head,
-        context.idx_tail,
+        idx_head,
+        idx_tail,
         upstream,
         &thread.model,
         None,
         thread.service_tier_fast,
-        Value::Array(input),
+        Value::Array(items),
         false,
         false,
         false,
@@ -4638,7 +4643,6 @@ struct ProtocolRecordMetadata {
 #[derive(Debug)]
 struct CompiledThreadContext {
     items: Vec<Value>,
-    protocol_items: Vec<Value>,
     record_ids: Vec<i64>,
     record_metadata: Vec<ProtocolRecordMetadata>,
     idx_head: i64,
@@ -4657,21 +4661,18 @@ impl CompiledThreadContext {
     fn from_records(idx_head: i64, idx_tail: i64, records: Vec<(i64, i64, String, Value)>) -> Self {
         let mut record_ids = Vec::with_capacity(records.len());
         let mut record_metadata = Vec::with_capacity(records.len());
-        let mut protocol_items = Vec::with_capacity(records.len());
         let mut items = Vec::with_capacity(records.len());
         for (record_id, created_at, kind, item) in records {
             record_ids.push(record_id);
             record_metadata.push(ProtocolRecordMetadata {
                 record_id,
                 created_at,
-                kind: kind.clone(),
+                kind,
             });
-            protocol_items.push(item.clone());
-            items.push(item.clone());
+            items.push(item);
         }
         Self {
             items,
-            protocol_items,
             record_ids,
             record_metadata,
             idx_head,
@@ -4799,14 +4800,14 @@ fn estimate_range_bytes(
 /// A ledger screenshot prices as what replay sends: the bounded media cost when
 /// it replays as a real image, and its truncated text size otherwise.
 fn estimated_screenshot_bytes(payload: &str, reinjected: bool) -> i64 {
-    let Ok(item) = serde_json::from_str::<Value>(payload) else {
+    let Ok(mut item) = serde_json::from_str::<Value>(payload) else {
         return payload.chars().count() as i64;
     };
-    let item = if reinjected {
-        screenshot_replay_item(&item)
+    if reinjected {
+        screenshot_replay_item(&mut item);
     } else {
-        context_protocol_item(&item)
-    };
+        context_protocol_item(&mut item);
+    }
     estimated_payload_bytes(&item.to_string())
 }
 
@@ -4930,7 +4931,7 @@ fn resolve_generated_image(data_dir: &Path, item: &mut Value) -> Result<(), ApiE
     };
     object.insert(
         "result".to_owned(),
-        json!(encode_base64(&objects::read(data_dir, &id)?)),
+        Value::String(encode_base64(&objects::read(data_dir, &id)?)),
     );
     Ok(())
 }
@@ -4951,7 +4952,7 @@ fn resolve_input_image(data_dir: &Path, part: &mut Value) -> Result<(), ApiError
         .ok_or_else(|| ApiError::internal("stored input image is missing its media type"))?;
     object.insert(
         "image_url".to_owned(),
-        json!(format!(
+        Value::String(format!(
             "data:{media_type};base64,{}",
             encode_base64(&objects::read(data_dir, &id)?)
         )),
@@ -5007,13 +5008,13 @@ fn load_protocol_items(
     };
     let mut records = Vec::with_capacity(rows.len());
     for (id, created_at, kind, payload) in rows {
-        let item: Value =
+        let mut item: Value =
             serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let mut item = if reinjected.contains(&id) {
-            screenshot_replay_item(&item)
+        if reinjected.contains(&id) {
+            screenshot_replay_item(&mut item);
         } else {
-            context_protocol_item(&item)
-        };
+            context_protocol_item(&mut item);
+        }
         materialize_media(data_dir, &mut item)?;
         records.push((id, created_at, kind, item));
     }
@@ -5037,19 +5038,23 @@ fn compile_thread_context(
     ))
 }
 
-fn context_tool_output_item(item: &Value) -> Value {
-    let mut item = item.clone();
+/// Truncates an oversized replayed tool output in place; every other item is
+/// left untouched.
+fn context_protocol_item(item: &mut Value) {
     if let Some("function_call_output" | "custom_tool_call_output") =
         item.get("type").and_then(Value::as_str)
-        && let Some(output) = item.get("output").and_then(Value::as_str)
     {
-        item["output"] = Value::String(context_tool_output(output));
+        let truncated = {
+            let Some(output) = item.get("output").and_then(Value::as_str) else {
+                return;
+            };
+            if output.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS {
+                return;
+            }
+            context_tool_output(output)
+        };
+        item["output"] = Value::String(truncated);
     }
-    item
-}
-
-fn context_protocol_item(item: &Value) -> Value {
-    context_tool_output_item(item)
 }
 
 fn context_tool_output(output: &str) -> String {
@@ -5121,13 +5126,15 @@ fn reinjected_screenshot_ids(ordered_ids: &[i64], screenshots: &HashSet<i64>) ->
 /// ASSUMPTION: upstreams accept an inline image data URL inside
 /// `function_call_output.output`; a provider that rejects it fails that
 /// request visibly and the turn can be retried, so no record is lost.
-fn screenshot_replay_item(item: &Value) -> Value {
+fn screenshot_replay_item(item: &mut Value) {
     let Some(image_url) = screenshot_image_data_url(item) else {
-        return context_tool_output_item(item);
+        context_protocol_item(item);
+        return;
     };
-    let mut item = item.clone();
-    item["output"] = json!([{"type": "input_image", "image_url": image_url}]);
-    item
+    let mut part = serde_json::Map::new();
+    part.insert("type".to_owned(), Value::String("input_image".to_owned()));
+    part.insert("image_url".to_owned(), Value::String(image_url));
+    item["output"] = Value::Array(vec![Value::Object(part)]);
 }
 
 fn screenshot_image_data_url(item: &Value) -> Option<String> {
@@ -5136,9 +5143,13 @@ fn screenshot_image_data_url(item: &Value) -> Option<String> {
     let data = result.get("data")?.as_str()?;
     let base64: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     // The Worker writes PNG screenshots on every platform.
-    base64
-        .starts_with("iVBORw0KGgo")
-        .then(|| format!("data:image/png;base64,{base64}"))
+    if !base64.starts_with("iVBORw0KGgo") {
+        return None;
+    }
+    let mut url = String::with_capacity("data:image/png;base64,".len() + base64.len());
+    url.push_str("data:image/png;base64,");
+    url.push_str(&base64);
+    Some(url)
 }
 
 fn tool_pair(item: &Value) -> Option<(&'static str, bool)> {
@@ -5157,38 +5168,44 @@ fn tool_pair(item: &Value) -> Option<(&'static str, bool)> {
     }
 }
 
-fn replayable_context_items(items: &[Value]) -> Vec<Value> {
-    let mut calls = HashMap::<(&str, &str), Vec<usize>>::new();
-    let mut outputs = HashMap::<(&str, &str), Vec<usize>>::new();
-    for (index, item) in items.iter().enumerate() {
-        if let Some((kind, output)) = tool_pair(item)
-            && let Some(id) = item
-                .get("call_id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-        {
-            let counts = if output { &mut outputs } else { &mut calls };
-            counts.entry((kind, id)).or_default().push(index);
+fn replayable_context_items(items: Vec<Value>) -> Vec<Value> {
+    let keep = {
+        let mut calls = HashMap::<(&str, &str), Vec<usize>>::new();
+        let mut outputs = HashMap::<(&str, &str), Vec<usize>>::new();
+        for (index, item) in items.iter().enumerate() {
+            if let Some((kind, output)) = tool_pair(item)
+                && let Some(id) = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+            {
+                let counts = if output { &mut outputs } else { &mut calls };
+                counts.entry((kind, id)).or_default().push(index);
+            }
         }
-    }
+        items
+            .iter()
+            .map(|item| {
+                let Some((kind, _)) = tool_pair(item) else {
+                    return true;
+                };
+                let Some(id) = item.get("call_id").and_then(Value::as_str) else {
+                    return false;
+                };
+                matches!(
+                    (
+                        calls.get(&(kind, id)).map(Vec::as_slice),
+                        outputs.get(&(kind, id)).map(Vec::as_slice)
+                    ),
+                    (Some([call]), Some([output])) if call < output
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     let paired = items
-        .iter()
-        .filter(|item| {
-            let Some((kind, _)) = tool_pair(item) else {
-                return true;
-            };
-            let Some(id) = item.get("call_id").and_then(Value::as_str) else {
-                return false;
-            };
-            matches!(
-                (
-                    calls.get(&(kind, id)).map(Vec::as_slice),
-                    outputs.get(&(kind, id)).map(Vec::as_slice)
-                ),
-                (Some([call]), Some([output])) if call < output
-            )
-        })
-        .cloned()
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
         .collect();
     regroup_tool_calls(paired)
 }
@@ -5223,19 +5240,21 @@ fn regroup_tool_calls(items: Vec<Value>) -> Vec<Value> {
 
 fn flush_tool_turn(regrouped: &mut Vec<Value>, turn: &mut Vec<Value>) {
     let items = std::mem::take(turn);
-    regrouped.extend(
-        items
-            .iter()
-            .filter(|item| !is_tool_call_item(item) && !is_tool_output_item(item))
-            .cloned(),
-    );
-    regrouped.extend(items.iter().filter(|item| is_tool_call_item(item)).cloned());
-    regrouped.extend(
-        items
-            .iter()
-            .filter(|item| is_tool_output_item(item))
-            .cloned(),
-    );
+    let mut plain = Vec::new();
+    let mut calls = Vec::new();
+    let mut outputs = Vec::new();
+    for item in items {
+        if is_tool_call_item(&item) {
+            calls.push(item);
+        } else if is_tool_output_item(&item) {
+            outputs.push(item);
+        } else {
+            plain.push(item);
+        }
+    }
+    regrouped.extend(plain);
+    regrouped.extend(calls);
+    regrouped.extend(outputs);
 }
 
 fn is_reasoning_item(item: &Value) -> bool {
@@ -5351,7 +5370,7 @@ async fn request_agent(
             .await
             .map_err(|e| (thread.clone(), Box::new(e)))?;
         let thread = &current;
-        let context = user_db(state, user, false, {
+        let mut context = user_db(state, user, false, {
             let id = thread.id.clone();
             let data_dir = state.data_dir.clone();
             move |c| recovery::current_context(c, &data_dir, &id, source_record_idx)
@@ -5406,7 +5425,7 @@ async fn request_agent(
             &thread.model,
             Some(&thread.reasoning_effort),
             thread.service_tier_fast,
-            Value::Array(context.items.clone()),
+            Value::Array(std::mem::take(&mut context.items)),
             has_workers,
             // Thread turns always inject the native web search tool; the
             // intercepted image generation tool follows the configured image
@@ -5421,6 +5440,16 @@ async fn request_agent(
                 if error.is_context_overflow() && checkpoint_retries < CHECKPOINT_RETRY_LIMIT =>
             {
                 checkpoint_retries += 1;
+                // INVARIANT: the request consumed the compiled items, so the
+                // checkpoint rebuilds the same record range before compacting.
+                context = user_db(state, user, false, {
+                    let id = thread.id.clone();
+                    let data_dir = state.data_dir.clone();
+                    let tail = context.idx_tail;
+                    move |connection| compile_thread_context(connection, &data_dir, &id, tail)
+                })
+                .await
+                .map_err(|error| (thread.clone(), Box::new(error)))?;
                 compact_thread_context(
                     state,
                     user,
@@ -5673,7 +5702,7 @@ async fn compact_thread_context(
         context.idx_tail,
         upstream,
         &thread.model,
-        &context.protocol_items,
+        &context.items,
         &context.record_metadata,
         cancellation.clone(),
     )
@@ -6233,6 +6262,38 @@ async fn responses_request_with_options(
     request.await
 }
 
+/// Serializes a Responses payload into the request body and drops the value
+/// tree before the network wait: a large replayed context must not stay
+/// resident while the upstream response streams.
+fn serialize_responses_payload(payload: Value) -> Result<Vec<u8>, ApiError> {
+    let mut body = Vec::with_capacity(serialized_size_estimate(&payload));
+    serde_json::to_writer(&mut body, &payload).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to serialize the upstream Responses payload: {error}"
+        ))
+    })?;
+    Ok(body)
+}
+
+/// Rough serialized size of a value; string contents dominate every payload,
+/// so reserving the estimate up front avoids the doubling copies of a growing
+/// buffer while a large context is serialized.
+fn serialized_size_estimate(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(_) => 5,
+        Value::Number(_) => 24,
+        Value::String(text) => text.len() + 2,
+        Value::Array(items) => 2 + items.iter().map(serialized_size_estimate).sum::<usize>(),
+        Value::Object(entries) => {
+            2 + entries
+                .iter()
+                .map(|(key, value)| key.len() + 4 + serialized_size_estimate(value))
+                .sum::<usize>()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_responses_request(
     state: &AppState,
@@ -6258,6 +6319,7 @@ async fn send_responses_request(
         web_search,
         image_generation,
     );
+    let body = serialize_responses_payload(payload)?;
     let mut request = state
         .client
         .post(format!(
@@ -6267,7 +6329,8 @@ async fn send_responses_request(
         .bearer_auth(upstream.api_key.as_str())
         .header("Accept", "text/event-stream")
         .header("originator", CYBION_ORIGINATOR)
-        .json(&payload);
+        .header("Content-Type", "application/json")
+        .body(body);
     if let Some((spec, _)) = audit.as_ref() {
         for (key, header) in [
             (EXPERIMENTAL_THREAD_ID_HEADER_KEY, THREAD_ID_HEADER),
@@ -6822,7 +6885,12 @@ fn responses_payload_with_options(
     web_search: bool,
     image_generation: bool,
 ) -> Value {
-    let mut payload = json!({"model":model,"input":input,"store":false,"stream":true});
+    let mut payload = serde_json::Map::with_capacity(8);
+    payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    payload.insert("input".to_owned(), input);
+    payload.insert("store".to_owned(), Value::Bool(false));
+    payload.insert("stream".to_owned(), Value::Bool(true));
+    let mut payload = Value::Object(payload);
     if let Some(reasoning_effort) = reasoning_effort {
         // Codex requests summaries explicitly so the summary event stream is
         // available for both rendering and the next Thread context.
@@ -6853,9 +6921,8 @@ fn sanitize_responses_input(payload: &mut Value) {
     let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) else {
         return;
     };
-    let replayable = replayable_context_items(input);
-    input.clear();
-    input.extend(replayable);
+    let items = std::mem::take(input);
+    *input = replayable_context_items(items);
     for item in input {
         match item.get("type").and_then(Value::as_str) {
             Some("web_search_call") => {
@@ -7412,7 +7479,8 @@ async fn image_generation_tool_output(
     let upstream = load_thread_upstream(state, user, thread).await?;
     let mut body = json!({ "model": model, "prompt": prompt });
     if !reference_images.is_empty() {
-        body["reference_images"] = json!(reference_images);
+        body["reference_images"] =
+            Value::Array(reference_images.into_iter().map(Value::String).collect());
     }
     let response = state
         .client
@@ -11148,7 +11216,8 @@ mod tests {
     fn oversized_tool_output_is_bounded_only_in_replay() {
         let output = format!("{}终", "文".repeat(MAX_CONTEXT_TOOL_OUTPUT_CHARS));
         let item = json!({"type":"function_call_output","call_id":"call-1","output":output});
-        let replayed = context_protocol_item(&item);
+        let mut replayed = item.clone();
+        context_protocol_item(&mut replayed);
         assert_eq!(
             item["output"].as_str().unwrap().chars().count(),
             MAX_CONTEXT_TOOL_OUTPUT_CHARS + 1
@@ -11167,19 +11236,21 @@ mod tests {
     fn screenshot_replay_embeds_png_payloads_and_keeps_other_results_text() {
         let png = format!("iVBORw0KGgo{}", "A".repeat(96));
         let item = json!({"type":"function_call_output","call_id":"c1","output":json!({"data":png}).to_string()});
-        let replayed = screenshot_replay_item(&item);
+        let mut replayed = item.clone();
+        screenshot_replay_item(&mut replayed);
         assert_eq!(replayed["output"][0]["type"], "input_image");
         assert_eq!(
             replayed["output"][0]["image_url"],
             json!(format!("data:image/png;base64,{png}"))
         );
 
-        let wrapped = json!({
+        let mut wrapped = json!({
             "type":"function_call_output","call_id":"c2",
             "output":json!({"data":"iVBORw0KGgoAAAANSUhEUg\n"}).to_string()
         });
+        screenshot_replay_item(&mut wrapped);
         assert_eq!(
-            screenshot_replay_item(&wrapped)["output"][0]["image_url"],
+            wrapped["output"][0]["image_url"],
             json!("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg")
         );
 
@@ -11187,8 +11258,9 @@ mod tests {
             "screenshot failed: permission denied",
             r#"{"data":"bm90IGEgcG5n"}"#,
         ] {
-            let item = json!({"type":"function_call_output","call_id":"c3","output":output});
-            assert_eq!(screenshot_replay_item(&item)["output"], json!(output));
+            let mut item = json!({"type":"function_call_output","call_id":"c3","output":output});
+            screenshot_replay_item(&mut item);
+            assert_eq!(item["output"], json!(output));
         }
     }
 
