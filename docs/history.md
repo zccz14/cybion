@@ -39,8 +39,9 @@ a `browser_control`/`computer_use` screenshot. The conversation renders inputs,
 messages, reasoning summaries, tool results, checkpoints, and runtime activity
 directly from `kind` and `payload`. Every built-in tool call renders through
 its own card: `bash` commands, `browser_control` actions, `computer_use`
-actions, `normai_web_search` queries, `normai_image_generation` prompts, and the
-seven controller-side context and machine tools. A `read_context` card
+actions, `view_image` pictures, `normai_web_search` queries,
+`normai_image_generation` prompts, and the seven controller-side context and
+machine tools. A `read_context` card
 resolves the context title and its Use When description through the same caches
 the Contexts page fills and links to that context, and a `write_context` card
 resolves the same way, notes a move into the trash, and shows a create call's
@@ -54,8 +55,9 @@ stored payload. Records may carry object references (`image_ref`,
 media, the History table does not. A generated image (`image_generation_call`
 with its resolved base64 result) renders as an image inline, and a marked
 screenshot output that carries PNG data renders its capture with the same
-open-image dialog; a capture without PNG data — a failed one, for example —
-keeps the ordinary tool output rendering.
+open-image dialog, as does a `view_image` output that carries its `input_image`
+part; an output without usable image data — a failed capture or view, for
+example — keeps the ordinary tool output rendering.
 Thread naming reads the input text from its payload.
 
 The conversation opens on a bounded window instead of the whole thread. The
@@ -81,10 +83,10 @@ with `has_older` false instead of hiding rows, and a page that finds no older
 
 The conversation derives its display from the combined durable history and
 pending response items. Inputs, assistant `response_output` items of type
-`message`, every `activity` record, and image records — a generated image or a
-ledger-marked screenshot with PNG data — stay outside process groups and end
-the preceding group. All other consecutive records form a `ThreadProcessGroup`,
-including a single record. Expanding the group renders the original records in
+`message`, every `activity` record, and image records — a generated image, a
+viewed image, or a ledger-marked screenshot with PNG data — stay outside
+process groups and end the preceding group. All other consecutive records
+form a `ThreadProcessGroup`, including a single record. Expanding the group renders the original records in
 their original order, with their existing payload inspection controls. A
 `checkpoint` record renders its stored Markdown through the shared Markdown
 renderer, the same rendering assistant replies use, and keeps its raw payload

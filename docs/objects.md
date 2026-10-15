@@ -19,6 +19,8 @@ only - records written before it shipped keep their inline base64.
 - **Pasted images**: when an input record is persisted, each validated
   `input_image` data URL is decoded and stored; the part carries `image_ref`
   and `media_type` instead of `image_url`.
+- **Viewed images**: a successful `view_image` result is decoded and stored;
+  the tool output carries `input_image` parts with `image_ref` and `media_type`.
 
 Worker screenshots still store their base64 inline. Moving them is future work:
 they live in two databases for shared Workers (the owner's call ledger and the

@@ -82,8 +82,9 @@ The conversation view supports a minimal mode. It folds each turn — the span
 from one user input to the next — down to the input plus a single tail item:
 the turn's last AI reply or its last activity line, whichever came later.
 Earlier replies, activities, and protocol records join the collapsed process
-group. The turn's images never fold away: generated images and ledger-marked
-screenshots collect into one image group shown with the tail item. The
+group. The turn's images never fold away: generated images, viewed images,
+and ledger-marked screenshots collect into one image group shown with the
+tail item. The
 personal default is stored in the user's database and edited under
 Configuration → Personal settings; each thread can override it from the
 thread settings popover, and the thread value wins. The setting is display

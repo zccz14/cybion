@@ -1,8 +1,9 @@
 # Worker sharing
 
 An owner can grant an existing Cybion user access to a Worker. The grant covers
-exactly `bash`, `browser_control`, and `computer_use`. The recipient runs these
-tools from their own Threads, model configuration, contexts, and API keys. Worker
+exactly `bash`, `browser_control`, `computer_use`, and `view_image`.
+The recipient runs these tools from their own Threads, model configuration,
+contexts, and API keys. Worker
 device credentials remain with the owner. The device continues using
 `/worker/v1/users/{owner}/workers/{worker}` and needs no protocol/config change.
 
