@@ -84,14 +84,18 @@ The Worker is small, and stays small under load. Measured on three machines
 **≈10–19 MB resident** — private footprint ~5–7 MB — from a single
 process that holds no local database and no model credentials.
 
-![Device-side memory: empty vs under load — Cybion Worker vs public data](docs/images/worker-footprint.png)
+![Memory footprint: empty vs under load — measured Cybion Worker vs public data](docs/images/worker-footprint.png)
 
-For scale, public single-session numbers for other harnesses: Codex CLI ~15 MB,
-OpenCode ~130 MB, Claude Code ~360–750 MB, ChatGPT Desktop 0.5–3.9 GB —
-different machines, versions and methods, so treat it as a magnitude
-comparison only. Sources: [HN](https://news.ycombinator.com/item?id=46904791),
+For scale, public numbers from other projects: Codex CLI ~15 MB, OpenCode
+~130 MB, Claude Code ~360–750 MB, ChatGPT Desktop 0.5–3.9 GB. Pi 1.0 on
+Rivet reports 0.82 MB per live session — incremental session memory inside
+one backend process (RSS baseline 223 MB), not a per-process footprint;
+idle sessions hibernate. Machines, versions and methods differ, so treat
+these as magnitude comparisons only. Sources:
+[HN](https://news.ycombinator.com/item?id=46904791),
 [aiya.de5.net](https://aiya.de5.net/t/topic/197),
-[openai/codex#38404](https://github.com/openai/codex/issues/38404).
+[openai/codex#38404](https://github.com/openai/codex/issues/38404),
+[Rivet](https://rivet.dev/changelog/2026-10-01-introducing-pi-1-0-for-rivet/).
 
 "Resident" here is RSS ≈ Activity Monitor's "Real Memory". The virtual
 address space macOS reports for the Worker (466 GB) is reserved address space,
