@@ -72,7 +72,7 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } fro
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, serializeThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
-import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, webSearchFunctionCall } from "@/lib/history-payload"
+import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { applyFavicon } from "@/lib/favicon"
@@ -86,6 +86,8 @@ import { AssistantMessage } from "@/components/assistant-message"
 import { CybionMark } from "@/components/cybion-mark"
 import { UserInputMessage } from "@/components/user-input-message"
 import { ScreenshotOutput } from "@/components/screenshot-output"
+import { ViewedOutput } from "@/components/viewed-output"
+import { ViewImageCall } from "@/components/view-image-call"
 import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
 
 import "./styles.css"
@@ -674,6 +676,7 @@ const copy = {
     toolBash: "Run shell commands",
     toolBrowserControl: "Control a browser",
     toolComputerUse: "Control the desktop",
+    toolViewImage: "View an image",
     toolReadContext: "Read contexts",
     toolWriteContext: "Create or edit contexts",
     toolListContexts: "List contexts",
@@ -1012,6 +1015,7 @@ const copy = {
     toolBash: "运行 Shell 命令",
     toolBrowserControl: "控制浏览器",
     toolComputerUse: "控制桌面",
+    toolViewImage: "查看图片",
     toolReadContext: "读取上下文",
     toolWriteContext: "创建或编辑上下文",
     toolListContexts: "列出上下文",
@@ -1939,6 +1943,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
 
   if (record.kind === "tool_output") {
     const screenshot = record.screenshot ? screenshotImageSource(record.payload) : null
+    const viewed = viewedImageSource(record.payload)
     return <div className="relative flex items-start gap-3 px-1">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground ring-1 ring-border">
         <TerminalSquareIcon className="size-4" />
@@ -1952,9 +1957,11 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
           </Badge>
           <time className="text-xs text-muted-foreground">{time}</time>
         </div>
-        {screenshot !== null
-          ? <ScreenshotOutput language={language} source={screenshot} />
-          : <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>}
+        {viewed !== null
+          ? <ViewedOutput language={language} source={viewed} />
+          : screenshot !== null
+            ? <ScreenshotOutput language={language} source={screenshot} />
+            : <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>}
         <details className="group mt-2">
           <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
             <span>{t("recordPayload")}</span>
@@ -2029,6 +2036,19 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
         <HistoryRecordPayload language={language} record={record} />
       </details>
     </ComputerUseCall>
+  }
+
+  const viewImageCall = viewImageFunctionCall(payload)
+  if (viewImageCall) {
+    return <ViewImageCall language={language} call={viewImageCall} time={time}>
+      <details className="group mt-2">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+          <span>{t("recordPayload")}</span>
+          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <HistoryRecordPayload language={language} record={record} />
+      </details>
+    </ViewImageCall>
   }
 
   const cybionCall = cybionToolFunctionCall(payload)
@@ -3414,6 +3434,7 @@ const toolLabels: Record<string, CopyKey> = {
   bash: "toolBash",
   browser_control: "toolBrowserControl",
   computer_use: "toolComputerUse",
+  view_image: "toolViewImage",
   normai_web_search: "toolWebSearch",
   normai_image_generation: "toolImageGeneration",
 }

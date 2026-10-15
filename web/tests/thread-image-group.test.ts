@@ -73,3 +73,19 @@ test("the app thread view renders generated images inline", () => {
   assert.match(source, /const imageSource = generatedImageSource\(record\.payload\)/)
   assert.match(source, /<img src=\{imageSource\} alt=\{t\("generatedImage"\)\}/)
 })
+
+test("image groups label viewed images in both languages", async () => {
+  const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
+  try {
+    const { ThreadImageGroup } = await server.ssrLoadModule("/src/components/thread-image-group.tsx")
+    const viewed = { id: 13, thread_id: "thread-a", kind: "tool_output", payload: { type: "function_call_output", call_id: "call-3", output: [{ type: "input_image", image_url: `data:image/png;base64,${png}D` }] }, created_at: 3 }
+    for (const language of ["zh", "en"]) {
+      const label = language === "zh" ? "查看的图片" : "Viewed image"
+      const html = renderToStaticMarkup(createElement(ThreadImageGroup, { language, images: [viewed] }))
+      assert.ok(html.includes(`alt="${label}"`), `missing ${label} in ${language}`)
+      assert.ok(html.includes(`aria-label="${language === "zh" ? "查看图片" : "Open image"}"`))
+    }
+  } finally {
+    await server.close()
+  }
+})

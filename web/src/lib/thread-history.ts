@@ -1,4 +1,4 @@
-import { screenshotImageSource } from "./history-payload.ts"
+import { screenshotImageSource, viewedImageSource } from "./history-payload.ts"
 import { generatedImageSource } from "./thread-response.ts"
 
 export type HistoryRecord = {
@@ -16,16 +16,18 @@ export type ThreadHistoryEntry =
   | { type: "process"; key: string; records: HistoryRecord[]; startedAt: number; finishedAt: number }
   | { type: "image-group"; key: string; records: HistoryRecord[] }
 
-export type ThreadImage = { source: string; kind: "generated" | "screenshot" }
+export type ThreadImage = { source: string; kind: "generated" | "screenshot" | "viewed" }
 
 // A record shows an image when it is a generated image carrying its base64
-// result, or a ledger-marked screenshot carrying PNG data. Everything else
-// stays ordinary protocol text.
+// result, a ledger-marked screenshot carrying PNG data, or a view_image output
+// carrying its input_image part. Everything else stays ordinary protocol text.
 export function threadImage(record: HistoryRecord): ThreadImage | null {
   const generated = generatedImageSource(record.payload)
   if (generated !== null) return { source: generated, kind: "generated" }
   const screenshot = record.screenshot === true ? screenshotImageSource(record.payload) : null
-  return screenshot !== null ? { source: screenshot, kind: "screenshot" } : null
+  if (screenshot !== null) return { source: screenshot, kind: "screenshot" }
+  const viewed = viewedImageSource(record.payload)
+  return viewed !== null ? { source: viewed, kind: "viewed" } : null
 }
 
 function isStandaloneRecord(record: HistoryRecord) {

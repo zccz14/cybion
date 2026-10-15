@@ -4899,16 +4899,20 @@ fn context_idx_head(
 }
 
 /// Resolves the object references stored in one durable record back into the
-/// inline media that replay and the history projections carry. Records written
-/// before object storage keep their inline media and pass through unchanged.
+/// inline media that replay and the history projections carry: a generated
+/// image, and `image_ref` parts in an input's `content` or in a `view_image`
+/// tool output's parts. Records written before object storage keep their
+/// inline media and pass through unchanged.
 /// COMPATIBILITY: inline media exists only in records written before the object
 /// store shipped; a backfill that moves them into objects can delete the inline
 /// branches, verifiable by no remaining record carrying inline media.
 fn materialize_media(data_dir: &Path, payload: &mut Value) -> Result<(), ApiError> {
     resolve_generated_image(data_dir, payload)?;
-    if let Some(content) = payload.get_mut("content").and_then(Value::as_array_mut) {
-        for part in content {
-            resolve_input_image(data_dir, part)?;
+    for key in ["content", "output"] {
+        if let Some(parts) = payload.get_mut(key).and_then(Value::as_array_mut) {
+            for part in parts {
+                resolve_input_image(data_dir, part)?;
+            }
         }
     }
     Ok(())
@@ -8227,6 +8231,24 @@ async fn worker_resources(
     Ok(Json(json!({"ok":true})))
 }
 
+/// Rewrites one `view_image` result before storage: the bytes move to the
+/// object store and the result becomes the `input_image` part that replay and
+/// history projections resolve. Failed or non-image results pass through
+/// unchanged and keep their text form.
+fn view_image_result(data_dir: &Path, result: &Value) -> Result<Value, ApiError> {
+    let Some(data) = result.get("data").and_then(Value::as_str) else {
+        return Ok(result.clone());
+    };
+    let Some(media_type) = result.get("media_type").and_then(Value::as_str) else {
+        return Ok(result.clone());
+    };
+    let Some(bytes) = decode_base64(data) else {
+        return Ok(result.clone());
+    };
+    let object = objects::put(data_dir, &bytes)?;
+    Ok(json!([{"type":"input_image","image_ref":object,"media_type":media_type}]))
+}
+
 async fn worker_result(
     State(state): State<AppState>,
     AxumPath((_user_id, worker_id, call_id)): AxumPath<(String, String, String)>,
@@ -8265,14 +8287,24 @@ async fn worker_result(
         machines::apply_effect(&state, &user, effect).await;
         return Ok(Json(json!({"ok": true})));
     }
+    let data_dir = state.data_dir.clone();
     user_db(&state, &user, false, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let started:Option<Option<i64>>=transaction.query_row("SELECT started_at FROM worker_calls WHERE id=? AND worker_id=?",params![call_id,worker_id],|r|r.get(0)).optional()?;
-        match started {
-            None=>return Err(ApiError::not_found("Worker call not found")),
-            Some(None)=>return Err(ApiError::conflict("Worker call has not been delivered")),
-            Some(Some(_))=>{},
+        let started:Option<(Option<i64>,String)>=transaction.query_row("SELECT started_at,name FROM worker_calls WHERE id=? AND worker_id=?",params![call_id,worker_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let Some((started,name))=started else {
+            return Err(ApiError::not_found("Worker call not found"));
+        };
+        if started.is_none() {
+            return Err(ApiError::conflict("Worker call has not been delivered"));
         }
+        // A view_image success persists as its input_image parts; every other
+        // result, failures included, keeps its text form.
+        let result = if name=="view_image" {
+            view_image_result(&data_dir,&input.result)?
+        } else {
+            input.result.clone()
+        };
+        let result_json = serde_json::to_string(&result).map_err(ApiError::internal)?;
         if worker_sharing::save_foreign_result(&transaction, &worker_id, &call_id, &result_json, status, error_text.as_deref())? {
             transaction.commit()?;
             return Ok(());
@@ -8301,17 +8333,22 @@ async fn worker_result(
             if let Some(saved)=saved {
                 if saved!=result_json {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
             } else {
-                persist_history_record(&transaction,HistoryRecordInsert{thread_id:&thread_id,kind:"activity",payload:&json!({"type":"late_worker_result","call_id":responses_call_id,"result":input.result}),created_at:now()})?;
+                persist_history_record(&transaction,HistoryRecordInsert{thread_id:&thread_id,kind:"activity",payload:&json!({"type":"late_worker_result","call_id":responses_call_id,"result":result}),created_at:now()})?;
                 stats::mark_dirty(&transaction, created_at)?;
                 transaction.execute("UPDATE worker_calls SET result_json=? WHERE id=?",params![result_json,call_id])?;
             }
             transaction.commit()?;
             return Ok(());
         }
+        let output_value = if name=="view_image" && result.is_array() {
+            result
+        } else {
+            json!(result.to_string())
+        };
         let output = json!({
             "type": responses_output_type,
             "call_id": if responses_call_id.is_empty() { call_id.clone() } else { responses_call_id.clone() },
-            "output": input.result.to_string(),
+            "output": output_value,
         });
         stats::mark_dirty(&transaction, created_at)?;
         let accepted = matches!(call_status.as_str(), "queued" | "delivered");
@@ -10173,7 +10210,7 @@ mod tests {
             true,
             true,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 12);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 13);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -10569,7 +10606,7 @@ mod tests {
 
     #[test]
     fn worker_tool_names_match_the_declared_tools() {
-        for name in ["bash", "browser_control", "computer_use"] {
+        for name in ["bash", "browser_control", "computer_use", "view_image"] {
             let input = json!({"worker_id": "worker", "action": "inspect"}).to_string();
             assert!(
                 prepare_worker_arguments(name, None, &input).is_ok(),
@@ -10624,10 +10661,11 @@ mod tests {
         assert_eq!(tools[7], TOOL_CATALOG["native"]["normai_web_search"]);
         assert_eq!(tools[8], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 12);
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 13);
         assert_eq!(worker_and_native[7]["name"], "bash");
-        assert_eq!(worker_and_native[10]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[11]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native[10]["name"], "view_image");
+        assert_eq!(worker_and_native[11]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[12]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false);
         assert_eq!(web_search_only.as_array().unwrap().len(), 8);
         assert_eq!(
@@ -10679,7 +10717,7 @@ mod tests {
         );
         assert_eq!(
             names(worker_tools()),
-            ["bash", "browser_control", "computer_use"]
+            ["bash", "browser_control", "computer_use", "view_image"]
         );
         let catalog = context_tools();
         let read_context = catalog
@@ -11413,6 +11451,111 @@ mod tests {
         assert!(
             estimate >= CONTEXT_MEDIA_ESTIMATE_TOKENS,
             "the reinjected image keeps its fixed media price: {estimate}"
+        );
+        assert!(
+            estimate < 2_000,
+            "the estimate must not price the raw base64 characters: {estimate}"
+        );
+    }
+
+    #[tokio::test]
+    async fn view_image_results_replay_as_input_images_from_the_object_store() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "view-image-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let data_dir = state.data_dir.clone();
+        let (image_url, stored, estimate) = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                connection.execute(
+                    "INSERT INTO workers(id,label,token_hash,created_at,last_seen_at,status) VALUES('view-worker','fixture',?,?,?,'online')",
+                    params![hash_secret("fixture-token"), now(), now()],
+                )?;
+                let input = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"look at the photo"}),
+                );
+                let mut bytes = vec![0x89, b'P', b'N', b'G'];
+                bytes.resize(52_002, b'x');
+                let png = encode_base64(&bytes);
+                let png_len = png.len();
+                let parts = view_image_result(
+                    &data_dir,
+                    &json!({"data": png, "media_type": "image/png"}),
+                )?;
+                assert!(
+                    parts.is_array(),
+                    "view_image_result must store the image as parts"
+                );
+                let shot = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({"type":"function_call_output","call_id":"view-1","output":parts}),
+                );
+                connection.execute(
+                    "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id)
+                     VALUES('call-view', 'view-worker', ?, 'view_image', ?, 'completed', ?, ?)",
+                    params![thread_id, json!({"path":"/tmp/photo.png"}).to_string(), now(), shot],
+                )?;
+                let failed = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({
+                        "type":"function_call_output","call_id":"view-2",
+                        "output":json!({"error":"view_image cannot read /tmp/missing.png"}).to_string(),
+                    }),
+                );
+                connection.execute(
+                    "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,output_record_id)
+                     VALUES('call-missing', 'view-worker', ?, 'view_image', ?, 'completed', ?, ?)",
+                    params![thread_id, json!({"path":"/tmp/missing.png"}).to_string(), now(), failed],
+                )?;
+                let stored: String = connection.query_row(
+                    "SELECT payload FROM history_records WHERE id=?",
+                    [shot],
+                    |r| r.get(0),
+                )?;
+                let context = compile_thread_context(connection, &data_dir, &thread_id, failed)?;
+                let output = |call_id: &str| {
+                    context
+                        .items
+                        .iter()
+                        .find(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
+                        .map(|item| item["output"].clone())
+                        .unwrap()
+                };
+                assert_eq!(output("view-1")[0]["type"], "input_image");
+                let image_url = output("view-1")[0]["image_url"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                assert_eq!(
+                    image_url.len(),
+                    "data:image/png;base64,".len() + png_len
+                );
+                // A failed view_image keeps the ordinary text projection.
+                assert_eq!(
+                    output("view-2"),
+                    json!(json!({"error":"view_image cannot read /tmp/missing.png"}).to_string())
+                );
+                let estimate = estimate_context_tokens(connection, &thread_id, input, failed)?;
+                Ok((image_url, stored, estimate))
+            }
+        })
+        .await
+        .unwrap();
+        assert!(stored.contains("\"image_ref\""));
+        assert!(
+            !stored.contains("\"data:\""),
+            "stored media stays an object reference"
+        );
+        assert!(
+            estimate >= CONTEXT_MEDIA_ESTIMATE_TOKENS,
+            "the viewed image keeps its fixed media price: {estimate}"
         );
         assert!(
             estimate < 2_000,

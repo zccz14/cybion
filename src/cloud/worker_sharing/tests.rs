@@ -343,6 +343,55 @@ fn screenshots_use_only_controller_provenance_without_owner_reads() {
 }
 
 #[test]
+fn view_image_outputs_project_as_input_image_parts() {
+    let (_root, mut a, b, _) = fixture();
+    granted(&mut a);
+    let i = intent(&b, "view_image", "view");
+    enqueue_intent(&mut a, "b", &i).unwrap();
+    worker_protocol::claim(&mut a, W, None).unwrap().unwrap();
+    let parts = json!([{"type":"input_image","image_ref":"0".repeat(64),"media_type":"image/png"}])
+        .to_string();
+    save_foreign_result(&a, W, &i.id, &parts, "completed", None).unwrap();
+    project_output(&a, "a", &i.id).unwrap();
+    let payload: String = b
+        .query_row(
+            "SELECT payload FROM history_records WHERE worker_call_id=? AND worker_output_phase='primary'",
+            [&i.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["output"][0]["type"], "input_image");
+    assert_eq!(payload["output"][0]["image_ref"], json!("0".repeat(64)));
+
+    let j = intent(&b, "view_image", "view-failed");
+    enqueue_intent(&mut a, "b", &j).unwrap();
+    worker_protocol::claim(&mut a, W, None).unwrap().unwrap();
+    save_foreign_result(
+        &a,
+        W,
+        &j.id,
+        "{\"error\":\"view_image cannot read /tmp/missing.png\"}",
+        "failed",
+        Some("view_image cannot read /tmp/missing.png"),
+    )
+    .unwrap();
+    project_output(&a, "a", &j.id).unwrap();
+    let payload: String = b
+        .query_row(
+            "SELECT payload FROM history_records WHERE worker_call_id=? AND worker_output_phase='primary'",
+            [&j.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        payload["output"],
+        json!("{\"error\":\"view_image cannot read /tmp/missing.png\"}")
+    );
+}
+
+#[test]
 fn schema_fast_path_avoids_writer_lock_and_future_versions_are_rejected() {
     let (root, a, _, _) = fixture();
     a.execute_batch("BEGIN IMMEDIATE; UPDATE workers SET label='uncommitted';")

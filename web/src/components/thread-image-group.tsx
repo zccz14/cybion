@@ -4,16 +4,17 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { threadHistoryRecordKey, threadImage, type HistoryRecord } from "@/lib/thread-history"
 
 const copy = {
-  en: { open: "Open image", generated: "Generated image", screenshot: "Screenshot" },
-  zh: { open: "查看图片", generated: "生成的图片", screenshot: "屏幕截图" },
+  en: { open: "Open image", generated: "Generated image", screenshot: "Screenshot", viewed: "Viewed image" },
+  zh: { open: "查看图片", generated: "生成的图片", screenshot: "屏幕截图", viewed: "查看的图片" },
 } as const
 
 export function ThreadImageGroup({ language, images }: { language: "en" | "zh"; images: readonly HistoryRecord[] }) {
   const text = copy[language]
+  const labels = { generated: text.generated, screenshot: text.screenshot, viewed: text.viewed } as const
   const files = images.flatMap((record) => {
     const image = threadImage(record)
     if (image === null) return []
-    return [{ key: threadHistoryRecordKey(record), label: image.kind === "generated" ? text.generated : text.screenshot, source: image.source }]
+    return [{ key: threadHistoryRecordKey(record), label: labels[image.kind], source: image.source }]
   })
   return <div data-slot="thread-image-group" className="min-w-0 max-w-xl">
     <Carousel opts={{ align: "start" }}>

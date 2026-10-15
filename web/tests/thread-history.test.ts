@@ -256,6 +256,7 @@ test("minimal entries keep stable keys through polling and the preview handoff",
 const png = `iVBORw0KGgo${"A".repeat(64)}`
 const generatedImage = { type: "image_generation_call", result: png, output_format: "png" }
 const screenshotOutput = { type: "function_call_output", call_id: "call-1", output: JSON.stringify({ data: png }) }
+const viewedOutput = { type: "function_call_output", call_id: "call-2", output: [{ type: "input_image", image_url: `data:image/png;base64,${png}` }] }
 
 test("generated images and ledger screenshots stay outside process groups", () => {
   const records = [
@@ -271,6 +272,15 @@ test("generated images and ledger screenshots stay outside process groups", () =
   assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
     [1], 2, 3, [4, 5, 6, 7],
   ])
+})
+
+test("viewed images stay outside process groups", () => {
+  const records = [
+    record(1, "response_output", { id: "rs_1", type: "reasoning" }),
+    record(2, "tool_output", viewedOutput),
+  ]
+  const entries = groupThreadHistory(records)
+  assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [[1], 2])
 })
 
 test("minimal mode collects a turn's images into one image group shown with its tail candidate", () => {

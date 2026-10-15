@@ -174,3 +174,42 @@ async fn stored_references_resolve_for_history_and_replay() {
     assert_eq!(replayed["result"], encode_base64(bytes));
     assert!(replayed.get("result_ref").is_none());
 }
+
+#[test]
+fn view_image_results_store_bytes_and_materialize_into_inline_parts() {
+    let (root, _state) = test_state();
+    let data_dir = root.path();
+    let bytes = b"a viewed png";
+    let result = view_image_result(
+        data_dir,
+        &json!({"data": encode_base64(bytes), "media_type": "image/png"}),
+    )
+    .unwrap();
+    let id = result[0]["image_ref"].as_str().unwrap().to_owned();
+    assert_eq!(id.len(), 64);
+    assert_eq!(result[0]["media_type"], "image/png");
+    assert_eq!(
+        fs::read(data_dir.join("objects").join(&id[..2]).join(&id)).unwrap(),
+        bytes
+    );
+    let mut item = json!({"type":"function_call_output","call_id":"c1","output":result});
+    materialize_media(data_dir, &mut item).unwrap();
+    assert_eq!(item["output"][0]["type"], "input_image");
+    assert_eq!(
+        item["output"][0]["image_url"],
+        json!(format!("data:image/png;base64,{}", encode_base64(bytes)))
+    );
+    assert!(item["output"][0].get("image_ref").is_none());
+
+    for passthrough in [
+        json!({"error":"view_image cannot read /tmp/missing.png"}),
+        json!({"data":"eA=="}),
+        json!({"data":"!!!","media_type":"image/png"}),
+        json!("text"),
+    ] {
+        assert_eq!(
+            view_image_result(data_dir, &passthrough).unwrap(),
+            passthrough
+        );
+    }
+}

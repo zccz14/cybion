@@ -56,6 +56,18 @@ export function bashFunctionCall(payload: unknown): BashFunctionCall | null {
   return { workerId: args.worker_id, command: args.command }
 }
 
+// The `view_image` call as stored in the Responses item: the Worker and the
+// path of the image file it reads.
+export type ViewImageFunctionCall = { workerId: string; path: string }
+
+export function viewImageFunctionCall(payload: unknown): ViewImageFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || object.name !== "view_image" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  if (typeof args?.worker_id !== "string" || typeof args.path !== "string") return null
+  return { workerId: args.worker_id, path: args.path }
+}
+
 export type WebSearchFunctionCall = { query: string }
 
 // The intercepted `normai_web_search` call as stored in the Responses item: one
@@ -117,6 +129,19 @@ export function screenshotImageSource(payload: unknown): string | null {
   return typeof data === "string" && data.startsWith(PNG_BASE64_PREFIX)
     ? `data:image/png;base64,${data}`
     : null
+}
+
+// A view_image output carries its file as an input_image part; the server
+// resolves the stored object reference into the data URL before the browser
+// sees it, so the part's image_url opens directly.
+export function viewedImageSource(payload: unknown): string | null {
+  const output = historyPayloadObject(payload)?.output
+  if (!Array.isArray(output)) return null
+  for (const part of output) {
+    const object = historyPayloadObject(part)
+    if (object?.type === "input_image" && typeof object.image_url === "string" && object.image_url !== "") return object.image_url
+  }
+  return null
 }
 
 function nonEmptyString(value: unknown): string | null {

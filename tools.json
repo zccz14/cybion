@@ -243,6 +243,34 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "type": "function",
+      "name": "view_image",
+      "description": "Read an image file (PNG, JPEG, WebP, or GIF) from the selected Worker's filesystem and attach it to this conversation so you can see it. Use it whenever you need to look at a picture, diagram, screenshot file, or photo that lives on the Worker; files larger than 4 MiB must be resized first (for example with bash).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "worker_id": {
+            "type": "string",
+            "description": "Exact worker_id from cybion_list_workers."
+          },
+          "path": {
+            "type": "string",
+            "description": "Path of the image file on the Worker."
+          },
+          "delay_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Seconds to wait in the controller before this call starts."
+          }
+        },
+        "required": [
+          "worker_id",
+          "path"
+        ],
+        "additionalProperties": false
+      }
     }
   ],
   "native": {

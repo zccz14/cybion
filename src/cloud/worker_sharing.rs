@@ -724,7 +724,10 @@ fn enqueue_intent(c: &mut Connection, caller: &str, intent: &Intent) -> Result<(
         .unwrap_or_default(),
     )
     .map_err(ApiError::bad_request)?;
-    if !matches!(name, "bash" | "browser_control" | "computer_use") {
+    if !matches!(
+        name,
+        "bash" | "browser_control" | "computer_use" | "view_image"
+    ) {
         return Err(ApiError::bad_request("tool is not shareable"));
     }
     let call = item["call_id"].as_str().unwrap_or_default();
@@ -920,6 +923,7 @@ struct Output {
     primary_done: bool,
     late_done: bool,
     failure_code: Option<String>,
+    view_image: bool,
 }
 fn failure_output(error: Option<&str>, code: Option<&str>) -> Value {
     let mut value = json!({"error":error.unwrap_or("Worker call failed")});
@@ -930,7 +934,7 @@ fn failure_output(error: Option<&str>, code: Option<&str>) -> Value {
     value
 }
 fn project_output(c: &Connection, owner: &str, id: &str) -> Result<(), ApiError> {
-    let row=c.query_row("SELECT caller_user_id,thread_id,input_record_id,responses_call_id,responses_output_type,result_json,error,name IN ('browser_control','computer_use') AND json_extract(arguments_json,'$.action')='screenshot',late_result,output_record_id IS NOT NULL OR output_discarded=1,late_output_record_id IS NOT NULL OR late_output_discarded=1,failure_code FROM worker_calls WHERE id=? AND caller_user_id IS NOT NULL AND status IN ('completed','failed','cancelled')",[id],|r|Ok(Output {caller:r.get(0)?,thread:r.get(1)?,input:r.get(2)?,call:r.get(3)?,output_type:r.get(4)?,result:r.get(5)?,error:r.get(6)?,screenshot:r.get::<_,Option<bool>>(7)?.unwrap_or(false),late:r.get(8)?,primary_done:r.get(9)?,late_done:r.get(10)?,failure_code:r.get(11)?})).optional()?;
+    let row=c.query_row("SELECT caller_user_id,thread_id,input_record_id,responses_call_id,responses_output_type,result_json,error,name IN ('browser_control','computer_use') AND json_extract(arguments_json,'$.action')='screenshot',late_result,output_record_id IS NOT NULL OR output_discarded=1,late_output_record_id IS NOT NULL OR late_output_discarded=1,failure_code,name='view_image' FROM worker_calls WHERE id=? AND caller_user_id IS NOT NULL AND status IN ('completed','failed','cancelled')",[id],|r|Ok(Output {caller:r.get(0)?,thread:r.get(1)?,input:r.get(2)?,call:r.get(3)?,output_type:r.get(4)?,result:r.get(5)?,error:r.get(6)?,screenshot:r.get::<_,Option<bool>>(7)?.unwrap_or(false),late:r.get(8)?,primary_done:r.get(9)?,late_done:r.get(10)?,failure_code:r.get(11)?,view_image:r.get(12)?})).optional()?;
     let Some(row) = row else {
         return Ok(());
     };
@@ -968,7 +972,17 @@ fn project_output(c: &Connection, owner: &str, id: &str) -> Result<(), ApiError>
                 } else {
                     "activity"
                 };
-                let payload = json!({"type":row.output_type,"call_id":row.call,"output":result});
+                let output = if row.view_image {
+                    // A view_image success stores its input_image parts; a
+                    // failed or non-image result keeps the stored text form.
+                    match serde_json::from_str::<Value>(&result) {
+                        Ok(value @ Value::Array(_)) => value,
+                        _ => Value::String(result),
+                    }
+                } else {
+                    Value::String(result)
+                };
+                let payload = json!({"type":row.output_type,"call_id":row.call,"output":output});
                 let record = persist_history_record(
                     &tx,
                     HistoryRecordInsert {
