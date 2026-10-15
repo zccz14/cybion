@@ -11464,7 +11464,7 @@ mod tests {
         let user = user_for_subject(&state, "view-image-user").unwrap();
         let thread = create_test_thread(&state, &user).await;
         let data_dir = state.data_dir.clone();
-        let (image_url, stored, estimate) = user_db(&state, &user, false, {
+        let (stored, estimate) = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
             move |connection| {
                 connection.execute(
@@ -11543,7 +11543,7 @@ mod tests {
                     json!(json!({"error":"view_image cannot read /tmp/missing.png"}).to_string())
                 );
                 let estimate = estimate_context_tokens(connection, &thread_id, input, failed)?;
-                Ok((image_url, stored, estimate))
+                Ok((stored, estimate))
             }
         })
         .await
