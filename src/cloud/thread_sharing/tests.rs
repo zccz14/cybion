@@ -412,6 +412,42 @@ fn history_projection_preserves_content_images_checkpoints_and_screenshot_proven
 }
 
 #[test]
+fn history_projection_preserves_viewed_image_parts_with_display_fields_only() {
+    let (root, mut a, _, _) = fixture();
+    // Store one view_image result the way the controller does: the bytes move
+    // to the object store and the output becomes its `input_image` part.
+    let mut parts = crate::cloud::view_image_result(
+        root.path(),
+        &json!({"data":"aGVsbG8=","media_type":"image/png"}),
+    )
+    .unwrap();
+    parts[0]["private"] = json!("removed");
+    let viewed = insert_record(
+        &a,
+        THREAD,
+        "tool_output",
+        json!({"type":"function_call_output","call_id":"view","output":parts}),
+    );
+    grant_b(&mut a);
+    let records = shared_records(load_history(&a, root.path(), THREAD, 0).unwrap());
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.id, viewed);
+    assert_eq!(record.payload["type"], "function_call_output");
+    assert_eq!(record.payload["call_id"], "view");
+    let parts = record.payload["output"]
+        .as_array()
+        .expect("viewed parts keep their array");
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["type"], "input_image");
+    assert_eq!(parts[0]["image_url"], "data:image/png;base64,aGVsbG8=");
+    let json = serde_json::to_string(&records).unwrap();
+    for private in ["image_ref", "media_type", "removed"] {
+        assert!(!json.contains(private), "{private}");
+    }
+}
+
+#[test]
 fn schema_23_upgrade_preserves_data_and_does_not_grant_existing_users() {
     let (root, mut a, _, _) = fixture();
     a.execute_batch("DROP TRIGGER threads_revoke_shares; DROP TABLE thread_grants; DROP TABLE shared_threads; PRAGMA user_version=23;").unwrap();

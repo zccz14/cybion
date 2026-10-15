@@ -21,6 +21,7 @@ const threadImageRecords = [
   record(7, "tool_output", { type: "function_call_output", call_id: "call-img", output: JSON.stringify({ status: "completed" }) }, 150),
   record(8, "tool_output", { type: "image_generation_call", status: "completed", result: png, output_format: "png" }, 155),
   record(9, "tool_output", { type: "image_generation_call", status: "completed", result: png, output_format: "png" }, 160),
+  record(14, "tool_output", { type: "function_call_output", call_id: "call-view", output: [{ type: "input_image", image_url: `data:image/png;base64,${png}` }] }, 162),
   record(10, "tool_output", { type: "function_call_output", call_id: "call-shot-2", output: JSON.stringify({ error: "screenshot failed" }) }, 165, true),
   record(11, "response_output", { id: "msg_11", type: "message", content: [{ type: "output_text", text: "图片已生成。" }] }, 170),
   record(12, "input", { content: "只出图不回复。" }, 200),
@@ -32,7 +33,7 @@ function Fixture() {
   const [minimal, setMinimal] = useState(false)
   const renderRecord = (record: HistoryRecord) => {
     const image = threadImage(record)
-    if (image !== null) return <img data-record-image={record.id} src={image.source} alt={image.kind === "generated" ? "Generated" : "Screenshot"} className="block max-h-72 w-auto max-w-full rounded-lg border bg-muted" />
+    if (image !== null) return <img data-record-image={record.id} src={image.source} alt={image.kind === "generated" ? "Generated" : image.kind === "viewed" ? "Viewed" : "Screenshot"} className="block max-h-72 w-auto max-w-full rounded-lg border bg-muted" />
     return <article data-record-id={record.id} className="min-w-0 rounded-lg border bg-card p-3 text-sm">
       <p className="whitespace-pre-wrap break-words">{historyPayloadText(record.payload)}</p>
     </article>

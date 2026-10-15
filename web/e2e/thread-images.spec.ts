@@ -13,20 +13,21 @@ async function itemSequence(page: import("@playwright/test").Page) {
   }))
 }
 
-test("generated images and screenshots stay visible while every process group is collapsed", async ({ page }) => {
+test("generated, viewed and screenshot images stay visible while every process group is collapsed", async ({ page }) => {
   const errors: string[] = []
   page.on("pageerror", (error) => errors.push(error.stack ?? error.message))
   await page.goto("/e2e/thread-images.html")
   const groups = page.locator(groupSelector)
   await expect(groups).toHaveCount(3)
   for (const group of await groups.all()) await expect(group).not.toHaveAttribute("open")
-  expect(await itemSequence(page)).toEqual(["1", "process", "3", "4", "5", "process", "8", "9", "process", "11", "12", "13"])
-  for (const id of [3, 8, 9, 13]) {
+  expect(await itemSequence(page)).toEqual(["1", "process", "3", "4", "5", "process", "8", "9", "14", "process", "11", "12", "13"])
+  for (const id of [3, 8, 9, 13, 14]) {
     const image = page.locator(`[data-record-image="${id}"]`)
     await expect(image).toBeVisible()
     expect(await image.evaluate((node) => node.closest("details") === null)).toBe(true)
   }
-  await expect(page.locator("[data-record-image]")).toHaveCount(4)
+  await expect(page.locator("[data-record-image]")).toHaveCount(5)
+  await expect(page.locator('[data-record-image="14"]')).toHaveAttribute("alt", "Viewed")
   // A marked screenshot without PNG data is not image content: it stays inside its collapsed group.
   await expect(page.locator('[data-record-id="10"]')).toBeHidden()
   await groups.nth(2).locator(":scope > summary").click()
@@ -42,10 +43,11 @@ test("minimal mode shows each turn's images as one one-row image group with its 
   await expect(page.locator("[data-record-image]")).toHaveCount(0)
   const imageGroups = page.locator(imageGroupSelector)
   await expect(imageGroups).toHaveCount(3)
-  await expect(page.locator(`${imageGroupSelector} img`)).toHaveCount(4)
+  await expect(page.locator(`${imageGroupSelector} img`)).toHaveCount(5)
   for (const group of await imageGroups.all()) await expect(group).toBeVisible()
   await expect(page.locator(`${imageGroupSelector} img[alt="屏幕截图"]`)).toHaveCount(1)
   await expect(page.locator(`${imageGroupSelector} img[alt="生成的图片"]`)).toHaveCount(3)
+  await expect(page.locator(`${imageGroupSelector} img[alt="查看的图片"]`)).toHaveCount(1)
   expect(await itemSequence(page)).toEqual(["1", "process", "4", "images", "5", "process", "11", "images", "12", "images"])
   const groups = page.locator(groupSelector)
   await expect(groups).toHaveCount(2)
@@ -56,7 +58,7 @@ test("minimal mode shows each turn's images as one one-row image group with its 
   await expect(imageGroups.nth(0).getByRole("button", { name: "Previous slide", exact: true })).toHaveCount(0)
   await expect(imageGroups.nth(2).getByRole("button", { name: "Previous slide", exact: true })).toHaveCount(0)
   const slides = imageGroups.nth(1).locator('[data-slot="carousel-item"]')
-  await expect(slides).toHaveCount(2)
+  await expect(slides).toHaveCount(3)
   const previous = imageGroups.nth(1).getByRole("button", { name: "Previous slide", exact: true })
   const next = imageGroups.nth(1).getByRole("button", { name: "Next slide", exact: true })
   await expect(previous).toBeDisabled()
@@ -66,14 +68,19 @@ test("minimal mode shows each turn's images as one one-row image group with its 
   await expect(slides.nth(1)).toBeInViewport({ ratio: 0.5 })
   await expect(slides.nth(0)).not.toBeInViewport({ ratio: 0.5 })
   await expect(previous).toBeEnabled()
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect(slides.nth(2)).toBeInViewport({ ratio: 0.5 })
   await expect(next).toBeDisabled()
+  await previous.click()
+  await expect(slides.nth(1)).toBeInViewport({ ratio: 0.5 })
   await previous.click()
   await expect(slides.nth(0)).toBeInViewport({ ratio: 0.5 })
   // Expanding the process group never duplicates the grouped images.
   await groups.nth(1).locator(":scope > summary").click()
   await expect(page.locator(`${groupSelector} img`)).toHaveCount(0)
   await expect(page.locator('[data-record-id="10"]')).toBeVisible()
-  await expect(page.locator(`${imageGroupSelector} img`)).toHaveCount(4)
+  await expect(page.locator(`${imageGroupSelector} img`)).toHaveCount(5)
   await imageGroups.nth(1).getByRole("button", { name: "查看图片", exact: true }).first().click()
   const dialog = page.getByRole("dialog")
   await expect(dialog).toBeVisible()
@@ -82,9 +89,10 @@ test("minimal mode shows each turn's images as one one-row image group with its 
   await page.keyboard.press("Escape")
   await expect(dialog).toBeHidden()
   await page.getByRole("button", { name: "Language", exact: true }).click()
-  await expect(page.getByRole("button", { name: "Open image", exact: true })).toHaveCount(4)
+  await expect(page.getByRole("button", { name: "Open image", exact: true })).toHaveCount(5)
   await expect(page.locator(`${imageGroupSelector} img[alt="Screenshot"]`)).toHaveCount(1)
   await expect(page.locator(`${imageGroupSelector} img[alt="Generated image"]`)).toHaveCount(3)
+  await expect(page.locator(`${imageGroupSelector} img[alt="Viewed image"]`)).toHaveCount(1)
   expect(errors).toEqual([])
 })
 

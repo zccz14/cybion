@@ -34,7 +34,7 @@ Thread origin chips are labelled **Web / API**, independent of ownership; the
 existing `view=mine` URL still selects web-created owned Threads.
 
 The viewer reuses the conversation renderer, process groups, history windows,
-image previews, screenshot provenance and live output preview. It has no composer,
+image previews, screenshot provenance, viewed images and live output preview. It has no composer,
 execution controls, model/default editors, sharing manager or owner resource
 queries. Minimal display is local component state and cannot change A's settings.
 All controls support English/Chinese, keyboard use, light/dark and narrow screens.
@@ -188,7 +188,8 @@ forwarded links and every read surface), idempotency, silent recipient
 provisioning, audit/context separation,
 source read-only transactions, revoke races, pagination, deletion rollback,
 archive semantics, missing files, failed sync/restart/regrant, stale tombstones,
-allowlisted live/history data and screenshot provenance. Browser tests exercise
-consent, clipboard links, focus restoration, read-only pages, history/live updates,
-revocation with an in-flight older page, cache clearance, account switches,
-temporary errors, local visibility, and bilingual/mobile/dark rendering.
+allowlisted live/history data, screenshot provenance and viewed images. Browser
+tests exercise consent, clipboard links, focus restoration, read-only pages,
+history/live updates with viewed images, revocation with an in-flight older
+page, cache clearance, account switches, temporary errors, local visibility, and
+bilingual/mobile/dark rendering.

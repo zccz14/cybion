@@ -46,9 +46,9 @@ async function fixture(page: Page) {
         if (state.holdOlder) { state.held = route; return }
         return route.fulfill({ json: { has_older: false, records: [record(1, "input", { role: "user", content: "Earlier original question" }), record(2, "response_output", { type: "message", role: "assistant", content: [{ type: "output_text", text: "Earlier answer" }] })] } })
       }
-      return route.fulfill({ json: { has_older: true, records: [record(10, "input", { role: "user", content: "Latest original question" }), { ...record(11, "tool_output", { type: "function_call_output", call_id: "shot", output: JSON.stringify({ data: shot }) }), screenshot: true }, record(12, "response_output", { type: "message", role: "assistant", content: [{ type: "output_text", text: "Saved answer" }] })] } })
+      return route.fulfill({ json: { has_older: true, records: [record(10, "input", { role: "user", content: "Latest original question" }), { ...record(11, "tool_output", { type: "function_call_output", call_id: "shot", output: JSON.stringify({ data: shot }) }), screenshot: true }, record(12, "tool_output", { type: "function_call_output", call_id: "view", output: [{ type: "input_image", image_url: `data:image/png;base64,${shot}` }] }), record(13, "response_output", { type: "message", role: "assistant", content: [{ type: "output_text", text: "Saved answer" }] })] } })
     }
-    if (path === `${apiPath}/history`) return route.fulfill({ json: state.extra && Number(url.searchParams.get("after")) < 13 ? [record(13, "response_output", { type: "message", role: "assistant", content: [{ type: "output_text", text: "New owner update" }] })] : [] })
+    if (path === `${apiPath}/history`) return route.fulfill({ json: state.extra && Number(url.searchParams.get("after")) < 14 ? [record(14, "response_output", { type: "message", role: "assistant", content: [{ type: "output_text", text: "New owner update" }] })] : [] })
     if (path === `${apiPath}/response`) return route.fulfill({ json: { started_at: 1_800_000_012, status: "in_flight", response: { completed: false, output: [{ item: { type: "message", id: "live", role: "assistant", content: [{ type: "output_text", text: "Streaming owner reply" }] }, done: false, record_id: null }] } } })
     return route.fulfill({ status: 403, json: { error: `Unexpected ${path}` } })
   })
@@ -92,7 +92,7 @@ test("owner explicitly consents, copies identity link, tracks sync and revokes",
   await expect(dialog).toContainText("Revoked; list sync pending")
 })
 
-test("viewer reads history, screenshots and live updates without any execution or resource requests", async ({ page }) => {
+test("viewer reads history, screenshots, viewed images and live updates without any execution or resource requests", async ({ page }) => {
   const { state, calls } = await fixture(page)
   await page.goto(`/e2e/thread-sharing.html#${routePath}`)
   await expect(page.getByRole("heading", { name: "Owner's private task" })).toBeVisible()
@@ -104,11 +104,16 @@ test("viewer reads history, screenshots and live updates without any execution o
   await expect(page.getByRole("button", { name: "Load earlier messages" })).toHaveCount(0)
   state.extra = true
   await expect(page.getByText("New owner update", { exact: true })).toBeAttached()
-  const screenshot = page.locator('img[src^="data:image/png"]')
-  await expect(screenshot).toHaveCount(1)
-  await expect(screenshot).toBeVisible()
-  expect(await screenshot.evaluate((node) => node.closest("details") === null)).toBe(true)
+  await expect(page.locator('img[src^="data:image/png"]')).toHaveCount(2)
+  const screenshot = page.locator('img[alt="Screenshot"]')
+  const viewed = page.locator('img[alt="Viewed image"]')
+  for (const image of [screenshot, viewed]) {
+    await expect(image).toHaveCount(1)
+    await expect(image).toBeVisible()
+    expect(await image.evaluate((node) => node.closest("details") === null)).toBe(true)
+  }
   await page.getByRole("checkbox", { name: "Minimal view (only for me)" }).check()
+  await expect(viewed).toBeVisible()
   await expect(page.getByRole("textbox")).toHaveCount(0)
   for (const label of ["Send", "Stop", "Continue", "Compact", "Delete", "Rename", "Share Thread"]) await expect(page.getByRole("button", { name: label, exact: true })).toHaveCount(0)
   expect(calls.every((c) => c.path.startsWith(apiPath) && c.method === "GET")).toBe(true)

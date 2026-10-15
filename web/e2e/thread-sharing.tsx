@@ -8,7 +8,8 @@ import { TooltipProvider } from "../src/components/ui/tooltip"
 import { UserInputMessage } from "../src/components/user-input-message"
 import { Markdown } from "../src/components/markdown"
 import { ScreenshotOutput } from "../src/components/screenshot-output"
-import { historyPayloadText, screenshotImageSource } from "../src/lib/history-payload"
+import { ViewedOutput } from "../src/components/viewed-output"
+import { historyPayloadText, screenshotImageSource, viewedImageSource } from "../src/lib/history-payload"
 import type { HistoryRecord } from "../src/lib/thread-history"
 import type { SharingRequest } from "../src/lib/thread-sharing"
 import { adoptLinkitFixtureSession, LinkitFixtureProviders } from "./linkit-fixture"
@@ -20,6 +21,8 @@ function Reader({ language, sessionId, userId, request }: { language: "en" | "zh
   const { ownerId = "", threadId = "" } = useParams()
   const record = (r: HistoryRecord) => {
     if (r.kind === "input") return <UserInputMessage language={language} payload={r.payload} />
+    const viewed = viewedImageSource(r.payload)
+    if (viewed !== null) return <ViewedOutput language={language} source={viewed} />
     const shot = r.screenshot ? screenshotImageSource(r.payload) : null
     if (shot) return <ScreenshotOutput language={language} source={shot} />
     return <div data-record-id={r.id}><Markdown>{historyPayloadText(r.payload)}</Markdown></div>

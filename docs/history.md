@@ -148,4 +148,6 @@ filter or record ID cannot select another user's database.
 authorized source read. They receive allowlisted conversation content, not the
 owner's global History table, private sharing audit events, encrypted protocol
 state or upstream response metadata. Screenshot flags retain trusted Controller
-provenance. Owner history and stored protocol payloads remain unchanged.
+provenance, and a viewed `view_image` output crosses as its `input_image` parts
+with display fields only. Owner history and stored protocol payloads remain
+unchanged.

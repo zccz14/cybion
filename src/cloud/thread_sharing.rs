@@ -505,7 +505,9 @@ fn shared_payload(value: &Value) -> Value {
         _ => &["type", "id", "role", "content", "phase", "action", "status"],
     };
     let mut result = select_fields(value, names);
-    for key in ["content", "summary"] {
+    // Message content, reasoning summaries and a viewed `view_image` output all
+    // cross as parts; only their display fields stay.
+    for key in ["content", "summary", "output"] {
         if let Some(parts) = result.get_mut(key).and_then(Value::as_array_mut) {
             for part in parts {
                 *part = select_fields(part, &["type", "text", "image_url", "detail", "refusal"]);
