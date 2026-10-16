@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="hl" cx="0.10" cy="0.10" r="1.0">
+      <stop offset="0" stop-color="#8c8c99"/>
+      <stop offset="0.32" stop-color="#3b3b43"/>
+      <stop offset="0.75" stop-color="#1d1d1f"/>
+      <stop offset="1" stop-color="#161616"/>
+    </radialGradient>
+    <linearGradient id="metal2" x1="0.1" y1="0" x2="0.2" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.45" stop-color="#dcdce6"/>
+      <stop offset="1" stop-color="#9c9cab"/>
+    </linearGradient>
+    <filter id="glow2" x="-45%" y="-45%" width="190%" height="190%">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#hl)"/>
+
+  <path d="M512 335 L716 689 L308 689 Z" fill="none" stroke="#ffffff"
+        stroke-width="88" stroke-linejoin="round" opacity="0.55" filter="url(#glow2)"/>
+
+  <path d="M512 335 L716 689 L308 689 Z" fill="none" stroke="url(#metal2)"
+        stroke-width="88" stroke-linejoin="round"/>
+</svg>

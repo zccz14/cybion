@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="metal" x1="0.1" y1="0" x2="0.25" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.5" stop-color="#d2d2da"/>
+      <stop offset="1" stop-color="#92929c"/>
+    </linearGradient>
+    <filter id="glow" x="-45%" y="-45%" width="190%" height="190%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+  </defs>
+  <path d="M512 337 L714 687 L310 687 Z" fill="none" stroke="#ffffff"
+        stroke-width="86" stroke-linejoin="round" opacity="0.55" filter="url(#glow)"/>
+  <path d="M512 337 L714 687 L310 687 Z" fill="none" stroke="url(#metal)"
+        stroke-width="86" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#2AA7FF</color>
+    <color name="ic_bg">#161616</color>
+    <color name="splash_bg">#161616</color>
+    <color name="status_bar">#FFFFFF</color>
+    <color name="web_bg">#FFFFFF</color>
+    <color name="error_bg">#FFFFFF</color>
+</resources>

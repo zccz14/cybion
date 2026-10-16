@@ -192,6 +192,25 @@ base64 data URL. Poll the thread and history endpoints for the result.
 In the app: **Using Cybion** (`/#/help`), **History** (`/#/history`),
 **Machines** (`/#/machines`).
 
+## Viewer clients
+
+The hosted web app at [`cybion.ntnl.io`](https://cybion.ntnl.io) is the control
+surface, and a modern browser runs it directly. Some platforms cannot use the
+browser they have — an Android WebView too old for the session check, or a
+desktop where the user wants an app icon and a real window. [`clients/`](clients/)
+packages the web app into small native **viewer** shells that render it and
+nothing else:
+
+- [`clients/android/`](clients/android/) — a minimal Java `WebView` activity.
+- [`clients/macos/`](clients/macos/) — a minimal Swift `WKWebView` app bundle.
+
+A shell holds no model, no Worker, and no credentials: execution still happens
+on a paired [Worker](#cybion-worker). Both shells inject a shared
+[Ed25519 shim](clients/shell/ed25519-polyfill.js) before any page script so the
+session check passes where `crypto.subtle` lacks Ed25519. See
+[clients/README.md](clients/README.md) and
+[clients/docs/compatibility.md](clients/docs/compatibility.md).
+
 ## Development and release
 
 ```sh

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cybion</string>
+    <string name="retry">重试</string>
+    <string name="error_body">加载失败：%1$s</string>
+    <string name="error_ssl">安全连接失败（证书校验未通过），已阻止加载。</string>
+    <string name="no_app_for_link">没有可以打开此链接的应用</string>
+    <string name="no_file_picker">无法打开文件选择器</string>
+</resources>

@@ -1,0 +1,66 @@
+plugins {
+    id 'com.android.application'
+}
+
+def keystorePath = System.getenv("CYBION_ANDROID_KEYSTORE")
+
+android {
+    namespace 'io.ntnl.cybion'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.ntnl.cybion.app"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePath != null) {
+                storeFile file(keystorePath)
+                storePassword System.getenv("CYBION_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("CYBION_ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("CYBION_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (keystorePath != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    sourceSets {
+        main {
+            // The Ed25519 shim is shared with the macOS shell; keep one copy.
+            assets.srcDirs += ['../../shell']
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}
