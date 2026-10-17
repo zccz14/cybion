@@ -105,11 +105,12 @@ conversation controls do. Machine identity is always visible near the action.
   conversations and context.
 - **Audit** contains usage statistics, reasoning requests, Worker calls,
   and history records. Usage statistics combines token accounting, request
-  outcomes, Worker call duration and traffic, and the split of Thread running
-  time between inference, Worker calls, and Cybion overhead; see
+  outcomes, Worker call duration and traffic; see
   [usage statistics](docs/usage-statistics.md).
 - **Administration**, visible only to administrators, contains Users, System
-  resources, and **System configuration** (`#/admin/configuration`).
+  resources, and **System configuration** (`#/admin/configuration`). Users
+  reports every running Thread by the party that owes its next step — kernel,
+  inference or device — see [administrator users](docs/admin-users.md).
 - **Configuration** contains **Personal settings** (`#/configuration`), API keys,
   and Tools. Personal settings contains new-thread defaults, the NormAI card
   (whose fallback dialog holds the manual Responses-compatible upstreams,

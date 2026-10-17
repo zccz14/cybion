@@ -689,6 +689,8 @@ const copy = {
     toolImageGeneration: "Image generation",
     toolCybion: "Cybion",
     toolOpenAi: "OpenAI",
+    phaseKernel: "Kernel",
+    phaseDevice: "Device",
     history: "History",
     historyDescription: "Browse the rows and stored fields in history_records across your workspace.",
     noHistory: "No messages in this thread yet.",
@@ -1029,6 +1031,8 @@ const copy = {
     toolImageGeneration: "图像生成",
     toolCybion: "Cybion",
     toolOpenAi: "OpenAI",
+    phaseKernel: "内核",
+    phaseDevice: "设备",
     history: "历史",
     historyDescription: "查看当前工作区 history_records 表中的记录与原始字段。",
     noHistory: "这个线程还没有消息。",
@@ -3444,15 +3448,18 @@ const toolLabels: Record<string, CopyKey> = {
 
 function ToolsPage() {
   const { t } = useUi()
+  // INVARIANT: the phase badge is the administrative running-phase taxonomy:
+  // tools.json's `worker` group executes on the user's device, while `context`
+  // (Cybion) and `native` (OpenAI) execute in the Controller.
   const groups = [
-    { names: toolCatalog.context.map((tool) => tool.name), provider: t("toolCybion") },
-    { names: toolCatalog.worker.map((tool) => tool.name), provider: "Worker" },
-    { names: Object.keys(toolCatalog.native), provider: t("toolOpenAi") },
+    { names: toolCatalog.context.map((tool) => tool.name), provider: t("toolCybion"), phase: t("phaseKernel") },
+    { names: toolCatalog.worker.map((tool) => tool.name), provider: "Worker", phase: t("phaseDevice") },
+    { names: Object.keys(toolCatalog.native), provider: t("toolOpenAi"), phase: t("phaseKernel") },
   ]
   const tools = [
-    ...groups.flatMap((group) => group.names.map((name) => ({ name, provider: group.provider, title: undefined as string | undefined }))),
+    ...groups.flatMap((group) => group.names.map((name) => ({ name, provider: group.provider, phase: group.phase, title: undefined as string | undefined }))),
   ]
-  return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.name}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.title ?? (toolLabels[tool.name] ? t(toolLabels[tool.name]) : tool.name)}</p><code className="text-xs text-muted-foreground">{tool.name}</code></div><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
+  return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.name}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.title ?? (toolLabels[tool.name] ? t(toolLabels[tool.name]) : tool.name)}</p><code className="text-xs text-muted-foreground">{tool.name}</code></div><Badge variant="secondary">{tool.phase}</Badge><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
 }
 
 function SecretValue({ value }: { value: string }) {

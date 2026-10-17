@@ -600,6 +600,7 @@ async fn cancelled_generation_cannot_checkpoint_dispatch_tools_or_clear_its_repl
         ActiveRequest {
             record_idx: next,
             cancellation: tx,
+            phase: Arc::new(run_phase::PhaseCell::new()),
         },
     );
     clear_current_request(&state, &user, &thread.id, first).await;
@@ -757,6 +758,7 @@ async fn cancel_marks_all_outstanding_worker_calls_and_keeps_late_results_as_act
         ActiveRequest {
             record_idx: input,
             cancellation: tx,
+            phase: Arc::new(run_phase::PhaseCell::new()),
         },
     );
     cancel_for(&state, &user, thread.id.clone()).await.unwrap();
