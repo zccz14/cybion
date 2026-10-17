@@ -128,12 +128,17 @@ test("thread settings live in the composer popover and the image tool follows it
   assert.match(popover, /imageModelOptions/)
 })
 
-test("the tools page renders the shared tool catalog", () => {
+test("the tools page groups the shared tool catalog by responsible party", () => {
   const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
   assert.match(source, /import toolCatalog from "\.\.\/\.\.\/tools\.json"/)
-  assert.match(source, /toolCatalog\.context\.map/)
+  // `context` and `native` share one Controller group; `worker` is the device.
+  assert.match(source, /\[\.\.\.toolCatalog\.context\.map\(\(tool\) => tool\.name\), \.\.\.Object\.keys\(toolCatalog\.native\)\]/)
   assert.match(source, /toolCatalog\.worker\.map/)
-  assert.match(source, /Object\.keys\(toolCatalog\.native\)/)
+  assert.match(source, /title: t\("phaseKernel"\)/)
+  assert.match(source, /title: t\("phaseDevice"\)/)
+  assert.match(source, /toolsKernelHint/)
+  assert.match(source, /toolsDeviceHint/)
+  assert.doesNotMatch(source, /toolCybion|toolOpenAi/)
   const names = [
     ...catalog.context.map((tool: { name: string }) => tool.name),
     ...catalog.worker.map((tool: { name: string }) => tool.name),

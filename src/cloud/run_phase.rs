@@ -71,10 +71,10 @@ impl PhaseCell {
 
 // INVARIANT: tools.json groups tools by the party that executes them, which is
 // exactly the phase taxonomy. `worker` runs on the user's device; `context`
-// (Cybion) and `native` (OpenAI) run here in the Controller, because
-// start_response_tool intercepts the native tools and never asks the upstream
-// to execute them. A native tool executed server-side by the upstream would
-// have to move to Inference.
+// and `native` run here in the Controller, because start_response_tool
+// intercepts the native tools and never asks the upstream to execute them.
+// A native tool executed server-side by the upstream would have to move to
+// Inference.
 pub(super) fn tool_phase(name: &str) -> Option<Phase> {
     let group_has = |group: &str| {
         TOOL_CATALOG[group]
