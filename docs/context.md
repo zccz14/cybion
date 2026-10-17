@@ -186,21 +186,24 @@ the `(model, upstream_id)` pair, before the next attempt compiles. Every
 inference attempt passes that check, so a switch made while a run is in flight
 is recorded by the next attempt.
 
-The barrier counts as a protocol record: it advances `idx_tail`, and the newest
-barrier inside the compiled range bounds the strip. Everything recorded before
-it replays without envelopes — a `reasoning`, `compaction`, or
-`context_compaction` item disappears because it carries nothing but the
-envelope, and a mixed item such as a message, function call, or tool output
-keeps its visible content and loses `encrypted_content`,
-`encrypted_function_args`, and `encrypted_content` parts. The barrier itself is
-never sent upstream. Records appended after it replay unchanged, so the switched
-model's own envelopes survive. A checkpoint compiled after the barrier moves
-`idx_head` past it, and the barrier then has no effect.
+Only envelopes are issuer-bound. Everything recorded before the newest barrier
+replays without them: an item that carries nothing but an envelope — a
+`compaction`, a `context_compaction`, or a `reasoning` whose only payload is
+`encrypted_content` — disappears, while every other item keeps its text and
+loses `encrypted_content`, `encrypted_function_args`, and `encrypted_content`
+parts. Reasoning text survives because a thinking-mode provider (DeepSeek)
+rejects a replayed tool-call turn whose assistant reasoning is missing, and it
+is plain text the next model reads like any other.
 
-COMPATIBILITY: `reasoning_audits.upstream_id` is NULL for audits written before
-schema 40, so their Thread records one barrier on its next request even without
-a switch. That one-time strip retires reasoning recorded before barriers
-existed; the `ensure_model_switch_barrier` comment tracks its removal.
+The barrier itself is never sent upstream. Records appended after it replay
+unchanged, so the switched model's own envelopes survive. A checkpoint compiled
+after the barrier moves `idx_head` past it, and the barrier then has no effect.
+
+A barrier only counts when it moved the replay target. An audit written before
+`schema 40` stored no `upstream_id`, so that half of the pair is unknown rather
+than different; builds between 37 and 40 recorded a barrier for those Threads
+anyway, describing a switch from a model to itself. Such a record stays in the
+transcript and does not bound the strip.
 
 Screenshots replay as images when the Worker call ledger says so: a `tool_output`
 whose call is `browser_control`/`computer_use` with `action = "screenshot"` and
