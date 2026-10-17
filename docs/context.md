@@ -163,7 +163,9 @@ Cleanup works on a request copy:
 - regroup each assistant segment so message, reasoning, and native items come
   first, every tool call follows, and the tool outputs form one contiguous run:
   strict Responses validators reject any item between a call and its
-  unanswered output.
+  unanswered output;
+- drop the envelopes recorded before the newest `model_switch` barrier (see
+  below).
 
 Within those rules other items keep their stored order. Tool output is bounded
 only in the request copy; the complete output stays in `history_records.payload`.
@@ -173,6 +175,32 @@ Stored media references resolve while the request copy is compiled: a
 `image_ref` part becomes its `input_image` data URL. Replay therefore sends the
 same inline media it sent before the object store existed; only the stored
 record shows the reference.
+
+## Model switches
+
+Upstreams encrypt reasoning, function arguments, and content parts so only the
+model that produced them can decode the envelope. A Thread that keeps replaying
+after `threads.model` or `threads.upstream_id` changes therefore records an
+`activity` record with `$.type = "model_switch"`, whose `from` and `to` carry
+the `(model, upstream_id)` pair, before the next attempt compiles. Every
+inference attempt passes that check, so a switch made while a run is in flight
+is recorded by the next attempt.
+
+The barrier counts as a protocol record: it advances `idx_tail`, and the newest
+barrier inside the compiled range bounds the strip. Everything recorded before
+it replays without envelopes — a `reasoning`, `compaction`, or
+`context_compaction` item disappears because it carries nothing but the
+envelope, and a mixed item such as a message, function call, or tool output
+keeps its visible content and loses `encrypted_content`,
+`encrypted_function_args`, and `encrypted_content` parts. The barrier itself is
+never sent upstream. Records appended after it replay unchanged, so the switched
+model's own envelopes survive. A checkpoint compiled after the barrier moves
+`idx_head` past it, and the barrier then has no effect.
+
+COMPATIBILITY: `reasoning_audits.upstream_id` is NULL for audits written before
+schema 39, so their Thread records one barrier on its next request even without
+a switch. That one-time strip retires reasoning recorded before barriers
+existed; the `ensure_model_switch_barrier` comment tracks its removal.
 
 Screenshots replay as images when the Worker call ledger says so: a `tool_output`
 whose call is `browser_control`/`computer_use` with `action = "screenshot"` and

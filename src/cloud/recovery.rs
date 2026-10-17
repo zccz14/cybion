@@ -99,6 +99,10 @@ pub(super) fn current_context(
     thread: &str,
     input: i64,
 ) -> Result<CompiledThreadContext, ApiError> {
+    // INVARIANT: every inference attempt compiles here, and a Thread can start
+    // replaying with another (upstream, model) pair mid-run, so the barrier is
+    // recorded where the switch first becomes visible to a request.
+    ensure_model_switch_barrier(c, thread)?;
     let tx = c.transaction()?;
     if latest_request_record_id(&tx, thread)? != Some(input)
         || load_thread(&tx, thread)?.status != "running"

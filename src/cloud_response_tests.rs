@@ -108,6 +108,7 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         thread_id: thread.id.clone(),
         request_kind: "inference".to_owned(),
         model: "fixture".to_owned(),
+        upstream_id: None,
         reasoning_effort: Some("high".to_owned()),
         idx_head: input,
         idx_tail: input,
@@ -1210,6 +1211,7 @@ async fn delayed_worker_calls_wait_in_the_controller_before_dispatch() {
         thread_id: thread.id.clone(),
         request_kind: "inference".to_owned(),
         model: "fixture".to_owned(),
+        upstream_id: None,
         reasoning_effort: Some("high".to_owned()),
         idx_head: input,
         idx_tail: input,
@@ -2964,4 +2966,317 @@ async fn superseded_web_search_outcomes_are_activity() {
     let output = history.last().unwrap();
     assert_eq!(output.kind, "activity");
     assert_eq!(output.payload["type"], "function_call_output");
+}
+
+#[test]
+fn replayed_context_drops_envelopes_recorded_before_a_model_switch() {
+    let items = vec![
+        json!({"role":"user","content":"hello"}),
+        json!({"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"cipher"}),
+        json!({"type":"message","id":"msg-1","role":"assistant","content":[
+            {"type":"output_text","text":"before"},
+            {"type":"encrypted_content","encrypted_content":"cipher"}
+        ]}),
+        json!({"type":"function_call","id":"fc-1","name":"bash","call_id":"call-a","arguments":"{}","encrypted_function_args":["cipher"]}),
+        json!({"type":"function_call_output","call_id":"call-a","output":[
+            {"type":"input_text","text":"ok"},
+            {"type":"encrypted_content","encrypted_content":"cipher"}
+        ]}),
+        json!({"type":"model_switch","from":{"model":"a","upstream_id":null},"to":{"model":"b","upstream_id":null}}),
+        json!({"type":"reasoning","id":"rs-2","summary":[],"encrypted_content":"cipher"}),
+        json!({"type":"message","id":"msg-2","role":"assistant","content":[{"type":"output_text","text":"after"}]}),
+    ];
+    let replay = replayable_context_items(items);
+    let reasoning = replay
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasoning.iter().map(|item| &item["id"]).collect::<Vec<_>>(),
+        [&json!("rs-2")],
+        "only the segment recorded after the switch keeps its reasoning"
+    );
+    assert!(
+        !replay.iter().any(|item| item["type"] == "model_switch"),
+        "the barrier is a Cybion record, never an upstream item"
+    );
+    assert_eq!(replay[1]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(replay[1]["content"][0]["text"], "before");
+    let call = replay
+        .iter()
+        .find(|item| item["call_id"] == "call-a" && item["type"] == "function_call")
+        .unwrap();
+    assert!(call.get("encrypted_function_args").is_none());
+    let output = replay
+        .iter()
+        .find(|item| item["call_id"] == "call-a" && item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(output["output"].as_array().unwrap().len(), 1);
+    assert_eq!(output["output"][0]["text"], "ok");
+}
+
+#[test]
+fn replayed_context_keeps_envelopes_when_no_switch_precedes_them() {
+    let items = vec![
+        json!({"role":"user","content":"hello"}),
+        json!({"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"cipher"}),
+        json!({"type":"message","id":"msg-1","role":"assistant","content":[
+            {"type":"output_text","text":"kept"},
+            {"type":"encrypted_content","encrypted_content":"cipher"}
+        ]}),
+    ];
+    let replay = replayable_context_items(items);
+    assert_eq!(replay.len(), 3);
+    assert_eq!(replay[1]["encrypted_content"], "cipher");
+    assert_eq!(replay[2]["content"][1]["encrypted_content"], "cipher");
+}
+
+#[test]
+fn replayed_context_strips_up_to_the_newest_switch_only() {
+    let items = vec![
+        json!({"type":"reasoning","id":"rs-old","summary":[],"encrypted_content":"cipher"}),
+        json!({"type":"model_switch","from":{"model":"a"},"to":{"model":"b"}}),
+        json!({"type":"reasoning","id":"rs-mid","summary":[],"encrypted_content":"cipher"}),
+        json!({"type":"model_switch","from":{"model":"b"},"to":{"model":"c"}}),
+        json!({"type":"reasoning","id":"rs-new","summary":[],"encrypted_content":"cipher"}),
+    ];
+    let replay = replayable_context_items(items);
+    assert_eq!(
+        replay
+            .iter()
+            .map(|item| item["id"].clone())
+            .collect::<Vec<_>>(),
+        [json!("rs-new")]
+    );
+}
+
+/// The Thread's model and upstream decide which envelopes the upstream can
+/// still decode, so a switch records one barrier and the replay retires every
+/// envelope recorded before it.
+#[tokio::test]
+async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelopes() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "model-switch-barrier").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let first_model = thread.model.clone();
+
+    let first_input = user_db(&state, &user, true, {
+        let thread_id = thread.id.clone();
+        let model = first_model.clone();
+        let upstream_id = thread.upstream_id.clone();
+        move |connection| {
+            let input = insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"hello"}),
+            );
+            insert_record(
+                connection,
+                &thread_id,
+                "response_output",
+                json!({"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"cipher"}),
+            );
+            insert_record(
+                connection,
+                &thread_id,
+                "response_output",
+                json!({"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}),
+            );
+            connection.execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,upstream_id,status,started_at)
+                 VALUES(?,?,'inference',?,?, 'completed', ?)",
+                params![input, &thread_id, &model, upstream_id, now()],
+            )?;
+            Ok(input)
+        }
+    })
+    .await
+    .unwrap();
+    assert!(first_input > 0);
+
+    let next_input = user_db(&state, &user, true, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            connection.execute(
+                "UPDATE threads SET model='next-model',status='running' WHERE id=?",
+                [&thread_id],
+            )?;
+            Ok(insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"and now?"}),
+            ))
+        }
+    })
+    .await
+    .unwrap();
+
+    let data_dir = state.data_dir.clone();
+    let context = user_db(&state, &user, false, {
+        let data_dir = data_dir.clone();
+        let thread_id = thread.id.clone();
+        move |connection| recovery::current_context(connection, &data_dir, &thread_id, next_input)
+    })
+    .await
+    .unwrap();
+
+    let (payload, barrier) = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            Ok::<_, ApiError>(connection.query_row(
+                "SELECT payload,id FROM history_records
+                 WHERE thread_id=? AND kind='activity'
+                   AND json_extract(payload,'$.type')='model_switch'",
+                [&thread_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["from"]["model"], json!(first_model));
+    assert_eq!(payload["to"]["model"], json!("next-model"));
+    assert_eq!(
+        context.idx_tail, barrier,
+        "the barrier is a protocol record, so it advances the replay tail"
+    );
+
+    let replay = replayable_context_items(context.items.clone());
+    assert!(
+        !replay.iter().any(|item| item["type"] == "reasoning"),
+        "reasoning from the previous model cannot be decoded by the next one"
+    );
+    assert!(!replay.iter().any(|item| item["type"] == "model_switch"));
+    assert!(
+        replay
+            .iter()
+            .any(|item| item["content"][0]["text"] == "first answer"),
+        "the visible answer still replays"
+    );
+
+    // The next model's own envelope replays: it sits after the barrier.
+    let tail = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            insert_record(
+                connection,
+                &thread_id,
+                "response_output",
+                json!({"type":"reasoning","id":"rs-2","summary":[],"encrypted_content":"fresh"}),
+            );
+            latest_protocol_record_id(connection, &thread_id)
+        }
+    })
+    .await
+    .unwrap();
+    let context = user_db(&state, &user, false, {
+        let data_dir = data_dir.clone();
+        let thread_id = thread.id.clone();
+        move |connection| compile_thread_context(connection, &data_dir, &thread_id, tail)
+    })
+    .await
+    .unwrap();
+    let replay = replayable_context_items(context.items.clone());
+    let reasoning = replay
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .collect::<Vec<_>>();
+    assert_eq!(reasoning.len(), 1);
+    assert_eq!(reasoning[0]["id"], json!("rs-2"));
+
+    // The switched model's own request records an audit, so the barrier is not
+    // repeated on later attempts.
+    user_db(&state, &user, true, {
+        let thread_id = thread.id.clone();
+        let upstream_id = thread.upstream_id.clone();
+        move |connection| {
+            connection.execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,upstream_id,status,started_at)
+                 VALUES(?,?,'inference','next-model',?, 'completed', ?)",
+                params![next_input, &thread_id, upstream_id, now()],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    user_db(&state, &user, false, {
+        let data_dir = data_dir.clone();
+        let thread_id = thread.id.clone();
+        move |connection| recovery::current_context(connection, &data_dir, &thread_id, next_input)
+    })
+    .await
+    .unwrap();
+    let barriers: i64 = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            Ok::<_, ApiError>(connection.query_row(
+                "SELECT COUNT(*) FROM history_records
+                 WHERE thread_id=? AND kind='activity'
+                   AND json_extract(payload,'$.type')='model_switch'",
+                [&thread_id],
+                |row| row.get(0),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(barriers, 1, "one switch records one barrier");
+}
+
+/// COMPATIBILITY: pre-schema-39 audits carry no `upstream_id`, so their Thread
+/// records one barrier even without a switch. Retire with the comment on
+/// `ensure_model_switch_barrier`.
+#[tokio::test]
+async fn an_audit_without_upstream_id_records_one_barrier_and_then_settles() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "legacy-audit-barrier").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = user_db(&state, &user, true, {
+        let thread_id = thread.id.clone();
+        let model = thread.model.clone();
+        move |connection| {
+            connection.execute("UPDATE threads SET status='running' WHERE id=?", [&thread_id])?;
+            let input = insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"hello"}),
+            );
+            connection.execute(
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at)
+                 VALUES(?,?,'inference',?, 'completed', ?)",
+                params![input, &thread_id, &model, now()],
+            )?;
+            Ok(input)
+        }
+    })
+    .await
+    .unwrap();
+    let data_dir = state.data_dir.clone();
+    user_db(&state, &user, false, {
+        let data_dir = data_dir.clone();
+        let thread_id = thread.id.clone();
+        move |connection| recovery::current_context(connection, &data_dir, &thread_id, input)
+    })
+    .await
+    .unwrap();
+    let barriers: i64 = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            Ok::<_, ApiError>(connection.query_row(
+                "SELECT COUNT(*) FROM history_records
+                 WHERE thread_id=? AND kind='activity'
+                   AND json_extract(payload,'$.type')='model_switch'",
+                [&thread_id],
+                |row| row.get(0),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(barriers, 1);
 }
