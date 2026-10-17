@@ -135,6 +135,12 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
+// INVARIANT: `ensure_user_schema` returns early when a database already reports
+// this version, so the idempotent `ADD COLUMN` loop in `migrate_user_schema`
+// never runs for one left at the old number. Adding a column therefore means
+// adding it to that loop *and* raising this constant; a missed bump fails every
+// query over the missing column, on every request of every existing user. The
+// guard is `a_previous_version_database_receives_the_audit_upstream_column`.
 const USER_SCHEMA_VERSION: i64 = 40;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
