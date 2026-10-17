@@ -198,7 +198,7 @@ model's own envelopes survive. A checkpoint compiled after the barrier moves
 `idx_head` past it, and the barrier then has no effect.
 
 COMPATIBILITY: `reasoning_audits.upstream_id` is NULL for audits written before
-schema 39, so their Thread records one barrier on its next request even without
+schema 40, so their Thread records one barrier on its next request even without
 a switch. That one-time strip retires reasoning recorded before barriers
 existed; the `ensure_model_switch_barrier` comment tracks its removal.
 
