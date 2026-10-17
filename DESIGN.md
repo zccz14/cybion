@@ -80,6 +80,11 @@ on selected/hovered rows as well as default rows. Primary action text and keyboa
 focus must remain visible. Native controls and scrollbars use the active theme's
 `color-scheme`. Keyboard, mobile, and reduced-motion behavior remain available.
 
+Dialogs never outgrow the viewport: the shared `DialogContent` caps its height at
+`calc(100svh - 2rem)` and scrolls its own content. Long forms therefore stay
+readable on short windows and phones, the page behind keeps its scroll position,
+and a dialog never needs its own height or scroll overrides.
+
 ## Themes and language
 
 The UI follows the OS light/dark preference on first load, then retains the

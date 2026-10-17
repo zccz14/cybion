@@ -23,7 +23,7 @@ export function ConceptHelp({ topic, language }: { topic: Topic; language: Onboa
   const text = onboardingCopy[language]
   return <Dialog>
     <DialogTrigger asChild><Button type="button" size="icon-sm" variant="ghost" aria-label={text[`${topic}Title`]} title={text[`${topic}Title`]}><CircleHelpIcon /></Button></DialogTrigger>
-    <DialogContent className="max-h-[85svh] overflow-y-auto sm:max-w-xl">
+    <DialogContent className="sm:max-w-xl">
       <DialogHeader><DialogTitle>{text[`${topic}Title`]}</DialogTitle><DialogDescription className="leading-6">{text[`${topic}Summary`]}</DialogDescription></DialogHeader>
       <ConceptDetails topic={topic} language={language} />
       <DialogFooter><Button asChild variant="outline"><Link to="/help">{text.learnMore}</Link></Button><DialogClose asChild><Button type="button">{text.close}</Button></DialogClose></DialogFooter>

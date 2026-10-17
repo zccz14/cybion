@@ -72,7 +72,7 @@
     {
       "type": "function",
       "name": "cybion_list_ultimate_machines",
-      "description": "List the user's Ultimate Machines (终极机器): scheduled self-checks that run one bash command on a Worker every interval and stay silent while the command exits 0. A failing run is delivered into the machine's repair Thread (终极机器 · <name>) as a user message asking to make the command return 0 — dropped, not queued, while that Thread is mid-turn; an offline or missing Worker is reported once per episode through Linkit; a run that never settles is declared lost after 15 minutes and reported once. Returns id, name, worker_id, worker_label, command, intent, interval_seconds, enabled, last_run_at, last_exit, thread_id, created_at. Use it to pick a machine_id for cybion_get_ultimate_machine or cybion_set_ultimate_machine.",
+      "description": "List the user's Ultimate Machines (终极机器): scheduled self-checks that run one bash command on a Worker every interval and stay silent while the command exits 0. A failing run is delivered into the machine's repair Thread (终极机器 · <name>) as a user message asking to make the command return 0 — dropped, not queued, while that Thread is mid-turn; an offline or missing Worker is reported once per episode through Linkit; a run that never settles is declared lost after 15 minutes and reported once. Returns id, name, worker_id, worker_label, command, intent, interval_seconds, enabled, last_run_at, last_exit, thread_id, created_at. Use it to pick a machine_id for cybion_get_ultimate_machine, cybion_set_ultimate_machine or cybion_delete_ultimate_machine.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -100,7 +100,7 @@
     {
       "type": "function",
       "name": "cybion_set_ultimate_machine",
-      "description": "Create or update an Ultimate Machine (终极机器) — one bash command run on one Worker every interval_seconds, silent while the command exits 0. Omit machine_id to create: name, worker_id, command and interval_seconds are required, the first run starts right away, and a repair Thread named 终极机器 · <name> is created automatically. Pass machine_id to update — only the fields you give change, and: an empty intent clears it; enabled pauses or resumes; a new worker_id starts a fresh offline-notification episode; renaming retitles the repair Thread unless the user renamed it by hand. Machines cannot be deleted here: pause with enabled=false, or delete the bound Thread or its Worker. To validate a check immediately, run the same command with bash on the Worker — the next scheduled run re-verifies silently.",
+      "description": "Create or update an Ultimate Machine (终极机器) — one bash command run on one Worker every interval_seconds, silent while the command exits 0. Omit machine_id to create: name, worker_id, command and interval_seconds are required, the first run starts right away, and a repair Thread named 终极机器 · <name> is created automatically. Pass machine_id to update — only the fields you give change, and: an empty intent clears it; enabled pauses or resumes; a new worker_id starts a fresh offline-notification episode; renaming retitles the repair Thread unless the user renamed it by hand. Machines are removed with cybion_delete_ultimate_machine, not here; pausing with enabled=false also stops the repair Thread's in-flight turn. To validate a check immediately, run the same command with bash on the Worker — the next scheduled run re-verifies silently.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -132,9 +132,27 @@
           },
           "enabled": {
             "type": "boolean",
-            "description": "Update only: false pauses all runs and notices, true resumes. A new machine starts enabled."
+            "description": "Update only: false pauses all runs and notices and stops the repair Thread's in-flight turn, true resumes. A new machine starts enabled."
           }
         },
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "cybion_delete_ultimate_machine",
+      "description": "Delete an Ultimate Machine (终极机器) for good: it leaves the machines list, stops being scheduled, and a run still in flight settles silently. The bound repair Thread (终极机器 · <name>) and its whole history survive as an ordinary Thread — delete that Thread separately if the user wants it gone too. The machine cannot be restored; use this only when the user asked to remove it, and prefer pausing with cybion_set_ultimate_machine when they merely want it quiet. Returns {\"deleted\": true, \"machine\": <the deleted definition>}.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "machine_id": {
+            "type": "string",
+            "description": "Exact id of the machine to delete, from cybion_list_ultimate_machines."
+          }
+        },
+        "required": [
+          "machine_id"
+        ],
         "additionalProperties": false
       }
     }

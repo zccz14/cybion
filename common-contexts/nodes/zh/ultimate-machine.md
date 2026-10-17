@@ -11,6 +11,9 @@
 - **离线**：运行时刻 Worker 离线或已不存在 → 跳过本次，通过 Linkit 提醒一次，长中断期间保持安静；恢复后自动继续（每个离线事件只提醒一次）。
 - **失联**：一次运行 15 分钟仍未落定（设备中途死亡等）→ 判定失联，提醒一次，下个间隔重试。
 - **丢消息**：修复 Thread 正在运行时，新的失败消息会被丢弃（不是排队）——它会在下一次运行落定后重新决定是否投递；因此静默既不代表健康，也不代表机器坏了。
+- **即时复查**：修复 Thread 的一轮运行成功结束后，机器立刻再检查一次，而不是等间隔：通过就沉默，仍然失败就把新的修复请求立刻推回 Thread。Thread 这一轮自己以失败结束（failed）时不即时复查——那可能是不可重试的错误——等间隔到点再继续。
+- **暂停**：`enabled: false` 停止定时运行与离线提醒，并停掉正在进行的一切：修复 Thread 当前这一轮、以及尚未落定的机器运行都会被取消。
+- **删除**：`cybion_delete_ultimate_machine` 彻底移除机器；绑定的修复 Thread 及其历史作为普通 Thread 保留。
 - **生命周期**：删除绑定的修复 Thread 或它使用的 Worker，会随之删除机器；改绑 Worker 会重启离线提醒事件（视作新的一轮）。
 
 ## 何时开一台
@@ -55,13 +58,14 @@
 
 ## 管理工具（tool 套件）
 
-管理终极机器有三件工具：`cybion_list_ultimate_machines`、`cybion_get_ultimate_machine`、`cybion_set_ultimate_machine`。字段级语义以工具描述为准；这里是使用套路。
+管理终极机器有四件工具：`cybion_list_ultimate_machines`、`cybion_get_ultimate_machine`、`cybion_set_ultimate_machine`、`cybion_delete_ultimate_machine`。字段级语义以工具描述为准；这里是使用套路。
 
 ### 何时用哪件
 
 - **看全貌、找 id**：`cybion_list_ultimate_machines`——每台机器的定义 + 最近一次落定结果（`enabled`、`last_run_at`、`last_exit`、绑定的修复 Thread）。
 - **看一台的细节**：`cybion_get_ultimate_machine`——`last_exit`：0 = 正常；其他数字 = 退出码（被杀且无退出码记为 -1）；null = 尚无落定结果（或该次执行未完成/已失联）。
 - **新建或修改**：`cybion_set_ultimate_machine`。
+- **删除**：`cybion_delete_ultimate_machine`——彻底移除；修复 Thread 保留。
 
 ### 新建（省略 machine_id）
 
@@ -76,10 +80,15 @@
 
 - 只提供要改的字段，其余保持不动。
 - `intent` 传空串清空意图；省略则保留。
-- `enabled: false` 暂停、`true` 恢复（新机器默认启用；`enabled` 仅在更新时可传）。
+- `enabled: false` 暂停、`true` 恢复（新机器默认启用；`enabled` 仅在更新时可传）。暂停会同时停掉修复 Thread 正在进行的那一轮。
 - 改 `worker_id` 会把机器搬过去，并重启「离线提醒」事件。
 - 改名会同步修复 Thread 标题（手动改过标题的除外）。
-- 三件套没有删除：要停就暂停；彻底移除由用户删除绑定的修复 Thread 或它使用的 Worker。
+
+### 删除（带 machine_id）
+
+- `cybion_delete_ultimate_machine` 传 `machine_id`：机器立刻停止调度并从列表消失，仍在途的一次运行会静默落定。
+- 绑定的修复 Thread 及其历史保留为普通 Thread；要连它一起清理，再单独删除那个 Thread。
+- 只在用户明确要求移除这台机器时使用；只是想让它安静，就用 `enabled: false` 暂停。
 
 机器是用户的资产：只在用户明确要求或修复需要时创建/修改；批量动作先说计划。
 
@@ -107,12 +116,12 @@ test $(df -Pk / | awk 'NR==2 {print $5}' | tr -d %) -lt 90
 2. **判断问题在哪**：
    - 环境问题（磁盘真的满了、证书真过期了、服务挂了）→ 用 bash 在对应 Worker 上直接修。
    - 检查本身写错了（路径变了、命令与系统不兼容）→ 先用 bash 验证修正后的命令，再用 `cybion_set_ultimate_machine` 更新机器定义；工具不可用时，请用户在「终极机器」页面修改。
-3. **验证**：手动运行修正后的命令，确认返回 0。
+3. **验证**：手动运行修正后的命令，确认返回 0；这一轮成功结束后机器会立刻复查，不必等定时器。
 4. **别为了变绿而弱化检查**：悄悄放宽 exit 0 的语义等于失去这台机器。
 5. **无需回复**：下次运行会自动验证；此后持续静默即修复成功。
 
 ## 边界与坑
 
-- **暂停 ≠ 删除**：`enabled=false`（或 `cybion_set_ultimate_machine` 传 `enabled=false`）只是暂停；彻底移除请删除绑定的修复 Thread 或它使用的 Worker。
+- **暂停 ≠ 删除**：`enabled=false`（或 `cybion_set_ultimate_machine` 传 `enabled=false`）只是暂停，同时停掉修复 Thread 当前这一轮；彻底移除用 `cybion_delete_ultimate_machine`，修复 Thread 会保留。
 - **敏感信息**：失败输出会进入 Thread 历史——不要 echo 密钥/令牌；确需检查令牌有效性时，只输出布尔判断。
 - **环境差异**：命令由 Worker 的执行环境运行；不要假设 PATH、locale、时区一致。

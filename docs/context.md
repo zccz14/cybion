@@ -53,8 +53,8 @@ returns the registered Worker identities (`worker_id`, `label`), ordered by
 label and ID; runtime state such as online status, heartbeat timestamps, and
 resource reports is not listed. The Ultimate Machine tools
 (`cybion_list_ultimate_machines`, `cybion_get_ultimate_machine`,
-`cybion_set_ultimate_machine`) are answered the same way; see
-[Ultimate machines](machines.md).
+`cybion_set_ultimate_machine`, `cybion_delete_ultimate_machine`) are answered
+the same way; see [Ultimate machines](machines.md).
 
 `write_context` creates or edits one of the user's local Contexts — title, Use
 When description, body, and parent. Omitting `context_id` creates a new

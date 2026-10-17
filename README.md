@@ -64,9 +64,10 @@ what the command reports; in the ideal case it never sends anything.
 - Offline Workers notify once per episode through Linkit; a run that never
   settles is declared lost and retried on the next interval.
 - Create and manage machines on the Machines page (`#/machines`) or from a
-  conversation. Pause, run once immediately, or edit at any time; the first
-  run starts right after creation, and machine runs stay out of usage
-  statistics.
+  conversation. Pause, run once immediately, edit or delete at any time; the
+  first run starts right after creation, a finished repair turn re-checks the
+  command at once, pausing also stops the repair Thread's current turn, and
+  deleting keeps the Thread. Machine runs stay out of usage statistics.
 
 ```sh
 # An example check — keep the root disk below 90%

@@ -684,6 +684,7 @@ const copy = {
     toolListUltimateMachines: "List Ultimate Machines",
     toolGetUltimateMachine: "Read an Ultimate Machine",
     toolSetUltimateMachine: "Create or update an Ultimate Machine",
+    toolDeleteUltimateMachine: "Delete an Ultimate Machine",
     toolWebSearch: "Web search",
     toolImageGeneration: "Image generation",
     toolCybion: "Cybion",
@@ -1023,6 +1024,7 @@ const copy = {
     toolListUltimateMachines: "列出终极机器",
     toolGetUltimateMachine: "读取终极机器",
     toolSetUltimateMachine: "创建或更新终极机器",
+    toolDeleteUltimateMachine: "删除终极机器",
     toolWebSearch: "网页搜索",
     toolImageGeneration: "图像生成",
     toolCybion: "Cybion",
@@ -3233,7 +3235,7 @@ function NormaiUpstreamCard({ sdk }: { sdk: AuthMiniApi }) {
           <DialogTrigger asChild>
             <Button size="sm" variant="outline"><Settings2Icon data-icon="inline-start" />{t("normaiFallbackUpstreams")}</Button>
           </DialogTrigger>
-          <DialogContent className="max-h-[85svh] overflow-y-auto sm:max-w-xl">
+          <DialogContent className="sm:max-w-xl">
             <DialogHeader><DialogTitle>{t("normaiFallbackUpstreams")}</DialogTitle><DialogDescription>{t("normaiFallbackDescription")}</DialogDescription></DialogHeader>
             <UpstreamsManager sdk={sdk} />
           </DialogContent>
@@ -3431,6 +3433,7 @@ const toolLabels: Record<string, CopyKey> = {
   cybion_list_ultimate_machines: "toolListUltimateMachines",
   cybion_get_ultimate_machine: "toolGetUltimateMachine",
   cybion_set_ultimate_machine: "toolSetUltimateMachine",
+  cybion_delete_ultimate_machine: "toolDeleteUltimateMachine",
   bash: "toolBash",
   browser_control: "toolBrowserControl",
   computer_use: "toolComputerUse",

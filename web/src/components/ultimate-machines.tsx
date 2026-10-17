@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
-import { PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
+import { PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react"
 
 import { formattedTime } from "@/lib/time"
 import { formatInterval, machineDraftValid, machinePayload, machineStatus, MAX_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, type Machine, type MachineDraft, type MachineStatus } from "@/lib/ultimate-machines"
@@ -42,6 +42,10 @@ const copy = {
     edit: "Edit",
     save: "Save",
     saving: "Saving…",
+    delete: "Delete",
+    deleting: "Deleting…",
+    deleteMachine: "Delete machine",
+    deleteMachineHint: "The check stops and the machine leaves this list. Its repair Thread keeps its history.",
     cancel: "Cancel",
     empty: "No machines yet.",
     emptyHint: "Create one to turn a failing check into a repair request in a bound Thread.",
@@ -87,6 +91,10 @@ const copy = {
     edit: "编辑",
     save: "保存",
     saving: "保存中…",
+    delete: "删除",
+    deleting: "删除中…",
+    deleteMachine: "删除机器",
+    deleteMachineHint: "机器停止检查并从列表中移除；绑定的修复 Thread 及其历史会保留。",
     cancel: "取消",
     empty: "还没有终极机器。",
     emptyHint: "创建一台，让失败的检查变成绑定 Thread 里的修复请求。",
@@ -131,6 +139,7 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState<MachineDraft>(EMPTY_DRAFT)
   const [editDraft, setEditDraft] = useState<(MachineDraft & { id: string }) | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null)
 
   const machines = useQuery({
     queryKey: ["machines", sessionId],
@@ -181,6 +190,15 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
     onSuccess: () => {
       invalidate()
       setEditDraft(null)
+    },
+  })
+
+  const remove = useMutation({
+    mutationFn: (id: string) =>
+      request<void>(`/api/machines/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: () => {
+      invalidate()
+      setDeleteTarget(null)
     },
   })
 
@@ -293,6 +311,9 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
                           <Button variant="outline" size="sm" disabled={run.isPending} onClick={() => run.mutate(machine.id)}>
                             <PlayIcon />{t("runNow")}
                           </Button>
+                          <Button variant="destructive" size="sm" onClick={() => { remove.reset(); setDeleteTarget(machine) }}>
+                            <Trash2Icon />{t("delete")}
+                          </Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -322,6 +343,22 @@ function UltimateMachinesSession({ language, sessionId, request }: Props) {
               <Button variant="outline" onClick={() => setEditDraft(null)}>{t("cancel")}</Button>
               <Button disabled={!canEdit} onClick={() => editDraft && update.mutate(editDraft)}>
                 {update.isPending ? t("saving") : t("save")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        <Dialog open={deleteTarget != null} onOpenChange={(next) => { if (!next) setDeleteTarget(null) }}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>{t("deleteMachine")}</DialogTitle>
+              <DialogDescription>{t("deleteMachineHint")}</DialogDescription>
+            </DialogHeader>
+            {deleteTarget && <p className="text-sm font-medium">{deleteTarget.name}</p>}
+            {remove.error && <Alert variant="destructive"><AlertDescription>{(remove.error as Error).message}</AlertDescription></Alert>}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t("cancel")}</Button>
+              <Button variant="destructive" disabled={remove.isPending} onClick={() => deleteTarget && remove.mutate(deleteTarget.id)}>
+                {remove.isPending ? t("deleting") : t("delete")}
               </Button>
             </DialogFooter>
           </DialogContent>
