@@ -79,6 +79,7 @@ pub(super) async fn ensure_thread_loop(
         ActiveRequest {
             record_idx: idx,
             cancellation,
+            phase: Arc::new(run_phase::PhaseCell::new()),
         },
     );
     drop(active);
@@ -122,6 +123,7 @@ pub(super) async fn wait_retry(
     input: i64,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(), ApiError> {
+    state.set_phase(user, thread, input, Phase::Kernel).await;
     let id = thread.to_owned();
     let at: Option<i64> = user_db(state, user, false, move |c| {
         if request_superseded(c, &id, input)? {
@@ -204,6 +206,9 @@ pub(super) async fn settle_tools(
         Ok(q.query_map(params![id,input],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }).await?;
     for item in pending {
+        state
+            .set_phase(user, &thread.id, input, Phase::Kernel)
+            .await;
         if *cancellation.borrow() {
             return Err(ApiError::cancelled());
         }
@@ -216,6 +221,9 @@ pub(super) async fn settle_tools(
                 call_id,
                 output_type,
             }) => {
+                state
+                    .set_phase(user, &thread.id, input, Phase::Device)
+                    .await;
                 let (result, output_id) =
                     wait_worker_result(state, user, &id, cancellation).await?;
                 if output_id.is_none() {
@@ -261,6 +269,9 @@ pub(super) async fn settle_tools(
                     }
                     Err(error) => return Err(error),
                 };
+                state
+                    .set_phase(user, &thread.id, input, Phase::Device)
+                    .await;
                 let (result, output_id) =
                     wait_worker_result(state, user, &id, cancellation).await?;
                 if output_id.is_none() {

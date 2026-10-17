@@ -6,11 +6,20 @@ const source = readFileSync(new URL("../src/components/admin-users.tsx", import.
 
 test("administrator users page keeps identity and per-user operational metrics together", () => {
   assert.match(source, /LinkitUserInfo userId=\{user\.user_id\}/)
-  for (const field of ["requests", "total_tokens", "cache_hit_rate", "history_records", "threads", "workers", "in_flight", "sqlite_bytes", "worker_sent_bytes", "worker_received_bytes", "upstream_sent_bytes", "upstream_received_bytes"]) {
+  for (const field of ["requests", "total_tokens", "cache_hit_rate", "history_records", "threads", "workers", "running", "kernel", "inference", "device", "sqlite_bytes", "worker_sent_bytes", "worker_received_bytes", "upstream_sent_bytes", "upstream_received_bytes"]) {
     assert.match(source, new RegExp(field))
   }
   assert.match(source, /refetchInterval: 5000/)
   assert.match(source, /仅管理员可查看用户列表。/)
+})
+
+test("administrator users page reports running Threads by responsible party", () => {
+  assert.match(source, /type Running = \{\n  total: number; kernel: number; inference: number; device: number; unattended: number; longest_seconds: number\n\}/)
+  assert.match(source, /\["running", t\.running\]/)
+  assert.match(source, /三态之和等于运行中的线程数/)
+  assert.match(source, /The three always add up to the running total/)
+  assert.match(source, /query\.data\.running\.unattended > 0/)
+  assert.doesNotMatch(source, /in_flight|inFlight/)
 })
 
 test("administrator users page does not repeat the raw user id or show a traffic start date", () => {

@@ -12,30 +12,35 @@ import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
+type Running = {
+  total: number; kernel: number; inference: number; device: number; unattended: number; longest_seconds: number
+}
 type Metrics = {
-  requests: number; in_flight: number; input_tokens: number; output_tokens: number; total_tokens: number
+  requests: number; input_tokens: number; output_tokens: number; total_tokens: number
   cached_tokens: number; cache_hit_rate: number | null; history_records: number; threads: number; workers: number
-  sqlite_bytes: number; sqlite_main_bytes: number; sqlite_wal_bytes: number; sqlite_shm_bytes: number
+  running: Running; sqlite_bytes: number; sqlite_main_bytes: number; sqlite_wal_bytes: number; sqlite_shm_bytes: number
 }
 type Traffic = {
   worker_received_bytes: number; worker_sent_bytes: number
   upstream_received_bytes: number; upstream_sent_bytes: number
 }
 type User = { user_id: string; is_admin: boolean; metrics: Metrics | null; traffic: Traffic | null; error: string | null }
-type Users = { items: User[]; generated_at: number }
-type Sort = "user_id" | "requests" | "total_tokens" | "cache_hit_rate" | "history_records" | "threads" | "in_flight" | "sqlite_bytes" | "workers" | "worker" | "upstream"
+type Users = { items: User[]; generated_at: number; running: Running }
+type Sort = "user_id" | "requests" | "total_tokens" | "cache_hit_rate" | "history_records" | "threads" | "running" | "sqlite_bytes" | "workers" | "worker" | "upstream"
 type Language = "en" | "zh"
 
 const copy = {
   zh: {
     user: "用户", requests: "推理请求", tokens: "累计 Token", cache: "缓存率", history: "历史记录", threads: "线程",
-    inFlight: "在途请求", sqlite: "SQLite", workers: "Workers", worker: "Worker 流量", upstream: "上游流量", admin: "管理员",
+    running: "运行中", sqlite: "SQLite", workers: "Workers", worker: "Worker 流量", upstream: "上游流量", admin: "管理员",
+    kernel: "内核", inference: "推理", device: "设备", unattended: "待恢复", longest: "最久",
     search: "搜索用户 ID", refresh: "刷新", loading: "正在读取用户…", error: "无法读取用户列表", retry: "重试",
     unavailable: "该用户的统计暂不可用", required: "仅管理员可查看用户列表。", empty: "暂无用户",
     noMatch: "没有匹配的用户", clear: "清空搜索", emptyHint: "用户首次登录 Cybion 后会显示在这里。",
     input: "输入", output: "输出", cached: "缓存", sent: "发送", received: "接收",
     updated: "更新于", auto: "每 5 秒刷新", previous: "上一页", next: "下一页", definitions: "统计口径",
     usageNote: "推理请求包含普通推理和上下文压缩，覆盖所有状态。Token 为上游已报告的输入与输出之和，缓存率 = 缓存输入 Token ÷ 输入 Token。无输入用量时显示 —。请求和 Token 基于保留的审计记录；删除线程会移除相关审计。",
+    runningNote: "运行中的线程按当前责任方分为三态：推理（等待模型上游响应，含上下文压缩）、设备（已交给 Worker，排队或执行中）、内核（Cybion 控制端：控制器工具、编译上下文、退避重试、收尾）。三态之和等于运行中的线程数。待恢复表示线程处于运行状态但本控制器没有执行任务，通常出现在重启后的几秒内。",
     networkNote: "流量为累计值，分别显示 Cybion 向 Worker / 推理上游发送和接收的 HTTP 正文字节，包含 Worker 心跳和 SSE 帧，不含 HTTP 头与 TLS 开销。",
     sqliteNote: "SQLite 为该用户数据库主文件、WAL 与 SHM 文件的合计。",
     workersNote: "Workers 为该用户名下未删除的设备数量；他人共享给该用户的设备不计入。",
@@ -43,13 +48,15 @@ const copy = {
   },
   en: {
     user: "User", requests: "Requests", tokens: "Total tokens", cache: "Cache rate", history: "History", threads: "Threads",
-    inFlight: "In flight", sqlite: "SQLite", workers: "Workers", worker: "Worker traffic", upstream: "Upstream traffic", admin: "Admin",
+    running: "Running", sqlite: "SQLite", workers: "Workers", worker: "Worker traffic", upstream: "Upstream traffic", admin: "Admin",
+    kernel: "Kernel", inference: "Inference", device: "Device", unattended: "unattended", longest: "Longest",
     search: "Search user ID", refresh: "Refresh", loading: "Loading users…", error: "Could not load users", retry: "Retry",
     unavailable: "User metrics are unavailable", required: "Administrator access is required to view users.", empty: "No users yet",
     noMatch: "No matching users", clear: "Clear search", emptyHint: "Users appear here after their first Cybion sign-in.",
     input: "Input", output: "Output", cached: "Cached", sent: "Sent", received: "Received",
     updated: "Updated", auto: "Refreshes every 5 seconds", previous: "Previous", next: "Next", definitions: "Metric definitions",
     usageNote: "Requests include inference and context compaction in every status. Tokens add reported input and output usage; cache rate = cached input tokens ÷ input tokens. No input usage displays —. Request and token totals use retained audits; deleting a thread removes its audits.",
+    runningNote: "Running Threads are split by who owes the next step: inference (waiting on the model upstream, including context compaction), device (handed to a Worker, queued or executing), and kernel (the Cybion Controller: controller tools, context compilation, retry backoff, finalization). The three always add up to the running total. Unattended means a Thread is marked running but this Controller holds no task for it, usually for a few seconds after a restart.",
     networkNote: "Traffic is a running total: sent and received HTTP body bytes between Cybion and Workers / inference upstreams, including Worker heartbeats and SSE framing, excluding HTTP headers and TLS overhead.",
     sqliteNote: "SQLite includes the user's main database, WAL and SHM files.",
     workersNote: "Workers counts the user's devices that are not deleted; devices shared with the user are excluded.",
@@ -62,9 +69,16 @@ function bytes(value: number) {
   return `${(value / 1024 ** unit).toFixed(unit === 0 ? 0 : 1)} ${["B", "KiB", "MiB", "GiB", "TiB"][unit]}`
 }
 
+function duration(seconds: number) {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60}s`
+  return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`
+}
+
 function sortValue(user: User, key: Exclude<Sort, "user_id">): number | null {
   if (key === "worker") return user.traffic ? user.traffic.worker_sent_bytes + user.traffic.worker_received_bytes : 0
   if (key === "upstream") return user.traffic ? user.traffic.upstream_sent_bytes + user.traffic.upstream_received_bytes : 0
+  if (key === "running") return user.metrics ? user.metrics.running.total : null
   return user.metrics?.[key] ?? null
 }
 
@@ -97,7 +111,7 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
   })
   const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / 25) - 1))
   const visible = filtered.slice(currentPage * 25, (currentPage + 1) * 25)
-  const columns: [Sort, string][] = [["user_id", t.user], ["requests", t.requests], ["total_tokens", t.tokens], ["cache_hit_rate", t.cache], ["history_records", t.history], ["threads", t.threads], ["in_flight", t.inFlight], ["sqlite_bytes", t.sqlite], ["workers", t.workers], ["worker", t.worker], ["upstream", t.upstream]]
+  const columns: [Sort, string][] = [["user_id", t.user], ["requests", t.requests], ["total_tokens", t.tokens], ["cache_hit_rate", t.cache], ["history_records", t.history], ["threads", t.threads], ["running", t.running], ["sqlite_bytes", t.sqlite], ["workers", t.workers], ["worker", t.worker], ["upstream", t.upstream]]
   function order(key: Sort) {
     setSort(key)
     setAscending(key === sort ? !ascending : key === "user_id")
@@ -123,9 +137,18 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
     {query.error && <Alert variant="destructive"><AlertTitle>{t.error}</AlertTitle><AlertDescription>{query.error.message}<Button variant="outline" size="sm" onClick={() => void query.refetch()}>{t.retry}</Button></AlertDescription></Alert>}
     {query.isPending && <div aria-label={t.loading} className="flex flex-col gap-3"><Skeleton className="h-10 w-full" /><Skeleton className="h-24 w-full" /><Skeleton className="h-24 w-full" /></div>}
     {query.data && <>
+      <div className="grid gap-3 sm:grid-cols-4">
+        {([[t.running, query.data.running.total], [t.kernel, query.data.running.kernel], [t.inference, query.data.running.inference], [t.device, query.data.running.device]] as const).map(([label, value]) => <div key={label} className="rounded-lg border bg-card px-4 py-3">
+          <p className="text-xs text-muted-foreground">{label}</p>
+          <p className="mt-1 text-2xl tabular-nums">{number(value)}</p>
+        </div>)}
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>{t.updated} {formattedTime(language, query.data.generated_at)} · {t.auto}</span>
-        <span>↑ {t.sent} · ↓ {t.received}</span>
+        <span>{t.updated} {formattedTime(language, query.data.generated_at)} · {t.auto} · {t.longest} {duration(query.data.running.longest_seconds)}</span>
+        <span className="flex items-center gap-3">
+          {query.data.running.unattended > 0 && <span role="status" className="text-destructive">⚠ {number(query.data.running.unattended)} {t.unattended}</span>}
+          <span>↑ {t.sent} · ↓ {t.received}</span>
+        </span>
       </div>
       <div className="min-w-0 rounded-lg border bg-card">
         <Table className="min-w-[80rem]">
@@ -145,7 +168,10 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
                   <TableCell className="text-right tabular-nums"><div>{m.cache_hit_rate === null ? "—" : `${(m.cache_hit_rate * 100).toFixed(1)}%`}</div><div className="mt-1 text-xs text-muted-foreground">{t.cached} {number(m.cached_tokens)}</div></TableCell>
                   <TableCell className="text-right tabular-nums">{number(m.history_records)}</TableCell>
                   <TableCell className="text-right tabular-nums">{number(m.threads)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{m.in_flight > 0 ? <Badge>{number(m.in_flight)}</Badge> : "0"}</TableCell>
+                  <TableCell className="text-right tabular-nums" title={`${t.kernel} ${number(m.running.kernel)} · ${t.inference} ${number(m.running.inference)} · ${t.device} ${number(m.running.device)} · ${t.unattended} ${number(m.running.unattended)} · ${t.longest} ${duration(m.running.longest_seconds)}`}>
+                    <div>{m.running.total > 0 ? <Badge>{number(m.running.total)}</Badge> : "0"}</div>
+                    {m.running.total > 0 && <div className="mt-1 whitespace-nowrap text-xs text-muted-foreground">{t.kernel} {number(m.running.kernel)} · {t.inference} {number(m.running.inference)} · {t.device} {number(m.running.device)}</div>}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums" title={`DB ${bytes(m.sqlite_main_bytes)} · WAL ${bytes(m.sqlite_wal_bytes)} · SHM ${bytes(m.sqlite_shm_bytes)}`}>{bytes(m.sqlite_bytes)}</TableCell>
                   <TableCell className="text-right tabular-nums">{number(m.workers)}</TableCell>
                 </> : <TableCell colSpan={8}><span role="status" className="text-destructive">{t.unavailable}</span></TableCell>}
@@ -159,6 +185,6 @@ export function AdminUsers({ language, request, allowed, sessionId }: {
       </div>
       {filtered.length > 25 && <div className="flex items-center justify-end gap-3 text-sm"><span>{currentPage + 1} / {Math.ceil(filtered.length / 25)}</span><Button variant="outline" size="sm" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>{t.previous}</Button><Button variant="outline" size="sm" disabled={(currentPage + 1) * 25 >= filtered.length} onClick={() => setPage(currentPage + 1)}>{t.next}</Button></div>}
     </>}
-    <details className="text-sm text-muted-foreground"><summary className="cursor-pointer rounded-sm py-1 focus-visible:outline-2 focus-visible:outline-ring">{t.definitions}</summary><div className="mt-2 flex max-w-3xl flex-col gap-2"><p>{t.usageNote}</p><p>{t.networkNote}</p><p>{t.sqliteNote}</p><p>{t.workersNote}</p></div></details>
+    <details className="text-sm text-muted-foreground"><summary className="cursor-pointer rounded-sm py-1 focus-visible:outline-2 focus-visible:outline-ring">{t.definitions}</summary><div className="mt-2 flex max-w-3xl flex-col gap-2"><p>{t.runningNote}</p><p>{t.usageNote}</p><p>{t.networkNote}</p><p>{t.sqliteNote}</p><p>{t.workersNote}</p></div></details>
   </section>
 }

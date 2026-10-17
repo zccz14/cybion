@@ -42,6 +42,7 @@ mod machines;
 mod normai;
 mod objects;
 mod recovery;
+mod run_phase;
 mod stats;
 mod thread_controls;
 mod thread_sharing;
@@ -51,6 +52,7 @@ mod worker_onboarding;
 mod worker_protocol;
 mod worker_sharing;
 
+use run_phase::Phase;
 use thread_controls::{RequestOperation, latest_request_record_id, request_superseded};
 use upstreams::Upstream;
 
@@ -141,7 +143,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 40;
+const USER_SCHEMA_VERSION: i64 = 41;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -182,6 +184,7 @@ struct AppState {
 struct ActiveRequest {
     record_idx: i64,
     cancellation: tokio::sync::watch::Sender<bool>,
+    phase: Arc<run_phase::PhaseCell>,
 }
 
 #[derive(Clone, Debug)]
@@ -1150,6 +1153,18 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_thread_id
   ON reasoning_audits(thread_id,id);
 "#;
 
+// The administrator snapshot asks, per running Thread, whether a shared
+// device still owes a tool result. A local call answers from `worker_calls`,
+// but a shared call is only a pending intent row in the caller's history;
+// without this partial index that probe walks the Thread's whole history.
+// Pending shared intents are few, so the index stays small.
+const USER_RUNNING_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS history_shared_intent_thread
+  ON history_records(thread_id) WHERE worker_call_id IS NOT NULL
+    AND worker_output_phase IS NULL
+    AND worker_owner_user_id IS NOT NULL AND worker_owner_user_id<>'';
+"#;
+
 // Usage statistics are served from materialized snapshots: a background
 // patrol folds raw rows into hour buckets and totals, refreshes the
 // stats_view_* snapshot rows for this table's four ranges, and requests only
@@ -1621,6 +1636,20 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(USER_LATEST_AUDIT_INDEXES)
         .map_err(ApiError::internal)?;
+    // A database that has never been through the sharing upgrade has no
+    // history intent columns yet; the index starts existing once they do, and
+    // every production database passes through that migration on its first
+    // open (worker_sharing::migrate owns the columns).
+    let shared_intent: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('history_records') WHERE name='worker_owner_user_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if shared_intent {
+        transaction
+            .execute_batch(USER_RUNNING_INDEXES)
+            .map_err(ApiError::internal)?;
+    }
     if version < USER_SCHEMA_VERSION {
         transaction
             .execute_batch(&format!("PRAGMA user_version = {USER_SCHEMA_VERSION};"))
@@ -4366,6 +4395,9 @@ async fn process_request(
     operation: RequestOperation,
     mut cancellation: watch::Receiver<bool>,
 ) {
+    state
+        .set_phase(&user, &thread_id, record_idx, Phase::Kernel)
+        .await;
     let loaded = user_db(&state, &user, false, {
         let thread_id = thread_id.clone();
         move |connection| {
@@ -5536,6 +5568,9 @@ async fn request_agent(
     .await
     .map_err(|error| (thread.clone(), Box::new(error)))?;
     loop {
+        state
+            .set_phase(user, &thread.id, source_record_idx, Phase::Kernel)
+            .await;
         if *cancellation.borrow() {
             return Err((thread.clone(), Box::new(ApiError::cancelled())));
         }
@@ -6426,6 +6461,11 @@ async fn responses_request_with_options(
         idx_head,
         idx_tail,
     };
+    if let Some(record) = input_record_id {
+        state
+            .set_phase(user, thread_id, record, Phase::Inference)
+            .await;
+    }
     let request = send_responses_request(
         state,
         Some(user),
@@ -7197,9 +7237,7 @@ fn context_tools() -> Value {
 }
 
 fn is_worker_tool(name: &str) -> bool {
-    TOOL_CATALOG["worker"]
-        .as_array()
-        .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == name))
+    run_phase::tool_phase(name) == Some(Phase::Device)
 }
 
 fn responses_tools(
@@ -7847,7 +7885,15 @@ async fn start_response_tool(
         _ => return Ok(None),
     };
     if name == "normai_web_search" {
-        let output = match web_search_tool_output(state, user, thread, input).await {
+        let output = state
+            .kernel_tool(
+                user,
+                &thread.id,
+                input_id,
+                web_search_tool_output(state, user, thread, input),
+            )
+            .await;
+        let output = match output {
             Ok(output) => output,
             Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
                 json!({ "error": error.message })
@@ -7864,14 +7910,21 @@ async fn start_response_tool(
         )));
     }
     if name == "normai_image_generation" {
-        let (output, image) =
-            match image_generation_tool_output(state, user, thread, input_id, input).await {
-                Ok(result) => result,
-                Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
-                    (json!({ "error": error.message }), None)
-                }
-                Err(error) => return Err(error),
-            };
+        let generated = state
+            .kernel_tool(
+                user,
+                &thread.id,
+                input_id,
+                image_generation_tool_output(state, user, thread, input_id, input),
+            )
+            .await;
+        let (output, image) = match generated {
+            Ok(result) => result,
+            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                (json!({ "error": error.message }), None)
+            }
+            Err(error) => return Err(error),
+        };
         let output = json!({
             "type": output_type,
             "call_id": call_id,
@@ -7882,19 +7935,14 @@ async fn start_response_tool(
                 .await?,
         )));
     }
-    let controller_output = match name.as_str() {
-        "read_context" => Some(read_context_tool_output(state, user, input).await),
-        "write_context" => Some(write_context_tool_output(state, user, input).await),
-        "cybion_list_contexts" => Some(list_contexts_tool_output(state, user).await),
-        "cybion_list_workers" => Some(list_workers_tool_output(state, user).await),
-        "cybion_list_ultimate_machines" => Some(machines::list_tool_output(state, user).await),
-        "cybion_get_ultimate_machine" => Some(machines::get_tool_output(state, user, input).await),
-        "cybion_set_ultimate_machine" => Some(machines::set_tool_output(state, user, input).await),
-        "cybion_delete_ultimate_machine" => {
-            Some(machines::delete_tool_output(state, user, input).await)
-        }
-        _ => None,
-    };
+    let controller_output = state
+        .kernel_tool(
+            user,
+            &thread.id,
+            input_id,
+            controller_tool_output(state, user, name, input),
+        )
+        .await;
     if let Some(output) = controller_output {
         let output = match output {
             Ok(output) => output,
@@ -7956,6 +8004,27 @@ async fn start_response_tool(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Runs one of the Controller's own tools. `None` means the name belongs to a
+/// Worker, so the caller dispatches it to the device instead.
+async fn controller_tool_output(
+    state: &AppState,
+    user: &User,
+    name: &str,
+    input: &str,
+) -> Option<Result<Value, ApiError>> {
+    Some(match name {
+        "read_context" => read_context_tool_output(state, user, input).await,
+        "write_context" => write_context_tool_output(state, user, input).await,
+        "cybion_list_contexts" => list_contexts_tool_output(state, user).await,
+        "cybion_list_workers" => list_workers_tool_output(state, user).await,
+        "cybion_list_ultimate_machines" => machines::list_tool_output(state, user).await,
+        "cybion_get_ultimate_machine" => machines::get_tool_output(state, user, input).await,
+        "cybion_set_ultimate_machine" => machines::set_tool_output(state, user, input).await,
+        "cybion_delete_ultimate_machine" => machines::delete_tool_output(state, user, input).await,
+        _ => return None,
+    })
 }
 
 fn prepare_worker_arguments(

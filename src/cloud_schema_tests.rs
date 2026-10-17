@@ -473,6 +473,7 @@ pub(super) fn remove_sharing_fixture(c: &Connection) {
     c.execute_batch(
         "DROP TABLE worker_grants; DROP TABLE shared_workers;
         DROP INDEX history_worker_origin; DROP INDEX history_worker_intent;
+        DROP INDEX history_shared_intent_thread;
         DROP INDEX worker_calls_foreign_origin; DROP INDEX worker_calls_queued;
         DROP INDEX worker_calls_pending_output; DROP INDEX worker_calls_created;
         DROP INDEX worker_calls_status_created; DROP INDEX worker_calls_worker_created;

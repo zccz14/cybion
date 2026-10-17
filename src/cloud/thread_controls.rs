@@ -142,6 +142,7 @@ pub(super) async fn enqueue(
         ActiveRequest {
             record_idx,
             cancellation,
+            phase: Arc::new(run_phase::PhaseCell::new()),
         },
     ) {
         let _ = previous.cancellation.send(true);
