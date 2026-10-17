@@ -24,9 +24,10 @@ does not redefine it.
 executes it.
 
 - `worker` → `device`.
-- `context` (Cybion) and `native` (OpenAI) → `kernel`. The native tools are
-  intercepted in `start_response_tool` and executed by the Controller against
-  the Thread's upstream, so the upstream never owns that wait.
+- `context` and `native` → `kernel`. The native tools (web search, image
+  generation) are intercepted in `start_response_tool` and executed by the
+  Controller against the Thread's upstream, so the upstream never owns that
+  wait, and the Tools page lists both groups as one Kernel group.
 
 `run_phase::tool_phase` implements the mapping and a unit test fails the build
 when a catalog tool has no phase. A native tool executed server-side by the

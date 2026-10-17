@@ -672,7 +672,7 @@ const copy = {
     baseUrl: "Base URL",
     username: "Username",
     tools: "Tools",
-    toolsDescription: "Capabilities available to Cybion threads.",
+    toolsDescription: "Capabilities available to Cybion threads, grouped by who executes them.",
     toolBash: "Run shell commands",
     toolBrowserControl: "Control a browser",
     toolComputerUse: "Control the desktop",
@@ -687,10 +687,10 @@ const copy = {
     toolDeleteUltimateMachine: "Delete an Ultimate Machine",
     toolWebSearch: "Web search",
     toolImageGeneration: "Image generation",
-    toolCybion: "Cybion",
-    toolOpenAi: "OpenAI",
     phaseKernel: "Kernel",
     phaseDevice: "Device",
+    toolsKernelHint: "Executed by the Cybion Controller: Contexts, Worker and Ultimate Machine management, plus the web search and image generation it intercepts.",
+    toolsDeviceHint: "Executed on the device you pick (a Worker): shell, browser, desktop and image reading.",
     history: "History",
     historyDescription: "Browse the rows and stored fields in history_records across your workspace.",
     noHistory: "No messages in this thread yet.",
@@ -1014,7 +1014,7 @@ const copy = {
     baseUrl: "基础地址",
     username: "用户名",
     tools: "工具",
-    toolsDescription: "Cybion 线程可使用的能力。",
+    toolsDescription: "Cybion 线程可使用的能力，按执行方分为内核与设备。",
     toolBash: "运行 Shell 命令",
     toolBrowserControl: "控制浏览器",
     toolComputerUse: "控制桌面",
@@ -1029,10 +1029,10 @@ const copy = {
     toolDeleteUltimateMachine: "删除终极机器",
     toolWebSearch: "网页搜索",
     toolImageGeneration: "图像生成",
-    toolCybion: "Cybion",
-    toolOpenAi: "OpenAI",
     phaseKernel: "内核",
     phaseDevice: "设备",
+    toolsKernelHint: "由 Cybion 控制器执行：上下文、Worker 与终极机器管理，以及被控制器接管的网页搜索与图像生成。",
+    toolsDeviceHint: "发送到你选定的设备（Worker）执行：Shell、浏览器、桌面与图片读取。",
     history: "历史",
     historyDescription: "查看当前工作区 history_records 表中的记录与原始字段。",
     noHistory: "这个线程还没有消息。",
@@ -3448,18 +3448,18 @@ const toolLabels: Record<string, CopyKey> = {
 
 function ToolsPage() {
   const { t } = useUi()
-  // INVARIANT: the phase badge is the administrative running-phase taxonomy:
-  // tools.json's `worker` group executes on the user's device, while `context`
-  // (Cybion) and `native` (OpenAI) execute in the Controller.
+  // INVARIANT: tools.json is the single source for who executes a tool, and it
+  // has exactly two responsible parties. `worker` runs on the user's device;
+  // `context` and `native` both run in the Controller, because the native tools
+  // are intercepted there instead of being executed by the upstream.
   const groups = [
-    { names: toolCatalog.context.map((tool) => tool.name), provider: t("toolCybion"), phase: t("phaseKernel") },
-    { names: toolCatalog.worker.map((tool) => tool.name), provider: "Worker", phase: t("phaseDevice") },
-    { names: Object.keys(toolCatalog.native), provider: t("toolOpenAi"), phase: t("phaseKernel") },
+    { title: t("phaseKernel"), hint: t("toolsKernelHint"), names: [...toolCatalog.context.map((tool) => tool.name), ...Object.keys(toolCatalog.native)] },
+    { title: t("phaseDevice"), hint: t("toolsDeviceHint"), names: toolCatalog.worker.map((tool) => tool.name) },
   ]
-  const tools = [
-    ...groups.flatMap((group) => group.names.map((name) => ({ name, provider: group.provider, phase: group.phase, title: undefined as string | undefined }))),
-  ]
-  return <Page title={t("tools")} description={t("toolsDescription")}><Card><CardContent className="divide-y p-0">{tools.map((tool) => <div className="flex items-center gap-3 px-4 py-4" key={tool.name}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{tool.title ?? (toolLabels[tool.name] ? t(toolLabels[tool.name]) : tool.name)}</p><code className="text-xs text-muted-foreground">{tool.name}</code></div><Badge variant="secondary">{tool.phase}</Badge><Badge variant="outline">{tool.provider}</Badge></div>)}</CardContent></Card></Page>
+  return <Page title={t("tools")} description={t("toolsDescription")}>{groups.map((group) => <Card key={group.title}>
+    <CardHeader><CardTitle>{group.title}</CardTitle><CardDescription>{group.hint}</CardDescription></CardHeader>
+    <CardContent className="divide-y p-0">{group.names.map((name) => <div className="flex items-center gap-3 px-4 py-4" key={name}><WrenchIcon className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="font-medium">{toolLabels[name] ? t(toolLabels[name]) : name}</p><code className="text-xs text-muted-foreground">{name}</code></div></div>)}</CardContent>
+  </Card>)}</Page>
 }
 
 function SecretValue({ value }: { value: string }) {
