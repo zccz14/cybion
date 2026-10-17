@@ -4728,6 +4728,19 @@ fn validate_protocol_record(
     }
 }
 
+/// A replay target is `(model, upstream)`. An audit written before schema 40
+/// stored no upstream, so that half is unknown rather than different: assuming
+/// it still matches keeps a Thread's envelopes replayable, and only the one
+/// request carrying a stale envelope can fail.
+fn replay_target_changed(
+    model: &str,
+    upstream_id: Option<&str>,
+    to_model: &str,
+    to_upstream_id: Option<&str>,
+) -> bool {
+    model != to_model || upstream_id.is_some_and(|id| Some(id) != to_upstream_id)
+}
+
 /// Upstreams encrypt reasoning, function arguments, and content parts so only
 /// the model that produced them decodes the envelope. When a Thread starts
 /// replaying with another `(upstream, model)` pair, everything already recorded
@@ -4747,13 +4760,13 @@ fn ensure_model_switch_barrier(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    // COMPATIBILITY: audits written before schema 40 have no `upstream_id`, so
-    // their Thread records one barrier on its next request even without a
-    // switch. That one-time strip is the intended way to retire reasoning
-    // recorded before barriers existed; remove this paragraph once no Thread
-    // holds an audit without `upstream_id`.
     if let Some((model, upstream_id)) = previous
-        && (model != thread.model || upstream_id != thread.upstream_id)
+        && replay_target_changed(
+            &model,
+            upstream_id.as_deref(),
+            &thread.model,
+            thread.upstream_id.as_deref(),
+        )
     {
         persist_history_record(
             &transaction,
@@ -5232,45 +5245,76 @@ fn tool_pair(item: &Value) -> Option<(&'static str, bool)> {
 /// A `model_switch` record: Cybion's own replay barrier. It is never an
 /// upstream item, so it leaves the replay in both segments and only bounds the
 /// strip.
-fn is_model_switch_barrier(item: &Value) -> bool {
+fn is_model_switch_record(item: &Value) -> bool {
     item.get("type").and_then(Value::as_str) == Some("model_switch")
+}
+
+/// Whether a barrier recorded a real move to another replay target. Builds
+/// between schema 37 and 40 also recorded one for a Thread whose audit predated
+/// `upstream_id`, describing no change at all; such a barrier stays in the
+/// transcript and stops bounding the strip.
+fn moves_replay_target(item: &Value) -> bool {
+    let half = |name: &str, field: &str| {
+        item.get(name)
+            .and_then(|half| half.get(field))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let (Some(from_model), Some(to_model)) = (half("from", "model"), half("to", "model")) else {
+        return false;
+    };
+    replay_target_changed(
+        &from_model,
+        half("from", "upstream_id").as_deref(),
+        &to_model,
+        half("to", "upstream_id").as_deref(),
+    )
 }
 
 /// Everything before the newest barrier was produced by another
 /// `(upstream, model)` pair, whose encrypted envelopes the current one cannot
-/// decode: an item that exists only to carry an envelope disappears, and a
-/// mixed item such as a message keeps its visible content.
-/// ASSUMPTION: only encrypted parts are issuer-bound; ids, summaries, and text
-/// replay to another model unchanged. Stripping too little fails loudly at the
-/// upstream naming the undecodable envelope, and the Thread then records a
-/// fresh barrier; stripping too much costs one segment's reasoning continuity.
+/// decode. Only envelopes are issuer-bound: an item carrying nothing but one
+/// disappears, and every other item keeps the text it replays with.
+/// ASSUMPTION: plaintext reasoning, summaries, ids, and tool results replay to
+/// another model unchanged. Stripping too little fails loudly at the upstream
+/// naming the undecodable envelope; stripping a thinking model's reasoning text
+/// fails every replayed tool-call turn, so text survives.
 fn strip_foreign_envelopes(items: Vec<Value>) -> Vec<Value> {
-    let Some(barrier) = items.iter().rposition(is_model_switch_barrier) else {
-        return items;
-    };
+    let barrier = items.iter().rposition(moves_replay_target);
     items
         .into_iter()
         .enumerate()
-        .filter(|(_, item)| !is_model_switch_barrier(item))
-        .filter_map(|(index, item)| {
-            if index > barrier {
-                Some(item)
-            } else {
-                without_envelopes(item)
-            }
+        .filter(|(_, item)| !is_model_switch_record(item))
+        .filter_map(|(index, item)| match barrier {
+            Some(barrier) if index < barrier => without_envelopes(item),
+            _ => Some(item),
         })
         .collect()
 }
 
 fn without_envelopes(mut item: Value) -> Option<Value> {
-    if matches!(
-        item.get("type").and_then(Value::as_str),
-        Some("reasoning" | "compaction" | "context_compaction")
-    ) {
-        return None;
-    }
     strip_encrypted_parts(&mut item);
-    Some(item)
+    let portable = match item.get("type").and_then(Value::as_str) {
+        Some("reasoning") => carries_reasoning_text(&item),
+        Some("compaction" | "context_compaction") => false,
+        _ => true,
+    };
+    portable.then_some(item)
+}
+
+/// INVARIANT: a thinking-mode provider rejects a replayed tool-call turn whose
+/// assistant reasoning text is missing, so a reasoning item survives the strip
+/// whenever its text does.
+fn carries_reasoning_text(item: &Value) -> bool {
+    item.get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+            })
+        })
 }
 
 fn strip_encrypted_parts(value: &mut Value) {

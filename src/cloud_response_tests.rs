@@ -3075,7 +3075,7 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
                 connection,
                 &thread_id,
                 "response_output",
-                json!({"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"cipher"}),
+                json!({"type":"reasoning","id":"rs-1","summary":[],"content":[{"type":"reasoning_text","text":"plan one"}],"encrypted_content":"cipher"}),
             );
             insert_record(
                 connection,
@@ -3145,9 +3145,14 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     );
 
     let replay = replayable_context_items(context.items.clone());
+    let reasoning = replay
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("thinking-mode providers reject a turn whose reasoning text is missing");
+    assert_eq!(reasoning["content"][0]["text"], json!("plan one"));
     assert!(
-        !replay.iter().any(|item| item["type"] == "reasoning"),
-        "reasoning from the previous model cannot be decoded by the next one"
+        reasoning.get("encrypted_content").is_none(),
+        "the previous model's envelope cannot be decoded by the next one"
     );
     assert!(!replay.iter().any(|item| item["type"] == "model_switch"));
     assert!(
@@ -3184,8 +3189,19 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
         .iter()
         .filter(|item| item["type"] == "reasoning")
         .collect::<Vec<_>>();
-    assert_eq!(reasoning.len(), 1);
-    assert_eq!(reasoning[0]["id"], json!("rs-2"));
+    assert_eq!(
+        reasoning
+            .iter()
+            .map(|item| item["id"].clone())
+            .collect::<Vec<_>>(),
+        [json!("rs-1"), json!("rs-2")]
+    );
+    assert!(reasoning[0].get("encrypted_content").is_none());
+    assert_eq!(
+        reasoning[1]["encrypted_content"],
+        json!("fresh"),
+        "the switched model's own envelope replays"
+    );
 
     // The switched model's own request records an audit, so the barrier is not
     // repeated on later attempts.
@@ -3227,11 +3243,10 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     assert_eq!(barriers, 1, "one switch records one barrier");
 }
 
-/// COMPATIBILITY: pre-schema-39 audits carry no `upstream_id`, so their Thread
-/// records one barrier even without a switch. Retire with the comment on
-/// `ensure_model_switch_barrier`.
+/// An audit written before `upstream_id` existed leaves that half of the pair
+/// unknown, not different: the Thread keeps replaying its envelopes.
 #[tokio::test]
-async fn an_audit_without_upstream_id_records_one_barrier_and_then_settles() {
+async fn an_audit_without_upstream_id_records_no_barrier() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "legacy-audit-barrier").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -3278,5 +3293,50 @@ async fn an_audit_without_upstream_id_records_one_barrier_and_then_settles() {
     })
     .await
     .unwrap();
-    assert_eq!(barriers, 1);
+    assert_eq!(barriers, 0);
+}
+
+#[test]
+fn replayed_context_keeps_reasoning_text_a_thinking_model_must_receive() {
+    let items = vec![
+        json!({"role":"user","content":"go"}),
+        json!({"type":"reasoning","id":"rs-1","summary":[],"content":[
+            {"type":"reasoning_text","text":"plan"}
+        ],"encrypted_content":"cipher"}),
+        json!({"type":"function_call","id":"fc-1","name":"bash","call_id":"call-a","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"call-a","output":"ok"}),
+        json!({"type":"model_switch","from":{"model":"deepseek-a","upstream_id":"u1"},"to":{"model":"deepseek-b","upstream_id":"u2"}}),
+        json!({"role":"user","content":"next"}),
+    ];
+    let replay = replayable_context_items(items);
+    let reasoning = replay
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("a thinking model rejects the tool-call turn without its reasoning text");
+    assert_eq!(reasoning["content"][0]["text"], json!("plan"));
+    assert!(reasoning.get("encrypted_content").is_none());
+    assert!(
+        replay.iter().any(|item| item["call_id"] == "call-a"),
+        "the tool call keeps replaying alongside the reasoning it belongs to"
+    );
+}
+
+#[test]
+fn a_barrier_that_did_not_move_the_replay_target_keeps_envelopes() {
+    let items = vec![
+        json!({"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"cipher"}),
+        json!({"type":"model_switch",
+            "from":{"model":"deepseek-flash","upstream_id":null},
+            "to":{"model":"deepseek-flash","upstream_id":"u1"},
+            "role":"system","content":"Model switched: deepseek-flash to deepseek-flash"}),
+        json!({"role":"user","content":"go"}),
+    ];
+    let replay = replayable_context_items(items);
+    assert_eq!(replay.len(), 2);
+    assert_eq!(
+        replay[0]["encrypted_content"],
+        json!("cipher"),
+        "a barrier describing no change must not strip anything"
+    );
+    assert!(!replay.iter().any(|item| item["type"] == "model_switch"));
 }
