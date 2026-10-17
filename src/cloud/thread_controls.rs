@@ -43,8 +43,10 @@ pub(super) fn request_context_tail(
 ) -> Result<i64, ApiError> {
     connection
         .query_row(
-            "SELECT MAX(id) FROM history_records WHERE thread_id=? AND id<=?
-             AND kind IN ('input','response_output','tool_output','checkpoint')",
+            &format!(
+                "SELECT MAX(id) FROM history_records
+                 WHERE thread_id=? AND id<=? AND {PROTOCOL_RECORDS}"
+            ),
             params![thread_id, record_idx],
             |row| row.get::<_, Option<i64>>(0),
         )?

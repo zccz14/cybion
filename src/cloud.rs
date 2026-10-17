@@ -1007,6 +1007,7 @@ CREATE TABLE IF NOT EXISTS reasoning_audits (
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   request_kind TEXT NOT NULL DEFAULT 'inference',
   model TEXT NOT NULL,
+  upstream_id TEXT,
   reasoning_effort TEXT,
   status TEXT NOT NULL CHECK(status IN ('in_flight','completed','failed','cancelled')),
   started_at INTEGER NOT NULL,
@@ -1465,6 +1466,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("threads", "api_key_id", "TEXT"),
         ("threads", "external_ref", "TEXT"),
         ("reasoning_audits", "reasoning_effort", "TEXT"),
+        ("reasoning_audits", "upstream_id", "TEXT"),
         ("threads", "upstream_id", "TEXT"),
         ("thread_defaults", "upstream_id", "TEXT"),
         ("threads", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -4681,11 +4683,18 @@ impl CompiledThreadContext {
     }
 }
 
+/// The records a Thread replays upstream. `model_switch` is Cybion's own
+/// replay barrier, not an upstream item: it counts as a protocol record so it
+/// advances the replay tail, and it marks where the Thread started replaying
+/// with another `(upstream, model)` pair.
+const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type')='model_switch'))";
+
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     connection
         .query_row(
-            "SELECT MAX(id) FROM history_records
-             WHERE thread_id=? AND kind IN ('input','response_output','tool_output','checkpoint')",
+            &format!(
+                "SELECT MAX(id) FROM history_records WHERE thread_id=? AND {PROTOCOL_RECORDS}"
+            ),
             [thread_id],
             |row| row.get::<_, Option<i64>>(0),
         )?
@@ -4697,20 +4706,67 @@ fn validate_protocol_record(
     thread_id: &str,
     idx_tail: i64,
 ) -> Result<(), ApiError> {
-    let kind = connection
+    let protocol: Option<bool> = connection
         .query_row(
-            "SELECT kind FROM history_records WHERE id=? AND thread_id=?",
+            &format!("SELECT {PROTOCOL_RECORDS} FROM history_records WHERE id=? AND thread_id=?"),
             params![idx_tail, thread_id],
-            |row| row.get::<_, String>(0),
+            |row| row.get(0),
         )
         .optional()?;
-    match kind.as_deref() {
-        Some("input" | "response_output" | "tool_output" | "checkpoint") => Ok(()),
-        Some(_) => Err(ApiError::conflict("idx_tail must be a protocol record")),
+    match protocol {
+        Some(true) => Ok(()),
+        Some(false) => Err(ApiError::conflict("idx_tail must be a protocol record")),
         None => Err(ApiError::conflict(
             "idx_tail is not a record in this thread",
         )),
     }
+}
+
+/// Upstreams encrypt reasoning, function arguments, and content parts so only
+/// the model that produced them decodes the envelope. When a Thread starts
+/// replaying with another `(upstream, model)` pair, everything already recorded
+/// must replay without envelopes: this barrier records where that happened, and
+/// the newest barrier bounds the strip.
+fn ensure_model_switch_barrier(
+    connection: &mut Connection,
+    thread_id: &str,
+) -> Result<(), ApiError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let thread = load_thread(&transaction, thread_id)?;
+    let previous: Option<(String, Option<String>)> = transaction
+        .query_row(
+            "SELECT model,upstream_id FROM reasoning_audits
+             WHERE thread_id=? ORDER BY id DESC LIMIT 1",
+            [thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    // COMPATIBILITY: audits written before schema 39 have no `upstream_id`, so
+    // their Thread records one barrier on its next request even without a
+    // switch. That one-time strip is the intended way to retire reasoning
+    // recorded before barriers existed; remove this paragraph once no Thread
+    // holds an audit without `upstream_id`.
+    if let Some((model, upstream_id)) = previous
+        && (model != thread.model || upstream_id != thread.upstream_id)
+    {
+        persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id,
+                kind: "activity",
+                payload: &json!({
+                    "type": "model_switch",
+                    "from": {"model": model, "upstream_id": upstream_id},
+                    "to": {"model": thread.model, "upstream_id": thread.upstream_id},
+                    "role": "system",
+                    "content": format!("Model switched: {} to {}", model, thread.model),
+                }),
+                created_at: now(),
+            },
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 /// Estimate the next inference request's input tokens from recorded evidence:
@@ -4761,12 +4817,11 @@ fn estimate_range_bytes(
     idx_from: i64,
     idx_to: i64,
 ) -> Result<i64, ApiError> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT id,kind,payload FROM history_records
-         WHERE thread_id=? AND id>=? AND id<=?
-           AND kind IN ('input','response_output','tool_output','checkpoint')
-         ORDER BY id",
-    )?;
+             WHERE thread_id=? AND id>=? AND id<=? AND {PROTOCOL_RECORDS}
+             ORDER BY id"
+    ))?;
     let rows = statement
         .query_map(params![thread_id, idx_from, idx_to], |row| {
             Ok((
@@ -4890,9 +4945,10 @@ fn context_idx_head(
     }
     connection
         .query_row(
-            "SELECT MIN(id) FROM history_records
-             WHERE thread_id=? AND id<=?
-               AND kind IN ('input','response_output','tool_output','checkpoint')",
+            &format!(
+                "SELECT MIN(id) FROM history_records
+                 WHERE thread_id=? AND id<=? AND {PROTOCOL_RECORDS}"
+            ),
             params![thread_id, idx_tail],
             |row| row.get::<_, Option<i64>>(0),
         )?
@@ -4981,12 +5037,11 @@ fn load_protocol_items(
     idx_head: i64,
     idx_tail: i64,
 ) -> Result<Vec<(i64, i64, String, Value)>, ApiError> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT h.id,h.created_at,h.kind,h.payload FROM history_records h
-         WHERE h.thread_id=? AND h.id>=? AND h.id<=?
-           AND h.kind IN ('input','response_output','tool_output','checkpoint')
-         ORDER BY h.id",
-    )?;
+             WHERE h.thread_id=? AND h.id>=? AND h.id<=? AND {PROTOCOL_RECORDS}
+             ORDER BY h.id"
+    ))?;
     let rows = statement
         .query_map(params![thread_id, idx_head, idx_tail], |row| {
             Ok((
@@ -5168,7 +5223,77 @@ fn tool_pair(item: &Value) -> Option<(&'static str, bool)> {
     }
 }
 
+/// A `model_switch` record: Cybion's own replay barrier. It is never an
+/// upstream item, so it leaves the replay in both segments and only bounds the
+/// strip.
+fn is_model_switch_barrier(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("model_switch")
+}
+
+/// Everything before the newest barrier was produced by another
+/// `(upstream, model)` pair, whose encrypted envelopes the current one cannot
+/// decode: an item that exists only to carry an envelope disappears, and a
+/// mixed item such as a message keeps its visible content.
+/// ASSUMPTION: only encrypted parts are issuer-bound; ids, summaries, and text
+/// replay to another model unchanged. Stripping too little fails loudly at the
+/// upstream naming the undecodable envelope, and the Thread then records a
+/// fresh barrier; stripping too much costs one segment's reasoning continuity.
+fn strip_foreign_envelopes(items: Vec<Value>) -> Vec<Value> {
+    let Some(barrier) = items.iter().rposition(is_model_switch_barrier) else {
+        return items;
+    };
+    items
+        .into_iter()
+        .enumerate()
+        .filter(|(_, item)| !is_model_switch_barrier(item))
+        .filter_map(|(index, item)| {
+            if index > barrier {
+                Some(item)
+            } else {
+                without_envelopes(item)
+            }
+        })
+        .collect()
+}
+
+fn without_envelopes(mut item: Value) -> Option<Value> {
+    if matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("reasoning" | "compaction" | "context_compaction")
+    ) {
+        return None;
+    }
+    strip_encrypted_parts(&mut item);
+    Some(item)
+}
+
+fn strip_encrypted_parts(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.retain(|key, _| {
+                !matches!(
+                    key.as_str(),
+                    "encrypted_content" | "encrypted_function_args"
+                )
+            });
+            for value in object.values_mut() {
+                strip_encrypted_parts(value);
+            }
+        }
+        Value::Array(items) => {
+            items.retain(|item| {
+                item.get("type").and_then(Value::as_str) != Some("encrypted_content")
+            });
+            for item in items {
+                strip_encrypted_parts(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn replayable_context_items(items: Vec<Value>) -> Vec<Value> {
+    let items = strip_foreign_envelopes(items);
     let keep = {
         let mut calls = HashMap::<(&str, &str), Vec<usize>>::new();
         let mut outputs = HashMap::<(&str, &str), Vec<usize>>::new();
@@ -5737,9 +5862,9 @@ async fn persist_thread_checkpoint(
             return Err(ApiError::cancelled());
         }
         let latest: Option<i64> = transaction.query_row(
-            "SELECT MAX(id) FROM history_records
-             WHERE thread_id=?
-               AND kind IN ('input','response_output','tool_output','checkpoint')",
+            &format!(
+                "SELECT MAX(id) FROM history_records WHERE thread_id=? AND {PROTOCOL_RECORDS}"
+            ),
             [&thread_id],
             |row| row.get(0),
         )?;
@@ -6171,6 +6296,7 @@ struct AuditSpec {
     thread_id: String,
     request_kind: String,
     model: String,
+    upstream_id: Option<String>,
     reasoning_effort: Option<String>,
     idx_head: i64,
     idx_tail: i64,
@@ -6241,6 +6367,7 @@ async fn responses_request_with_options(
         thread_id: thread_id.to_owned(),
         request_kind: request_kind.to_owned(),
         model: model.to_owned(),
+        upstream_id: Some(upstream.id.clone()),
         reasoning_effort: reasoning_effort.map(str::to_owned),
         idx_head,
         idx_tail,
@@ -6785,6 +6912,7 @@ async fn begin_reasoning_audit(state: &AppState, spec: &AuditSpec) -> Result<i64
     let thread_id = spec.thread_id.clone();
     let request_kind = spec.request_kind.clone();
     let model = spec.model.clone();
+    let upstream_id = spec.upstream_id.clone();
     let reasoning_effort = spec.reasoning_effort.clone();
     let idx_head = spec.idx_head;
     let idx_tail = spec.idx_tail;
@@ -6794,13 +6922,14 @@ async fn begin_reasoning_audit(state: &AppState, spec: &AuditSpec) -> Result<i64
         true,
         move |connection| {
             connection.execute(
-                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,reasoning_effort,status,started_at,idx_head,idx_tail)
-                 VALUES(?,?,?,?,?, 'in_flight', ?, ?, ?)",
+                "INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,upstream_id,reasoning_effort,status,started_at,idx_head,idx_tail)
+                 VALUES(?,?,?,?,?,?, 'in_flight', ?, ?, ?)",
                 params![
                     input_record_id,
                     thread_id,
                     request_kind,
                     model,
+                    upstream_id,
                     reasoning_effort,
                     now(),
                     idx_head,
