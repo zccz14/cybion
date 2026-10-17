@@ -24,7 +24,10 @@ const MAX_INTERVAL_SECONDS: i64 = 30 * 24 * 60 * 60;
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/machines", get(list).post(create))
-        .route("/api/machines/{id}", axum::routing::patch(update))
+        .route(
+            "/api/machines/{id}",
+            axum::routing::patch(update).delete(delete),
+        )
         .route("/api/machines/{id}/run", post(run_now))
 }
 
@@ -199,8 +202,36 @@ pub(super) async fn update_for(
     input: UpdateMachineInput,
 ) -> Result<MachineView, ApiError> {
     let id = record_id(id)?;
-    user_db(state, user, true, move |connection| {
+    // An explicit `enabled: false` is a pause request even when the machine was
+    // already paused, so whatever turn the repair Thread is running stops here.
+    let paused = input.enabled == Some(false);
+    let machine = user_db(state, user, true, move |connection| {
         update_machine(connection, &id, input)
+    })
+    .await?;
+    if paused {
+        thread_controls::cancel_for(state, user, machine.thread_id.clone()).await?;
+    }
+    Ok(machine)
+}
+
+pub(super) async fn delete(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    delete_for(&state, &identity.user, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deletes a machine and keeps its repair Thread: the machine is the schedule,
+/// the Thread is the record of what it reported.
+async fn delete_for(state: &AppState, user: &User, id: &str) -> Result<MachineView, ApiError> {
+    let id = record_id(id)?;
+    user_db(state, user, true, move |connection| {
+        let machine = load_machine(connection, &id)?;
+        connection.execute("DELETE FROM machines WHERE id=?", [&id])?;
+        Ok(machine)
     })
     .await
 }
@@ -221,6 +252,12 @@ pub(super) async fn load_for(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetMachineArguments {
+    machine_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteMachineArguments {
     machine_id: String,
 }
 
@@ -322,6 +359,22 @@ pub(super) async fn set_tool_output(
         }
     };
     serde_json::to_value(machine).map_err(ApiError::internal)
+}
+
+/// `cybion_delete_ultimate_machine`: remove the machine for good; its repair
+/// Thread and history stay behind as an ordinary Thread.
+pub(super) async fn delete_tool_output(
+    state: &AppState,
+    user: &User,
+    input: &str,
+) -> Result<Value, ApiError> {
+    let arguments: DeleteMachineArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!(
+            "cybion_delete_ultimate_machine arguments must contain an explicit machine_id: {error}"
+        ))
+    })?;
+    let machine = delete_for(state, user, &arguments.machine_id).await?;
+    Ok(json!({ "deleted": true, "machine": machine }))
 }
 
 pub(super) type MachineEditRow = (String, String, String, Option<String>, i64, bool, String);
@@ -738,6 +791,64 @@ fn offline_notice(
         params![at, machine.id],
     )?;
     Ok(vec![MachineEffect::Linkit { text }])
+}
+
+/// A repair Thread finished a turn: its machine checks the command right away
+/// instead of waiting for the interval, so a fix is verified in seconds and a
+/// still-failing check is pushed back into the Thread immediately.
+///
+/// A turn that ended in failure keeps the interval schedule: the error may not
+/// be retryable, and re-checking at once would only burn turns.
+pub(super) async fn check_after_thread_turn(state: &AppState, user: &User, thread_id: &str) {
+    let thread_id = thread_id.to_owned();
+    let checked = user_db(state, user, true, move |connection| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        run_machine_of_thread(&transaction, &thread_id)?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await;
+    if let Err(error) = checked {
+        tracing::warn!(user=%user.id,error=%error.message,"Ultimate Machine immediate check deferred");
+    }
+}
+
+/// Dispatches the check of the machine bound to `thread_id`, unless it is
+/// paused or its previous run is still in flight. An offline or missing Worker
+/// stays quiet here: the interval scheduler reports it once per offline episode.
+fn run_machine_of_thread(connection: &Connection, thread_id: &str) -> Result<(), ApiError> {
+    let machine: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT id,worker_id,command FROM machines WHERE thread_id=? AND enabled=1",
+            [thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((machine_id, worker_id, command)) = machine else {
+        return Ok(());
+    };
+    let pending: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM worker_calls WHERE machine_id=? AND status IN ('queued','delivered'))",
+        [&machine_id],
+        |row| row.get(0),
+    )?;
+    if pending {
+        return Ok(());
+    }
+    let Some(worker) = worker_snapshot(connection, &worker_id)? else {
+        return Ok(());
+    };
+    if !worker.online {
+        return Ok(());
+    }
+    enqueue_run(
+        connection,
+        &machine_id,
+        &worker_id,
+        thread_id,
+        &command,
+        &worker,
+    )
 }
 
 fn latest_call(

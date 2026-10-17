@@ -187,12 +187,17 @@ the first authenticated browser session initializes that key atomically.
   command intent; while that Thread is running, further failure messages are
   dropped rather than queued. A Worker that is offline (or missing) reports
   through the Linkit notification channel instead, once per offline episode.
-  Each machine owns the Thread created with it; the Machines page (`#/machines`)
-  lists every machine with its Worker, interval, latest result, and Thread link,
-  and can pause, run once immediately, or edit a machine (name, Worker, command,
-  intent, interval); a `?` button explains where the name comes from — the Bell
-  Labs box that only switches itself off — with a small animation. Machine runs
-  stay out of usage statistics. See
+  When that Thread finishes a turn, the machine re-checks the command right
+  away — a passing check goes silent, a failing one is pushed back into the
+  Thread at once; a turn that ends in failure keeps the interval schedule,
+  because the error may not be retryable. Each machine owns the Thread created
+  with it; the Machines page (`#/machines`) lists every machine with its
+  Worker, interval, latest result, and Thread link, and can pause, run once
+  immediately, edit (name, Worker, command, intent, interval), or delete a
+  machine. Pausing also stops the Thread's in-flight turn, and deleting removes
+  only the machine — the Thread and its history remain. A `?` button explains
+  where the name comes from — the Bell Labs box that only switches itself off —
+  with a small animation. Machine runs stay out of usage statistics. See
   [Ultimate machines](machines.md).
 - A paired Worker performs Bash, Browser Control, and Computer Use on the
   user's device. It keeps no model credential or SQLite database.

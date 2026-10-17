@@ -227,7 +227,7 @@ export function computerUseFunctionCall(payload: unknown): ComputerUseFunctionCa
   }
 }
 
-// The seven controller-side Cybion tools as stored in the Responses item. The
+// The eight controller-side Cybion tools as stored in the Responses item. The
 // list tools carry no displayable arguments; a machine update is a call that
 // names its machine, and a context write names its context or, when creating,
 // its title. A create shows whichever fields it provides; missing identifiers
@@ -240,6 +240,7 @@ export type CybionToolFunctionCall =
   | { tool: "cybion_list_ultimate_machines" }
   | { tool: "cybion_get_ultimate_machine"; machineId: string }
   | { tool: "cybion_set_ultimate_machine"; machineId: string | null; name: string | null; workerId: string | null; intervalSeconds: number | null; enabled: boolean | null; command: string | null; intent: string | null }
+  | { tool: "cybion_delete_ultimate_machine"; machineId: string }
 
 export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall | null {
   const object = historyPayloadObject(payload)
@@ -267,6 +268,10 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
     case "cybion_get_ultimate_machine": {
       const machineId = nonEmptyString(args.machine_id)
       return machineId === null ? null : { tool: "cybion_get_ultimate_machine", machineId }
+    }
+    case "cybion_delete_ultimate_machine": {
+      const machineId = nonEmptyString(args.machine_id)
+      return machineId === null ? null : { tool: "cybion_delete_ultimate_machine", machineId }
     }
     case "cybion_set_ultimate_machine": {
       const call: CybionToolFunctionCall = {

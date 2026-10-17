@@ -11,6 +11,9 @@ The name comes from the Bell Labs desk box whose only function is to switch itse
 - **Offline**: if the Worker is offline or gone at run time → skip this run and alert once through Linkit; stay quiet during a long outage; resume automatically once it recovers (each offline event alerts once).
 - **Lost**: a run that does not settle within 15 minutes (device died mid-run, etc.) → declared lost, one alert, retried at the next interval.
 - **Dropped messages**: while the repair Thread is mid-turn, a new failure message is dropped (not queued) — it is reconsidered after the next run settles; silence therefore means neither good health nor a dead machine.
+- **Immediate re-check**: when the repair Thread finishes a turn successfully, the machine checks again right away instead of waiting for the interval: a passing check goes silent, a failing one is pushed straight back into the Thread. A turn that ends in failure does not trigger a re-check — the error may not be retryable — and the interval schedule continues.
+- **Pause**: `enabled: false` stops the schedule and its alerts, and stops what is in flight: the repair Thread's current turn and any unsettled machine run are cancelled.
+- **Delete**: `cybion_delete_ultimate_machine` removes the machine for good; the bound repair Thread and its history survive as an ordinary Thread.
 - **Lifecycle**: deleting the bound repair Thread or the Worker it uses deletes the machine with it; rebinding to another Worker restarts the offline-alert episode (treated as a new one).
 
 ## When to create one
@@ -55,13 +58,14 @@ Dry-run it first: use the bash tool to run the same command on the target Worker
 
 ## Management tools (the tool suite)
 
-Three tools manage Ultimate Machines: `cybion_list_ultimate_machines`, `cybion_get_ultimate_machine`, `cybion_set_ultimate_machine`. Field-level semantics follow the tool descriptions; here are the usage patterns.
+Four tools manage Ultimate Machines: `cybion_list_ultimate_machines`, `cybion_get_ultimate_machine`, `cybion_set_ultimate_machine`, `cybion_delete_ultimate_machine`. Field-level semantics follow the tool descriptions; here are the usage patterns.
 
 ### Which one to use
 
 - **Overview and ids**: `cybion_list_ultimate_machines` — every machine's definition plus its latest settled result (`enabled`, `last_run_at`, `last_exit`, the bound repair Thread).
 - **One machine in detail**: `cybion_get_ultimate_machine` — `last_exit`: 0 = healthy; any other number = the exit code (killed without one counts as -1); null = no settled result yet (or the latest run never completed / was declared lost).
 - **Create or update**: `cybion_set_ultimate_machine`.
+- **Delete**: `cybion_delete_ultimate_machine` — removes it for good; the repair Thread stays.
 
 ### Create (omit machine_id)
 
@@ -76,10 +80,15 @@ Required: `name`, `worker_id`, `command`, `interval_seconds` (10–2592000); opt
 
 - Pass only the fields you want to change; everything else stays put.
 - An empty `intent` clears it; omit it to keep it.
-- `enabled: false` pauses, `true` resumes (new machines start enabled; `enabled` can only be passed on update).
+- `enabled: false` pauses, `true` resumes (new machines start enabled; `enabled` can only be passed on update). Pausing also stops the repair Thread's current turn.
 - Changing `worker_id` moves the machine and restarts the offline-alert episode.
 - Renaming retitles the repair Thread (unless its title was renamed by hand).
-- The suite has no delete: pause to stop; complete removal is deleting the bound repair Thread or the Worker it uses.
+
+### Delete (with machine_id)
+
+- `cybion_delete_ultimate_machine` with `machine_id`: the machine stops being scheduled and leaves the list at once; a run still in flight settles silently.
+- The bound repair Thread and its history stay as an ordinary Thread; delete that Thread separately if it should go too.
+- Use it only when the user asked to remove this machine; to merely keep it quiet, pause with `enabled: false`.
 
 Machines are the user's assets: create or update them only when the user asks or a repair requires it; describe the plan before batch actions.
 
@@ -107,12 +116,12 @@ Workflow:
 2. **Decide where the problem is**:
    - Environment problem (the disk really is full, the certificate really expired, the service is down) → fix it directly with bash on that Worker.
    - The check itself is wrong (the path changed, the command is incompatible with the system) → verify the corrected command with bash first, then update the machine definition with `cybion_set_ultimate_machine`; if the tool is unavailable, ask the user to edit it on the Ultimate Machines page.
-3. **Verify**: run the corrected command by hand and confirm it returns 0.
+3. **Verify**: run the corrected command by hand and confirm it returns 0; the machine re-checks as soon as this turn finishes, so there is no need to wait for the timer.
 4. **Do not weaken the check just to turn it green**: quietly loosening what exit 0 means equals losing the machine.
 5. **No reply needed**: the next run verifies automatically; continued silence afterward means the repair worked.
 
 ## Boundaries and pitfalls
 
-- **Pause ≠ delete**: `enabled=false` (or passing `enabled=false` to `cybion_set_ultimate_machine`) only pauses; for complete removal, delete the bound repair Thread or the Worker it uses.
+- **Pause ≠ delete**: `enabled=false` (or passing `enabled=false` to `cybion_set_ultimate_machine`) only pauses, and stops the repair Thread's current turn; for complete removal use `cybion_delete_ultimate_machine`, which keeps the repair Thread.
 - **Secrets**: failure output enters the Thread history — do not echo keys/tokens; if you must test whether a token is valid, output a boolean only.
 - **Environment differences**: commands run in the Worker's execution environment; do not assume a uniform PATH, locale, or timezone.

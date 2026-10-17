@@ -243,3 +243,200 @@ async fn get_tool_reports_unknown_and_invalid_ids() {
         error.message
     );
 }
+
+async fn machine_calls(state: &AppState, user: &User, machine_id: &str) -> i64 {
+    let machine_id = machine_id.to_owned();
+    user_db(state, user, false, move |connection| {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM worker_calls WHERE machine_id=?",
+                [&machine_id],
+                |row| row.get(0),
+            )
+            .map_err(ApiError::from)
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn delete_tool_removes_the_machine_and_keeps_its_repair_thread() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "machine-tool-delete").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:9/v1").await;
+    set_default_upstream(&state, &user, &upstream.id).await;
+    let worker_id = "00000000-0000-4000-8000-000000000404";
+    insert_worker(&state, &user, worker_id).await;
+    let created = machines::set_tool_output(
+        &state,
+        &user,
+        &json!({
+            "name": "磁盘检查",
+            "worker_id": worker_id,
+            "command": "test -f /tmp/ultimate-machine-ok",
+            "interval_seconds": 600
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let machine_id = created["id"].as_str().unwrap().to_owned();
+    let thread_id = created["thread_id"].as_str().unwrap().to_owned();
+
+    let deleted = machines::delete_tool_output(
+        &state,
+        &user,
+        &json!({ "machine_id": machine_id.as_str() }).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(deleted["machine"]["id"], machine_id.as_str());
+    assert_eq!(deleted["machine"]["thread_id"], thread_id.as_str());
+
+    let listed = machines::list_tool_output(&state, &user).await.unwrap();
+    assert!(listed["machines"].as_array().unwrap().is_empty());
+    let error = machines::get_tool_output(
+        &state,
+        &user,
+        &json!({ "machine_id": machine_id.as_str() }).to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.message.contains("machine not found"),
+        "{}",
+        error.message
+    );
+    // The repair Thread outlives the machine as an ordinary Thread.
+    assert_eq!(
+        thread_title(&state, &user, &thread_id).await,
+        "终极机器 · 磁盘检查"
+    );
+
+    let error = machines::delete_tool_output(
+        &state,
+        &user,
+        &json!({ "machine_id": machine_id.as_str() }).to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.message.contains("machine not found"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn pausing_a_machine_stops_its_repair_thread_and_pending_run() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "machine-tool-pause").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:9/v1").await;
+    set_default_upstream(&state, &user, &upstream.id).await;
+    let worker_id = "00000000-0000-4000-8000-000000000405";
+    insert_worker(&state, &user, worker_id).await;
+    let created = machines::set_tool_output(
+        &state,
+        &user,
+        &json!({
+            "name": "磁盘检查",
+            "worker_id": worker_id,
+            "command": "test -f /tmp/ultimate-machine-ok",
+            "interval_seconds": 600
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let machine_id = created["id"].as_str().unwrap().to_owned();
+    let thread_id = created["thread_id"].as_str().unwrap().to_owned();
+    user_db(&state, &user, true, {
+        let thread_id = thread_id.clone();
+        move |connection| {
+            connection.execute(
+                "UPDATE threads SET status='running' WHERE id=?",
+                [&thread_id],
+            )?;
+            connection.execute(
+                "INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at) VALUES('repair-call',?,?,'bash','{}','queued',?)",
+                params![worker_id, thread_id, now()],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+
+    machines::set_tool_output(
+        &state,
+        &user,
+        &json!({ "machine_id": machine_id.as_str(), "enabled": false }).to_string(),
+    )
+    .await
+    .unwrap();
+
+    let (status, call_status) = user_db(&state, &user, false, {
+        let thread_id = thread_id.clone();
+        move |connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT status FROM threads WHERE id=?",
+                    [&thread_id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                connection.query_row(
+                    "SELECT status FROM worker_calls WHERE id='repair-call'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?,
+            ))
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, "idle");
+    assert_eq!(call_status, "cancelled");
+}
+
+#[tokio::test]
+async fn a_finished_thread_turn_checks_the_machine_immediately() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "machine-tool-immediate").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:9/v1").await;
+    set_default_upstream(&state, &user, &upstream.id).await;
+    let worker_id = "00000000-0000-4000-8000-000000000406";
+    insert_worker(&state, &user, worker_id).await;
+    let created = machines::set_tool_output(
+        &state,
+        &user,
+        &json!({
+            "name": "磁盘检查",
+            "worker_id": worker_id,
+            "command": "test -f /tmp/ultimate-machine-ok",
+            "interval_seconds": 600
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let machine_id = created["id"].as_str().unwrap().to_owned();
+    let thread_id = created["thread_id"].as_str().unwrap().to_owned();
+
+    machines::check_after_thread_turn(&state, &user, &thread_id).await;
+    assert_eq!(machine_calls(&state, &user, &machine_id).await, 1);
+    // A run is still in flight: the next finished turn does not dispatch one more.
+    machines::check_after_thread_turn(&state, &user, &thread_id).await;
+    assert_eq!(machine_calls(&state, &user, &machine_id).await, 1);
+
+    // A paused machine stops checking right away and drops the pending run.
+    machines::set_tool_output(
+        &state,
+        &user,
+        &json!({ "machine_id": machine_id.as_str(), "enabled": false }).to_string(),
+    )
+    .await
+    .unwrap();
+    machines::check_after_thread_turn(&state, &user, &thread_id).await;
+    assert_eq!(machine_calls(&state, &user, &machine_id).await, 1);
+}

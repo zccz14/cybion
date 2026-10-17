@@ -161,6 +161,7 @@ test("cybion tool calls expose context and machine arguments", () => {
   assert.deepEqual(cybionToolFunctionCall(call("cybion_list_workers", {})), { tool: "cybion_list_workers" })
   assert.deepEqual(cybionToolFunctionCall(call("cybion_list_ultimate_machines", {})), { tool: "cybion_list_ultimate_machines" })
   assert.deepEqual(cybionToolFunctionCall(call("cybion_get_ultimate_machine", { machine_id: "m-1" })), { tool: "cybion_get_ultimate_machine", machineId: "m-1" })
+  assert.deepEqual(cybionToolFunctionCall(call("cybion_delete_ultimate_machine", { machine_id: " m-1 " })), { tool: "cybion_delete_ultimate_machine", machineId: "m-1" })
   assert.deepEqual(
     cybionToolFunctionCall(call("cybion_set_ultimate_machine", { machine_id: "m-1", name: " 磁盘检查 ", interval_seconds: 600, enabled: false, command: "df -h", intent: " 确保根分区低于 90% " })),
     { tool: "cybion_set_ultimate_machine", machineId: "m-1", name: "磁盘检查", workerId: null, intervalSeconds: 600, enabled: false, command: "df -h", intent: "确保根分区低于 90%" },
@@ -178,6 +179,7 @@ test("incomplete or unknown cybion tool arguments retain the generic protocol re
     call("read_context", "{}"),
     call("read_context", '{"context_id":""}'),
     call("cybion_get_ultimate_machine", "{}"),
+    call("cybion_delete_ultimate_machine", "{}"),
     call("cybion_set_ultimate_machine", "{}"),
     call("cybion_set_ultimate_machine", '{"enabled":"yes"}'),
     call("cybion_list_contexts", "not json"),

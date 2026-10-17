@@ -18,6 +18,10 @@ can read, configure, and steer like any other Thread.
 | Worker offline or gone at the scheduled time | The run is skipped and the owner receives one Linkit notification per offline episode; the flag resets when the next run is dispatched. |
 | Run never settled (device died mid-run) | After 15 minutes the run is declared failed, the owner is notified once, and the next interval retries. |
 | Interval scheduling | The next run starts one interval (seconds) after the previous run settled; at most one run per machine is in flight. |
+| Repair Thread turn completes | The machine checks the command right away instead of waiting for the interval, so a repair is verified in seconds: a passing run goes silent, a failing one is pushed straight back into the Thread. |
+| Repair Thread turn fails | No immediate re-check — the error may not be retryable, and a fast loop would only burn turns. The interval schedule continues. |
+| Pause (`enabled: false`) | Stops the schedule and its notices, and stops what is in flight: the repair Thread's current turn and a pending machine run are cancelled. |
+| Delete | The machine is gone for good: it leaves the list and never runs again. Its repair Thread and history survive as an ordinary Thread. |
 
 ## Storage
 
@@ -35,7 +39,9 @@ Each machine is one `machines` row in the owner's database:
 Machine runs are `worker_calls` rows with `machine_id` set. They follow the
 normal Worker protocol (`bash`, `timeout_seconds: 300`) but settle through the
 machine scheduler instead of a Thread turn, and they are excluded from usage
-statistics.
+statistics. Deleting a machine removes only its `machines` row: the Thread
+stays, the runs it left behind keep their `machine_id` (and their statistics
+exclusion), and a run still in flight settles silently.
 
 ## API
 
@@ -45,6 +51,7 @@ statistics.
 | `POST` | `/api/machines` | Create a machine (also creates its Thread). |
 | `PATCH` | `/api/machines/{id}` | Partial update with any of `enabled`, `name`, `worker_id`, `command`, `intent`, `interval_seconds`; the pause switch sends `enabled` alone and an empty `intent` clears it. |
 | `POST` | `/api/machines/{id}/run` | Run once now (rejected while a run is pending or the Worker is offline). |
+| `DELETE` | `/api/machines/{id}` | Delete the machine; its repair Thread and history stay. |
 
 Renaming a machine retitles the repair Thread to `终极机器 · <name>` only while
 the Thread still carries its automatic title; a hand-renamed title is kept.
@@ -63,17 +70,21 @@ validation as the API:
   (name, worker_id, command and interval_seconds required) and otherwise
   applies a partial update: only the fields given change, an empty `intent`
   clears it, `enabled` pauses or resumes, a new `worker_id` resets the offline
-  episode and renaming retitles the repair Thread.
+  episode and renaming retitles the repair Thread. Pausing also stops the
+  repair Thread's in-flight turn.
+- `cybion_delete_ultimate_machine` deletes a machine for good and returns
+  `{"deleted": true, "machine": …}`; the repair Thread stays behind.
 
-The tools never delete a machine, bind owned Workers only and treat `enabled`
-as update-only, mirroring the page.
+The tools bind owned Workers only and treat `enabled` as update-only, mirroring
+the page.
 
 ## Page
 
 `#/machines` (Work group) shows every machine with status, Worker, command,
 interval, latest result, and a link to its repair Thread, and offers the pause
-switch, a one-off run, and an edit dialog that shares the create form (name,
-Worker, command, intent, interval). The page polls every 5 seconds.
+switch, a one-off run, an edit dialog that shares the create form (name,
+Worker, command, intent, interval), and a delete action that confirms first and
+says the repair Thread keeps its history. The page polls every 5 seconds.
 
 A `?` button opens a dialog on the origin of the name — the Bell Labs joke box
 (Marvin Minsky's 1952 build, whose fame spread from Claude Shannon's desk)

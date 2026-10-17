@@ -72,6 +72,21 @@ const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const help = readFileSync(new URL("../src/components/ultimate-machine-help.tsx", import.meta.url), "utf8")
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
 
+test("the machine row deletes through a confirmation dialog that keeps the repair Thread", () => {
+  assert.ok(component.includes('method: "DELETE"'))
+  assert.ok(component.includes("remove.mutate(deleteTarget.id)"))
+  assert.ok(component.includes('t("deleteMachine")'))
+  assert.ok(component.includes("Its repair Thread keeps its history."))
+  assert.ok(component.includes("绑定的修复 Thread 及其历史会保留。"))
+})
+
+test("every dialog scrolls instead of overflowing the viewport", () => {
+  const dialog = readFileSync(new URL("../src/components/ui/dialog.tsx", import.meta.url), "utf8")
+  assert.ok(dialog.includes("max-h-[calc(100svh-2rem)]"))
+  assert.ok(dialog.includes("overflow-y-auto"))
+  assert.ok(dialog.includes("overscroll-contain"))
+})
+
 test("create and edit dialogs share one field group and one payload builder", () => {
   assert.ok(component.includes('idPrefix="machine-create"'))
   assert.ok(component.includes('idPrefix="machine-edit"'))
@@ -120,12 +135,14 @@ test("real machine list renders edit, run and thread links from live data", asyn
     assert.ok(html.includes(">Edit<"))
     assert.match(html, /New machine/)
     assert.match(html, /Run now/)
+    assert.match(html, /Delete/)
     assert.match(html, /Linux US/)
     assert.match(html, /href="\/threads\/t1"/)
     const zh = render("zh")
     assert.ok(zh.includes(">编辑<"))
     assert.match(zh, /新建机器/)
     assert.match(zh, /立即运行/)
+    assert.match(zh, /删除/)
   } finally {
     client.clear()
     await server.close()

@@ -79,7 +79,7 @@ function ThreadSharingControl({ userId, sessionId, threadId, language, request }
     <Button variant={active ? "secondary" : "outline"} size="sm" title={active ? t.ongoing : t.description}>
       <Share2Icon />{grants.error ? t.unknown : active ? `${t.shared} · ${active}` : t.share}
     </Button></DialogTrigger>
-    <DialogContent className="max-h-[85svh] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle>{t.title}</DialogTitle><DialogDescription>{t.description}</DialogDescription></DialogHeader>
+    <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>{t.title}</DialogTitle><DialogDescription>{t.description}</DialogDescription></DialogHeader>
       <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (recipient && !invalid && consent && !busy) grant.mutate(recipient) }}>
         <Field data-invalid={Boolean(invalid)}>
           <LinkitUserPicker lang={language === "zh" ? "zh-CN" : "en-US"} label={t.recipient} value={recipient} onValueChange={(next) => { setRecipient(next); setConsent(false); grant.reset() }} />

@@ -1522,7 +1522,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 13);
     let names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -1606,6 +1606,7 @@ async fn inference_injects_web_search_and_the_configured_image_tool() {
             "cybion_list_ultimate_machines",
             "cybion_get_ultimate_machine",
             "cybion_set_ultimate_machine",
+            "cybion_delete_ultimate_machine",
             "bash",
             "browser_control",
             "computer_use",
