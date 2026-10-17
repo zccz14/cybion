@@ -135,7 +135,7 @@ const RESPONSES_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 90;
 // The controller-served delay_seconds value must be positive; the model picks
 // the wait, so it has no upper bound.
 const MIN_WAIT_SECONDS: u64 = 1;
-const USER_SCHEMA_VERSION: i64 = 39;
+const USER_SCHEMA_VERSION: i64 = 40;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -4741,7 +4741,7 @@ fn ensure_model_switch_barrier(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    // COMPATIBILITY: audits written before schema 39 have no `upstream_id`, so
+    // COMPATIBILITY: audits written before schema 40 have no `upstream_id`, so
     // their Thread records one barrier on its next request even without a
     // switch. That one-time strip is the intended way to retire reasoning
     // recorded before barriers existed; remove this paragraph once no Thread
@@ -10362,6 +10362,40 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Kept");
         assert_eq!(trashed_at, None);
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, USER_SCHEMA_VERSION);
+    }
+
+    /// A database already at the previous version must still receive a column
+    /// added by the current one: the version gate, not the column loop, decides
+    /// whether a migration runs at all.
+    #[test]
+    fn a_previous_version_database_receives_the_audit_upstream_column() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("previous.sqlite3");
+        let connection = open_user(&path, true).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE reasoning_audits DROP COLUMN upstream_id;
+                 PRAGMA user_version = 39;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        let columns = connection
+            .prepare("PRAGMA table_info(reasoning_audits)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            columns.iter().any(|column| column == "upstream_id"),
+            "the schema version must admit every pending column migration"
+        );
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
