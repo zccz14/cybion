@@ -131,8 +131,8 @@ test("thread settings live in the composer popover and the image tool follows it
 test("the tools page groups the shared tool catalog by responsible party", () => {
   const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
   assert.match(source, /import toolCatalog from "\.\.\/\.\.\/tools\.json"/)
-  // `context` and `native` share one Controller group; `worker` is the device.
-  assert.match(source, /\[\.\.\.toolCatalog\.context\.map\(\(tool\) => tool\.name\), \.\.\.Object\.keys\(toolCatalog\.native\)\]/)
+  // `context`, `note` and `native` share one Controller group; `worker` is the device.
+  assert.match(source, /\[\.\.\.toolCatalog\.context\.map\(\(tool\) => tool\.name\), \.\.\.toolCatalog\.note\.map\(\(tool\) => tool\.name\), \.\.\.Object\.keys\(toolCatalog\.native\)\]/)
   assert.match(source, /toolCatalog\.worker\.map/)
   assert.match(source, /title: t\("phaseKernel"\)/)
   assert.match(source, /title: t\("phaseDevice"\)/)
@@ -141,6 +141,7 @@ test("the tools page groups the shared tool catalog by responsible party", () =>
   assert.doesNotMatch(source, /toolCybion|toolOpenAi/)
   const names = [
     ...catalog.context.map((tool: { name: string }) => tool.name),
+    ...catalog.note.map((tool: { name: string }) => tool.name),
     ...catalog.worker.map((tool: { name: string }) => tool.name),
     ...Object.keys(catalog.native),
   ]

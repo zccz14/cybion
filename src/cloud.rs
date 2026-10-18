@@ -40,6 +40,7 @@ mod history;
 mod linkit_notifications;
 mod machines;
 mod normai;
+mod notes;
 mod objects;
 mod recovery;
 mod run_phase;
@@ -143,7 +144,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 41;
+const USER_SCHEMA_VERSION: i64 = 42;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -522,6 +523,16 @@ fn app(state: AppState) -> Router {
             axum::routing::put(worker_sharing::grant).delete(worker_sharing::revoke),
         )
         .route("/api/contexts", get(list_contexts).post(create_context))
+        .route(
+            "/api/notes",
+            get(notes::list_notes).post(notes::create_note),
+        )
+        .route("/api/notes/{id}/done", post(notes::cross_out_note))
+        .route("/api/notes/{id}", delete(notes::delete_note))
+        .route(
+            "/api/note-settings",
+            get(notes::settings).put(notes::update_settings),
+        )
         .route("/api/contexts/{id}/move", axum::routing::post(move_context))
         .route(
             "/api/contexts/{id}/restore",
@@ -954,6 +965,61 @@ fn set_admin_meta_bool_sync(path: &Path, key: &str, enabled: bool) -> Result<(),
             "INSERT INTO app_meta(key,value) VALUES(?,?)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![key, if enabled { "1" } else { "0" }],
+        )
+        .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+/// A system-wide integer setting, stored beside the administrator metadata and
+/// read with a default so a fresh deployment needs no seeding step.
+fn admin_meta_int_sync(path: &Path, key: &str, default: i64) -> Result<i64, ApiError> {
+    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(ApiError::internal)?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );",
+        )
+        .map_err(ApiError::internal)?;
+    let value: Option<String> = connection
+        .query_row("SELECT value FROM app_meta WHERE key=?", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(ApiError::internal)?;
+    Ok(value
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(default))
+}
+
+fn set_admin_meta_int_sync(path: &Path, key: &str, value: i64) -> Result<(), ApiError> {
+    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(ApiError::internal)?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );",
+        )
+        .map_err(ApiError::internal)?;
+    connection
+        .execute(
+            "INSERT INTO app_meta(key,value) VALUES(?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value.to_string()],
         )
         .map_err(ApiError::internal)?;
     Ok(())
@@ -1405,6 +1471,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
+    transaction.execute_batch(notes::SCHEMA)?;
     transaction.execute_batch(linkit_notifications::SCHEMA)?;
     if version < 14 {
         // COMPATIBILITY: the Cybion schema upgrader preserves notification setup for pre-14 databases
@@ -3453,23 +3520,37 @@ async fn generate_thread_title(
     ))
 }
 
+#[derive(Serialize)]
+struct DeleteThreadView {
+    deleted_notes: i64,
+}
+
 async fn delete_thread(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<DeleteThreadView>, ApiError> {
     let id = thread_id(&id)?;
     let owner = identity.user.id.clone();
-    user_db(&state, &identity.user, true, move |connection| {
-        stats::note_thread_deleted(connection, &id)?;
-        let changed = connection.execute("DELETE FROM threads WHERE id=?", [id])?;
-        if changed == 0 {
+    let deleted_notes = user_db(&state, &identity.user, true, move |connection| {
+        let exists = connection
+            .query_row("SELECT 1 FROM threads WHERE id=?", [&id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !exists {
             return Err(ApiError::not_found("thread not found"));
         }
-        thread_sharing::sync_grants(connection, &owner)
+        stats::note_thread_deleted(connection, &id)?;
+        // A note was written against this Thread's context, so it leaves with
+        // the Thread; promoting it to global would only manufacture a note no
+        // other Thread can read.
+        let deleted_notes = notes::tear_thread(connection, &id)?;
+        connection.execute("DELETE FROM threads WHERE id=?", [id])?;
+        thread_sharing::sync_grants(connection, &owner)?;
+        Ok(deleted_notes)
     })
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(DeleteThreadView { deleted_notes }))
 }
 
 #[derive(Deserialize)]
@@ -5620,13 +5701,26 @@ async fn request_agent(
                 continue;
             }
         }
-        let workers = user_db(state, user, false, |connection| {
-            registered_workers(connection)
+        let (workers, note_block) = user_db(state, user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                Ok((
+                    registered_workers(connection)?,
+                    notes::injection_block(connection, &thread_id)?,
+                ))
+            }
         })
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let has_workers = !workers.is_empty();
         let image_generation = effective_image_generation_model(thread, &defaults).is_some();
+        let mut request_items = std::mem::take(&mut context.items);
+        if let Some(block) = note_block.as_deref() {
+            // The notes block lives only in the request copy: history records
+            // stay exactly what happened, and compaction and title requests
+            // build their own input without it.
+            notes::inject(&mut request_items, block);
+        }
         let response = match responses_request_with_options(
             state,
             user,
@@ -5639,7 +5733,7 @@ async fn request_agent(
             &thread.model,
             Some(&thread.reasoning_effort),
             thread.service_tier_fast,
-            Value::Array(std::mem::take(&mut context.items)),
+            Value::Array(request_items),
             has_workers,
             // Thread turns always inject the native web search tool; the
             // intercepted image generation tool follows the configured image
@@ -7236,6 +7330,10 @@ fn context_tools() -> Value {
     TOOL_CATALOG["context"].clone()
 }
 
+fn note_tools() -> Value {
+    TOOL_CATALOG["note"].clone()
+}
+
 fn is_worker_tool(name: &str) -> bool {
     run_phase::tool_phase(name) == Some(Phase::Device)
 }
@@ -7249,6 +7347,7 @@ fn responses_tools(
     let mut tools = Vec::new();
     if include_context_tools {
         tools.extend(context_tools().as_array().cloned().unwrap_or_default());
+        tools.extend(note_tools().as_array().cloned().unwrap_or_default());
     }
     if include_worker_tools {
         tools.extend(worker_tools().as_array().cloned().unwrap_or_default());
@@ -7940,7 +8039,7 @@ async fn start_response_tool(
             user,
             &thread.id,
             input_id,
-            controller_tool_output(state, user, name, input),
+            controller_tool_output(state, user, &thread.id, name, input),
         )
         .await;
     if let Some(output) = controller_output {
@@ -8011,6 +8110,7 @@ async fn start_response_tool(
 async fn controller_tool_output(
     state: &AppState,
     user: &User,
+    thread_id: &str,
     name: &str,
     input: &str,
 ) -> Option<Result<Value, ApiError>> {
@@ -8019,6 +8119,8 @@ async fn controller_tool_output(
         "write_context" => write_context_tool_output(state, user, input).await,
         "cybion_list_contexts" => list_contexts_tool_output(state, user).await,
         "cybion_list_workers" => list_workers_tool_output(state, user).await,
+        "add_notes" => notes::add_tool_output(state, user, thread_id, input).await,
+        "cross_out_notes" => notes::cross_out_tool_output(state, user, thread_id, input).await,
         "cybion_list_ultimate_machines" => machines::list_tool_output(state, user).await,
         "cybion_get_ultimate_machine" => machines::get_tool_output(state, user, input).await,
         "cybion_set_ultimate_machine" => machines::set_tool_output(state, user, input).await,
@@ -8785,6 +8887,10 @@ mod common_context_tests;
 #[cfg(test)]
 #[path = "cloud_context_sort_tests.rs"]
 mod context_sort_tests;
+
+#[cfg(test)]
+#[path = "cloud_notes_tests.rs"]
+mod notes_tests;
 
 #[cfg(test)]
 #[path = "cloud_objects_tests.rs"]
@@ -10567,7 +10673,7 @@ mod tests {
             true,
             true,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 14);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 16);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -11004,7 +11110,7 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
-        assert_eq!(tools.as_array().unwrap().len(), 10);
+        assert_eq!(tools.as_array().unwrap().len(), 12);
         assert_eq!(tools[0]["name"], "cybion_list_contexts");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "read_context");
@@ -11017,18 +11123,22 @@ mod tests {
         assert_eq!(tools[7]["name"], "cybion_delete_ultimate_machine");
         assert_eq!(tools[5]["parameters"]["required"], json!(["machine_id"]));
         assert_eq!(tools[7]["parameters"]["required"], json!(["machine_id"]));
-        assert_eq!(tools[8], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[9], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[8]["name"], "add_notes");
+        assert_eq!(tools[8]["parameters"]["required"], json!(["items"]));
+        assert_eq!(tools[9]["name"], "cross_out_notes");
+        assert_eq!(tools[9]["parameters"]["required"], json!(["note_ids"]));
+        assert_eq!(tools[10], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 14);
-        assert_eq!(worker_and_native[8]["name"], "bash");
-        assert_eq!(worker_and_native[11]["name"], "view_image");
-        assert_eq!(worker_and_native[12]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[13]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 16);
+        assert_eq!(worker_and_native[10]["name"], "bash");
+        assert_eq!(worker_and_native[13]["name"], "view_image");
+        assert_eq!(worker_and_native[14]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[15]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 9);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 11);
         assert_eq!(
-            web_search_only[8],
+            web_search_only[10],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false);
@@ -11047,7 +11157,9 @@ mod tests {
                 "cybion_list_ultimate_machines",
                 "cybion_get_ultimate_machine",
                 "cybion_set_ultimate_machine",
-                "cybion_delete_ultimate_machine"
+                "cybion_delete_ultimate_machine",
+                "add_notes",
+                "cross_out_notes"
             ]
         );
         assert_eq!(responses_tools(false, false, false, false), json!([]));
@@ -11076,6 +11188,7 @@ mod tests {
                 "cybion_delete_ultimate_machine"
             ]
         );
+        assert_eq!(names(note_tools()), ["add_notes", "cross_out_notes"]);
         assert_eq!(
             names(worker_tools()),
             ["bash", "browser_control", "computer_use", "view_image"]
@@ -11309,7 +11422,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 12);
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
@@ -11318,8 +11431,10 @@ mod tests {
         assert_eq!(tools[5], TOOL_CATALOG["context"][5]);
         assert_eq!(tools[6], TOOL_CATALOG["context"][6]);
         assert_eq!(tools[7], TOOL_CATALOG["context"][7]);
-        assert_eq!(tools[8], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[9], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[8], TOOL_CATALOG["note"][0]);
+        assert_eq!(tools[9], TOOL_CATALOG["note"][1]);
+        assert_eq!(tools[10], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

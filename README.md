@@ -7,7 +7,7 @@ Cybion is the hosted AI execution service at
 OpenAI-compatible models into work on the machines you own. Sign in, pair each
 device as a lightweight Worker, and run Threads that execute real work — Bash,
 Browser Control, and Computer Use on the machine you choose — guided by
-explicit Contexts and a replayable history.
+explicit governed contexts and a replayable archive.
 
 [Open Cybion](https://cybion.ntnl.io) · [Quick start](#quick-start) ·
 [Ultimate Machines](#ultimate-machines) · [Integration API](#integration-api)
@@ -19,7 +19,8 @@ write — a title, a "use when" description, a body, and a place in a tree —
 created, edited, and trashed from the Contexts page or with `write_context`.
 Threads discover Contexts on demand (`cybion_list_contexts`, `read_context`)
 and read only what a task cites; source material stays on your devices and
-network services. Conversations replay from an append-only history, the
+network services. Sticky notes are the opposite kind of context: short items a
+Thread must visibly cross out, so "finished" and "dropped" never look alike. Conversations replay from an append-only history, the
 conversation header shows the live context size against its budget, and long
 Threads compact into checkpoints instead of overflowing.
 
@@ -129,6 +130,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | --- | --- | --- |
 | Threads | Durable conversations with full execution history; server-side filters and search; archive, restore, and delete; read-only sharing with other Cybion users. | [Threads](docs/threads.md) · [Sharing](docs/thread-sharing.md) · [Recovery](docs/thread-recovery.md) |
 | Contexts | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_context`; ships with a read-only Common Context. | [Contexts](docs/context.md) · [Compaction](docs/context_compacting.md) |
+| Notes | Short items that clear to zero: attached to one Thread or shared globally, injected into every request, crossed out by the Thread and torn off only by you. | [Sticky notes](docs/notes.md) |
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, Windows, and Android (early development); pairing, remote upgrades, and worker sharing; iOS coming soon. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
 | Models & tools | NormAI upstream out of the box; fallback upstreams with per-upstream model catalogs; web search and image generation tools; per-thread model, reasoning effort, and context budget. | [Service overview](docs/introduction.md) |
@@ -183,6 +185,7 @@ base64 data URL. Poll the thread and history endpoints for the result.
   [usage and drafts](docs/thread-usage-and-drafts.md),
   [recovery](docs/thread-recovery.md), [sharing](docs/thread-sharing.md).
 - [Contexts](docs/context.md) and [context compaction](docs/context_compacting.md).
+- [Sticky notes](docs/notes.md) — the zero-target kind of governed context.
 - [Worker onboarding](docs/worker-onboarding.md) and [worker sharing](docs/worker-sharing.md).
 - [Ultimate machines](docs/machines.md).
 - [History table](docs/history.md) and [usage statistics](docs/usage-statistics.md).

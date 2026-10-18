@@ -157,6 +157,67 @@
       }
     }
   ],
+  "note": [
+    {
+      "type": "function",
+      "name": "add_notes",
+      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, so add one only when something is genuinely owed and do not add background, plans, or reminders to yourself. scope \"thread\" (the default) attaches the note to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's context. scope \"global\" shares the note with every Thread, so it must read on its own, naming the project and the action without referring to \"this\" or \"that\". Notes past the limit are refused; cross out or tear off what is done first.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "thread",
+              "global"
+            ],
+            "description": "Omit for a note attached to this Thread; \"global\" shares it with every Thread and requires self-contained text."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "One action in one short line. The service refuses text past its character limit and asks you to condense it."
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "cross_out_notes",
+      "description": "Cross out sticky notes you finished. Crossing out is the only way a note leaves the list: there is no delete, no edit and no reopen, and a note attached to another Thread is reported as not_found. Crossing an already crossed note is reported as already_done and changes nothing, so never retry it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "note_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Exact note id from the injected sticky notes block."
+            }
+          }
+        },
+        "required": [
+          "note_ids"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
   "worker": [
     {
       "type": "function",

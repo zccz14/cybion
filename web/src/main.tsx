@@ -41,6 +41,7 @@ import {
   Minimize2Icon,
   PlayIcon,
   SquareIcon,
+  StickyNoteIcon,
   DatabaseIcon,
   DownloadIcon,
   ExternalLinkIcon,
@@ -456,8 +457,23 @@ const copy = {
     recordHidden: "Internal",
     recordPayload: "View raw payload",
     navWork: "Work",
-    contexts: "Contexts",
-    contextsTitle: "Contexts",
+    navGovernedContexts: "Governed contexts",
+    contexts: "Manual",
+    contextsTitle: "Manual",
+    notes: "Notes",
+    notesTitle: "Notes",
+    notesDescription: "One line per note, one action per note. A Thread sees and crosses out only its own notes; a global note is shared with every Thread, so it has to read on its own. Crossing out keeps the text as the record, and only you can tear a note off.",
+    noteAddPlaceholder: "One thing owed…",
+    noteAdd: "Add note",
+    noteAddError: "Could not add the note",
+    noteGlobalGroup: "Global",
+    noteDoneGroup: "Crossed out",
+    noteEmpty: "Nothing on the notes. Threads add here only what is genuinely owed.",
+    noteDoneEmpty: "Nothing crossed out yet.",
+    noteCrossOut: "Cross out",
+    noteTear: "Tear off",
+    noteThreadLink: "Open Thread",
+    deleteThreadNotes: "This Thread's open notes are torn off with it:",
     contextLocalTitle: "Your contexts",
     contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
     contextTrashTitle: "Trash",
@@ -679,6 +695,8 @@ const copy = {
     toolViewImage: "View an image",
     toolReadContext: "Read contexts",
     toolWriteContext: "Create or edit contexts",
+    toolAddNotes: "Add notes",
+    toolCrossOutNotes: "Cross out notes",
     toolListContexts: "List contexts",
     toolListWorkers: "List Workers",
     toolListUltimateMachines: "List Ultimate Machines",
@@ -691,8 +709,8 @@ const copy = {
     phaseDevice: "Device",
     toolsKernelHint: "Executed by the Cybion Controller: Contexts, Worker and Ultimate Machine management, plus the web search and image generation it intercepts.",
     toolsDeviceHint: "Executed on the device you pick (a Worker): shell, browser, desktop and image reading.",
-    history: "History",
-    historyDescription: "Browse the rows and stored fields in history_records across your workspace.",
+    history: "Archive",
+    historyDescription: "The append-only archive of every record your Threads sent and received.",
     noHistory: "No messages in this thread yet.",
     loadEarlierMessages: "Load earlier messages",
     loadingEarlierMessages: "Loading earlier messages…",
@@ -798,8 +816,23 @@ const copy = {
     recordHidden: "内部记录",
     recordPayload: "查看原始负载",
     navWork: "工作",
-    contexts: "上下文",
-    contextsTitle: "上下文",
+    navGovernedContexts: "受控上下文",
+    contexts: "手册",
+    contextsTitle: "手册",
+    notes: "便签",
+    notesTitle: "便签",
+    notesDescription: "一条一行，一行一件事。线程只看得见、也只划得掉自己的便签；全局便签由所有线程共享，所以要脱离上下文也能读懂。划掉会保留原文作为记录，只有你能撕掉它。",
+    noteAddPlaceholder: "欠着的一件事…",
+    noteAdd: "添加便签",
+    noteAddError: "无法添加便签",
+    noteGlobalGroup: "全局",
+    noteDoneGroup: "已划掉",
+    noteEmpty: "便签是空的。线程只把真正欠着的事放上来。",
+    noteDoneEmpty: "还没有划掉的便签。",
+    noteCrossOut: "划掉",
+    noteTear: "撕掉",
+    noteThreadLink: "打开线程",
+    deleteThreadNotes: "本线程未划掉的便签会一并撕掉：",
     contextLocalTitle: "你的上下文",
     contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
     contextTrashTitle: "回收站",
@@ -1021,6 +1054,8 @@ const copy = {
     toolViewImage: "查看图片",
     toolReadContext: "读取上下文",
     toolWriteContext: "创建或编辑上下文",
+    toolAddNotes: "添加便签",
+    toolCrossOutNotes: "划掉便签",
     toolListContexts: "列出上下文",
     toolListWorkers: "列出 Worker",
     toolListUltimateMachines: "列出终极机器",
@@ -1033,8 +1068,8 @@ const copy = {
     phaseDevice: "设备",
     toolsKernelHint: "由 Cybion 控制器执行：上下文、Worker 与终极机器管理，以及被控制器接管的网页搜索与图像生成。",
     toolsDeviceHint: "发送到你选定的设备（Worker）执行：Shell、浏览器、桌面与图片读取。",
-    history: "历史",
-    historyDescription: "查看当前工作区 history_records 表中的记录与原始字段。",
+    history: "档案",
+    historyDescription: "线程收发记录的全量只读档案。",
     noHistory: "这个线程还没有消息。",
     loadEarlierMessages: "加载更早消息",
     loadingEarlierMessages: "正在加载更早消息…",
@@ -1427,15 +1462,20 @@ function WorkspaceShell({
   const workNav = [
     { to: "/threads", label: language === "zh" ? "我的对话" : "My conversations", icon: MessagesSquareIcon },
     { to: "/shared-threads", label: language === "zh" ? "分享给我" : "Shared with me", icon: Share2Icon },
-    { to: "/contexts", label: t("contexts"), icon: FolderTreeIcon },
     { to: "/workers", label: t("workers"), icon: MonitorIcon },
     { to: "/machines", label: t("machines"), icon: PowerIcon },
+  ]
+  // Three kinds of governed context, ordered by lifetime: notes clear to zero,
+  // the manual converges, the archive only grows.
+  const contextNav = [
+    { to: "/notes", label: t("notes"), icon: StickyNoteIcon },
+    { to: "/contexts", label: t("contexts"), icon: FolderTreeIcon },
+    { to: "/history", label: t("history"), icon: DatabaseIcon },
   ]
   const auditNav = [
     { to: "/insights", label: t("usageStats"), icon: ChartColumnIcon },
     { to: "/reasoning-audit", label: t("audit"), icon: FileSearchIcon },
     { to: "/worker-audit", label: t("workerAudit"), icon: LogsIcon },
-    { to: "/history", label: t("history"), icon: DatabaseIcon },
   ]
   const administrationNav = isAdmin
     ? [
@@ -1452,6 +1492,7 @@ function WorkspaceShell({
   ]
   const workspaceNav: WorkspaceNavGroup[] = [
     { id: "work", label: t("navWork"), items: workNav },
+    { id: "contexts", label: t("navGovernedContexts"), items: contextNav },
     { id: "audit", label: t("navAudit"), items: auditNav },
     ...(administrationNav.length > 0 ? [{ id: "administration", label: t("navAdministration"), items: administrationNav }] : []),
     { id: "configuration", label: t("navConfiguration"), items: configurationNav },
@@ -1488,6 +1529,7 @@ function WorkspaceShell({
             <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate({ pathname: "/threads", search: location.search })} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
             <Route path="/shared-threads" element={<SharedThreadsPage language={language} userId={userId} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />} />
             <Route path="/shared-threads/:ownerId/:threadId" element={<SharedThreadRoute sdk={sdk} userId={userId} />} />
+            <Route path="/notes" element={<NotesPage sdk={sdk} />} />
             <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
@@ -1512,6 +1554,7 @@ function WorkspaceShell({
 }
 
 function pageTitle(pathname: string, t: (key: CopyKey) => string) {
+  if (pathname.startsWith("/notes")) return t("notesTitle")
   if (pathname.startsWith("/contexts")) return t("contextsTitle")
   if (pathname.startsWith("/insights")) return t("usageStats")
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
@@ -1708,6 +1751,10 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
+  // Deleting a Thread tears off its open notes: the confirmation lists exactly
+  // what goes, because a note written here cannot be read by another Thread.
+  const threadNotes = useQuery({ queryKey: ["notes"], queryFn: () => api<{ open: Note[]; done: Note[] }>(sdk, "/api/notes"), enabled: deleteOpen })
+  const openThreadNotes = (threadNotes.data?.open ?? []).filter((note) => note.thread_id === threadId)
   useEffect(() => {
     setTitle(thread.data?.title ?? "")
     setEditing(false)
@@ -1770,6 +1817,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
       setDeleteOpen(false)
       composer.clear()
       void client.invalidateQueries({ queryKey: ["threads"] })
+      void client.invalidateQueries({ queryKey: ["notes"] })
       navigate({ pathname: "/threads", search: location.search })
     },
   })
@@ -1873,7 +1921,12 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
           </div>
         </FieldGroup>
       </form>
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>{remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>
+        {openThreadNotes.length > 0 && <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+          <p className="font-medium">{t("deleteThreadNotes")}</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">{openThreadNotes.map((note) => <li key={note.id} className="break-words">{note.text}</li>)}</ul>
+        </div>}
+        {remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
     </section>
   </main>
 }
@@ -2224,6 +2277,91 @@ function findCommonContextNode(node: CommonContextNode, id: string): CommonConte
 // leaving the page for another node. Creating a context stays explicit.
 const CONTEXT_AUTOSAVE_DEBOUNCE_MS = 5_000
 const CONTEXT_AUTOSAVE_INTERVAL_MS = 15_000
+
+type Note = { id: string; thread_id: string | null; thread_title: string | null; text: string; created_at: number; done_at: number | null }
+
+// The notes page is the review surface for the two scopes: global notes are one
+// group, then every Thread that still holds a note. Crossing out keeps the text
+// as the record; tearing off belongs to the owner alone.
+function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t, language } = useUi()
+  const client = useQueryClient()
+  const notes = useQuery({ queryKey: ["notes"], queryFn: () => api<{ open: Note[]; done: Note[] }>(sdk, "/api/notes") })
+  const [text, setText] = useState("")
+  const refresh = () => void client.invalidateQueries({ queryKey: ["notes"] })
+  const create = useMutation({
+    mutationFn: (value: string) => api<Note>(sdk, "/api/notes", { method: "POST", body: JSON.stringify({ text: value }) }),
+    onSuccess: () => { setText(""); refresh() },
+  })
+  const crossOut = useMutation({
+    mutationFn: (id: string) => api<Note>(sdk, `/api/notes/${encodeURIComponent(id)}/done`, { method: "POST" }),
+    onSuccess: refresh,
+  })
+  const tear = useMutation({
+    mutationFn: (id: string) => api<void>(sdk, `/api/notes/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: refresh,
+  })
+  const open = notes.data?.open ?? []
+  const done = notes.data?.done ?? []
+  const groups = useMemo(() => {
+    const grouped = new Map<string, { title: string | null; notes: Note[] }>()
+    for (const note of open) {
+      const key = note.thread_id ?? ""
+      const group = grouped.get(key) ?? { title: note.thread_title, notes: [] }
+      group.notes.push(note)
+      grouped.set(key, group)
+    }
+    return [...grouped.entries()]
+  }, [open])
+  const age = (createdAt: number) => {
+    const days = Math.floor((Date.now() / 1000 - createdAt) / 86400)
+    return days < 1 ? null : language === "zh" ? `${days} 天` : `${days}d`
+  }
+  return <Page title={t("notesTitle")} description={t("notesDescription")}>
+    <Card>
+      <CardContent className="pt-6">
+        <form className="flex flex-wrap items-start gap-2" onSubmit={(event) => { event.preventDefault(); const value = text.trim(); if (value) create.mutate(value) }}>
+          <Input aria-label={t("noteAdd")} className="min-w-0 flex-1" value={text} placeholder={t("noteAddPlaceholder")} onChange={(event) => setText(event.target.value)} />
+          <Button disabled={!text.trim() || create.isPending}>{create.isPending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t("noteAdd")}</Button>
+        </form>
+        {create.error && <Alert variant="destructive" className="mt-4"><CircleAlertIcon /><AlertTitle>{t("noteAddError")}</AlertTitle><AlertDescription>{errorMessage(create.error)}</AlertDescription></Alert>}
+        {notes.error && <div className="mt-4"><RequestError error={notes.error} onRetry={() => void notes.refetch()} /></div>}
+        {notes.isPending && <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("notesTitle")}</div>}
+        {notes.data && open.length === 0 && <p className="mt-4 text-sm text-muted-foreground">{t("noteEmpty")}</p>}
+        {groups.map(([key, group]) => <div key={key || "global"} className="mt-6">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-medium">{group.title ?? t("noteGlobalGroup")}</h2>
+            {key && <Link className="text-xs text-muted-foreground underline-offset-2 hover:underline" to={`/threads/${encodeURIComponent(key)}`}>{t("noteThreadLink")}</Link>}
+          </div>
+          <div className="mt-2 divide-y rounded-lg border border-border">
+            {group.notes.map((note) => <div key={note.id} className="flex items-start gap-2 px-3 py-2">
+              <Button size="icon-sm" variant="ghost" aria-label={t("noteCrossOut")} title={t("noteCrossOut")} disabled={crossOut.isPending} onClick={() => crossOut.mutate(note.id)}><CheckIcon /></Button>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm break-words">{note.text}</p>
+                <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><code>{note.id}</code>{age(note.created_at) && <span>{age(note.created_at)}</span>}</p>
+              </div>
+              <Button size="icon-sm" variant="ghost" aria-label={t("noteTear")} title={t("noteTear")} disabled={tear.isPending} onClick={() => tear.mutate(note.id)}><Trash2Icon /></Button>
+            </div>)}
+          </div>
+        </div>)}
+      </CardContent>
+    </Card>
+    <Card>
+      <CardHeader><CardTitle className="text-base">{t("noteDoneGroup")}</CardTitle></CardHeader>
+      <CardContent>
+        {done.length === 0 ? <p className="text-sm text-muted-foreground">{t("noteDoneEmpty")}</p> : <div className="divide-y rounded-lg border border-border">
+          {done.map((note) => <div key={note.id} className="flex items-start gap-2 px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm break-words text-muted-foreground line-through">{note.text}</p>
+              <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><code>{note.id}</code>{note.thread_title && <span>{note.thread_title}</span>}</p>
+            </div>
+            <Button size="icon-sm" variant="ghost" aria-label={t("noteTear")} title={t("noteTear")} disabled={tear.isPending} onClick={() => tear.mutate(note.id)}><Trash2Icon /></Button>
+          </div>)}
+        </div>}
+      </CardContent>
+    </Card>
+  </Page>
+}
 
 function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
@@ -3434,6 +3572,8 @@ const toolLabels: Record<string, CopyKey> = {
   cybion_list_workers: "toolListWorkers",
   read_context: "toolReadContext",
   write_context: "toolWriteContext",
+  add_notes: "toolAddNotes",
+  cross_out_notes: "toolCrossOutNotes",
   cybion_list_ultimate_machines: "toolListUltimateMachines",
   cybion_get_ultimate_machine: "toolGetUltimateMachine",
   cybion_set_ultimate_machine: "toolSetUltimateMachine",
@@ -3453,7 +3593,7 @@ function ToolsPage() {
   // `context` and `native` both run in the Controller, because the native tools
   // are intercepted there instead of being executed by the upstream.
   const groups = [
-    { title: t("phaseKernel"), hint: t("toolsKernelHint"), names: [...toolCatalog.context.map((tool) => tool.name), ...Object.keys(toolCatalog.native)] },
+    { title: t("phaseKernel"), hint: t("toolsKernelHint"), names: [...toolCatalog.context.map((tool) => tool.name), ...toolCatalog.note.map((tool) => tool.name), ...Object.keys(toolCatalog.native)] },
     { title: t("phaseDevice"), hint: t("toolsDeviceHint"), names: toolCatalog.worker.map((tool) => tool.name) },
   ]
   return <Page title={t("tools")} description={t("toolsDescription")}>{groups.map((group) => <Card key={group.title}>
