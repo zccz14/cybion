@@ -116,6 +116,20 @@ the first authenticated browser session initializes that key atomically.
   top level or under `parent_id`; a trashed Context and its subtree leave
   every Context tool, while the Contexts page still shows it under Trash and
   restores it to its original place.
+- **Sticky notes** are the third governed-context kind beside the Manual and the
+  Archive: short items owned by one user, each either global (`thread_id` NULL,
+  visible to and crossable from every Thread) or attached to one Thread (visible
+  and crossable only there). Threads add them with `add_notes` and cross them out
+  with `cross_out_notes`; crossing out stamps `done_at` and keeps the text as the
+  record, the model has no delete or edit, and only the owner tears a note off.
+  Every inference request carries one synthetic `developer` message with the
+  Thread's open notes before the newest user input, built into the request copy
+  and never into `history_records`; compaction and title requests do not carry
+  it. Deleting a Thread tears off its notes and reports `deleted_notes`. Two
+  character limits (thread notes, global notes) and the two open caps bound the
+  injection; the character limits are system configuration, so an over-long note
+  is refused with a message the model acts on instead of being truncated. See
+  [Sticky notes](notes.md).
 - `history_records` is the append-only per-thread protocol log. It stores the
   user input, every upstream Responses output item, Worker output, checkpoint,
   and activity record. The auto-incrementing `history_records.id` is the record

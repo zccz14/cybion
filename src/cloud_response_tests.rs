@@ -1522,7 +1522,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 13);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 15);
     let names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -1607,6 +1607,8 @@ async fn inference_injects_web_search_and_the_configured_image_tool() {
             "cybion_get_ultimate_machine",
             "cybion_set_ultimate_machine",
             "cybion_delete_ultimate_machine",
+            "add_notes",
+            "cross_out_notes",
             "bash",
             "browser_control",
             "computer_use",
@@ -3340,4 +3342,82 @@ fn a_barrier_that_did_not_move_the_replay_target_keeps_envelopes() {
         "a barrier describing no change must not strip anything"
     );
     assert!(!replay.iter().any(|item| item["type"] == "model_switch"));
+}
+
+#[tokio::test]
+async fn inference_injects_the_open_notes_before_the_newest_user_input() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "notes-injection-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, true, move |connection| {
+        notes::add(
+            connection,
+            Some(&thread_id),
+            &["alpha item".to_owned()],
+            120,
+        )?;
+        notes::add(connection, None, &["global item".to_owned()], 200)?;
+        // A note attached to another Thread must never reach this request.
+        notes::add(
+            connection,
+            Some("another-thread"),
+            &["beta item".to_owned()],
+            120,
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_json_request(&mut socket).await;
+        let body = json!({
+            "id":"r0","end_turn":true,
+            "output":[{"type":"message","id":"m0","role":"assistant","content":[{"type":"output_text","text":"done"}]}]
+        }).to_string();
+        socket.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+        ).as_bytes()).await.unwrap();
+        request
+    });
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
+    };
+    let input = input_record(&state, &user, &thread).await;
+    let (_tx, mut rx) = tokio::sync::watch::channel(false);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let request = server.await.unwrap();
+    let items = request["input"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0]["role"], "developer");
+    let block = items[0]["content"].as_str().unwrap();
+    assert!(block.contains("Sticky notes — global (1):"), "{block}");
+    assert!(block.contains("Sticky notes — this thread (1):"), "{block}");
+    assert!(block.contains("global item"), "{block}");
+    assert!(block.contains("alpha item"), "{block}");
+    assert!(!block.contains("beta item"), "{block}");
+    assert_eq!(items[1], json!({"role":"user","content":"hello"}));
+    // The block is request state, never a record.
+    let stored: i64 = user_db(&state, &user, false, |connection| {
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM history_records WHERE payload LIKE '%Sticky notes%'",
+            [],
+            |row| row.get(0),
+        )?)
+    })
+    .await
+    .unwrap();
+    assert_eq!(stored, 0);
 }

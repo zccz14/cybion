@@ -100,11 +100,13 @@ conversation controls do. Machine identity is always visible near the action.
 
 ### Navigation and configuration ownership
 
-- **Work** contains Threads, Contexts, Workers, and Ultimate Machines. Device
-  management and scheduled machine checks belong to the user's work, alongside
-  conversations and context.
-- **Audit** contains usage statistics, reasoning requests, Worker calls,
-  and history records. Usage statistics combines token accounting, request
+- **Work** contains Threads, Workers, and Ultimate Machines. Device management
+  and scheduled machine checks belong to the user's work, alongside
+  conversations.
+- **Governed contexts** contains the three kinds of context, ordered by lifetime:
+  Notes (`#/notes`, cleared to zero), the Manual (`#/contexts`, the knowledge tree
+  read on demand), and the Archive (`#/history`, the append-only record).
+- **Audit** contains usage statistics, reasoning requests, and Worker calls. Usage statistics combines token accounting, request
   outcomes, Worker call duration and traffic; see
   [usage statistics](docs/usage-statistics.md).
 - **Administration**, visible only to administrators, contains Users, System

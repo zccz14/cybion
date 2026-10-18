@@ -1,7 +1,9 @@
 # History table
 
-`#/history` browses the authenticated user's `history_records` table across all
-threads. Each database row is one table row.
+`#/history` is the Archive of the governed contexts: it browses the
+authenticated user's `history_records` table across all threads, append-only and
+read only. It is reached from Work → Governed contexts → Archive. Each database
+row is one table row.
 It is read only. Filters, sort order, page, and page size are retained in the URL.
 The thread column shows the current `threads.title` above the original ID, with
 a link icon beside the ID that opens the thread. The title comes from the same

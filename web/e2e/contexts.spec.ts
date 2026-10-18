@@ -31,7 +31,7 @@ test("the Contexts page keeps an edge-to-edge tree beside a full-width reading p
   await expect(page.locator(".markdown-editor")).toBeVisible()
 
   // the page title lives in the shared app header; the page itself owns no title block
-  await expect(page.locator(".ux-app-header__title")).toHaveText("上下文")
+  await expect(page.locator(".ux-app-header__title")).toHaveText("手册")
 
   // unified tree: both sources as top-level sections
   await expect(page.getByText("Cybion 公共上下文", { exact: true }).first()).toBeVisible()

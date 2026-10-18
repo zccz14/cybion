@@ -8,11 +8,13 @@ const copy = {
     listContexts: "List contexts", listWorkers: "List Workers", readContext: "Read context", writeContext: "Edit context", createContext: "Create context", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
     getMachine: "Read Ultimate Machine", updateMachine: "Update Ultimate Machine", createMachine: "Create Ultimate Machine", deleteMachine: "Delete Ultimate Machine",
     name: "Name", worker: "Worker", interval: "Interval", state: "State", enabled: "Enabled", paused: "Paused", command: "Command", intent: "Intent",
+    addNotes: "Add notes", crossOutNotes: "Cross out notes", scope: "Scope", scopeThread: "This Thread", scopeGlobal: "Global",
   },
   zh: {
     listContexts: "列出上下文", listWorkers: "列出 Worker", readContext: "读取上下文", writeContext: "编辑上下文", createContext: "新建上下文", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
     getMachine: "读取终极机器", updateMachine: "更新终极机器", createMachine: "创建终极机器", deleteMachine: "删除终极机器",
     name: "名称", worker: "Worker", interval: "间隔", state: "状态", enabled: "启用", paused: "已暂停", command: "命令", intent: "意图",
+    addNotes: "添加便签", crossOutNotes: "划掉便签", scope: "范围", scopeThread: "本线程", scopeGlobal: "全局",
   },
 } as const
 
@@ -42,6 +44,8 @@ export function CybionToolCall({ language, call, workers, contexts, time, childr
       case "cybion_get_ultimate_machine": return text.getMachine
       case "cybion_set_ultimate_machine": return call.machineId !== null ? text.updateMachine : text.createMachine
       case "cybion_delete_ultimate_machine": return text.deleteMachine
+      case "add_notes": return text.addNotes
+      case "cross_out_notes": return text.crossOutNotes
     }
   })()
   return <div className="relative flex items-start gap-3 px-1">
@@ -97,6 +101,13 @@ function CybionToolDetail({ language, call, workers, contexts }: {
     case "cybion_get_ultimate_machine":
     case "cybion_delete_ultimate_machine":
       return <pre className={monoBlock}>{call.machineId}</pre>
+    case "add_notes":
+      return <>
+        <p className="mt-1.5 text-xs text-muted-foreground">{text.scope}{language === "zh" ? "：" : ": "}{call.scope === "global" ? text.scopeGlobal : text.scopeThread}</p>
+        <ul className="mt-2 space-y-1">{call.texts.map((note) => <li key={note} className="break-words text-sm">{note}</li>)}</ul>
+      </>
+    case "cross_out_notes":
+      return <ul className="mt-2 space-y-1 font-mono text-xs">{call.noteIds.map((id) => <li key={id}>{id}</li>)}</ul>
     case "cybion_list_contexts":
     case "cybion_list_workers":
     case "cybion_list_ultimate_machines":

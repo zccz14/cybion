@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test"
 async function fixture(page: Page) {
   const state = {
     features: { thread_id_header: false, session_id_header: false },
+    notes: { thread_max_chars: 120, global_max_chars: 200 },
     accessGate: Promise.resolve(),
     failAccess: false,
     failFeatureSave: false,
@@ -20,6 +21,10 @@ async function fixture(page: Page) {
       return route.fulfill(state.failAccess ? { status: 500, json: { error: "Access check unavailable" } } : { json: { is_admin: session === "admin" } })
     }
     if (session !== "admin") return route.fulfill({ status: 403, json: { error: "Administrator access is required" } })
+    if (path === "/api/note-settings") {
+      if (method === "PUT") state.notes = { ...state.notes, ...body }
+      return route.fulfill({ json: state.notes })
+    }
     if (path === "/api/experimental-features") {
       if (method === "PUT") {
         if (state.failFeatureSave) return route.fulfill({ status: 500, json: { error: "Feature save unavailable" } })

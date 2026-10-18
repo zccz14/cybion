@@ -46,7 +46,7 @@ for (const [language, theme] of [["zh", "light"], ["en", "dark"]] as const) {
     const fixture = await stubWorkspace(page, { language, theme })
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.goto("/#/contexts")
-    await expect(page.locator(".ux-app-header__title")).toHaveText(language === "zh" ? "上下文" : "Contexts")
+    await expect(page.locator(".ux-app-header__title")).toHaveText(language === "zh" ? "手册" : "Manual")
     await expect(page.locator('input[type="file"]')).toHaveCount(0)
     if (theme === "dark") await expect(page.locator("html")).toHaveClass("dark")
     else await expect(page.locator("html")).not.toHaveClass("dark")

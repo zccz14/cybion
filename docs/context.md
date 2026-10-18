@@ -69,6 +69,13 @@ returns the row, so the Contexts page shows each trashed root under Trash.
 original place. The read-only Cybion Common Context cannot be written, and a
 hidden Context cannot be written until it is restored.
 
+Sticky notes are a separate governed-context kind with their own tools
+(`add_notes`, `cross_out_notes`) and their own storage; no Context tool returns
+or edits them. Every inference request also carries one synthetic `developer`
+message holding the Thread's open notes immediately before the newest user
+input, assembled into the request copy and never into `history_records`. See
+[Sticky notes](notes.md).
+
 Every Worker tool call must include an exact `worker_id` from
 `cybion_list_workers`; a Worker is never chosen implicitly. Registration does
 not imply availability: inference keeps Worker tool definitions available

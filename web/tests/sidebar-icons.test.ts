@@ -14,13 +14,14 @@ const entries = [...navigation.matchAll(/\{ to: "([^"]+)", label: [^\n]+, icon: 
 const approved = [
   ["/threads", "MessagesSquareIcon"],
   ["/shared-threads", "Share2Icon"],
-  ["/contexts", "FolderTreeIcon"],
   ["/workers", "MonitorIcon"],
   ["/machines", "PowerIcon"],
+  ["/notes", "StickyNoteIcon"],
+  ["/contexts", "FolderTreeIcon"],
+  ["/history", "DatabaseIcon"],
   ["/insights", "ChartColumnIcon"],
   ["/reasoning-audit", "FileSearchIcon"],
   ["/worker-audit", "LogsIcon"],
-  ["/history", "DatabaseIcon"],
   ["/admin/users", "UsersIcon"],
   ["/system", "CpuIcon"],
   ["/admin/configuration", "SettingsIcon"],
@@ -34,8 +35,8 @@ test("sidebar routes use the approved semantic icons in their existing order", (
   assert.deepEqual(entries, approved)
 })
 
-test("all 16 sidebar destinations render distinct monochrome outlines, including Lucide aliases", () => {
-  assert.equal(entries.length, 16)
+test("all 17 sidebar destinations render distinct monochrome outlines, including Lucide aliases", () => {
+  assert.equal(entries.length, 17)
   const shapes = entries.map(([route, name]) => {
     const Icon = icons[name as keyof typeof icons] as icons.LucideIcon
     const svg = renderToStaticMarkup(createElement(Icon))

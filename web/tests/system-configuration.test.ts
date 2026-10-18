@@ -34,7 +34,7 @@ test("system configuration has a dedicated route, bilingual title, and admin nav
 
 test("Workers belongs to Work and there is no empty System navigation group", () => {
   const work = main.match(/const workNav = \[([\s\S]*?)\n  \]/)![1]
-  assert.deepEqual([...work.matchAll(/to: "([^\"]+)"/g)].map((match) => match[1]), ["/threads", "/shared-threads", "/contexts", "/workers", "/machines"])
+  assert.deepEqual([...work.matchAll(/to: "([^\"]+)"/g)].map((match) => match[1]), ["/threads", "/shared-threads", "/workers", "/machines"])
   assert.doesNotMatch(main, /navSystem|systemNav/)
   assert.match(main, /id: "work", label: t\("navWork"\), items: workNav/)
   assert.match(main, /to: "\/system", label: t\("systemResources"\)/)
@@ -50,4 +50,26 @@ test("system editors mount only after verified administrator access and scope ca
   assert.doesNotMatch(system, /useEffect|queryKey: \["integrations"\]/)
   for (const key of ["thread_id_header", "session_id_header"]) assert.ok(system.includes(key))
   assert.doesNotMatch(system, /user_agent|originator|RequestHeaders/)
+})
+
+test("governed contexts groups notes, the manual and the archive by lifetime", () => {
+  const work = main.match(/const workNav = \[([\s\S]*?)\n  \]/)![1]
+  const contexts = main.match(/const contextNav = \[([\s\S]*?)\n  \]/)![1]
+  const audit = main.match(/const auditNav = \[([\s\S]*?)\n  \]/)![1]
+  assert.deepEqual([...contexts.matchAll(/to: "([^"]+)"/g)].map((match) => match[1]), ["/notes", "/contexts", "/history"])
+  assert.doesNotMatch(work, /"\/contexts"/)
+  assert.doesNotMatch(audit, /"\/history"/)
+  assert.match(main, /id: "contexts", label: t\("navGovernedContexts"\), items: contextNav/)
+  assert.match(main, /navGovernedContexts: "受控上下文"/)
+  assert.match(main, /navGovernedContexts: "Governed contexts"/)
+  assert.match(main, /notes: "便签"/)
+  assert.match(main, /notes: "Notes"/)
+  assert.match(main, /path="\/notes" element=\{<NotesPage sdk=\{sdk\} \/>/)
+  assert.match(main, /pathname\.startsWith\("\/notes"\)\) return t\("notesTitle"\)/)
+})
+
+test("the thread delete dialog lists the open notes it tears off", () => {
+  assert.match(main, /const openThreadNotes = \(threadNotes\.data\?\.open \?\? \[\]\)\.filter\(\(note\) => note\.thread_id === threadId\)/)
+  assert.match(main, /\{openThreadNotes\.map\(\(note\) => <li key=\{note\.id\}/)
+  assert.match(main, /deleteThreadNotes: "本线程未划掉的便签会一并撕掉："/)
 })

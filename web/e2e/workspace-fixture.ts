@@ -10,6 +10,7 @@ export async function stubWorkspace(page: Page, options: {
   language?: "zh" | "en"; theme?: "light" | "dark"; activeTotal?: number; webTotal?: number; archivedTotal?: number;
   countFails?: boolean; connectionFails?: boolean; startFails?: boolean; fallbackReady?: boolean;
   contexts?: { id: string; name: string; parent_id?: string | null; trashed_at?: number }[];
+  notes?: { id: string; thread_id: string | null; thread_title: string | null; text: string; created_at: number; done_at: number | null }[];
 } = {}) {
   const language = options.language ?? "zh", theme = options.theme ?? "light"
   const { publicKey, privateKey } = generateKeyPairSync("ed25519")
@@ -27,6 +28,8 @@ export async function stubWorkspace(page: Page, options: {
   const writes: { path: string; body: Record<string, unknown> }[] = []
   const requests: string[] = [], unexpected: string[] = []
   page.on("pageerror", (error) => unexpected.push(`Page error: ${error.message}`))
+  // Copy every note: the fixture mutates state across tests in one spec file.
+  let notes = (options.notes ?? []).map((note) => ({ ...note }))
   const state = { connectionFails: options.connectionFails ?? false }
   const profile = { user_id: "onboarding-user", username: "onboarding", intro: "", lang: language, theme, avatar_url: null }
   const release = JSON.parse(readFileSync(new URL("../../worker-release.json", import.meta.url), "utf8"))
@@ -122,6 +125,24 @@ export async function stubWorkspace(page: Page, options: {
         const reference = references.find((item) => item.id === path.split("/").at(-1))!
         Object.assign(reference, request.postDataJSON())
         return json(reference)
+      }
+      if (path === "/api/notes") {
+        if (request.method() === "POST") {
+          const body = request.postDataJSON() as { text: string }
+          const note = { id: `note-${notes.length + 1}`, thread_id: null, thread_title: null, text: body.text, created_at: now, done_at: null }
+          notes.push(note)
+          return json(note)
+        }
+        return json({ open: notes.filter((note) => note.done_at === null), done: notes.filter((note) => note.done_at !== null) })
+      }
+      if (/^\/api\/notes\/[^/]+\/done$/.test(path)) {
+        const note = notes.find((item) => item.id === path.split("/").at(-2))!
+        note.done_at = now
+        return json(note)
+      }
+      if (/^\/api\/notes\/[^/]+$/.test(path) && request.method() === "DELETE") {
+        notes = notes.filter((item) => item.id !== path.split("/").at(-1))
+        return route.fulfill({ status: 204, headers })
       }
       if (path === "/api/common-contexts") return json({
         revision: 1,

@@ -241,6 +241,8 @@ export type CybionToolFunctionCall =
   | { tool: "cybion_get_ultimate_machine"; machineId: string }
   | { tool: "cybion_set_ultimate_machine"; machineId: string | null; name: string | null; workerId: string | null; intervalSeconds: number | null; enabled: boolean | null; command: string | null; intent: string | null }
   | { tool: "cybion_delete_ultimate_machine"; machineId: string }
+  | { tool: "add_notes"; scope: "thread" | "global"; texts: string[] }
+  | { tool: "cross_out_notes"; noteIds: string[] }
 
 export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall | null {
   const object = historyPayloadObject(payload)
@@ -258,6 +260,19 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
       return contextId === null && name === null
         ? null
         : { tool: "write_context", contextId, trashed: args.parent_id === "TRASH", name, parentId: nonEmptyString(args.parent_id) }
+    }
+    case "add_notes": {
+      const items = Array.isArray(args.items) ? args.items : []
+      const texts = items.flatMap((item: unknown) => {
+        const object = historyPayloadObject(item)
+        return typeof object?.text === "string" && object.text.trim() !== "" ? [object.text.trim()] : []
+      })
+      return texts.length === 0 ? null : { tool: "add_notes", scope: args.scope === "global" ? "global" : "thread", texts }
+    }
+    case "cross_out_notes": {
+      const noteIds = (Array.isArray(args.note_ids) ? args.note_ids : [])
+        .filter((id): id is string => typeof id === "string" && id.trim() !== "")
+      return noteIds.length === 0 ? null : { tool: "cross_out_notes", noteIds }
     }
     case "cybion_list_contexts":
       return { tool: "cybion_list_contexts" }
