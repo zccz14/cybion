@@ -1,16 +1,36 @@
 import type { ReactNode } from "react"
 import { ChevronRightIcon } from "lucide-react"
-import { formatThreadProcessDuration } from "@/lib/thread-history"
+import { useLiveSeconds } from "@/hooks/use-now"
+import { formatThreadProcessDuration, threadProcessDuration } from "@/lib/thread-history"
 
 const copy = {
-  en: { title: "Process messages", durationHint: "Time between the earliest and latest messages in this group.", count: (count: number) => `${count} ${count === 1 ? "message" : "messages"}` },
-  zh: { title: "过程消息", durationHint: "本组最早一条消息到最晚一条消息的时间差。", count: (count: number) => `${count} 条` },
+  en: {
+    title: "Process messages",
+    durationHint: "Time between the earliest and latest messages in this group.",
+    liveDurationHint: "Time from this group's earliest message until now: this run is still writing into it.",
+    count: (count: number) => `${count} ${count === 1 ? "message" : "messages"}`,
+  },
+  zh: {
+    title: "过程消息",
+    durationHint: "本组最早一条消息到最晚一条消息的时间差。",
+    liveDurationHint: "本组最早一条消息到现在的时间：本次执行仍在往这一组里写记录。",
+    count: (count: number) => `${count} 条`,
+  },
 }
 
-export function ThreadProcessGroup({ language, count, durationSeconds, children }: {
+// The newest group of a running Thread is still growing, so its label follows a one-second
+// clock instead of freezing at its latest record: a frozen counter reads as a stalled run.
+function LiveProcessDuration({ language, startedAt, finishedAt }: { language: "en" | "zh"; startedAt: number; finishedAt: number }) {
+  const now = useLiveSeconds()
+  return <>{formatThreadProcessDuration(threadProcessDuration(startedAt, finishedAt, now), language)}</>
+}
+
+export function ThreadProcessGroup({ language, count, startedAt, finishedAt, running, children }: {
   language: "en" | "zh"
   count: number
-  durationSeconds: number
+  startedAt: number
+  finishedAt: number
+  running: boolean
   children: ReactNode
 }) {
   const text = copy[language]
@@ -20,7 +40,11 @@ export function ThreadProcessGroup({ language, count, durationSeconds, children 
       <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
         <span className="font-medium">{text.title}</span>
         <span className="text-xs text-muted-foreground">{text.count(count)}</span>
-        <span title={text.durationHint} className="text-xs tabular-nums text-muted-foreground">{formatThreadProcessDuration(durationSeconds, language)}</span>
+        <span title={running ? text.liveDurationHint : text.durationHint} className="text-xs tabular-nums text-muted-foreground">
+          {running
+            ? <LiveProcessDuration language={language} startedAt={startedAt} finishedAt={finishedAt} />
+            : formatThreadProcessDuration(finishedAt - startedAt, language)}
+        </span>
       </span>
     </summary>
     <div className="flex min-w-0 flex-col gap-6 border-t border-border/70 p-3 sm:p-4">{children}</div>

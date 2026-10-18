@@ -153,6 +153,24 @@ export function groupThreadHistoryMinimal(records: readonly HistoryRecord[]): Th
   return entries
 }
 
+// A Thread that is still running keeps writing into its newest process group, so that group is
+// measured against the clock. A message — the user's input or an assistant reply — ends the
+// group before it, so the newest one is live only while nothing but image groups follow it.
+export function liveThreadProcessKey(entries: readonly ThreadHistoryEntry[]): string | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry.type === "process") return entry.key
+    if (entry.type === "message") return null
+  }
+  return null
+}
+
+// The clock is the browser's while `created_at` is the server's, so the clock never shortens the
+// span the group's own records already prove: a client running behind cannot rewind the counter.
+export function threadProcessDuration(startedAt: number, finishedAt: number, now: number) {
+  return Math.max(finishedAt, now) - startedAt
+}
+
 export function formatThreadProcessDuration(durationSeconds: number, language: "en" | "zh") {
   const total = Math.max(0, Math.floor(durationSeconds))
   const hours = String(Math.floor(total / 3600)).padStart(2, "0")

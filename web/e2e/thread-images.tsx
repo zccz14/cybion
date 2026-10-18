@@ -49,7 +49,7 @@ function Fixture() {
       <MessageScroller className="min-h-0 flex-1">
         <MessageScrollerViewport>
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
-            <ThreadHistory records={threadImageRecords} language={language} minimal={minimal} renderRecord={renderRecord} />
+            <ThreadHistory records={threadImageRecords} language={language} minimal={minimal} running={false} renderRecord={renderRecord} />
           </MessageScrollerContent>
         </MessageScrollerViewport>
         <MessageScrollerButton behavior="auto" />

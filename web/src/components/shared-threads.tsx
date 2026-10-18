@@ -109,7 +109,7 @@ function SharedConversation({ thread, scope, path, language, request, renderReco
       {hasOlder && <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center px-6"><Button className="pointer-events-auto shadow-sm" size="sm" variant="outline" disabled={older.isFetching} onClick={() => { if (older.data) void older.fetchNextPage(); else void older.refetch() }}>{older.isFetching && <Spinner />}{t.earlier}</Button></div>}
       <MessageScrollerViewport><MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
         {content.isPending && <p role="status">{t.loading}</p>}{older.error && <SharingError error={older.error} language={language} retry={() => { if (older.data) void older.fetchNextPage(); else void older.refetch() }} />}
-        <ThreadHistory records={[...records, ...pending]} language={language} minimal={minimal} renderRecord={renderRecord} />
+        <ThreadHistory records={[...records, ...pending]} language={language} minimal={minimal} running={thread.status === "running"} renderRecord={renderRecord} />
         {!content.isPending && records.length === 0 && pending.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">{t.noHistory}</p>}
       </MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton behavior="auto" />
     </MessageScroller></MessageScrollerProvider>}

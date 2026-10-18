@@ -67,6 +67,23 @@ test("keyboard toggles, polling, language changes and streaming handoff preserve
   await expect(page.locator(groupSelector).last()).not.toHaveAttribute("open")
 })
 
+test("a running Thread counts its newest process group up to the clock", async ({ page }) => {
+  await page.goto("/e2e/thread-history.html")
+  const summary = page.locator(groupSelector).last().locator(":scope > summary")
+  await expect(summary).toContainText("运行了 00 小时 00 分钟 00 秒")
+  const elapsed = async () => {
+    const match = /运行了 (\d+) 小时 (\d+) 分钟 (\d+) 秒/.exec(await summary.innerText())
+    if (match === null) throw new Error(`no elapsed time in ${await summary.innerText()}`)
+    return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])
+  }
+  await page.getByRole("button", { name: "Running", exact: true }).click()
+  await expect(page.locator(`${groupSelector} [title*="本次执行仍在往这一组里写记录"]`)).toHaveCount(1)
+  const started = await elapsed()
+  await expect.poll(elapsed, { timeout: 5_000 }).toBeGreaterThan(started)
+  await page.getByRole("button", { name: "Running", exact: true }).click()
+  await expect(summary).toContainText("运行了 00 小时 00 分钟 00 秒")
+})
+
 test("compact and expanded groups wrap on narrow screens in both themes and languages", async ({ page }) => {
   await page.goto("/e2e/thread-history.html")
   for (const theme of ["light", "dark"]) {
