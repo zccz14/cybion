@@ -1849,7 +1849,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
             <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
               {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-              <ThreadHistory records={records} language={language} minimal={minimal} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} contexts={contextLookup} />} />
+              <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} contexts={contextLookup} />} />
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}

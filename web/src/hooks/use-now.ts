@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react"
+import { useEffect, useState, useSyncExternalStore } from "react"
 
 // One shared minute clock behind every relative label: each subscriber re-renders
 // at most once a minute, so "5 分钟前" style text stays correct even while
@@ -29,4 +29,16 @@ function subscribe(listener: () => void) {
 
 export function useNowSeconds() {
   return useSyncExternalStore(subscribe, () => seconds)
+}
+
+// A second-resolution ticker for an elapsed time that must visibly advance. It exists only
+// while its component is mounted, so an idle conversation keeps no timer: the minute clock
+// above stays the only one every page shares.
+export function useLiveSeconds() {
+  const [seconds, setSeconds] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const timer = window.setInterval(() => setSeconds(Math.floor(Date.now() / 1000)), 1_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  return seconds
 }

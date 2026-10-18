@@ -98,13 +98,19 @@ renders inline as SVG in the neutral palette of the current light or dark
 theme, and a definition that fails to parse — for example a diagram still
 streaming in — stays visible as an ordinary code block until it becomes valid.
 
-Each group starts collapsed and shows its record count and the difference
-between its maximum and minimum `created_at` values (Unix seconds). Chinese
-labels use `运行了 hh 小时 mm 分钟 ss 秒`; English labels use
+Each group starts collapsed and shows its record count and its elapsed time,
+the difference between its maximum and minimum `created_at` values (Unix
+seconds). Chinese labels use `运行了 hh 小时 mm 分钟 ss 秒`; English labels use
 `Ran for 01h 02m 03s`, for example. Hours do not wrap after 24. A singleton or
-same-timestamp group reports zero. Standalone messages and the current clock
-do not contribute to the duration. Pending items retain the existing response
-preview timestamp (`started_at`) until durable timestamps become available.
+same-timestamp group reports zero, and standalone messages never contribute to
+a duration. While the Thread runs, its newest group — the one no message
+follows — is still growing: it measures from its earliest `created_at` to the
+current browser clock, so the label advances every second instead of freezing
+at its latest record, and it falls back to the recorded span once a message
+closes the group or the run ends. The clock never shortens a span the group's
+own records already prove, so a browser running behind the server cannot
+rewind the counter. Pending items retain the existing response preview
+timestamp (`started_at`) until durable timestamps become available.
 
 Minimal mode never folds image content away. Each turn's image records collect
 into one image group rendered with the turn's tail item — its last reply or

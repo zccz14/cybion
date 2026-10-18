@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, threadHistoryRecordKey, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id, screenshot = false): HistoryRecord {
@@ -85,6 +85,24 @@ test("elapsed time uses minimum and maximum timestamps, not array endpoints or a
   assert.equal(group.startedAt, 100)
   assert.equal(group.finishedAt, 3765)
   assert.equal(formatThreadProcessDuration(group.finishedAt - group.startedAt, "zh"), "运行了 01 小时 01 分钟 05 秒")
+})
+
+test("only the newest group of a running Thread is live, and only until a message closes it", () => {
+  const growing = [record(1, "input", { role: "user", content: "Hello" }), record(2, "response_output", { type: "reasoning" }), record(3, "tool_output")]
+  const open = groupThreadHistory(growing)
+  assert.equal(liveThreadProcessKey(open), open[1].key)
+  assert.equal(liveThreadProcessKey(groupThreadHistory([...growing, record(4, "response_output", { id: "msg_4", type: "message", content: [] })])), null)
+  assert.equal(liveThreadProcessKey(groupThreadHistory([record(1, "input"), record(2, "response_output", { id: "msg_2", type: "message", content: [] })])), null)
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6OZ0AAAAASUVORK5CYII="
+  const withTrailingImage = groupThreadHistoryMinimal([...growing, record(4, "tool_output", { type: "image_generation_call", status: "completed", result: png })])
+  assert.deepEqual(withTrailingImage.map((entry) => entry.type), ["message", "process", "image-group"])
+  assert.equal(liveThreadProcessKey(withTrailingImage), withTrailingImage[1].key)
+})
+
+test("a live duration runs to the clock without ever rewinding below the recorded span", () => {
+  assert.equal(threadProcessDuration(100, 3765, 5000), 4900)
+  // A browser clock behind the server keeps the span the records already prove.
+  assert.equal(threadProcessDuration(100, 3765, 1000), 3665)
 })
 
 test("singleton and same-timestamp groups have zero elapsed time", () => {
