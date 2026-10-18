@@ -37,7 +37,7 @@ function ThemeFixture() {
     root.style.colorScheme = dark ? "dark" : "light"
   }, [dark])
   return <AppLayout
-    logo={{ light: <CybionMark className="size-6 shrink-0" />, dark: <CybionMark className="size-6 shrink-0" /> }}
+    logo={<CybionMark className="size-6 shrink-0" />}
     title="Cybion"
     nav={themeNav}
     pageTitle="中性黑灰 · Neutral dark"

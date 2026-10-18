@@ -1503,7 +1503,7 @@ function WorkspaceShell({
   }))
 
   return <AppLayout
-    logo={{ light: <CybionMark className="size-6 shrink-0" />, dark: <CybionMark className="size-6 shrink-0" /> }}
+    logo={<CybionMark className="size-6 shrink-0" />}
     title="Cybion"
     nav={nav}
     pageTitle={routeTitle}
