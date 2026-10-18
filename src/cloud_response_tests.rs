@@ -3345,7 +3345,7 @@ fn a_barrier_that_did_not_move_the_replay_target_keeps_envelopes() {
 }
 
 #[tokio::test]
-async fn inference_injects_the_open_notes_before_the_newest_user_input() {
+async fn inference_appends_the_open_notes_to_the_request_tail() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "notes-injection-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -3401,14 +3401,15 @@ async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     let request = server.await.unwrap();
     let items = request["input"].as_array().unwrap();
     assert_eq!(items.len(), 2, "{items:?}");
-    assert_eq!(items[0]["role"], "developer");
-    let block = items[0]["content"].as_str().unwrap();
+    // The block trails the request: the replayed user input keeps its position.
+    assert_eq!(items[0], json!({"role":"user","content":"hello"}));
+    assert_eq!(items[1]["role"], "developer");
+    let block = items[1]["content"].as_str().unwrap();
     assert!(block.contains("Sticky notes — global (1):"), "{block}");
     assert!(block.contains("Sticky notes — this thread (1):"), "{block}");
     assert!(block.contains("global item"), "{block}");
     assert!(block.contains("alpha item"), "{block}");
     assert!(!block.contains("beta item"), "{block}");
-    assert_eq!(items[1], json!({"role":"user","content":"hello"}));
     // The block is request state, never a record.
     let stored: i64 = user_db(&state, &user, false, |connection| {
         Ok(connection.query_row(
@@ -3420,4 +3421,96 @@ async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     .await
     .unwrap();
     assert_eq!(stored, 0);
+}
+
+/// The cache contract: everything the previous request sent, minus its trailing
+/// notes block, must be a prefix of the next request. Prefix caching matches
+/// from the first item, so a block anywhere but the tail would make the
+/// provider re-process the previous turn's user message, tool calls and outputs.
+#[tokio::test]
+async fn each_request_extends_the_previous_one_instead_of_diverging() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "notes-prefix-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, true, move |connection| {
+        notes::add(
+            connection,
+            Some(&thread_id),
+            &["alpha item".to_owned()],
+            120,
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(read_json_request(&mut socket).await);
+            let body = json!({
+                "id":format!("r{index}"),"end_turn":true,
+                "output":[{"type":"message","id":format!("m{index}"),"role":"assistant","content":[{"type":"output_text","text":"done"}]}]
+            }).to_string();
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
+    };
+    let (_tx, mut rx) = tokio::sync::watch::channel(false);
+    let first_input = input_record(&state, &user, &thread).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, first_input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let thread_id = thread.id.clone();
+    let second_input = user_db(&state, &user, false, move |connection| {
+        connection.execute("UPDATE threads SET status='running' WHERE id=?", [&thread_id])?;
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            json!({"type":"message","id":"m0","role":"assistant","content":[{"type":"output_text","text":"done"}]}),
+        );
+        Ok(insert_record(
+            connection,
+            &thread_id,
+            "input",
+            json!({"role":"user","content":"again"}),
+        ))
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, second_input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let requests = server.await.unwrap();
+    let without_block = |request: &Value| {
+        let mut items = request["input"].as_array().unwrap().clone();
+        let block = items.pop().expect("a request carries the notes block");
+        assert_eq!(block["role"], "developer");
+        assert!(block["content"].as_str().unwrap().contains("Sticky notes"));
+        items
+    };
+    let first = without_block(&requests[0]);
+    let second = without_block(&requests[1]);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(&second[..first.len()], &first[..]);
 }

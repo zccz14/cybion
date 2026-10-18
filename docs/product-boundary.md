@@ -123,9 +123,9 @@ the first authenticated browser session initializes that key atomically.
   with `cross_out_notes`; crossing out stamps `done_at` and keeps the text as the
   record, the model has no delete or edit, and only the owner tears a note off.
   Every inference request carries one synthetic `developer` message with the
-  Thread's open notes before the newest user input, built into the request copy
+  Thread's open notes appended to the request tail, built into the request copy
   and never into `history_records`; compaction and title requests do not carry
-  it. Deleting a Thread tears off its notes and reports `deleted_notes`. Two
+  it, and the tail placement keeps the replayed prefix cacheable. Deleting a Thread tears off its notes and reports `deleted_notes`. Two
   character limits (thread notes, global notes) and the two open caps bound the
   injection; the character limits are system configuration, so an over-long note
   is refused with a message the model acts on instead of being truncated. See

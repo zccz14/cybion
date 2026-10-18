@@ -72,8 +72,9 @@ hidden Context cannot be written until it is restored.
 Sticky notes are a separate governed-context kind with their own tools
 (`add_notes`, `cross_out_notes`) and their own storage; no Context tool returns
 or edits them. Every inference request also carries one synthetic `developer`
-message holding the Thread's open notes immediately before the newest user
-input, assembled into the request copy and never into `history_records`. See
+message holding the Thread's open notes appended to the request tail, assembled
+into the request copy and never into `history_records`; the tail placement keeps
+the replayed prefix reusable for the provider's prefix cache. See
 [Sticky notes](notes.md).
 
 Every Worker tool call must include an exact `worker_id` from

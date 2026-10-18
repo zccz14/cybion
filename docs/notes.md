@@ -23,8 +23,8 @@ another Thread's notes are not part of this Thread's world.
 
 ## Injection
 
-Every inference request inserts one synthetic `developer` message immediately
-before the newest user input:
+Every inference request appends one synthetic `developer` message to the very
+end of its input:
 
 ```text
 Sticky notes — global (1):
@@ -39,7 +39,15 @@ are blocked.
 The block is assembled into the request copy only: `history_records` stays exactly
 what happened, and compaction and title requests build their own input without it.
 A Thread with nothing open gets no block at all — nothing is owed, nothing to say.
-Because insertion happens at the tail, the replayed prefix keeps its warm cache.
+
+The tail is not cosmetic. Prefix caching matches from the first item, and the
+notes are the only part of the prompt that changes from turn to turn: a block
+placed before the newest user input would diverge exactly there and make the
+provider re-process everything the previous turn sent after it — its user
+message, its tool calls and their outputs. At the tail only the block itself is
+re-read, both across turns and after a note changes mid-turn. The cost is the
+block's own tokens on every request, which is the price of the Thread seeing the
+notes at all.
 
 ## Tools
 

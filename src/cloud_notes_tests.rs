@@ -232,16 +232,19 @@ fn injection_skips_crossed_notes_entirely() {
 }
 
 #[test]
-fn the_injected_block_precedes_the_newest_user_input() {
-    let mut items = vec![
+fn the_injected_block_is_the_last_item_of_the_request() {
+    // Prefix caching matches from the first item, so the only volatile part of
+    // the prompt has to sit at the tail: everything before it stays reusable.
+    let history = vec![
         json!({"role":"user","content":"first"}),
         json!({"role":"assistant","content":"reply"}),
         json!({"role":"user","content":"second"}),
     ];
+    let mut items = history.clone();
     notes::inject(&mut items, "block");
     assert_eq!(items.len(), 4);
-    assert_eq!(items[2], json!({"role":"developer","content":"block"}));
-    assert_eq!(items[3], json!({"role":"user","content":"second"}));
+    assert_eq!(items[..3], history[..]);
+    assert_eq!(items[3], json!({"role":"developer","content":"block"}));
 
     let mut empty: Vec<Value> = Vec::new();
     notes::inject(&mut empty, "block");

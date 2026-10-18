@@ -379,17 +379,18 @@ pub(super) fn injection_block(
     Ok(Some(block))
 }
 
-/// Places the block immediately before the newest user input, so the request
-/// tail is the user's actual message and the replayed prefix stays stable.
+/// Appends the block to the very end of the request.
+///
+/// The notes are the only part of the prompt that changes from turn to turn, so
+/// they must be last: prefix caching matches from the first item, and a block
+/// placed before the newest user input would diverge exactly there, making the
+/// provider re-process everything the previous turn sent after it — its user
+/// message, its tool calls and their outputs. At the tail only the block itself
+/// is re-read, both across turns and after a note changes mid-turn. The codebase
+/// already ends requests with synthetic instructions (checkpoint and title
+/// generation), so a trailing developer message is an established shape.
 pub(super) fn inject(items: &mut Vec<Value>, block: &str) {
-    let item = json!({"role":"developer","content":block});
-    match items
-        .iter()
-        .rposition(|item| item.get("role").and_then(Value::as_str) == Some("user"))
-    {
-        Some(index) => items.insert(index, item),
-        None => items.push(item),
-    }
+    items.push(json!({"role":"developer","content":block}));
 }
 
 async fn limits(state: &AppState) -> Result<(i64, i64), ApiError> {
