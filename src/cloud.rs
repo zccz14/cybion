@@ -502,6 +502,7 @@ fn app(state: AppState) -> Router {
             "/api/threads/{id}/history/window",
             get(thread_history_window),
         )
+        .route("/api/threads/{id}/history/reads", get(thread_context_reads))
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
         .route("/api/threads/{id}/cancel", post(thread_controls::cancel))
@@ -3793,6 +3794,77 @@ fn thread_history_older_page(
         |row| row.get(0),
     )?;
     Ok(ThreadHistoryWindow { records, has_older })
+}
+
+/// The `read_context` calls inside the context this Thread replays right now.
+/// The browser parses them into the Contexts the model has read, so the page can
+/// show what is still in context; a compaction moves the head to its checkpoint
+/// and the calls before it fall out of the range.
+#[derive(Serialize)]
+struct ThreadContextReadsView {
+    /// Context head: the checkpoint, or the oldest protocol record, that replay starts at.
+    head: Option<i64>,
+    /// Context tail: the newest protocol record the head reaches.
+    tail: Option<i64>,
+    /// `read_context` calls in `[head, tail]`, oldest first.
+    calls: Vec<HistoryRecord>,
+}
+
+async fn thread_context_reads(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ThreadContextReadsView>, ApiError> {
+    let id = thread_id(&id)?;
+    Ok(Json(context_reads_for(&state, &identity.user, id).await?))
+}
+
+async fn context_reads_for(
+    state: &AppState,
+    user: &User,
+    id: String,
+) -> Result<ThreadContextReadsView, ApiError> {
+    user_db(state, user, true, move |connection| {
+        load_context_reads(connection, &id)
+    })
+    .await
+}
+
+fn load_context_reads(
+    connection: &Connection,
+    id: &str,
+) -> Result<ThreadContextReadsView, ApiError> {
+    load_thread(connection, id)?;
+    let tail: Option<i64> = connection.query_row(
+        &format!("SELECT MAX(id) FROM history_records WHERE thread_id=? AND {PROTOCOL_RECORDS}"),
+        [id],
+        |row| row.get(0),
+    )?;
+    let Some(tail) = tail else {
+        return Ok(ThreadContextReadsView {
+            head: None,
+            tail: None,
+            calls: Vec::new(),
+        });
+    };
+    let head = context_idx_head(connection, id, tail)?;
+    let mut statement = connection.prepare(
+        "SELECT id,thread_id,kind,payload,created_at FROM history_records
+         WHERE thread_id=? AND kind='response_output' AND id>=? AND id<=?
+           AND json_extract(payload,'$.type')='function_call'
+           AND json_extract(payload,'$.name')='read_context'
+         ORDER BY id",
+    )?;
+    let rows = statement.query_map(params![id, head, tail], history_from_row)?;
+    let mut calls = Vec::new();
+    for row in rows {
+        calls.push(row?);
+    }
+    Ok(ThreadContextReadsView {
+        head: Some(head),
+        tail: Some(tail),
+        calls,
+    })
 }
 
 async fn thread_input(
@@ -8895,6 +8967,10 @@ mod notes_tests;
 #[cfg(test)]
 #[path = "cloud_objects_tests.rs"]
 mod objects_tests;
+
+#[cfg(test)]
+#[path = "cloud_context_reads_tests.rs"]
+mod context_reads_tests;
 
 #[cfg(test)]
 mod tests {

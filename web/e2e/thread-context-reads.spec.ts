@@ -1,0 +1,32 @@
+import { expect, test } from "@playwright/test"
+
+test("the Thread header names every Context the Thread still holds, with its hash and a link", async ({ page }) => {
+  await page.goto("/e2e/thread-context-reads.html")
+  const reads = page.locator("#reads")
+  await expect(reads).toContainText("已读上下文 2")
+  await expect(reads).toContainText("#10–#31")
+  const manual = reads.getByRole("link", { name: /必读上下文/ })
+  await expect(manual).toContainText("8f1d2e3a")
+  await expect(manual).toContainText("×2")
+  await expect(manual).toHaveAttribute("href", "#/contexts?context=8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f")
+  await expect(manual).toHaveAttribute("title", "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f · 读取 2 次")
+  const unresolved = reads.getByRole("link", { name: /未知上下文/ })
+  await expect(unresolved).toContainText("c0ffee00")
+  await expect(unresolved).toHaveAttribute("href", "#/contexts?context=c0ffee00-1111-2222-3333-444455556666")
+  const empty = page.locator("#empty")
+  await expect(empty).toContainText("已读上下文 0")
+  await expect(empty).toContainText("本窗口内没有读取上下文")
+  await expect(empty.getByRole("link")).toHaveCount(0)
+})
+
+test("the indicator speaks both languages and keeps its layout in either theme", async ({ page }) => {
+  await page.goto("/e2e/thread-context-reads.html")
+  await page.getByRole("button", { name: "Theme", exact: true }).click()
+  await page.getByRole("button", { name: "Language", exact: true }).click()
+  const reads = page.locator("#reads")
+  await expect(reads).toContainText("Read contexts 2")
+  await expect(reads).toContainText("#10–#31")
+  await expect(reads.getByRole("link", { name: /必读上下文/ })).toHaveAttribute("title", /read 2 times/)
+  await expect(reads.getByRole("link", { name: /Unknown context/ })).toContainText("c0ffee00")
+  await expect(page.locator("#empty")).toContainText("no context read in this window")
+})

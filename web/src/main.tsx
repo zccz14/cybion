@@ -76,6 +76,7 @@ import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, seriali
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
+import { threadContextReads, type ThreadContextReadsView } from "@/lib/thread-context-reads"
 import { applyFavicon } from "@/lib/favicon"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
@@ -127,6 +128,7 @@ import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
 import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
+import { ThreadContextReads } from "@/components/thread-context-reads"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
@@ -1714,13 +1716,22 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     ...durableRecords,
     ...pendingResponseRecords(liveResponse.data, durableRecords, threadId),
   ], [durableRecords, liveResponse.data, threadId])
+  // The reads the Thread still holds: the endpoint reports the calls inside the context
+  // replay starts from, so a compaction empties whatever its checkpoint replaced.
+  const contextReads = useQuery({
+    queryKey: ["thread-context-reads", threadId, userId],
+    queryFn: ({ signal }) => api<ThreadContextReadsView>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history/reads`, { signal }),
+    refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
+    enabled: Boolean(threadId),
+  })
+  const readContexts = useMemo(() => threadContextReads(contextReads.data?.calls ?? []), [contextReads.data])
   // A `read_context`/`write_context` card resolves the context's title and Use
   // When description through the same caches the Contexts page fills; the
   // fetches only start when the loaded history actually touches a context.
-  const readsContexts = useMemo(() => records.some((record) => {
+  const readsContexts = useMemo(() => readContexts.length > 0 || records.some((record) => {
     const payload = historyPayloadObject(record.payload)
     return payload?.type === "function_call" && (payload.name === "read_context" || payload.name === "write_context")
-  }), [records])
+  }), [readContexts, records])
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: readsContexts })
   const commonContexts = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`), enabled: readsContexts })
   const contextLookup = useMemo(() => {
@@ -1872,6 +1883,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
             <ThreadStatusSummary status={current.display_status} language={language} />
             {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
           </div>
+          {contextReads.data !== undefined && contextReads.data.head !== null && <ThreadContextReads reads={readContexts} lookup={contextLookup} view={contextReads.data} language={language} />}
         </div>}
         <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
         <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
