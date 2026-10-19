@@ -7,12 +7,19 @@ import type { ThreadContextRead } from "../src/lib/thread-context-reads"
 import "../src/styles.css"
 
 const manual = "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f"
-const unknown = "c0ffee00-1111-2222-3333-444455556666"
+const edited = "c0ffee00-1111-2222-3333-444455556666"
+const unanswered = "11112222-3333-4444-5555-666677778888"
+const gone = "99998888-7777-6666-5555-444433332222"
 const reads: ThreadContextRead[] = [
-  { context_id: manual, calls: 2, first_record_id: 11, last_record_id: 27, last_read_at: 27 },
-  { context_id: unknown, calls: 1, first_record_id: 30, last_record_id: 30, last_read_at: 30 },
+  { context_id: manual, calls: 2, first_record_id: 11, last_record_id: 27, last_read_at: 27, read_hash: "aaaaaaaaaaaaaaaa", current_hash: "aaaaaaaaaaaaaaaa" },
+  { context_id: edited, calls: 1, first_record_id: 30, last_record_id: 30, last_read_at: 30, read_hash: "bbbbbbbbbbbbbbbb", current_hash: "cccccccccccccccc" },
+  { context_id: unanswered, calls: 1, first_record_id: 31, last_record_id: 31, last_read_at: 31, read_hash: null, current_hash: "dddddddddddddddd" },
+  { context_id: gone, calls: 1, first_record_id: 32, last_record_id: 32, last_read_at: 32, read_hash: "eeeeeeeeeeeeeeee", current_hash: null },
 ]
-const lookup: ReadonlyMap<string, ContextSummary> = new Map([[manual, { name: "必读上下文", description: "标准手册" }]])
+const lookup: ReadonlyMap<string, ContextSummary> = new Map([
+  [manual, { name: "必读上下文", description: "标准手册" }],
+  [edited, { name: "LOL-MODEL", description: "模型与回测" }],
+])
 
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")
@@ -21,7 +28,7 @@ function Fixture() {
       <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button>
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>
     </header>
-    <div id="reads"><ThreadContextReads reads={reads} lookup={lookup} view={{ head: 10, tail: 31 }} language={language} /></div>
+    <div id="reads"><ThreadContextReads reads={reads} lookup={lookup} view={{ head: 10, tail: 32 }} language={language} /></div>
     <div id="empty"><ThreadContextReads reads={[]} lookup={lookup} view={{ head: 40, tail: 41 }} language={language} /></div>
   </main>
 }
