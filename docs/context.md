@@ -143,6 +143,30 @@ requesting user's database; common nodes come from the compiled tree instead.
 The model can pass a child's `context_id` to `read_context` to discover the next
 level. Child content and deeper descendants are disclosed only when read.
 
+## Read-context indicator
+
+The conversation header shows which Contexts the Thread has read **and still
+holds**. `GET /api/threads/{id}/history/reads` answers with the current
+`head` and `tail` plus the `response_output` records inside that range whose
+item is a `read_context` function call; the browser reads each call's
+`context_id` out of its arguments. Calls before the head are not in the answer,
+so when a compaction appends its checkpoint the reads it summarized leave the
+list and only the reads made after the checkpoint stay. This is the same
+`[idx_head, idx_tail]` the compiler replays, not a separate stored state.
+
+Each Context appears once, in the order the Thread first read it: its name
+resolved through the same caches the Contexts page fills, the first eight
+characters of its id as a short hash, and a link to that Context. A Context read
+again in the window shows its repeat count; an id that no longer resolves — a
+trashed or deleted Context — keeps the short hash as its label and its full id in
+the tooltip.
+
+The row also shows the record range it was computed from, so a head that moved to
+a checkpoint is visible. A Thread with no protocol record yet reports `head` and
+`tail` as `null` and the row stays hidden. A range without a `read_context` call
+renders the row with a count of zero, which is the signal that the Thread has not
+read any Context in this window.
+
 ## Cybion Common Context
 
 `common-contexts/` at the repository root holds the Cybion Common Context: a

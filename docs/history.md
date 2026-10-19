@@ -81,6 +81,13 @@ input record — not produced by the current protocol — returns every record
 with `has_older` false instead of hiding rows, and a page that finds no older
 `input` returns everything older than its cursor with `has_older` false.
 
+`GET /api/threads/{id}/history/reads` serves the header's read-context
+indicator: the `head` and `tail` of the context the Thread replays now, plus the
+`read_context` function calls in that inclusive range in the same record shape as
+the history endpoints, oldest first. Records outside `[head, tail]` are never
+returned, so a compaction empties the answer down to the calls made after its
+checkpoint. See [Thread context replay](context.md).
+
 ## Conversation process groups
 
 The conversation derives its display from the combined durable history and
