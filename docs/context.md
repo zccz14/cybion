@@ -146,20 +146,35 @@ level. Child content and deeper descendants are disclosed only when read.
 ## Read-context indicator
 
 The conversation header shows which Contexts the Thread has read **and still
-holds**. `GET /api/threads/{id}/history/reads` answers with the current
-`head` and `tail` plus the `response_output` records inside that range whose
-item is a `read_context` function call; the browser reads each call's
-`context_id` out of its arguments. Calls before the head are not in the answer,
-so when a compaction appends its checkpoint the reads it summarized leave the
-list and only the reads made after the checkpoint stay. This is the same
-`[idx_head, idx_tail]` the compiler replays, not a separate stored state.
+holds**, and whether the copy it read is still the current one.
+`GET /api/threads/{id}/history/reads` answers with the current `head` and `tail`
+plus the `read_context` calls inside that range, each carrying its record, the
+`read_hash` of the version its tool output delivered, and the `current_hash` of
+what the same read returns now; the browser reads each call's `context_id` out of
+its arguments. Calls before the head are not in the answer, so when a compaction
+appends its checkpoint the reads it summarized leave the list and only the reads
+made after the checkpoint stay. This is the same `[idx_head, idx_tail]` the
+compiler replays, not a separate stored state.
 
-Each Context appears once, in the order the Thread first read it: its name
-resolved through the same caches the Contexts page fills, the first eight
-characters of its id as a short hash, and a link to that Context. A Context read
-again in the window shows its repeat count; an id that no longer resolves — a
-trashed or deleted Context — keeps the short hash as its label and its full id in
-the tooltip.
+Both fingerprints cover the node's own content — its title, Use When description,
+and body — and nothing around it: moving a Context, reordering its siblings, or
+editing a child leaves the fingerprint alone, because a read registers content
+rather than the tree. The read fingerprint comes from the stored tool output, so
+it is the version the model actually received; an answer that carried no Context
+body, such as a read that failed, has none. The current fingerprint resolves the
+same id the way `read_context` resolves it — local Contexts first, then the
+compiled common tree in its source language — and is absent once the Context is
+deleted or hidden by the trash.
+
+Each Context appears once, in the order the Thread first read it, with the newest
+read of it deciding both fingerprints: a Thread that read a Context before and
+after an edit holds the edit. The chip shows its name resolved through the same
+caches the Contexts page fills, the short id, the short read fingerprint, and a
+link to that Context. It marks the three states worth noticing: an edited Context
+(`read_hash` differs from `current_hash`), a Context whose read never returned a
+body, and a Context that no longer resolves. A repeat read in the window shows its
+count, and the tooltip carries the full id, the record that read it, and both full
+fingerprints.
 
 The row also shows the record range it was computed from, so a head that moved to
 a checkpoint is visible. A Thread with no protocol record yet reports `head` and

@@ -3807,7 +3807,19 @@ struct ThreadContextReadsView {
     /// Context tail: the newest protocol record the head reaches.
     tail: Option<i64>,
     /// `read_context` calls in `[head, tail]`, oldest first.
-    calls: Vec<HistoryRecord>,
+    calls: Vec<ContextReadCall>,
+}
+
+#[derive(Serialize)]
+struct ContextReadCall {
+    #[serde(flatten)]
+    record: HistoryRecord,
+    /// Fingerprint of the Context version this call's tool output carried; absent
+    /// when the call was never answered or the answer held no Context body.
+    read_hash: Option<String>,
+    /// Fingerprint of what the same read returns now; absent when the Context no
+    /// longer resolves.
+    current_hash: Option<String>,
 }
 
 async fn thread_context_reads(
@@ -3858,13 +3870,117 @@ fn load_context_reads(
     let rows = statement.query_map(params![id, head, tail], history_from_row)?;
     let mut calls = Vec::new();
     for row in rows {
-        calls.push(row?);
+        let record = row?;
+        let read_hash = read_call_fingerprint(connection, id, &record, tail)?;
+        let current_hash = match read_call_context_id(&record.payload) {
+            Some(context_id) => current_context_fingerprint(connection, &context_id)?,
+            None => None,
+        };
+        calls.push(ContextReadCall {
+            record,
+            read_hash,
+            current_hash,
+        });
     }
     Ok(ThreadContextReadsView {
         head: Some(head),
         tail: Some(tail),
         calls,
     })
+}
+
+/// The fingerprint of one Context version as `read_context` hands it to the
+/// model: its title, Use When description, and body. Moving a Context, reordering
+/// its siblings, or editing a child leaves it unchanged, because a read registers
+/// that node's own content rather than the tree around it.
+fn context_fingerprint(name: &str, description: &str, content: &str) -> String {
+    let mut hasher = Sha256::new();
+    for field in [name, description, content] {
+        hasher.update(field.as_bytes());
+        hasher.update([0]);
+    }
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The version the model actually received: the tool output this call was
+/// answered with. A superseded answer is stored as `activity` and is not in the
+/// replay, so it does not count as read.
+fn read_call_fingerprint(
+    connection: &Connection,
+    thread_id: &str,
+    call: &HistoryRecord,
+    tail: i64,
+) -> Result<Option<String>, ApiError> {
+    let Some(call_id) = call.payload.get("call_id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let output: Option<String> = connection
+        .query_row(
+            "SELECT payload FROM history_records
+             WHERE thread_id=? AND kind='tool_output' AND id>? AND id<=?
+               AND json_extract(payload,'$.call_id')=?
+             ORDER BY id LIMIT 1",
+            params![thread_id, call.id, tail, call_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(output.as_deref().and_then(read_output_fingerprint))
+}
+
+fn read_output_fingerprint(payload: &str) -> Option<String> {
+    let payload = serde_json::from_str::<Value>(payload).ok()?;
+    let output = serde_json::from_str::<Value>(payload.get("output")?.as_str()?).ok()?;
+    Some(context_fingerprint(
+        output.get("name")?.as_str()?,
+        output.get("description")?.as_str()?,
+        output.get("content")?.as_str()?,
+    ))
+}
+
+fn read_call_context_id(payload: &Value) -> Option<String> {
+    let arguments = serde_json::from_str::<Value>(payload.get("arguments")?.as_str()?).ok()?;
+    Uuid::parse_str(arguments.get("context_id")?.as_str()?)
+        .ok()
+        .map(|id| id.to_string())
+}
+
+/// What the same read returns now, resolved the way the tool resolves it: local
+/// Contexts first, then the compiled common tree in its source language.
+fn current_context_fingerprint(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<String>, ApiError> {
+    let local = connection
+        .query_row(
+            "SELECT name,description,content FROM contexts WHERE id=?",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((name, description, content)) = local {
+        return Ok((!context_hidden(connection, id)?)
+            .then(|| context_fingerprint(&name, &description, &content)));
+    }
+    Ok(
+        common_contexts::read(id, common_contexts::SOURCE_LANGUAGE).map(|read| {
+            context_fingerprint(
+                &read.context.name,
+                &read.context.description,
+                &read.context.content,
+            )
+        }),
+    )
 }
 
 async fn thread_input(

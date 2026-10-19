@@ -22,7 +22,8 @@ and read only what a task cites; source material stays on your devices and
 network services. Sticky notes are the opposite kind of context: short items a
 Thread must visibly cross out, so "finished" and "dropped" never look alike. Conversations replay from an append-only history, the
 conversation header shows the live context size against its budget and the
-Contexts the Thread has read in that window, and long Threads compact into
+Contexts the Thread has read in that window — with a content fingerprint that says
+whether the copy it read has since been edited — and long Threads compact into
 checkpoints instead of overflowing.
 
 **Cloud-hosted inference.** Inference runs in the hosted controller, not on
