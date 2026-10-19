@@ -28,6 +28,10 @@ automatic compaction budget (`context_budget_tokens` on the thread, falling back
 to the user's default). The chip turns warning-colored once the recorded context
 reaches the budget, and reads "auto-compaction off" when the budget is 0.
 
+The same header area lists the Contexts the Thread has read inside that window,
+with a link and a short hash per Context; see
+[Thread context replay](context.md).
+
 SQL sums recorded values independently for each Token field and skips `NULL`
 values. Cache rate divides summed cached input by summed input, rather than
 averaging request percentages. A positive input count without cache data, or a

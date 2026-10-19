@@ -90,6 +90,7 @@ export async function stubWorkspace(page: Page, options: {
       if (path === "/api/threads/start") return json({ thread_id: thread.id, record_idx: 1, status: "accepted" })
       if (path === `/api/threads/${thread.id}`) return json(thread)
       if (path === `/api/threads/${thread.id}/history/window`) return json({ records: [], has_older: false })
+      if (path === `/api/threads/${thread.id}/history/reads`) return json({ head: null, tail: null, calls: [] })
       if (path === `/api/threads/${thread.id}/response`) return json(null)
       if (path === `/api/threads/${thread.id}/grants`) return json([])
       if (path === "/api/contexts") {
