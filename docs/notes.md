@@ -96,11 +96,16 @@ lists the open ones before the Thread goes.
 
 ## Pages
 
-`#/notes` (Work → Governed contexts → Notes) is the owner's review surface: the
-open notes grouped by the Thread that wrote them, each group linking back, then a
-collapsed list of crossed notes. Each open note offers *cross out* and *tear off*;
-a crossed note offers *tear off* only. The page shows each note's id and, past a
-day, its age. It never writes a note: notes come from Threads.
+`#/notes` (Work → Governed contexts → Notes) is the owner's review surface and
+shows a note's whole record: the open notes grouped by the Thread that wrote them,
+then the crossed ones. Each group is headed by a link into its Thread (with the
+Thread id beside it), and every note prints its id, when it was written, and — once
+crossed — when it was crossed out, as an absolute timestamp in the UI language with
+a machine-readable `<time datetime>` attribute. A crossed note repeats the link to
+its Thread, because its row no longer sits under a group.
+
+Each open note offers *cross out* and *tear off*; a crossed note offers *tear off*
+only. The page never writes a note: notes come from Threads.
 
 The Tools page lists both tools under the Controller group, and every tool call
 renders as its own card in the conversation.
