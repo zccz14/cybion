@@ -477,6 +477,8 @@ const copy = {
     noteCrossOut: "Cross out",
     noteTear: "Tear off",
     noteThreadLink: "Open Thread",
+    noteCreated: "Created",
+    noteCrossedOut: "Crossed out",
     deleteThreadNotes: "This Thread's open notes are torn off with it:",
     contextLocalTitle: "Your contexts",
     contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
@@ -836,6 +838,8 @@ const copy = {
     noteCrossOut: "划掉",
     noteTear: "撕掉",
     noteThreadLink: "打开线程",
+    noteCreated: "创建于",
+    noteCrossedOut: "划掉于",
     deleteThreadNotes: "本线程未划掉的便签会一并撕掉：",
     contextLocalTitle: "你的上下文",
     contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
@@ -2304,10 +2308,10 @@ const CONTEXT_AUTOSAVE_INTERVAL_MS = 15_000
 
 type Note = { id: string; thread_id: string; thread_title: string | null; text: string; created_at: number; done_at: number | null }
 
-// The notes page is the owner's review surface, and the page never writes a
-// note: notes belong to the Thread that wrote them, so every group here is one
-// Thread with a link back. Crossing out keeps the text as the record; tearing
-// off belongs to the owner alone.
+// Every note shows its whole record: the id the model quotes back, when it was
+// written, and — once crossed — when it was crossed. A note belongs to the
+// Thread that wrote it, so the page always says which one and links to it. The
+// page never writes a note; tearing off belongs to the owner alone.
 function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const client = useQueryClient()
@@ -2332,10 +2336,8 @@ function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
     }
     return [...grouped.entries()]
   }, [open])
-  const age = (createdAt: number) => {
-    const days = Math.floor((Date.now() / 1000 - createdAt) / 86400)
-    return days < 1 ? null : language === "zh" ? `${days} 天` : `${days}d`
-  }
+  const threadPath = (threadId: string) => `/threads/${encodeURIComponent(threadId)}`
+  const stamp = (value: number) => <time dateTime={new Date(value * 1000).toISOString()} className="tabular-nums">{formattedTime(language, value)}</time>
   return <Page title={t("notesTitle")} description={t("notesDescription")}>
     <Card>
       <CardContent className="pt-6">
@@ -2343,16 +2345,20 @@ function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
         {notes.isPending && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("notesTitle")}</div>}
         {notes.data && open.length === 0 && <p className="text-sm text-muted-foreground">{t("noteEmpty")}</p>}
         {groups.map(([threadId, group]) => <div key={threadId} className="mt-6">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-medium">{group.title ?? threadId}</h2>
-            <Link className="text-xs text-muted-foreground underline-offset-2 hover:underline" to={`/threads/${encodeURIComponent(threadId)}`}>{t("noteThreadLink")}</Link>
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <Link className="text-sm font-medium hover:underline" to={threadPath(threadId)}>{group.title ?? threadId}</Link>
+            <code className="text-[0.7rem] text-muted-foreground">{threadId}</code>
           </div>
           <div className="mt-2 divide-y rounded-lg border border-border">
             {group.notes.map((note) => <div key={note.id} className="flex items-start gap-2 px-3 py-2">
               <Button size="icon-sm" variant="ghost" aria-label={t("noteCrossOut")} title={t("noteCrossOut")} disabled={crossOut.isPending} onClick={() => crossOut.mutate(note.id)}><CheckIcon /></Button>
               <div className="min-w-0 flex-1">
                 <p className="text-sm break-words">{note.text}</p>
-                <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><code>{note.id}</code>{age(note.created_at) && <span>{age(note.created_at)}</span>}</p>
+                <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  <code>{note.id}</code>
+                  <span>{t("noteCreated")} {stamp(note.created_at)}</span>
+                  {note.done_at !== null && <span>{t("noteCrossedOut")} {stamp(note.done_at)}</span>}
+                </p>
               </div>
               <Button size="icon-sm" variant="ghost" aria-label={t("noteTear")} title={t("noteTear")} disabled={tear.isPending} onClick={() => tear.mutate(note.id)}><Trash2Icon /></Button>
             </div>)}
@@ -2367,7 +2373,12 @@ function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
           {done.map((note) => <div key={note.id} className="flex items-start gap-2 px-3 py-2">
             <div className="min-w-0 flex-1">
               <p className="text-sm break-words text-muted-foreground line-through">{note.text}</p>
-              <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><code>{note.id}</code>{note.thread_title && <span>{note.thread_title}</span>}</p>
+              <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <code>{note.id}</code>
+                <span>{t("noteCreated")} {stamp(note.created_at)}</span>
+                {note.done_at !== null && <span>{t("noteCrossedOut")} {stamp(note.done_at)}</span>}
+                <span>{t("noteThreadLink")} <Link className="underline-offset-2 hover:underline" to={threadPath(note.thread_id)}>{note.thread_title ?? note.thread_id}</Link></span>
+              </p>
             </div>
             <Button size="icon-sm" variant="ghost" aria-label={t("noteTear")} title={t("noteTear")} disabled={tear.isPending} onClick={() => tear.mutate(note.id)}><Trash2Icon /></Button>
           </div>)}
