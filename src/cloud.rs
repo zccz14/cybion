@@ -144,7 +144,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 45;
+const USER_SCHEMA_VERSION: i64 = 46;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1255,6 +1255,100 @@ CREATE INDEX IF NOT EXISTS history_shared_intent_thread
     AND worker_owner_user_id IS NOT NULL AND worker_owner_user_id<>'';
 "#;
 
+// The administrator snapshot reports per-user request, token and row counts for
+// every user database on every five-second refresh. Counting them from
+// `reasoning_audits` and `history_records` scans both tables in full, so the
+// page costs one full scan of every user's history per request and grows with
+// the data instead of staying flat. These triggers keep a single rollup row in
+// step with the raw rows inside the writing transaction — including the
+// foreign-key cascade behind `DELETE FROM threads` — so the snapshot reads
+// seven integers per user.
+const USER_ROLLUP_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS user_rollup (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  requests INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_tokens INTEGER NOT NULL DEFAULT 0,
+  history_records INTEGER NOT NULL DEFAULT 0,
+  threads INTEGER NOT NULL DEFAULT 0,
+  workers INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO user_rollup(id) VALUES(1);
+CREATE TRIGGER IF NOT EXISTS user_rollup_audit_insert AFTER INSERT ON reasoning_audits BEGIN
+  UPDATE user_rollup SET
+    requests = requests + 1,
+    input_tokens = input_tokens + COALESCE(NEW.input_tokens,0),
+    output_tokens = output_tokens + COALESCE(NEW.output_tokens,0),
+    cached_tokens = cached_tokens + COALESCE(NEW.cached_tokens,0)
+  WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_audit_tokens AFTER UPDATE OF input_tokens,output_tokens,cached_tokens ON reasoning_audits BEGIN
+  UPDATE user_rollup SET
+    input_tokens = input_tokens + COALESCE(NEW.input_tokens,0) - COALESCE(OLD.input_tokens,0),
+    output_tokens = output_tokens + COALESCE(NEW.output_tokens,0) - COALESCE(OLD.output_tokens,0),
+    cached_tokens = cached_tokens + COALESCE(NEW.cached_tokens,0) - COALESCE(OLD.cached_tokens,0)
+  WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_audit_delete AFTER DELETE ON reasoning_audits BEGIN
+  UPDATE user_rollup SET
+    requests = requests - 1,
+    input_tokens = input_tokens - COALESCE(OLD.input_tokens,0),
+    output_tokens = output_tokens - COALESCE(OLD.output_tokens,0),
+    cached_tokens = cached_tokens - COALESCE(OLD.cached_tokens,0)
+  WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_history_insert AFTER INSERT ON history_records BEGIN
+  UPDATE user_rollup SET history_records = history_records + 1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_history_delete AFTER DELETE ON history_records BEGIN
+  UPDATE user_rollup SET history_records = history_records - 1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_thread_insert AFTER INSERT ON threads BEGIN
+  UPDATE user_rollup SET threads = threads + 1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_thread_delete AFTER DELETE ON threads BEGIN
+  UPDATE user_rollup SET threads = threads - 1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_worker_insert AFTER INSERT ON workers BEGIN
+  UPDATE user_rollup SET workers = workers + (CASE WHEN NEW.deleted_at IS NULL THEN 1 ELSE 0 END) WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_worker_delete AFTER DELETE ON workers BEGIN
+  UPDATE user_rollup SET workers = workers - (CASE WHEN OLD.deleted_at IS NULL THEN 1 ELSE 0 END) WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS user_rollup_worker_update AFTER UPDATE OF deleted_at ON workers BEGIN
+  UPDATE user_rollup SET workers = workers
+    + (CASE WHEN NEW.deleted_at IS NULL THEN 1 ELSE 0 END)
+    - (CASE WHEN OLD.deleted_at IS NULL THEN 1 ELSE 0 END)
+  WHERE id=1;
+END;
+"#;
+
+const USER_ROLLUP_TRIGGERS_DROP: &str = r#"
+DROP TRIGGER IF EXISTS user_rollup_audit_insert;
+DROP TRIGGER IF EXISTS user_rollup_audit_tokens;
+DROP TRIGGER IF EXISTS user_rollup_audit_delete;
+DROP TRIGGER IF EXISTS user_rollup_history_insert;
+DROP TRIGGER IF EXISTS user_rollup_history_delete;
+DROP TRIGGER IF EXISTS user_rollup_thread_insert;
+DROP TRIGGER IF EXISTS user_rollup_thread_delete;
+DROP TRIGGER IF EXISTS user_rollup_worker_insert;
+DROP TRIGGER IF EXISTS user_rollup_worker_delete;
+DROP TRIGGER IF EXISTS user_rollup_worker_update;
+"#;
+
+// Seeds the rollup from the raw rows of a database that predates it. Runs once
+// per database on its first open at schema 46; the triggers own every later
+// change.
+const USER_ROLLUP_BACKFILL: &str = r#"
+INSERT OR REPLACE INTO user_rollup(id,requests,input_tokens,output_tokens,cached_tokens,history_records,threads,workers)
+SELECT 1, COUNT(*),
+  COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_tokens),0),
+  (SELECT COUNT(*) FROM history_records), (SELECT COUNT(*) FROM threads),
+  (SELECT COUNT(*) FROM workers WHERE deleted_at IS NULL)
+FROM reasoning_audits;
+"#;
+
 // Usage statistics are served from materialized snapshots: a background
 // patrol folds raw rows into hour buckets and totals, refreshes the
 // stats_view_* snapshot rows for this table's four ranges, and requests only
@@ -1452,6 +1546,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                  DROP TABLE IF EXISTS workers;
                  DROP TABLE IF EXISTS api_keys;
                  DROP TABLE IF EXISTS reasoning_audits;
+                 DROP TABLE IF EXISTS user_rollup;
                  DROP TABLE IF EXISTS history_records;
                  DROP TABLE IF EXISTS threads;
                  DROP TABLE IF EXISTS thread_defaults;
@@ -1460,6 +1555,14 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             )
             .map_err(ApiError::internal)?;
     }
+    // Triggers attached to a table make SQLite validate their bodies against
+    // every structural change, so a later `DROP COLUMN` or table rebuild fails
+    // outright. Detach them for the duration of the migration; the rollup is
+    // recreated and recomputed at the end, and a failed migration rolls the
+    // whole transaction back with the old triggers intact.
+    transaction
+        .execute_batch(USER_ROLLUP_TRIGGERS_DROP)
+        .map_err(ApiError::internal)?;
     transaction.execute_batch(THREAD_SCHEMA)?;
     let thread_schema: String = transaction.query_row(
         "SELECT sql FROM sqlite_schema WHERE type='table' AND name='threads'",
@@ -1785,6 +1888,29 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             .execute_batch(USER_RUNNING_INDEXES)
             .map_err(ApiError::internal)?;
     }
+    // A database that jumps from a pre-sharing version straight to the current
+    // one creates `workers` fresh and skips the gated sharing migration that
+    // owns this column, but the rollup counts non-deleted Workers. Add it here,
+    // after every other migration, so the migration that does own it still runs
+    // first.
+    let has_worker_deleted_at: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('workers') WHERE name='deleted_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_worker_deleted_at {
+        transaction
+            .execute("ALTER TABLE workers ADD COLUMN deleted_at INTEGER", [])
+            .map_err(ApiError::internal)?;
+    }
+    transaction
+        .execute_batch(USER_ROLLUP_SCHEMA)
+        .map_err(ApiError::internal)?;
+    // Recompute rather than patch: a structural migration above may have
+    // rebuilt or rewritten rows the triggers could not follow.
+    transaction
+        .execute_batch(USER_ROLLUP_BACKFILL)
+        .map_err(ApiError::internal)?;
     if version < USER_SCHEMA_VERSION {
         transaction
             .execute_batch(&format!("PRAGMA user_version = {USER_SCHEMA_VERSION};"))

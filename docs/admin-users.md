@@ -69,13 +69,40 @@ resuming them.
 
 ## Cost
 
-One read-only query per user database per poll (every 5 seconds), bounded by
-the running set rather than by history: in-flight audits and unsettled Worker
-calls are reached through their status-prefixed indexes, and the pending
-shared intents through the partial `history_shared_intent_thread` index. The
-page never scans a history range and keeps no time series, so it stays a
+Each poll (every 5 seconds) opens each user database read-only and answers two
+questions, neither of which depends on how much history the user has:
+
+- **Usage counters** (requests, tokens, cache rate, history records, Threads,
+  Workers) come from the single `user_rollup` row the database maintains for
+  itself. Seven integers, no table scan.
+- **Running Threads** are bounded by the running set: in-flight audits and
+  unsettled Worker calls are reached through their status-prefixed indexes, and
+  pending shared intents through the partial `history_shared_intent_thread`
+  index.
+
+The page never scans a history range and keeps no time series, so it stays a
 snapshot rather than the interval attribution that usage statistics removed
 (see [usage statistics](usage-statistics.md)).
+
+### The usage rollup
+
+`user_rollup` holds one row per user database. Triggers on `reasoning_audits`,
+`history_records`, `threads` and `workers` adjust it inside the same
+transaction as the write that changed a raw row, so the row is exact at every
+commit — including the foreign-key cascade behind `DELETE FROM threads`, which
+fires the child tables' delete triggers. Soft-deleting a Worker moves `workers`
+by the same trigger rule the page reports.
+
+The triggers make a table structural change fail while they are attached
+(SQLite validates trigger bodies when a column is dropped), so
+`migrate_user_schema` detaches them first, rebuilds whatever it needs, then
+recreates them and recomputes the rollup from the raw rows. That recompute also
+seeds a database created before schema 46, so the counters need no separate
+backfill step. A failed migration rolls back with the old triggers intact.
+
+Reads fall back to counting the raw rows when `user_rollup` is absent — a file
+no Cybion build has migrated yet — and the regression test keeps both answers
+equal.
 
 ## API
 
