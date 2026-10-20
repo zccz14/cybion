@@ -470,6 +470,10 @@ pub(super) fn remove_thread_sharing_fixture(c: &Connection) {
 
 pub(super) fn remove_sharing_fixture(c: &Connection) {
     remove_thread_sharing_fixture(c);
+    // The rollup triggers reference `workers.deleted_at`, and SQLite refuses to
+    // drop a column a trigger still names. A downgraded fixture therefore has
+    // to detach them, exactly as a migration does before it rebuilds a table.
+    c.execute_batch(USER_ROLLUP_TRIGGERS_DROP).unwrap();
     c.execute_batch(
         "DROP TABLE worker_grants; DROP TABLE shared_workers;
         DROP INDEX history_worker_origin; DROP INDEX history_worker_intent;

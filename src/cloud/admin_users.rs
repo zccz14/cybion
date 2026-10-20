@@ -145,23 +145,10 @@ fn metrics(
 ) -> Result<Metrics> {
     let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.busy_timeout(Duration::from_secs(1))?;
-    let mut metrics = connection.query_row("SELECT COUNT(*),
-        COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_tokens),0),
-        (SELECT COUNT(*) FROM history_records), (SELECT COUNT(*) FROM threads),
-        (SELECT COUNT(*) FROM workers WHERE deleted_at IS NULL)
-        FROM reasoning_audits", [], |row| {
-        let input_tokens: i64 = row.get(1)?;
-        let output_tokens: i64 = row.get(2)?;
-        let cached_tokens: i64 = row.get(3)?;
-        Ok(Metrics {
-            requests: row.get(0)?, input_tokens, output_tokens,
-            total_tokens: input_tokens + output_tokens, cached_tokens,
-            cache_hit_rate: (input_tokens > 0).then(|| cached_tokens as f64 / input_tokens as f64),
-            history_records: row.get(4)?, threads: row.get(5)?, workers: row.get(6)?,
-            running: Running::default(),
-            sqlite_bytes: 0, sqlite_main_bytes: 0, sqlite_wal_bytes: 0, sqlite_shm_bytes: 0,
-        })
-    })?;
+    let mut metrics = match rolled(&connection)? {
+        Some(metrics) => metrics,
+        None => counted(&connection)?,
+    };
     metrics.running = running(&connection, user_id, live)?;
     metrics.sqlite_main_bytes = fs::metadata(path)?.len();
     metrics.sqlite_wal_bytes = file_size(&PathBuf::from(format!("{}-wal", path.display())))?;
@@ -169,6 +156,89 @@ fn metrics(
     metrics.sqlite_bytes =
         metrics.sqlite_main_bytes + metrics.sqlite_wal_bytes + metrics.sqlite_shm_bytes;
     Ok(metrics)
+}
+
+type Counts = (i64, i64, i64, i64, i64, i64, i64);
+
+/// Reads the rollup row the `USER_ROLLUP_SCHEMA` triggers maintain: seven
+/// integers instead of a scan of every audit and history record. `None` when
+/// the file predates the rollup, which only happens for a database no Cybion
+/// build has opened yet.
+fn rolled(connection: &Connection) -> Result<Option<Metrics>> {
+    let row = connection.query_row(
+        "SELECT requests,input_tokens,output_tokens,cached_tokens,history_records,threads,workers
+           FROM user_rollup WHERE id=1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        },
+    );
+    match row {
+        Ok((requests, input, output, cached, history, threads, workers)) => Ok(Some(summary((
+            requests, input, output, cached, history, threads, workers,
+        )))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("no such table") =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The pre-rollup answer, kept as the fallback and as the regression oracle:
+/// the same numbers, counted from the raw rows.
+fn counted(connection: &Connection) -> Result<Metrics> {
+    let counts: Counts = connection.query_row(
+        "SELECT COUNT(*),
+        COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_tokens),0),
+        (SELECT COUNT(*) FROM history_records), (SELECT COUNT(*) FROM threads),
+        (SELECT COUNT(*) FROM workers WHERE deleted_at IS NULL)
+        FROM reasoning_audits",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        },
+    )?;
+    Ok(summary(counts))
+}
+
+fn summary(
+    (requests, input_tokens, output_tokens, cached_tokens, history, threads, workers): Counts,
+) -> Metrics {
+    Metrics {
+        requests,
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens + output_tokens,
+        cached_tokens,
+        cache_hit_rate: (input_tokens > 0).then(|| cached_tokens as f64 / input_tokens as f64),
+        history_records: history,
+        threads,
+        workers,
+        running: Running::default(),
+        sqlite_bytes: 0,
+        sqlite_main_bytes: 0,
+        sqlite_wal_bytes: 0,
+        sqlite_shm_bytes: 0,
+    }
 }
 
 const RUNNING_THREADS: &str = r#"
