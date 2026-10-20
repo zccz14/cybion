@@ -12,6 +12,7 @@ struct MockLinkit {
     bot: Option<Bot>,
     owner: String,
     username: Option<String>,
+    lang: Option<String>,
     counterpart: String,
     calls: Vec<String>,
     messages: Vec<Value>,
@@ -68,7 +69,7 @@ async fn mock_linkit(State(remote): State<Arc<Mutex<MockLinkit>>>, request: Requ
     }
     if path == "/api/me" {
         return if human {
-            Json(json!({"id":remote.owner,"profile":remote.username.as_ref().map(|username|json!({"username":username}))})).into_response()
+            Json(json!({"id":remote.owner,"profile":remote.username.as_ref().map(|username|json!({"username":username,"lang":remote.lang}))})).into_response()
         } else {
             Json(json!({"id":bot.unwrap().id,"profile":null})).into_response()
         };
@@ -153,6 +154,7 @@ async fn fixture() -> Fixture {
         }),
         owner: user.id.clone(),
         username: Some("owner".into()),
+        lang: Some("zh-CN".into()),
         counterpart: user.id.clone(),
         calls: vec![],
         messages: vec![],
@@ -173,6 +175,7 @@ async fn fixture() -> Fixture {
         linkit_bot_id: "bot-1".into(),
         linkit_bot_token: "sk-bot-token".into(),
         linkit_username: "owner".into(),
+        linkit_language: "zh-CN".into(),
     };
     save_settings(&state, &user, &settings).await.unwrap();
     let upstream = insert_upstream(&state, &user, "fixture", &format!("{base}/v1")).await;
@@ -396,6 +399,37 @@ async fn ensure_is_owner_scoped_repairs_stale_bot_token_and_preserves_upstreams(
         StatusCode::FORBIDDEN
     );
     assert_eq!(f.remote.lock().await.calls.len(), 1);
+}
+
+#[tokio::test]
+async fn ensure_captures_the_linkit_language_preference_for_checkpoints() {
+    let f = fixture().await;
+    let stored = |f: &Fixture| {
+        let state = f.state.clone();
+        let user = f.user.clone();
+        async move {
+            user_db(&state, &user, false, |connection| {
+                Ok(integration_settings(connection)?.linkit_language)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    f.remote.lock().await.lang = Some("zh-CN,en-US".into());
+    let _ = ensure(State(f.state.clone()), identity(&f)).await.unwrap();
+    assert_eq!(stored(&f).await, "zh-CN,en-US");
+
+    // A profile without a preference clears the stored value, which puts the
+    // checkpoint instruction back on its English default.
+    f.remote.lock().await.lang = None;
+    let _ = ensure(State(f.state.clone()), identity(&f)).await.unwrap();
+    assert_eq!(stored(&f).await, "");
+    assert_eq!(
+        CheckpointLanguage::from_preference(&stored(&f).await),
+        CheckpointLanguage::En
+    );
+
+    f.server.abort();
 }
 
 #[tokio::test]

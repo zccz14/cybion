@@ -55,7 +55,7 @@ async fn reply_completed(socket: &mut tokio::net::TcpStream, text: &str) {
 
 fn checkpoint_body(marker: &str) -> String {
     format!(
-        "# Durable working context\n\n## Concepts and terminology\n- {marker}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record anchors\n\n## Active decisions and constraints\n- preserve history\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
+        "# Durable working context\n\n## Concepts and terminology\n- {marker}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record anchors\n\n## Active decisions and constraints\n- preserve history\n\n## Contexts worth re-reading\n- (none)\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
     )
 }
 
@@ -508,7 +508,7 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_json_request(&mut socket).await;
-        reply(&mut socket, "# Durable working context\n\n## Concepts and terminology\n- preserved\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1\n\n## Active decisions and constraints\n- preserve history\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]").await;
+        reply(&mut socket, "# Durable working context\n\n## Concepts and terminology\n- preserved\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1\n\n## Active decisions and constraints\n- preserve history\n\n## Contexts worth re-reading\n- (none)\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]").await;
         assert!(
             tokio::time::timeout(Duration::from_millis(200), listener.accept())
                 .await
