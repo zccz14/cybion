@@ -188,8 +188,10 @@ Before an inference request compiles, the controller compares every Context the
 Thread read inside that window against what the same read returns now. When one
 changed, it appends a `context_dirty` activity record naming the Context, the
 record that read it, and the current fingerprint, and the compiler replays that
-record as a developer message: it names each Context and the record that read it
-and asks for a fresh `read_context`. The notice is durable — it stays in the
+record as a developer message. The message is a requirement rather than a hint:
+it declares the copies in the conversation stale and unusable, requires one
+`read_context` call per Context before the next tool call or answer, and forbids
+falling back to the old copy when a read fails. The notice is durable — it stays in the
 transcript, and in every later replay of the range, until a checkpoint replaces
 it — and the record is also what keeps a Thread from being told the same change
 on every attempt: a Context is announced once per `(read record, current

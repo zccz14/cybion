@@ -4185,7 +4185,9 @@ fn context_dirty_message(payload: &Value) -> Option<Value> {
         .filter_map(|context| {
             let id = context.get("context_id")?.as_str()?;
             let record = context.get("read_record_id")?.as_i64()?;
-            Some(format!("- {id} (you read it at record #{record})"))
+            Some(format!(
+                "- {id} (your stale copy came from record #{record})"
+            ))
         })
         .collect::<Vec<_>>();
     if lines.is_empty() {
@@ -4194,7 +4196,9 @@ fn context_dirty_message(payload: &Value) -> Option<Value> {
     Some(json!({
         "role": "developer",
         "content": format!(
-            "Contexts you read have changed since. Read them again before relying on their content:\n{}\nCall read_context for each one and use the new content.",
+            "Contexts you read are out of date. The copies of them in this conversation are stale — do not use them again.\n\n\
+             Required, not optional: before your next tool call or answer, call read_context once for each Context below and rely only on what it returns.\n{}\n\n\
+             Skipping this means answering from superseded material. If a read fails, say so and ask the user; never fall back to the old copy.",
             lines.join("\n")
         ),
     }))
