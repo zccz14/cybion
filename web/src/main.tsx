@@ -1894,7 +1894,6 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
             <ThreadStatusSummary status={current.display_status} language={language} />
             {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
           </div>
-          {contextReads.data !== undefined && contextReads.data.head !== null && <ThreadContextReads reads={readContexts} lookup={contextLookup} view={contextReads.data} language={language} />}
         </div>}
         <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
         <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
@@ -1924,6 +1923,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
+              {contextReads.data !== undefined && contextReads.data.head !== null && <div className="border-t pt-3"><ThreadContextReads reads={readContexts} lookup={contextLookup} view={contextReads.data} language={language} /></div>}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton behavior="auto" />
