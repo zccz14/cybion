@@ -29,9 +29,8 @@ to the user's default). The chip turns warning-colored once the recorded context
 reaches the budget, and reads "auto-compaction off" when the budget is 0.
 
 The same header area lists the Contexts the Thread has read inside that window:
-a link, the short id, the short content fingerprint of the version it read, and a
-marker when that version has since been edited; see
-[Thread context replay](context.md).
+a name, a link, and a marker only when the copy the model holds is no longer the
+current one; see [Thread context replay](context.md).
 
 SQL sums recorded values independently for each Token field and skips `NULL`
 values. Cache rate divides summed cached input by summed input, rather than
