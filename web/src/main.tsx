@@ -79,7 +79,6 @@ import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, 
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { contextDirtyContexts, threadContextReads, type ThreadContextReadsView } from "@/lib/thread-context-reads"
-import { applyFavicon } from "@/lib/favicon"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useComposerImages } from "@/hooks/use-composer-images"
@@ -1374,7 +1373,6 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
   }), [language])
   return <LinkitProvider linkitBaseUrl="https://linkit.ntnl.io" lang={language === "zh" ? "zh-CN" : "en-US"}>
     <LinkitLanguageSync setLanguage={setLanguage} />
-    <LinkitFaviconSync />
     <NormaiAutoConnect sdk={sdk} />
     <LinkitAutoEnsure sdk={sdk} />
     <UiContext.Provider value={ui}>
@@ -1408,12 +1406,6 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
       </ErrorBoundary>
     </UiContext.Provider>
   </LinkitProvider>
-}
-
-function LinkitFaviconSync() {
-  const { resolvedTheme } = useLinkit()
-  useEffect(() => { applyFavicon(resolvedTheme) }, [resolvedTheme])
-  return null
 }
 
 function LinkitLanguageSync({ setLanguage }: { setLanguage: (language: Language) => void }) {
