@@ -60,11 +60,15 @@ User messages use the dedicated `user-message` tokens: in light mode these alias
 Near-white primary buttons therefore remain compact action signals while long
 user messages remain dark gray, and one footer row below each user message
 bubble carries the shared copy control and the record id with its timestamp.
-Cybion replies and checkpoints render as plain Markdown directly on the working
-surface; replies carry no avatar, name, or bubble, and their copy control and
-timestamp follow the content the same way. Reasoning panels use the
-card surface in dark mode, and reasoning-panel boundaries use the neutral
-border.
+Cybion replies render as plain Markdown directly on the working surface; replies
+carry no avatar, name, or bubble, and their copy control and timestamp follow the
+content the same way. A checkpoint is the one record that announces itself: a
+dashed card on the muted surface carries a database icon, its label, the
+`内部记录` / `Internal` badge, its timestamp, and one line of the checkpoint's own
+prose, so a compression point stays legible in the transcript without opening
+it; its Markdown body and raw payload stay folded behind that summary.
+Reasoning panels use the card surface in dark mode, and reasoning-panel
+boundaries use the neutral border.
 
 Dark Markdown uses the neutral typography palette for body text, headings,
 quotes, links, tables, and code. Light Markdown keeps its existing palette.
