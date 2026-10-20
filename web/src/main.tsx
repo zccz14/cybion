@@ -76,7 +76,7 @@ import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, seriali
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
-import { threadContextReads, type ThreadContextReadsView } from "@/lib/thread-context-reads"
+import { contextDirtyContexts, threadContextReads, type ThreadContextReadsView } from "@/lib/thread-context-reads"
 import { applyFavicon } from "@/lib/favicon"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
@@ -128,6 +128,7 @@ import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
 import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
+import { ContextDirtyNotice } from "@/components/context-dirty-notice"
 import { ThreadContextReads } from "@/components/thread-context-reads"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
@@ -1730,6 +1731,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
   // fetches only start when the loaded history actually touches a context.
   const readsContexts = useMemo(() => readContexts.length > 0 || records.some((record) => {
     const payload = historyPayloadObject(record.payload)
+    if (payload?.type === "context_dirty") return true
     return payload?.type === "function_call" && (payload.name === "read_context" || payload.name === "write_context")
   }), [readContexts, records])
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: readsContexts })
@@ -1982,6 +1984,11 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
       </MessageContent>
     </Message>
   }
+  const dirtyContexts = contextDirtyContexts(record)
+  if (dirtyContexts) {
+    return <ContextDirtyNotice contexts={dirtyContexts} lookup={contexts} language={language} time={time} recordId={record.id} />
+  }
+
   const text = historyRecordText(record)
 
   if (isReasoningRecord(record)) {

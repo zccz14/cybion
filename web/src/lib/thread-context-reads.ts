@@ -1,12 +1,11 @@
-import { cybionToolFunctionCall } from "./history-payload.ts"
+import { cybionToolFunctionCall, historyPayloadObject } from "./history-payload.ts"
 import type { HistoryRecord } from "./thread-history.ts"
 
-// One `read_context` call the Thread made inside the context it still replays,
-// with the fingerprint of the version it answered with and of the same read now.
-export type ThreadContextReadCall = HistoryRecord & {
-  read_hash: string | null
-  current_hash: string | null
-}
+// Whether the Context a read answered with is still the current copy, as the
+// controller judged it when the page asked.
+export type ContextReadState = "current" | "changed" | "unanswered" | "missing"
+
+export type ThreadContextReadCall = HistoryRecord & { state: ContextReadState }
 
 // The controller answers with the calls inside `[head, tail]`, so a compaction
 // removes exactly the reads its checkpoint replaced.
@@ -22,13 +21,8 @@ export type ThreadContextRead = {
   first_record_id: number
   last_record_id: number
   last_read_at: number
-  // The version this Thread read; null when the model never received a body.
-  read_hash: string | null
-  // What the same read returns now; null when the Context no longer resolves.
-  current_hash: string | null
+  state: ContextReadState
 }
-
-export type ContextReadState = "current" | "changed" | "unanswered" | "missing"
 
 // INVARIANT: the controller returns the calls oldest first, so Map insertion order is
 // the order the Thread discovered the Contexts in. The newest read of a Context is the
@@ -42,25 +36,22 @@ export function threadContextReads(calls: readonly ThreadContextReadCall[]): Thr
     const contextId = call.contextId.toLowerCase()
     const read = reads.get(contextId)
     reads.set(contextId, read
-      ? { ...read, calls: read.calls + 1, last_record_id: record.id, last_read_at: record.created_at, read_hash: record.read_hash, current_hash: record.current_hash }
-      : { context_id: contextId, calls: 1, first_record_id: record.id, last_record_id: record.id, last_read_at: record.created_at, read_hash: record.read_hash, current_hash: record.current_hash })
+      ? { ...read, calls: read.calls + 1, last_record_id: record.id, last_read_at: record.created_at, state: record.state }
+      : { context_id: contextId, calls: 1, first_record_id: record.id, last_record_id: record.id, last_read_at: record.created_at, state: record.state })
   }
   return [...reads.values()]
 }
 
-export function contextReadState(read: ThreadContextRead): ContextReadState {
-  if (read.read_hash === null) return "unanswered"
-  if (read.current_hash === null) return "missing"
-  return read.read_hash === read.current_hash ? "current" : "changed"
-}
-
-// The Contexts page addresses a Context by its full id and the endpoint answers
-// full fingerprints; the Thread page shows the short form of each so a row of
-// chips stays readable.
-export function shortContextId(contextId: string) {
-  return contextId.slice(0, 8)
-}
-
-export function shortFingerprint(hash: string) {
-  return hash.slice(0, 8)
+// The Contexts a `context_dirty` activity record announced: the controller
+// appends it before a request compiles, and the compiler replays the same list
+// upstream as a developer message.
+export function contextDirtyContexts(record: HistoryRecord): string[] | null {
+  const payload = historyPayloadObject(record.payload)
+  if (record.kind !== "activity" || payload?.type !== "context_dirty") return null
+  const contexts = Array.isArray(payload.contexts) ? payload.contexts : []
+  const ids = contexts.flatMap((context) => {
+    const object = historyPayloadObject(context)
+    return typeof object?.context_id === "string" ? [object.context_id] : []
+  })
+  return ids.length > 0 ? ids : null
 }

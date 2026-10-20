@@ -3817,8 +3817,8 @@ fn thread_history_older_page(
 
 /// The `read_context` calls inside the context this Thread replays right now.
 /// The browser parses them into the Contexts the model has read, so the page can
-/// show what is still in context; a compaction moves the head to its checkpoint
-/// and the calls before it fall out of the range.
+/// show what is still in context and whether it still holds; a compaction moves
+/// the head to its checkpoint and the calls before it fall out of the range.
 #[derive(Serialize)]
 struct ThreadContextReadsView {
     /// Context head: the checkpoint, or the oldest protocol record, that replay starts at.
@@ -3833,12 +3833,41 @@ struct ThreadContextReadsView {
 struct ContextReadCall {
     #[serde(flatten)]
     record: HistoryRecord,
-    /// Fingerprint of the Context version this call's tool output carried; absent
-    /// when the call was never answered or the answer held no Context body.
-    read_hash: Option<String>,
-    /// Fingerprint of what the same read returns now; absent when the Context no
-    /// longer resolves.
-    current_hash: Option<String>,
+    /// Whether the Context this call read is still the current copy.
+    state: ContextReadState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ContextReadState {
+    /// The Thread holds the current version.
+    Current,
+    /// The Context changed after the read.
+    Changed,
+    /// The call was never answered with a Context body.
+    Unanswered,
+    /// The Context no longer resolves.
+    Missing,
+}
+
+/// What one read and the same read now amount to. `Changed` carries the current
+/// fingerprint, which is what the Thread is told about and recorded as told.
+enum ReadVersion {
+    Same,
+    Changed(String),
+    Unanswered,
+    Missing,
+}
+
+impl ReadVersion {
+    fn state(&self) -> ContextReadState {
+        match self {
+            Self::Same => ContextReadState::Current,
+            Self::Changed(_) => ContextReadState::Changed,
+            Self::Unanswered => ContextReadState::Unanswered,
+            Self::Missing => ContextReadState::Missing,
+        }
+    }
 }
 
 async fn thread_context_reads(
@@ -3879,6 +3908,24 @@ fn load_context_reads(
         });
     };
     let head = context_idx_head(connection, id, tail)?;
+    let mut calls = Vec::new();
+    for record in read_context_calls(connection, id, head, tail)? {
+        let state = read_version(connection, id, &record, tail)?.state();
+        calls.push(ContextReadCall { record, state });
+    }
+    Ok(ThreadContextReadsView {
+        head: Some(head),
+        tail: Some(tail),
+        calls,
+    })
+}
+
+fn read_context_calls(
+    connection: &Connection,
+    thread_id: &str,
+    head: i64,
+    tail: i64,
+) -> Result<Vec<HistoryRecord>, ApiError> {
     let mut statement = connection.prepare(
         "SELECT id,thread_id,kind,payload,created_at FROM history_records
          WHERE thread_id=? AND kind='response_output' AND id>=? AND id<=?
@@ -3886,26 +3933,151 @@ fn load_context_reads(
            AND json_extract(payload,'$.name')='read_context'
          ORDER BY id",
     )?;
-    let rows = statement.query_map(params![id, head, tail], history_from_row)?;
+    let rows = statement.query_map(params![thread_id, head, tail], history_from_row)?;
     let mut calls = Vec::new();
     for row in rows {
-        let record = row?;
-        let read_hash = read_call_fingerprint(connection, id, &record, tail)?;
-        let current_hash = match read_call_context_id(&record.payload) {
-            Some(context_id) => current_context_fingerprint(connection, &context_id)?,
-            None => None,
-        };
-        calls.push(ContextReadCall {
-            record,
-            read_hash,
-            current_hash,
-        });
+        calls.push(row?);
     }
-    Ok(ThreadContextReadsView {
-        head: Some(head),
-        tail: Some(tail),
-        calls,
+    Ok(calls)
+}
+
+/// The same Context can be read repeatedly; the newest read is the copy the
+/// Thread holds, so it decides both the state and what is re-read.
+fn latest_reads(calls: Vec<HistoryRecord>) -> Vec<(String, HistoryRecord)> {
+    let mut latest: Vec<(String, HistoryRecord)> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for call in calls {
+        let Some(context_id) = read_call_context_id(&call.payload) else {
+            continue;
+        };
+        match seen.get(&context_id) {
+            Some(index) => latest[*index].1 = call,
+            None => {
+                seen.insert(context_id.clone(), latest.len());
+                latest.push((context_id, call));
+            }
+        }
+    }
+    latest
+}
+
+fn read_version(
+    connection: &Connection,
+    thread_id: &str,
+    call: &HistoryRecord,
+    tail: i64,
+) -> Result<ReadVersion, ApiError> {
+    let Some(read_hash) = read_call_fingerprint(connection, thread_id, call, tail)? else {
+        return Ok(ReadVersion::Unanswered);
+    };
+    let current = match read_call_context_id(&call.payload) {
+        Some(context_id) => current_context_fingerprint(connection, &context_id)?,
+        None => None,
+    };
+    Ok(match current {
+        Some(current) if current == read_hash => ReadVersion::Same,
+        Some(current) => ReadVersion::Changed(current),
+        None => ReadVersion::Missing,
     })
+}
+
+/// Before a request compiles, the Thread is told which Contexts it read have
+/// changed since. One durable `context_dirty` activity record carries that list:
+/// the compiler replays it as a developer message, the transcript keeps it as
+/// evidence, and the record itself stops the same change from being announced
+/// again.
+fn append_context_dirty_notice(
+    connection: &Connection,
+    thread_id: &str,
+    tail: i64,
+) -> Result<Option<i64>, ApiError> {
+    let head = context_idx_head(connection, thread_id, tail)?;
+    let changes = unannounced_changes(connection, thread_id, head, tail)?;
+    if changes.is_empty() {
+        return Ok(None);
+    }
+    let contexts = changes
+        .iter()
+        .map(|(context_id, record_id, current_hash)| {
+            json!({
+                "context_id": context_id,
+                "read_record_id": record_id,
+                "current_hash": current_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({ "type": "context_dirty", "contexts": contexts });
+    let record = persist_history_record(
+        connection,
+        HistoryRecordInsert {
+            thread_id,
+            kind: "activity",
+            payload: &payload,
+            created_at: now(),
+        },
+    )?;
+    Ok(Some(record))
+}
+
+/// The Contexts whose change this Thread has not been told about yet, as
+/// `(context id, the record that read it, the current fingerprint)`.
+fn unannounced_changes(
+    connection: &Connection,
+    thread_id: &str,
+    head: i64,
+    tail: i64,
+) -> Result<Vec<(String, i64, String)>, ApiError> {
+    let announced = announced_changes(connection, thread_id, head, tail)?;
+    let calls = read_context_calls(connection, thread_id, head, tail)?;
+    let mut changes = Vec::new();
+    for (context_id, call) in latest_reads(calls) {
+        let version = read_version(connection, thread_id, &call, tail)?;
+        let ReadVersion::Changed(current_hash) = version else {
+            continue;
+        };
+        let change = (context_id, call.id, current_hash);
+        if !announced.contains(&change) {
+            changes.push(change);
+        }
+    }
+    Ok(changes)
+}
+
+/// What earlier notices in the same range already said, so the same verdict is not
+/// repeated attempt after attempt. A Context that changes again is a new entry
+/// and is announced.
+fn announced_changes(
+    connection: &Connection,
+    thread_id: &str,
+    head: i64,
+    tail: i64,
+) -> Result<HashSet<(String, i64, String)>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT payload FROM history_records
+         WHERE thread_id=? AND kind='activity' AND id>=? AND id<=?
+           AND json_extract(payload,'$.type')='context_dirty'",
+    )?;
+    let rows = statement.query_map(params![thread_id, head, tail], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut announced = HashSet::new();
+    for row in rows {
+        let payload: Value = serde_json::from_str(&row?).map_err(ApiError::internal)?;
+        let Some(contexts) = payload.get("contexts").and_then(Value::as_array) else {
+            continue;
+        };
+        for context in contexts {
+            let (Some(context_id), Some(record_id), Some(current_hash)) = (
+                context.get("context_id").and_then(Value::as_str),
+                context.get("read_record_id").and_then(Value::as_i64),
+                context.get("current_hash").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            announced.insert((context_id.to_owned(), record_id, current_hash.to_owned()));
+        }
+    }
+    Ok(announced)
 }
 
 /// The fingerprint of one Context version as `read_context` hands it to the
@@ -4000,6 +4172,32 @@ fn current_context_fingerprint(
             )
         }),
     )
+}
+
+/// A `context_dirty` activity replays as the developer message it stands for.
+fn context_dirty_message(payload: &Value) -> Option<Value> {
+    if payload.get("type").and_then(Value::as_str) != Some("context_dirty") {
+        return None;
+    }
+    let contexts = payload.get("contexts")?.as_array()?;
+    let lines = contexts
+        .iter()
+        .filter_map(|context| {
+            let id = context.get("context_id")?.as_str()?;
+            let record = context.get("read_record_id")?.as_i64()?;
+            Some(format!("- {id} (you read it at record #{record})"))
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "role": "developer",
+        "content": format!(
+            "Contexts you read have changed since. Read them again before relying on their content:\n{}\nCall read_context for each one and use the new content.",
+            lines.join("\n")
+        ),
+    }))
 }
 
 async fn thread_input(
@@ -5019,7 +5217,7 @@ impl CompiledThreadContext {
 /// replay barrier, not an upstream item: it counts as a protocol record so it
 /// advances the replay tail, and it marks where the Thread started replaying
 /// with another `(upstream, model)` pair.
-const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type')='model_switch'))";
+const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','context_dirty')))";
 
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     connection
@@ -5410,6 +5608,9 @@ fn load_protocol_items(
     for (id, created_at, kind, payload) in rows {
         let mut item: Value =
             serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if let Some(notice) = context_dirty_message(&item) {
+            item = notice;
+        }
         if reinjected.contains(&id) {
             screenshot_replay_item(&mut item);
         } else {

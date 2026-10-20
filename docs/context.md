@@ -19,7 +19,10 @@ input | response_output | tool_output | checkpoint
 ```
 
 `activity` records describe runtime state for the UI. They remain in history
-but are outside the model context and cannot be selected as a context tail.
+and are outside the model context, except two Cybion-authored kinds that do take
+part in replay: `model_switch` marks a replay barrier, and `context_dirty`
+compiles into the developer message that tells a Thread which Contexts it read
+have changed since.
 
 ## Compilation
 
@@ -148,39 +151,59 @@ level. Child content and deeper descendants are disclosed only when read.
 The conversation header shows which Contexts the Thread has read **and still
 holds**, and whether the copy it read is still the current one.
 `GET /api/threads/{id}/history/reads` answers with the current `head` and `tail`
-plus the `read_context` calls inside that range, each carrying its record, the
-`read_hash` of the version its tool output delivered, and the `current_hash` of
-what the same read returns now; the browser reads each call's `context_id` out of
-its arguments. Calls before the head are not in the answer, so when a compaction
-appends its checkpoint the reads it summarized leave the list and only the reads
-made after the checkpoint stay. This is the same `[idx_head, idx_tail]` the
-compiler replays, not a separate stored state.
+plus the `read_context` calls inside that range, each carrying its record and the
+`state` the controller judged: `current`, `changed`, `unanswered` (the answer
+carried no Context body) or `missing` (the Context no longer resolves). Calls
+before the head are not in the answer, so when a compaction appends its
+checkpoint the reads it summarized leave the list and only the reads made after
+the checkpoint stay. This is the same `[idx_head, idx_tail]` the compiler
+replays, not a separate stored state.
 
-Both fingerprints cover the node's own content — its title, Use When description,
-and body — and nothing around it: moving a Context, reordering its siblings, or
-editing a child leaves the fingerprint alone, because a read registers content
-rather than the tree. The read fingerprint comes from the stored tool output, so
-it is the version the model actually received; an answer that carried no Context
-body, such as a read that failed, has none. The current fingerprint resolves the
-same id the way `read_context` resolves it — local Contexts first, then the
-compiled common tree in its source language — and is absent once the Context is
-deleted or hidden by the trash.
+The verdict compares two fingerprints of the Context's own content — its title,
+Use When description, and body — and nothing around it: moving a Context,
+reordering its siblings, or editing a child leaves the fingerprint alone, because
+a read registers content rather than the tree. The read fingerprint comes from
+the stored tool output, so it is the version the model actually received; the
+current one resolves the same id the way `read_context` resolves it — local
+Contexts first, then the compiled common tree in its source language.
 
 Each Context appears once, in the order the Thread first read it, with the newest
-read of it deciding both fingerprints: a Thread that read a Context before and
-after an edit holds the edit. The chip shows its name resolved through the same
-caches the Contexts page fills, the short id, the short read fingerprint, and a
-link to that Context. It marks the three states worth noticing: an edited Context
-(`read_hash` differs from `current_hash`), a Context whose read never returned a
-body, and a Context that no longer resolves. A repeat read in the window shows its
-count, and the tooltip carries the full id, the record that read it, and both full
-fingerprints.
+read deciding its state: a Thread that read a Context before and after an edit
+holds the edit. The chip shows the Context's name, a link to it, and only the
+states worth noticing — edited, never answered, gone. A current Context is not
+marked, a repeat read shows its count, and the tooltip carries the full id and
+the record that read it. No identifier or fingerprint is printed on the chip: a
+UUID means nothing to a reader, and both are already in the activity record and
+the tool output behind it.
 
 The row also shows the record range it was computed from, so a head that moved to
 a checkpoint is visible. A Thread with no protocol record yet reports `head` and
 `tail` as `null` and the row stays hidden. A range without a `read_context` call
 renders the row with a count of zero, which is the signal that the Thread has not
 read any Context in this window.
+
+### Changed Contexts are announced
+
+Before an inference request compiles, the controller compares every Context the
+Thread read inside that window against what the same read returns now. When one
+changed, it appends a `context_dirty` activity record naming the Context, the
+record that read it, and the current fingerprint, and the compiler replays that
+record as a developer message: it names each Context and the record that read it
+and asks for a fresh `read_context`. The notice is durable — it stays in the
+transcript, and in every later replay of the range, until a checkpoint replaces
+it — and the record is also what keeps a Thread from being told the same change
+on every attempt: a Context is announced once per `(read record, current
+fingerprint)` pair, so a further change is a new pair and is announced again,
+while a notice already made is not repeated.
+
+The announcement runs in the transaction that compiles the request, after the
+request boundary and the Thread's status are confirmed, so it belongs to the
+range that request replays and cannot race a newer input. A Context the Thread
+re-read after the change is current again and is not announced. A Context that is
+no longer readable — deleted, or hidden by the trash — is not announced, because
+there is nothing left to re-read; the header marks it instead. The notice names
+ids rather than titles: the ids are what `read_context` takes, and a title may
+itself have changed.
 
 ## Cybion Common Context
 
