@@ -5,12 +5,15 @@ the Archive. They are the only kind expected to reach zero.
 
 ## Boundary
 
-A note is one short line and one action. It has two scopes:
+A note is one short line and one action, and it belongs to exactly one Thread.
+That Thread is the only place the note is visible, the only place it can be
+crossed out, and the only thing that gives its wording meaning: a note may lean
+on the conversation it was written in.
 
-| Scope | Visible in | Crossable by | Writing contract |
-| --- | --- | --- | --- |
-| Attached (`thread_id` set) | Only that Thread | Only that Thread | May lean on the Thread's context |
-| Global (`thread_id` NULL) | Every Thread | Every Thread | Must read on its own |
+`thread_id` is `NOT NULL` and the controller stamps it from the calling Thread,
+so the model can never write into another Thread's notes. There is no mode that
+shares a note between Threads; a note that has to outlive its Thread belongs in a
+Context, not in a note.
 
 The durable state is `done_at`: a note is open while it is NULL and crossed out
 once it is stamped. Crossing out is terminal — there is no edit, no reopen and no
@@ -27,13 +30,10 @@ Every inference request inserts one synthetic `developer` message immediately
 before the newest user input:
 
 ```text
-Sticky notes — global (1):
-[a1b2c3d4] 交 11 月房租
-Sticky notes — this thread (1):
+Sticky notes (1):
 [9f0e1d2c] 确认 GRID 解耦是否生效
-Cross out what you finished. Global notes are shared with every thread; a note
-attached to this thread is visible and crossable only here. Ask the user when you
-are blocked.
+Cross out what you finished. A note is visible and crossable only in the Thread
+that wrote it. Ask the user when you are blocked.
 ```
 
 The block is assembled into the request copy only: `history_records` stays exactly
@@ -45,41 +45,37 @@ Because insertion happens at the tail, the replayed prefix keeps its warm cache.
 
 | Tool | Effect |
 | --- | --- |
-| `add_notes` | `{scope?: "thread" \| "global", items: [{text}]}` → `{scope, added: [{note_id, text}], open: {thread, global}}` |
+| `add_notes` | `{items: [{text}]}` → `{added: [{note_id, text}], open}` |
 | `cross_out_notes` | `{note_ids: [...]}` → `{crossed_out, already_done, not_found}` |
-
-`scope` defaults to `thread`; the controller stamps `thread_id` from the calling
-Thread, so the model can never write into another Thread's notes. Crossing an
-already crossed note reports `already_done` and changes nothing, so a retry is
-harmless.
 
 Both limits are answered to the model as tool output it can act on, not as a
 failed turn:
 
 ```text
-note is 143 characters; thread notes allow at most 120. Condense it into one short
+note is 143 characters; a note allows at most 120. Condense it into one short
 line and call add_notes again.
-thread notes already hold 10 open items; the limit is 10. Cross out what is
+this Thread already holds 10 open notes; the limit is 10. Cross out what is
 finished, or ask the user to tear off the notes that no longer apply.
 ```
+
+Crossing an already crossed note reports `already_done` and changes nothing, so a
+retry is harmless.
 
 ## Limits
 
 | Limit | Default | Where |
 | --- | --- | --- |
-| Thread note characters | 120 | System configuration (`notes.thread_max_chars`) |
-| Global note characters | 200 | System configuration (`notes.global_max_chars`) |
+| Note characters | 120 | System configuration (`notes.thread_max_chars`) |
 | Open notes per Thread | 10 | Code constant |
-| Open global notes | 10 | Code constant |
 
-The character limits are service configuration, never a database constraint: a
-long note is refused with a message that asks for a shorter one, so the text is
-rewritten rather than silently truncated. Values are whole numbers from 1 to
-2000, stored in the controller's `app_meta` beside the administrator metadata,
-and read with the defaults above so a fresh deployment needs no seeding step.
+The character limit is service configuration, never a database constraint: a long
+note is refused with a message that asks for a shorter one, so the text is
+rewritten rather than silently truncated. Values are whole numbers from 1 to 2000,
+stored in the controller's `app_meta` beside the administrator metadata, and read
+with the default above so a fresh deployment needs no seeding step.
 
-The two open caps bound the injected block by construction — at most twenty lines
-per request — so request assembly never truncates.
+The open cap bounds the injected block by construction — at most ten lines per
+request — so request assembly never truncates.
 
 ## Storage
 
@@ -88,29 +84,29 @@ One `notes` row per note in the owner's database:
 | Column | Meaning |
 | --- | --- |
 | `id` | Eight hex characters, the id the model quotes back. |
-| `thread_id` | The owning Thread, or NULL for a global note. No foreign key. |
+| `thread_id` | The owning Thread, `NOT NULL`. No foreign key. |
 | `text` | The note itself; immutable after creation. |
 | `created_at` | Unix seconds; orders the notes page and the injected block. |
 | `done_at` | NULL while open, the crossing time once crossed out. |
 
 Deleting a Thread tears off its notes, open and crossed, and answers
-`{"deleted_notes": n}`. A note was written against that Thread's context, so
-promoting it to global would only manufacture a note no other Thread can read;
-the delete confirmation lists the open ones before the Thread goes.
+`{"deleted_notes": n}`. A note was written against that Thread's context and
+means nothing outside it, so it goes with the Thread; the delete confirmation
+lists the open ones before the Thread goes.
 
 ## Pages
 
-`#/notes` (Work → Governed contexts → Notes) is the owner's review surface: one
-input for a new global note, then the open notes grouped by scope — global first,
-then one group per Thread with a link back — and a collapsed list of crossed
-notes. Each open note offers *cross out* and *tear off*; a crossed note offers
-*tear off* only. The page shows each note's id and, past a day, its age.
+`#/notes` (Work → Governed contexts → Notes) is the owner's review surface: the
+open notes grouped by the Thread that wrote them, each group linking back, then a
+collapsed list of crossed notes. Each open note offers *cross out* and *tear off*;
+a crossed note offers *tear off* only. The page shows each note's id and, past a
+day, its age. It never writes a note: notes come from Threads.
 
 The Tools page lists both tools under the Controller group, and every tool call
 renders as its own card in the conversation.
 
 ## Non-goals
 
-Several boards, labels, priorities, drag ordering, due dates and reminders,
-extracting notes from a conversation automatically, and sharing notes with
-another user. A Thread share never exposes the owner's notes.
+Notes shared between Threads or between users, several boards, labels,
+priorities, drag ordering, due dates and reminders, and extracting notes from a
+conversation automatically. A Thread share never exposes the owner's notes.

@@ -3351,20 +3351,9 @@ async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     let thread = create_test_thread(&state, &user).await;
     let thread_id = thread.id.clone();
     user_db(&state, &user, true, move |connection| {
-        notes::add(
-            connection,
-            Some(&thread_id),
-            &["alpha item".to_owned()],
-            120,
-        )?;
-        notes::add(connection, None, &["global item".to_owned()], 200)?;
+        notes::add(connection, &thread_id, &["alpha item".to_owned()], 120)?;
         // A note attached to another Thread must never reach this request.
-        notes::add(
-            connection,
-            Some("another-thread"),
-            &["beta item".to_owned()],
-            120,
-        )?;
+        notes::add(connection, "another-thread", &["beta item".to_owned()], 120)?;
         Ok(())
     })
     .await
@@ -3403,9 +3392,7 @@ async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     assert_eq!(items.len(), 2, "{items:?}");
     assert_eq!(items[0]["role"], "developer");
     let block = items[0]["content"].as_str().unwrap();
-    assert!(block.contains("Sticky notes — global (1):"), "{block}");
-    assert!(block.contains("Sticky notes — this thread (1):"), "{block}");
-    assert!(block.contains("global item"), "{block}");
+    assert!(block.contains("Sticky notes (1):"), "{block}");
     assert!(block.contains("alpha item"), "{block}");
     assert!(!block.contains("beta item"), "{block}");
     assert_eq!(items[1], json!({"role":"user","content":"hello"}));

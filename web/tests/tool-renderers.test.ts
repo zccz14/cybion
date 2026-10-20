@@ -18,7 +18,7 @@ const samples: Record<string, unknown> = {
   cybion_get_ultimate_machine: { type: "function_call", name: "cybion_get_ultimate_machine", arguments: '{"machine_id":"machine-1"}' },
   cybion_set_ultimate_machine: { type: "function_call", name: "cybion_set_ultimate_machine", arguments: '{"name":"磁盘检查","worker_id":"worker-1","command":"df -h","interval_seconds":600}' },
   cybion_delete_ultimate_machine: { type: "function_call", name: "cybion_delete_ultimate_machine", arguments: '{"machine_id":"machine-1"}' },
-  add_notes: { type: "function_call", name: "add_notes", arguments: '{"scope":"global","items":[{"text":"pay the rent"}]}' },
+  add_notes: { type: "function_call", name: "add_notes", arguments: '{"items":[{"text":"pay the rent"}]}' },
   cross_out_notes: { type: "function_call", name: "cross_out_notes", arguments: '{"note_ids":["a1b2c3d4"]}' },
   normai_web_search: { type: "function_call", name: "normai_web_search", arguments: '{"query":"rust release"}' },
   normai_image_generation: { type: "function_call", name: "normai_image_generation", arguments: '{"prompt":"a dog"}' },

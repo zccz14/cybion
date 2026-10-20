@@ -14,7 +14,7 @@ type Language = "en" | "zh"
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 type Props = { language: Language; sessionId: string | null | undefined; request: Request }
 type ExperimentalFeatures = { thread_id_header: boolean; session_id_header: boolean }
-type NoteSettings = { thread_max_chars: number; global_max_chars: number }
+type NoteSettings = { thread_max_chars: number }
 const NOTE_CHAR_CEILING = 2000
 const copy = {
   en: {
@@ -27,10 +27,8 @@ const copy = {
     saveExperimentalError: "Could not save experimental feature settings",
     notesTitle: "Sticky notes",
     notesDescription: "Character limits the service enforces when a note is added. A longer note is refused with a message that asks the model to condense it, so the note is rewritten instead of silently truncated.",
-    threadMaxChars: "Thread note limit",
-    threadMaxCharsDescription: "Characters allowed in a note attached to one Thread. It may lean on that Thread's context.",
-    globalMaxChars: "Global note limit",
-    globalMaxCharsDescription: "Characters allowed in a global note, which must read on its own in every Thread.",
+    threadMaxChars: "Note limit",
+    threadMaxCharsDescription: "Characters allowed in a note. A note belongs to one Thread, so it may lean on that Thread's context.",
     saveNotes: "Save limits",
     saveNotesError: "Could not save the note limits",
     notesInvalid: "Enter a whole number between 1 and 2000.",
@@ -50,10 +48,8 @@ const copy = {
     saveExperimentalError: "无法保存实验性功能设置",
     notesTitle: "便签",
     notesDescription: "服务在添加便签时执行的字符上限。超长会被拒绝并提示模型精简内容，因此便签会被重写，而不是被静默截断。",
-    threadMaxChars: "本线程便签上限",
-    threadMaxCharsDescription: "附属于单个线程的便签允许的字符数，它可以依赖该线程的上下文。",
-    globalMaxChars: "全局便签上限",
-    globalMaxCharsDescription: "全局便签允许的字符数，它必须在任何线程里都能独立读懂。",
+    threadMaxChars: "便签上限",
+    threadMaxCharsDescription: "每条便签允许的字符数。便签只属于一个线程，因此可以依赖该线程的上下文。",
     saveNotes: "保存上限",
     saveNotesError: "无法保存便签上限",
     notesInvalid: "请输入 1 到 2000 之间的整数。",
@@ -124,7 +120,6 @@ function NoteLimitsCard({ language, sessionId, request }: Props) {
   const value = draft ?? settings.data ?? null
   const valid = value !== null
     && Number.isInteger(value.thread_max_chars) && value.thread_max_chars >= 1 && value.thread_max_chars <= NOTE_CHAR_CEILING
-    && Number.isInteger(value.global_max_chars) && value.global_max_chars >= 1 && value.global_max_chars <= NOTE_CHAR_CEILING
   const change = (key: keyof NoteSettings) => (event: ChangeEvent<HTMLInputElement>) => {
     const next = Number.parseInt(event.target.value, 10)
     if (value !== null) setDraft({ ...value, [key]: Number.isNaN(next) ? 0 : next })
@@ -136,10 +131,6 @@ function NoteLimitsCard({ language, sessionId, request }: Props) {
       <Field orientation="horizontal">
         <FieldContent><FieldLabel htmlFor="note-thread-max-chars">{t.threadMaxChars}</FieldLabel><FieldDescription id="note-thread-max-chars-description">{t.threadMaxCharsDescription}</FieldDescription></FieldContent>
         <Input id="note-thread-max-chars" aria-describedby="note-thread-max-chars-description" className="w-28" type="number" min={1} max={NOTE_CHAR_CEILING} value={value.thread_max_chars} disabled={save.isPending} onChange={change("thread_max_chars")} />
-      </Field>
-      <Field orientation="horizontal">
-        <FieldContent><FieldLabel htmlFor="note-global-max-chars">{t.globalMaxChars}</FieldLabel><FieldDescription id="note-global-max-chars-description">{t.globalMaxCharsDescription}</FieldDescription></FieldContent>
-        <Input id="note-global-max-chars" aria-describedby="note-global-max-chars-description" className="w-28" type="number" min={1} max={NOTE_CHAR_CEILING} value={value.global_max_chars} disabled={save.isPending} onChange={change("global_max_chars")} />
       </Field>
       <div className="flex items-center gap-2">
         <Button size="sm" disabled={!valid || save.isPending || draft === null} onClick={() => { if (value !== null) save.mutate(value) }}>{save.isPending ? <Spinner /> : null}{t.saveNotes}</Button>

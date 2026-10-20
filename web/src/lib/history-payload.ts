@@ -241,7 +241,7 @@ export type CybionToolFunctionCall =
   | { tool: "cybion_get_ultimate_machine"; machineId: string }
   | { tool: "cybion_set_ultimate_machine"; machineId: string | null; name: string | null; workerId: string | null; intervalSeconds: number | null; enabled: boolean | null; command: string | null; intent: string | null }
   | { tool: "cybion_delete_ultimate_machine"; machineId: string }
-  | { tool: "add_notes"; scope: "thread" | "global"; texts: string[] }
+  | { tool: "add_notes"; texts: string[] }
   | { tool: "cross_out_notes"; noteIds: string[] }
 
 export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall | null {
@@ -267,7 +267,7 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
         const object = historyPayloadObject(item)
         return typeof object?.text === "string" && object.text.trim() !== "" ? [object.text.trim()] : []
       })
-      return texts.length === 0 ? null : { tool: "add_notes", scope: args.scope === "global" ? "global" : "thread", texts }
+      return texts.length === 0 ? null : { tool: "add_notes", texts }
     }
     case "cross_out_notes": {
       const noteIds = (Array.isArray(args.note_ids) ? args.note_ids : [])
