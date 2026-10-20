@@ -115,7 +115,9 @@ the first authenticated browser session initializes that key atomically.
   Omitting `context_id` creates a new Context (a `name` is required) at the
   top level or under `parent_id`; a trashed Context and its subtree leave
   every Context tool, while the Contexts page still shows it under Trash and
-  restores it to its original place.
+  restores it to its original place. A Context its owner locked refuses every
+  `write_context` change and answers with its child Contexts, which stay
+  writable — so a hand-written manual cannot be rewritten by a Thread.
 - **Sticky notes** are the third governed-context kind beside the Manual and the
   Archive: short items owned by one user, each belonging to exactly one Thread
   (`thread_id` NOT NULL) that is stamped from the caller, so a note is visible and

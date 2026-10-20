@@ -328,6 +328,38 @@ test("the title edits inline and the field labels explain themselves", async ({ 
   expect(fixture.unexpected).toEqual([])
 })
 
+test("a locked context refuses Threads but stays the owner's to edit", async ({ page }) => {
+  const fixture = await stubWorkspace(page, { language: "zh", theme: "light" })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.goto("/#/contexts")
+  await createContext(page, "项目手册")
+  const section = page.locator("main > section")
+
+  // Locking is one immediate write of the flag, not part of the draft.
+  await section.getByRole("button", { name: "锁定（AI 只读）", exact: true }).click()
+  await expect.poll(() => fixture.references[0]?.locked).toBe(true)
+  expect(fixture.writes).toContainEqual({ path: "/api/contexts/saved-reference", body: { locked: true } })
+  await expect(section.getByText("已锁定 · AI 只读", { exact: true })).toBeVisible()
+  await expect(section.getByText("AI 不能用 write_context 改动它", { exact: false })).toBeVisible()
+  await expect(page.getByRole("tree", { name: "你的上下文" }).locator('[data-locked="true"]')).toHaveCount(1)
+  await page.screenshot({ path: "test-results/context-locked.png" })
+
+  // The owner keeps editing, and the save leaves the lock alone.
+  await expect(section.getByRole("button", { name: "解除锁定", exact: true })).toBeVisible()
+  await page.getByLabel("用途 Use When", { exact: true }).fill("记录项目资料的存放位置")
+  await page.locator("main > section h2").click()
+  await expect.poll(() => fixture.references[0]?.description, { timeout: 3500 }).toBe("记录项目资料的存放位置")
+  expect(fixture.references[0]?.locked).toBe(true)
+
+  // Unlocking hands the context back to the Threads.
+  await section.getByRole("button", { name: "解除锁定", exact: true }).click()
+  await expect.poll(() => fixture.references[0]?.locked).toBe(false)
+  await expect(section.getByText("已锁定 · AI 只读", { exact: true })).toHaveCount(0)
+  await expect(page.getByRole("tree", { name: "你的上下文" }).locator('[data-locked="true"]')).toHaveCount(0)
+
+  expect(fixture.unexpected).toEqual([])
+})
+
 test("the common context copy follows the UI language", async ({ page }) => {
   const fixture = await stubWorkspace(page, { language: "en", theme: "light" })
   await page.setViewportSize({ width: 1440, height: 960 })

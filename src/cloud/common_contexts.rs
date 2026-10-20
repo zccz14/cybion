@@ -120,6 +120,9 @@ pub(super) fn read(id: &str, language: &str) -> Option<ContextReadView> {
             content: content(node.content_file.get(language)).to_owned(),
             parent_id,
             sort_key: String::new(),
+            // The compiled tree has no owner to lock it: it is read-only for
+            // every Thread by construction.
+            locked: false,
             trashed_at: None,
         },
         children: node

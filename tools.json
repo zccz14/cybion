@@ -23,7 +23,7 @@
     {
       "type": "function",
       "name": "read_context",
-      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller. Start from a context_id listed by cybion_list_contexts; pass a returned child context_id to explore further levels. Reads resolve local Contexts first, then the read-only Cybion Common Context.",
+      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller. Start from a context_id listed by cybion_list_contexts; pass a returned child context_id to explore further levels. Reads resolve local Contexts first, then the read-only Cybion Common Context. A local Context's answer carries `locked`: while true, write_context cannot change that Context, and its child Contexts are where writes go.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -41,7 +41,7 @@
     {
       "type": "function",
       "name": "write_context",
-      "description": "Create or edit one of the user's local Contexts from the controller — title, Use When description, body, and parent. Omit context_id to create a new Context: name is required and it starts at the top level or under parent_id. Pass context_id to edit that Context; omitted fields keep their current values, and parent_id takes an exact context_id, null for the top level, or the special value \"TRASH\" to move the Context into the trash (updates only). A trashed Context disappears from every Context tool, while the user still sees it in the Contexts page and can restore it. Returns the Context metadata. The read-only Cybion Common Context cannot be written, and a Context hidden by the trash cannot be written until it is restored.",
+      "description": "Create or edit one of the user's local Contexts from the controller — title, Use When description, body, and parent. Omit context_id to create a new Context: name is required and it starts at the top level or under parent_id. Pass context_id to edit that Context; omitted fields keep their current values, and parent_id takes an exact context_id, null for the top level, or the special value \"TRASH\" to move the Context into the trash (updates only). A trashed Context disappears from every Context tool, while the user still sees it in the Contexts page and can restore it. Returns the Context metadata. The read-only Cybion Common Context cannot be written, and a Context hidden by the trash cannot be written until it is restored. A Context its owner locked refuses every write_context change — title, Use When description, body, parent, and TRASH — and answers with its child Contexts, which stay writable.",
       "parameters": {
         "type": "object",
         "properties": {

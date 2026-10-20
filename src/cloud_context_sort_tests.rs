@@ -211,6 +211,7 @@ async fn patch_reparent_appends_under_the_new_parent_and_keeps_keys_otherwise() 
             description: None,
             content: None,
             parent_id: Some(Some(second.id.clone())),
+            locked: None,
         }),
     )
     .await
@@ -230,6 +231,7 @@ async fn patch_reparent_appends_under_the_new_parent_and_keeps_keys_otherwise() 
             description: None,
             content: None,
             parent_id: Some(Some(second.id.clone())),
+            locked: None,
         }),
     )
     .await

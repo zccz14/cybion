@@ -72,6 +72,17 @@ returns the row, so the Contexts page shows each trashed root under Trash.
 original place. The read-only Cybion Common Context cannot be written, and a
 hidden Context cannot be written until it is restored.
 
+A Context its owner **locked** on the Contexts page refuses every
+`write_context` change — title, Use When description, body, parent, and `TRASH`
+alike — and answers with the lock and the way around it: the child Contexts
+stay writable, both an existing one and a new one created with `parent_id` set
+to the locked id. The lock exists so a hand-written manual keeps its own words
+while Threads keep extending it underneath; it belongs to the owner, so nothing
+the model sends can set or clear it. The flag is `contexts.locked`, a read
+carries it as `locked`, and an owner's `PATCH /api/contexts/{id}` sets or clears
+it with `locked` while an edit that omits the field keeps the current value —
+move, trash, and restore are the page's own routes and never touch it.
+
 Sticky notes are a separate governed-context kind with their own tools
 (`add_notes`, `cross_out_notes`) and their own storage; no Context tool returns
 or edits them. Every inference request also carries one synthetic `developer`
@@ -140,7 +151,9 @@ resolves local Contexts first, then the compiled Cybion Common Context;
 
 Children contain only direct-child metadata (`context_id`, `name`, `description`);
 local children are ordered by name and ID while the Cybion Common
-Context keeps its authored order. A leaf always returns `children: []`. The
+Context keeps its authored order. A local Context also reports `locked`; a
+common node is `locked: false`, because the compiled tree belongs to no owner
+and the lock is what `write_context` refuses (see above). A leaf always returns `children: []`. The
 current node and its child metadata are read in one transaction from the
 requesting user's database; common nodes come from the compiled tree instead.
 The model can pass a child's `context_id` to `read_context` to discover the next
