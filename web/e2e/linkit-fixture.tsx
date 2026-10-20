@@ -42,6 +42,11 @@ export function linkitFixtureResponse(request: Request, users: readonly LinkitFi
     return { json: query ? users.filter((user) => user.username.toLowerCase().startsWith(query) || user.user_id.toLowerCase().startsWith(query)) : [], headers }
   }
   if (path === "/api/me") return { json: { id: "fixture-viewer", profile: null }, headers }
+  if (path === "/api/public/profiles/batch") {
+    const ids = (JSON.parse(request.postData() ?? "{}") as { user_ids?: string[] }).user_ids ?? []
+    return { json: users.filter((user) => ids.includes(user.user_id)), headers }
+  }
+  if (path === "/api/user-notes/batch") return { json: [], headers }
   if (path.startsWith("/api/public/profiles/")) return { status: 404, json: { error: "Linkit fixture profile not found" }, headers }
   if (path === "/api/unread-count") return { json: { total: 0 }, headers }
   if (path === "/api/events") return { contentType: "text/event-stream", body: "", headers }
