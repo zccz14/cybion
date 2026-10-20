@@ -12,8 +12,18 @@ The checkpoint keeps the following sections in order:
 2. authoritative resources and exact locations;
 3. a causally relevant chronicle;
 4. active decisions and constraints;
-5. the current objective and next step;
-6. unfinished work and evidence routes.
+5. the Contexts worth re-reading;
+6. the current objective and next step;
+7. unfinished work and evidence routes.
+
+`read_context` output is not replayed after a checkpoint: a detail the
+checkpoint drops is recoverable only by reading that Context again. The fifth
+section therefore carries one bullet per Context the thread read whose detail
+the checkpoint does not restate — the exact `context_id`, then why it must be
+read again and which decision or next step depends on it — so the next request
+re-reads instead of trusting a memory of a Context it no longer holds. Asking
+the model for that judgment keeps it the model's decision which Contexts stop
+mattering; read output is never pinned into the request.
 
 The final section contains a fenced JSON array with `topic_key`, `status`,
 `message_range`, and `search_keywords`. Calendar times are copied only when
@@ -60,6 +70,19 @@ prefix cache and only the trailing instruction is new.
 Only the final validated Markdown is appended as a `checkpoint` record. The
 source records and every ordinary Responses output remain available through
 the history API and their original record indices.
+
+## Language
+
+The instruction prose follows the user's Linkit language preference
+(`profiles.lang`, a comma-separated priority list such as `zh-CN,en-US`). The
+first tag decides, `zh*` selects Chinese, and an empty or unrecognized tag keeps
+English. The controller captures the preference when it checks the Linkit
+channel and stores it beside the integration credentials, so compaction itself
+stays a local row lookup and never calls Linkit. Section headings stay English
+in every language: `validate_checkpoint_text` enforces them, consolidation of a
+prior checkpoint keys on them, and the transcript renders them as written.
+
+## Manual compaction
 
 Manual compaction uses this same compiler, reduction algorithm, and checkpoint
 validation. It does not execute tools or continue the task afterward. The
