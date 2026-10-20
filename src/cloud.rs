@@ -144,7 +144,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 43;
+const USER_SCHEMA_VERSION: i64 = 44;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -524,10 +524,7 @@ fn app(state: AppState) -> Router {
             axum::routing::put(worker_sharing::grant).delete(worker_sharing::revoke),
         )
         .route("/api/contexts", get(list_contexts).post(create_context))
-        .route(
-            "/api/notes",
-            get(notes::list_notes).post(notes::create_note),
-        )
+        .route("/api/notes", get(notes::list_notes))
         .route("/api/notes/{id}/done", post(notes::cross_out_note))
         .route("/api/notes/{id}", delete(notes::delete_note))
         .route(
@@ -1026,6 +1023,30 @@ fn set_admin_meta_int_sync(path: &Path, key: &str, value: i64) -> Result<(), Api
     Ok(())
 }
 
+/// Drops a setting the service no longer reads: a removed feature leaves no
+/// dead row behind in the administrator metadata.
+fn prune_admin_meta_sync(path: &Path, key: &str) -> Result<(), ApiError> {
+    let connection = Connection::open(path).map_err(ApiError::internal)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(ApiError::internal)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(ApiError::internal)?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );",
+        )
+        .map_err(ApiError::internal)?;
+    connection
+        .execute("DELETE FROM app_meta WHERE key=?", [key])
+        .map_err(ApiError::internal)?;
+    Ok(())
+}
+
 async fn experimental_header_enabled(
     state: &AppState,
     key: &'static str,
@@ -1474,6 +1495,28 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
     transaction.execute_batch(notes::SCHEMA)?;
+
+    if version < 44 {
+        // COMPATIBILITY: schema <=43 expressed a global note by leaving
+        // `thread_id` NULL. Global notes were removed, so those rows leave with the
+        // only column that could hold them, and the rebuild makes `thread_id` NOT
+        // NULL — the constraint that keeps a note from escaping its Thread, since
+        // notes carry no foreign key. Retire this migration once every retained
+        // user database is schema 44+; keep the preservation regression test.
+        transaction.execute_batch(
+            "CREATE TABLE notes_with_thread (
+               id TEXT PRIMARY KEY,
+               thread_id TEXT NOT NULL,
+               text TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               done_at INTEGER
+             );
+             INSERT INTO notes_with_thread(id,thread_id,text,created_at,done_at)
+               SELECT id,thread_id,text,created_at,done_at FROM notes WHERE thread_id IS NOT NULL;
+             DROP TABLE notes;
+             ALTER TABLE notes_with_thread RENAME TO notes;",
+        )?;
+    }
     transaction.execute_batch(linkit_notifications::SCHEMA)?;
     if version < 14 {
         // COMPATIBILITY: the Cybion schema upgrader preserves notification setup for pre-14 databases
@@ -3561,9 +3604,8 @@ async fn delete_thread(
             return Err(ApiError::not_found("thread not found"));
         }
         stats::note_thread_deleted(connection, &id)?;
-        // A note was written against this Thread's context, so it leaves with
-        // the Thread; promoting it to global would only manufacture a note no
-        // other Thread can read.
+        // A note was written against this Thread's context and no other Thread
+        // can read it, so it leaves with the Thread.
         let deleted_notes = notes::tear_thread(connection, &id)?;
         connection.execute("DELETE FROM threads WHERE id=?", [id])?;
         thread_sharing::sync_grants(connection, &owner)?;

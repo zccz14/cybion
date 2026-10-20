@@ -10,7 +10,7 @@ export async function stubWorkspace(page: Page, options: {
   language?: "zh" | "en"; theme?: "light" | "dark"; activeTotal?: number; webTotal?: number; archivedTotal?: number;
   countFails?: boolean; connectionFails?: boolean; startFails?: boolean; fallbackReady?: boolean;
   contexts?: { id: string; name: string; parent_id?: string | null; trashed_at?: number }[];
-  notes?: { id: string; thread_id: string | null; thread_title: string | null; text: string; created_at: number; done_at: number | null }[];
+  notes?: { id: string; thread_id: string; thread_title: string | null; text: string; created_at: number; done_at: number | null }[];
 } = {}) {
   const language = options.language ?? "zh", theme = options.theme ?? "light"
   const { publicKey, privateKey } = generateKeyPairSync("ed25519")
@@ -128,12 +128,6 @@ export async function stubWorkspace(page: Page, options: {
         return json(reference)
       }
       if (path === "/api/notes") {
-        if (request.method() === "POST") {
-          const body = request.postDataJSON() as { text: string }
-          const note = { id: `note-${notes.length + 1}`, thread_id: null, thread_title: null, text: body.text, created_at: now, done_at: null }
-          notes.push(note)
-          return json(note)
-        }
         return json({ open: notes.filter((note) => note.done_at === null), done: notes.filter((note) => note.done_at !== null) })
       }
       if (/^\/api\/notes\/[^/]+\/done$/.test(path)) {

@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test"
 async function fixture(page: Page) {
   const state = {
     features: { thread_id_header: false, session_id_header: false },
-    notes: { thread_max_chars: 120, global_max_chars: 200 },
+    notes: { thread_max_chars: 120 },
     accessGate: Promise.resolve(),
     failAccess: false,
     failFeatureSave: false,

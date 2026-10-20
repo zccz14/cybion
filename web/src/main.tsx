@@ -465,11 +465,7 @@ const copy = {
     contextsTitle: "Manual",
     notes: "Notes",
     notesTitle: "Notes",
-    notesDescription: "One line per note, one action per note. A Thread sees and crosses out only its own notes; a global note is shared with every Thread, so it has to read on its own. Crossing out keeps the text as the record, and only you can tear a note off.",
-    noteAddPlaceholder: "One thing owed…",
-    noteAdd: "Add note",
-    noteAddError: "Could not add the note",
-    noteGlobalGroup: "Global",
+    notesDescription: "One line per note, one action per note. Notes are written by Threads: each one belongs to exactly one Thread, which is the only place it is visible and crossable. Crossing out keeps the text as the record, and only you can tear a note off.",
     noteDoneGroup: "Crossed out",
     noteEmpty: "Nothing on the notes. Threads add here only what is genuinely owed.",
     noteDoneEmpty: "Nothing crossed out yet.",
@@ -824,11 +820,7 @@ const copy = {
     contextsTitle: "手册",
     notes: "便签",
     notesTitle: "便签",
-    notesDescription: "一条一行，一行一件事。线程只看得见、也只划得掉自己的便签；全局便签由所有线程共享，所以要脱离上下文也能读懂。划掉会保留原文作为记录，只有你能撕掉它。",
-    noteAddPlaceholder: "欠着的一件事…",
-    noteAdd: "添加便签",
-    noteAddError: "无法添加便签",
-    noteGlobalGroup: "全局",
+    notesDescription: "一条一行，一行一件事。便签由线程写下，每条只属于一个线程，也只有那个线程看得见、划得掉。划掉会保留原文作为记录，只有你能撕掉它。",
     noteDoneGroup: "已划掉",
     noteEmpty: "便签是空的。线程只把真正欠着的事放上来。",
     noteDoneEmpty: "还没有划掉的便签。",
@@ -2297,21 +2289,17 @@ function findCommonContextNode(node: CommonContextNode, id: string): CommonConte
 const CONTEXT_AUTOSAVE_DEBOUNCE_MS = 5_000
 const CONTEXT_AUTOSAVE_INTERVAL_MS = 15_000
 
-type Note = { id: string; thread_id: string | null; thread_title: string | null; text: string; created_at: number; done_at: number | null }
+type Note = { id: string; thread_id: string; thread_title: string | null; text: string; created_at: number; done_at: number | null }
 
-// The notes page is the review surface for the two scopes: global notes are one
-// group, then every Thread that still holds a note. Crossing out keeps the text
-// as the record; tearing off belongs to the owner alone.
+// The notes page is the owner's review surface, and the page never writes a
+// note: notes belong to the Thread that wrote them, so every group here is one
+// Thread with a link back. Crossing out keeps the text as the record; tearing
+// off belongs to the owner alone.
 function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const client = useQueryClient()
   const notes = useQuery({ queryKey: ["notes"], queryFn: () => api<{ open: Note[]; done: Note[] }>(sdk, "/api/notes") })
-  const [text, setText] = useState("")
   const refresh = () => void client.invalidateQueries({ queryKey: ["notes"] })
-  const create = useMutation({
-    mutationFn: (value: string) => api<Note>(sdk, "/api/notes", { method: "POST", body: JSON.stringify({ text: value }) }),
-    onSuccess: () => { setText(""); refresh() },
-  })
   const crossOut = useMutation({
     mutationFn: (id: string) => api<Note>(sdk, `/api/notes/${encodeURIComponent(id)}/done`, { method: "POST" }),
     onSuccess: refresh,
@@ -2325,10 +2313,9 @@ function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
   const groups = useMemo(() => {
     const grouped = new Map<string, { title: string | null; notes: Note[] }>()
     for (const note of open) {
-      const key = note.thread_id ?? ""
-      const group = grouped.get(key) ?? { title: note.thread_title, notes: [] }
+      const group = grouped.get(note.thread_id) ?? { title: note.thread_title, notes: [] }
       group.notes.push(note)
-      grouped.set(key, group)
+      grouped.set(note.thread_id, group)
     }
     return [...grouped.entries()]
   }, [open])
@@ -2339,18 +2326,13 @@ function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("notesTitle")} description={t("notesDescription")}>
     <Card>
       <CardContent className="pt-6">
-        <form className="flex flex-wrap items-start gap-2" onSubmit={(event) => { event.preventDefault(); const value = text.trim(); if (value) create.mutate(value) }}>
-          <Input aria-label={t("noteAdd")} className="min-w-0 flex-1" value={text} placeholder={t("noteAddPlaceholder")} onChange={(event) => setText(event.target.value)} />
-          <Button disabled={!text.trim() || create.isPending}>{create.isPending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t("noteAdd")}</Button>
-        </form>
-        {create.error && <Alert variant="destructive" className="mt-4"><CircleAlertIcon /><AlertTitle>{t("noteAddError")}</AlertTitle><AlertDescription>{errorMessage(create.error)}</AlertDescription></Alert>}
-        {notes.error && <div className="mt-4"><RequestError error={notes.error} onRetry={() => void notes.refetch()} /></div>}
-        {notes.isPending && <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("notesTitle")}</div>}
-        {notes.data && open.length === 0 && <p className="mt-4 text-sm text-muted-foreground">{t("noteEmpty")}</p>}
-        {groups.map(([key, group]) => <div key={key || "global"} className="mt-6">
+        {notes.error && <RequestError error={notes.error} onRetry={() => void notes.refetch()} />}
+        {notes.isPending && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("notesTitle")}</div>}
+        {notes.data && open.length === 0 && <p className="text-sm text-muted-foreground">{t("noteEmpty")}</p>}
+        {groups.map(([threadId, group]) => <div key={threadId} className="mt-6">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-medium">{group.title ?? t("noteGlobalGroup")}</h2>
-            {key && <Link className="text-xs text-muted-foreground underline-offset-2 hover:underline" to={`/threads/${encodeURIComponent(key)}`}>{t("noteThreadLink")}</Link>}
+            <h2 className="text-sm font-medium">{group.title ?? threadId}</h2>
+            <Link className="text-xs text-muted-foreground underline-offset-2 hover:underline" to={`/threads/${encodeURIComponent(threadId)}`}>{t("noteThreadLink")}</Link>
           </div>
           <div className="mt-2 divide-y rounded-lg border border-border">
             {group.notes.map((note) => <div key={note.id} className="flex items-start gap-2 px-3 py-2">

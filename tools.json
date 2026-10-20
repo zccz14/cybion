@@ -161,18 +161,10 @@
     {
       "type": "function",
       "name": "add_notes",
-      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, so add one only when something is genuinely owed and do not add background, plans, or reminders to yourself. scope \"thread\" (the default) attaches the note to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's context. scope \"global\" shares the note with every Thread, so it must read on its own, naming the project and the action without referring to \"this\" or \"that\". Notes past the limit are refused; cross out or tear off what is done first.",
+      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, so add one only when something is genuinely owed and do not add background, plans, or reminders to yourself. Every note attaches to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's context. Notes past the limit are refused; cross out or tear off what is done first.",
       "parameters": {
         "type": "object",
         "properties": {
-          "scope": {
-            "type": "string",
-            "enum": [
-              "thread",
-              "global"
-            ],
-            "description": "Omit for a note attached to this Thread; \"global\" shares it with every Thread and requires self-contained text."
-          },
           "items": {
             "type": "array",
             "items": {

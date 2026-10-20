@@ -133,7 +133,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | --- | --- | --- |
 | Threads | Durable conversations with full execution history; server-side filters and search; archive, restore, and delete; read-only sharing with other Cybion users. | [Threads](docs/threads.md) · [Sharing](docs/thread-sharing.md) · [Recovery](docs/thread-recovery.md) |
 | Contexts | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_context`; ships with a read-only Common Context. | [Contexts](docs/context.md) · [Compaction](docs/context_compacting.md) |
-| Notes | Short items that clear to zero: attached to one Thread or shared globally, injected into every request, crossed out by the Thread and torn off only by you. | [Sticky notes](docs/notes.md) |
+| Notes | Short items that clear to zero: written by a Thread and visible only there, injected into every request it runs, crossed out by that Thread and torn off only by you. | [Sticky notes](docs/notes.md) |
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, Windows, and Android (early development); pairing, remote upgrades, and worker sharing; iOS coming soon. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
 | Models & tools | NormAI upstream out of the box; fallback upstreams with per-upstream model catalogs; web search and image generation tools; per-thread model, reasoning effort, and context budget. | [Service overview](docs/introduction.md) |
