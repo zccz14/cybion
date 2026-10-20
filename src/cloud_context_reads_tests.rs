@@ -366,6 +366,13 @@ async fn a_changed_context_is_announced_once_and_compiled_as_a_developer_message
         "the notice names the Context: {content}"
     );
     assert!(content.contains(&format!("record #{first}")));
+    // The instruction is mandatory and forbids reading past the stale copy.
+    assert!(content.contains("Required, not optional"), "{content}");
+    assert!(content.contains("do not use them again"), "{content}");
+    assert!(
+        content.contains("never fall back to the old copy"),
+        "{content}"
+    );
     assert!(content.contains("read_context"));
 }
 
