@@ -38,11 +38,13 @@ test("only read_context calls count, and a call without a context id is dropped"
   assert.deepEqual(reads, [])
 })
 
-test("the chip carries no id or fingerprint, and the Thread header asks for the states", () => {
+test("the chip carries no id or fingerprint, and the Thread transcript asks for the states", () => {
   const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   const indicator = readFileSync(new URL("../src/components/thread-context-reads.tsx", import.meta.url), "utf8")
   assert.match(main, /\/history\/reads`/)
   assert.match(main, /<ThreadContextReads reads=\{readContexts\}/)
+  // The row is a transcript row, not header chrome: reading more Contexts scrolls away instead of shrinking the conversation.
+  assert.ok(main.indexOf("<MessageScrollerContent") < main.indexOf("<ThreadContextReads reads={readContexts}"))
   assert.match(main, /<ContextDirtyNotice contexts=\{dirtyContexts\}/)
   assert.doesNotMatch(indicator, /shortContextId|shortFingerprint|read_hash|current_hash/)
   assert.match(indicator, /text\.state\[read\.state\]/)

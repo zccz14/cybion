@@ -161,8 +161,10 @@ level. Child content and deeper descendants are disclosed only when read.
 
 ## Read-context indicator
 
-The conversation header shows which Contexts the Thread has read **and still
-holds**, and whether the copy it read is still the current one.
+The end of the conversation shows which Contexts the Thread has read **and
+still holds**, and whether the copy it read is still the current one. The row is
+the last row of the transcript rather than header chrome, so a Thread that reads
+many Contexts scrolls its list out of the way instead of holding screen height.
 `GET /api/threads/{id}/history/reads` answers with the current `head` and `tail`
 plus the `read_context` calls inside that range, each carrying its record and the
 `state` the controller judged: `current`, `changed`, `unanswered` (the answer
@@ -216,7 +218,7 @@ request boundary and the Thread's status are confirmed, so it belongs to the
 range that request replays and cannot race a newer input. A Context the Thread
 re-read after the change is current again and is not announced. A Context that is
 no longer readable — deleted, or hidden by the trash — is not announced, because
-there is nothing left to re-read; the header marks it instead. The notice names
+there is nothing left to re-read; the read-context row marks it instead. The notice names
 ids rather than titles: the ids are what `read_context` takes, and a title may
 itself have changed.
 
