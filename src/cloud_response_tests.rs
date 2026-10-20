@@ -470,6 +470,7 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
             "content":"Cybion user-authored content is preserved",
             "parent_id":null,
             "sort_key":"",
+            "locked":false,
             "children":[
                 {"context_id":child_a,"name":"Alpha","description":"Metadata for Alpha"},
                 {"context_id":child_b,"name":"Alpha","description":"Metadata for Alpha"},
@@ -1054,6 +1055,195 @@ async fn write_context_creates_new_contexts() {
     )
     .await;
     assert_eq!(hidden, json!({"error": "parent context not found"}));
+}
+
+#[tokio::test]
+async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "locked-context-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let manual = "00000000-0000-4000-8000-0000000000f0";
+    let appendix = "00000000-0000-4000-8000-0000000000f1";
+    user_db(&state, &user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content,locked) VALUES(?,'Handbook','Read when the handbook matters','handbook body',1)",
+            [manual],
+        )?;
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,'Appendix','Read when the appendix matters','appendix body',?)",
+            params![appendix, manual],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // Every write to the locked Context is refused — body, title, and trash
+    // alike — and each answer names the lock and the children that stay open.
+    for (index, arguments) in [
+        json!({"context_id": manual, "content": "rewritten by a Thread"}),
+        json!({"context_id": manual, "name": "Renamed by a Thread"}),
+        json!({"context_id": manual, "parent_id": "TRASH"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refused = tool_output(
+            &state,
+            &user,
+            &thread,
+            input,
+            &format!("write-locked-{index}"),
+            "write_context",
+            arguments,
+        )
+        .await;
+        let message = refused["error"].as_str().unwrap_or_default();
+        assert!(message.contains(manual), "unexpected output: {refused}");
+        assert!(message.contains("locked"), "unexpected output: {refused}");
+        assert!(
+            message.contains(&format!("read_context {manual}")),
+            "unexpected output: {refused}"
+        );
+        assert!(
+            message.contains(&format!("parent_id {manual}")),
+            "unexpected output: {refused}"
+        );
+    }
+    let stored = user_db(&state, &user, false, move |connection| {
+        connection
+            .query_row(
+                "SELECT name,content,trashed_at FROM contexts WHERE id=?",
+                [manual],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        ("Handbook".to_owned(), "handbook body".to_owned(), None)
+    );
+
+    // A read reports the lock, so the next attempt starts from the children.
+    let read = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "read-locked",
+        "read_context",
+        json!({"context_id": manual}),
+    )
+    .await;
+    assert_eq!(read["locked"], json!(true));
+    assert_eq!(read["children"][0]["context_id"], appendix);
+
+    // Children stay writable: an existing one, and a brand-new one.
+    let edited = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-locked-child",
+        "write_context",
+        json!({"context_id": appendix, "content": "appendix v2"}),
+    )
+    .await;
+    assert_eq!(edited["id"], appendix);
+    assert_eq!(edited["description"], "Read when the appendix matters");
+    let created = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-locked-grandchild",
+        "write_context",
+        json!({"name": "Observations", "parent_id": manual}),
+    )
+    .await;
+    assert_eq!(created["parent_id"], manual);
+}
+
+#[tokio::test]
+async fn the_owner_locks_a_context_from_the_page_and_keeps_editing_it() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "context-lock-owner").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let manual = "00000000-0000-4000-8000-0000000000f2";
+    user_db(&state, &user, true, move |connection| {
+        connection.execute(
+            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
+            [manual],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let page = |locked: Option<bool>, description: Option<&str>, content: Option<&str>| {
+        update_context(
+            State(state.clone()),
+            axum::Extension(BrowserIdentity {
+                user: user.clone(),
+                bearer: String::new(),
+            }),
+            AxumPath(manual.to_owned()),
+            Json(UpdateContextInput {
+                name: None,
+                description: description.map(str::to_owned),
+                content: content.map(str::to_owned),
+                parent_id: None,
+                locked,
+            }),
+        )
+    };
+
+    let locked = page(Some(true), None, None).await.unwrap().0;
+    assert!(locked.locked);
+    let refused = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-while-locked",
+        "write_context",
+        json!({"context_id": manual, "content": "Thread edit"}),
+    )
+    .await;
+    assert!(refused["error"].is_string(), "unexpected output: {refused}");
+
+    // An ordinary save keeps the lock and still records the owner's words.
+    let saved = page(None, Some("Read when revised"), Some("owner words"))
+        .await
+        .unwrap()
+        .0;
+    assert!(saved.locked);
+    assert_eq!(saved.description, "Read when revised");
+    assert_eq!(saved.content, "owner words");
+
+    // Unlocking hands the Context back to write_context.
+    let unlocked = page(Some(false), None, None).await.unwrap().0;
+    assert!(!unlocked.locked);
+    let written = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-after-unlock",
+        "write_context",
+        json!({"context_id": manual, "content": "Thread note"}),
+    )
+    .await;
+    assert_eq!(written["id"], manual);
 }
 
 #[tokio::test]

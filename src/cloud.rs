@@ -144,7 +144,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 44;
+const USER_SCHEMA_VERSION: i64 = 45;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1208,7 +1208,8 @@ CREATE TABLE IF NOT EXISTS contexts (
   content TEXT NOT NULL,
   parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
   sort_key TEXT NOT NULL DEFAULT '',
-  trashed_at INTEGER
+  trashed_at INTEGER,
+  locked INTEGER NOT NULL DEFAULT 0
 );
 "#;
 
@@ -1752,6 +1753,14 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // upgrade once every user database is audited at schema 39+; retain the
         // column test.
         migrate_context_trash(&transaction)?;
+    }
+    if version < 45 {
+        // Contexts gain the lock flag: a Context its owner locked refuses
+        // every `write_context` edit while its child Contexts stay writable,
+        // so a hand-written manual keeps its own words. Retire this upgrade
+        // once every user database is audited at schema 45+; retain the column
+        // test.
+        migrate_context_lock(&transaction)?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -2308,6 +2317,10 @@ struct ContextView {
     content: String,
     parent_id: Option<String>,
     sort_key: String,
+    // The owner's lock. While set, `write_context` refuses to change this
+    // Context and answers with its child Contexts instead; every read carries
+    // the flag so a Thread can plan around a manual it may not rewrite.
+    locked: bool,
     // Only trashed rows carry the marker; live Context reads keep their
     // existing wire shape.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2351,6 +2364,8 @@ struct UpdateContextInput {
     content: Option<String>,
     #[serde(default)]
     parent_id: Option<Option<String>>,
+    #[serde(default)]
+    locked: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2480,6 +2495,7 @@ fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextView> {
         parent_id: row.get(4)?,
         sort_key: row.get(5)?,
         trashed_at: row.get(6)?,
+        locked: row.get(7)?,
     })
 }
 
@@ -4416,6 +4432,23 @@ fn migrate_context_trash(connection: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Moves the Contexts table to schema 44: adds the lock flag a Context's owner
+/// sets on the Contexts page, which makes `write_context` refuse to change that
+/// Context while its child Contexts stay writable.
+fn migrate_context_lock(connection: &Connection) -> Result<(), ApiError> {
+    let has_locked: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('contexts') WHERE name='locked')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_locked {
+        connection
+            .execute_batch("ALTER TABLE contexts ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
+            .map_err(ApiError::internal)?;
+    }
+    Ok(())
+}
+
 /// Keys a brand-new Context after the last sibling under the same parent.
 fn append_context_sort_key(
     connection: &Connection,
@@ -4553,7 +4586,7 @@ async fn list_contexts(
 ) -> Result<Json<Vec<ContextView>>, ApiError> {
     let contexts = user_db(&state, &identity.user, true, |connection| {
         let mut statement = connection.prepare(
-            "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
+            "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
         )?;
         let rows = statement.query_map([], context_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -4586,6 +4619,7 @@ async fn create_context(
             content,
             parent_id,
             sort_key,
+            locked: false,
             trashed_at: None,
         };
         transaction.execute(
@@ -4622,7 +4656,7 @@ async fn move_context(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -4664,7 +4698,7 @@ async fn restore_context(
         }
         connection
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -4718,7 +4752,7 @@ async fn local_context(
         let transaction = connection.transaction()?;
         let context = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -4747,7 +4781,7 @@ async fn update_context(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -4776,6 +4810,9 @@ async fn update_context(
             .transpose()?
             .unwrap_or_else(|| current.parent_id.clone());
         validate_context_parent(&transaction, Some(&id), parent_id.as_deref())?;
+        // The lock is the owner's own flag: an edit that says nothing about it
+        // keeps it, so ordinary saves never unlock a manual by accident.
+        let locked = input.locked.unwrap_or(current.locked);
         // Reparenting through the editor appends under the new parent; the
         // drag interaction is the surface that chooses an exact position.
         let sort_key = if parent_id == current.parent_id {
@@ -4784,8 +4821,8 @@ async fn update_context(
             append_context_sort_key(&transaction, parent_id.as_deref())?
         };
         transaction.execute(
-            "UPDATE contexts SET name=?,description=?,content=?,parent_id=?,sort_key=? WHERE id=?",
-            params![&name, &description, &content, &parent_id, &sort_key, &id],
+            "UPDATE contexts SET name=?,description=?,content=?,parent_id=?,sort_key=?,locked=? WHERE id=?",
+            params![&name, &description, &content, &parent_id, &sort_key, locked, &id],
         )?;
         transaction.commit()?;
         Ok(ContextView {
@@ -4795,6 +4832,7 @@ async fn update_context(
             content,
             parent_id,
             sort_key,
+            locked,
             trashed_at: current.trashed_at,
         })
     })
@@ -8044,6 +8082,16 @@ async fn write_context_tool_output(
     Ok(context)
 }
 
+/// The one answer a locked Context gives `write_context`: name the lock and
+/// point at the child Contexts, which the lock deliberately leaves writable.
+fn locked_context_message(id: &str) -> String {
+    format!(
+        "context {id} is locked by the user, so write_context cannot change it; \
+         its child Contexts stay writable — read_context {id} lists them, and \
+         write_context with parent_id {id} creates a new child."
+    )
+}
+
 /// The create half of write_context: a new Context starts visible, at the top
 /// level or under a visible parent; the trash marker is an update-only value.
 async fn create_context_tool_output(
@@ -8112,7 +8160,7 @@ async fn edit_context_tool_output(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -8122,6 +8170,9 @@ async fn edit_context_tool_output(
         };
         if context_hidden(&transaction, &id)? {
             return Ok(None);
+        }
+        if current.locked {
+            return Err(ApiError::bad_request(locked_context_message(&id)));
         }
         let name = name.map(context_name).transpose()?.unwrap_or(current.name);
         let description = description
@@ -11112,7 +11163,8 @@ mod tests {
                 "content",
                 "parent_id",
                 "sort_key",
-                "trashed_at"
+                "trashed_at",
+                "locked"
             ]
         );
         let version: i64 = connection
@@ -11153,6 +11205,37 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Kept");
         assert_eq!(trashed_at, None);
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, USER_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn context_lock_marker_upgrades_an_existing_database() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("v44.sqlite3");
+        let connection = open_user(&path, true).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE contexts DROP COLUMN locked;
+                 INSERT INTO contexts(id,name,description,content,parent_id,sort_key)
+                 VALUES('kept','Kept','Read when kept','Kept content',NULL,'a1');
+                 PRAGMA user_version = 44;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        let (name, locked): (String, bool) = connection
+            .query_row(
+                "SELECT name,locked FROM contexts WHERE id='kept'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Kept");
+        assert!(!locked);
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -11863,6 +11946,12 @@ mod tests {
                 .unwrap()
                 .contains("children returned by a previous read_context call")
         );
+        assert!(
+            read_context["description"]
+                .as_str()
+                .unwrap()
+                .contains("`locked`")
+        );
         let write_context = catalog
             .as_array()
             .unwrap()
@@ -11874,6 +11963,12 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("trash")
+        );
+        assert!(
+            write_context["description"]
+                .as_str()
+                .unwrap()
+                .contains("locked")
         );
         assert_eq!(write_context["parameters"]["required"], json!(null));
         assert!(

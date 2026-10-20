@@ -49,6 +49,8 @@ import {
   FileSearchIcon,
   FolderTreeIcon,
   InfoIcon,
+  LockIcon,
+  LockOpenIcon,
   KeyRoundIcon,
   LogsIcon,
   MessagesSquareIcon,
@@ -373,6 +375,9 @@ type Context = {
   content: string
   parent_id: string | null
   sort_key: string
+  // The owner's lock: while set, write_context refuses this context and its
+  // child contexts are where a Thread writes instead.
+  locked: boolean
   // Present only while the context sits in the trash.
   trashed_at?: number
 }
@@ -480,6 +485,10 @@ const copy = {
     contextSelectHint: "Select a node in the tree, or create a new context.",
     contextGlobalBadge: "Read-only",
     contextGlobalHint: "Compiled into Cybion with each release and shared by every user. The content below is what Threads read through the Contexts tools.",
+    contextLock: "Lock (AI read-only)",
+    contextUnlock: "Unlock",
+    contextLockedBadge: "Locked · AI read-only",
+    contextLockedHint: "Threads cannot change this context with write_context; they write into its child contexts instead. You can still edit it here.",
     contextName: "Context name",
     contextDescription: "Use When",
     contextContent: "Body",
@@ -835,6 +844,10 @@ const copy = {
     contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
     contextGlobalBadge: "只读",
     contextGlobalHint: "随 Cybion 版本编译发布、所有用户共享只读。下方内容即 Thread 通过上下文工具读到的正文。",
+    contextLock: "锁定（AI 只读）",
+    contextUnlock: "解除锁定",
+    contextLockedBadge: "已锁定 · AI 只读",
+    contextLockedHint: "AI 不能用 write_context 改动它，只能写进它的子上下文；你在这里仍可编辑。",
     contextName: "上下文名称",
     contextDescription: "用途 Use When",
     contextContent: "正文",
@@ -2547,6 +2560,16 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     mutationFn: (id: string) => api<Context>(sdk, `/api/contexts/${encodeURIComponent(id)}/restore`, { method: "POST" }),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
   })
+  // The lock is the owner's flag, so it is its own immediate write instead of
+  // riding on the draft: a toggle must land now, and a content save that omits
+  // it leaves it alone.
+  const lock = useMutation({
+    mutationFn: (input: { id: string; locked: boolean }) => api<Context>(sdk, `/api/contexts/${encodeURIComponent(input.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ locked: input.locked }),
+    }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
+  })
 
   const editDraft = useCallback((update: (current: ContextDraft) => ContextDraft) => {
     const current = draftRef.current
@@ -2616,6 +2639,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   // Selection resolves by id across the two sources, mirroring the
   // controller's read order: a local draft wins, then the common tree.
   const localSelected = draft ? null : visible.find((context) => context.id === selectedId) ?? null
+  const draftLocked = draft?.id ? (contexts.data ?? []).find((context) => context.id === draft.id)?.locked === true : false
   const commonSelected = draft || localSelected ? null : commonNodes.find((node) => node.id === selectedId) ?? null
 
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
@@ -2673,6 +2697,10 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
             saving={pending.has(draft.id)}
             dirty={saved !== null && !draftsMatch(draft, saved)}
             saveError={saveFailure && saveFailure.id === draft.id ? saveFailure.error : null}
+            locked={draftLocked}
+            lockPending={lock.isPending && lock.variables?.id === draft.id}
+            lockError={lock.error && lock.variables?.id === draft.id ? lock.error : null}
+            onToggleLock={() => { if (draft.id) lock.mutate({ id: draft.id, locked: !draftLocked }) }}
           />
         : commonSelected
           ? <ContextReadOnlyPane
@@ -2823,7 +2851,10 @@ function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabe
         </Button>
         <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === context.id ? "bg-accent" : ""}`} onClick={() => onSelect(context)}>
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="truncate font-medium">{context.name}</span>
+            <span className="flex min-w-0 items-center gap-1">
+              <span className="truncate font-medium">{context.name}</span>
+              {context.locked && <LockIcon data-locked="true" aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />}
+            </span>
             {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
           </span>
         </Button>
@@ -2900,7 +2931,7 @@ function ContextFieldHelp({ label, help }: { label: string; help: string }) {
   </Dialog>
 }
 
-function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSelected, saving, dirty, saveError }: {
+function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSelected, saving, dirty, saveError, locked, lockPending, lockError, onToggleLock }: {
   draft: ContextDraft
   editDraft: (update: (current: ContextDraft) => ContextDraft) => void
   remove: UseMutationResult<unknown, Error, string>
@@ -2910,6 +2941,10 @@ function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSele
   saving: boolean
   dirty: boolean
   saveError: Error | null
+  locked: boolean
+  lockPending: boolean
+  lockError: Error | null
+  onToggleLock: () => void
 }) {
   const { t, language } = useUi()
   const autosaveStatus = saving ? t("contextAutosaving") : saveError ? t("contextAutosaveFailed") : dirty ? t("contextAutosavePending") : t("contextAutosaved")
@@ -2928,6 +2963,15 @@ function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSele
       {!renaming && <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setRenaming(true)}><PencilIcon className="size-4" /></Button>}
       {draft.id && <Button type="button" size="icon-sm" variant="ghost" aria-label={t("deleteContext")} title={t("deleteContext")} disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon />}</Button>}
     </div>
+    {draft.id && <div className="flex flex-wrap items-center gap-2">
+      {locked && <Badge variant="outline">{t("contextLockedBadge")}</Badge>}
+      <Button type="button" size="sm" variant="outline" aria-label={locked ? t("contextUnlock") : t("contextLock")} title={locked ? t("contextUnlock") : t("contextLock")} disabled={lockPending} onClick={onToggleLock}>
+        {lockPending ? <Spinner /> : locked ? <LockOpenIcon data-icon="inline-start" /> : <LockIcon data-icon="inline-start" />}
+        <span>{locked ? t("contextUnlock") : t("contextLock")}</span>
+      </Button>
+      {locked && <p className="text-xs text-muted-foreground">{t("contextLockedHint")}</p>}
+    </div>}
+    {lockError && <RequestError error={lockError} onRetry={onToggleLock} />}
     <form
       className="flex flex-col gap-5"
       onSubmit={(event) => { event.preventDefault(); submit() }}

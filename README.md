@@ -16,7 +16,8 @@ explicit governed contexts and a replayable archive.
 
 **Explicit context, not hidden memory.** Durable knowledge is a Context you
 write — a title, a "use when" description, a body, and a place in a tree —
-created, edited, and trashed from the Contexts page or with `write_context`.
+created, edited, and trashed from the Contexts page or with `write_context`,
+and lockable there so a hand-written manual stays out of the Thread's reach.
 Threads discover Contexts on demand (`cybion_list_contexts`, `read_context`)
 and read only what a task cites; source material stays on your devices and
 network services. Sticky notes are the opposite kind of context: short items a
@@ -132,7 +133,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | Area | What it does | Docs |
 | --- | --- | --- |
 | Threads | Durable conversations with full execution history; server-side filters and search; archive, restore, and delete; read-only sharing with other Cybion users. | [Threads](docs/threads.md) · [Sharing](docs/thread-sharing.md) · [Recovery](docs/thread-recovery.md) |
-| Contexts | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_context`; ships with a read-only Common Context. | [Contexts](docs/context.md) · [Compaction](docs/context_compacting.md) |
+| Contexts | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_context`, and lock from the UI so a Thread cannot rewrite a hand-written manual; ships with a read-only Common Context. | [Contexts](docs/context.md) · [Compaction](docs/context_compacting.md) |
 | Notes | Short items that clear to zero: written by a Thread and visible only there, injected into every request it runs, crossed out by that Thread and torn off only by you. | [Sticky notes](docs/notes.md) |
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, Windows, and Android (early development); pairing, remote upgrades, and worker sharing; iOS coming soon. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
