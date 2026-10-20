@@ -33,6 +33,10 @@ struct Identity {
 #[derive(Deserialize)]
 struct Profile {
     username: String,
+    /// Comma-separated language priority list (`zh-CN,en-US`); older Linkit
+    /// builds return no field at all.
+    #[serde(default)]
+    lang: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -180,10 +184,11 @@ async fn save_settings(
     let saved = settings.clone();
     user_db(state, user, true, move |connection| {
         connection.execute(
-            "INSERT INTO integration_settings(id,linkit_bot_id,linkit_bot_token,linkit_username,updated_at)
-             VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET linkit_bot_id=excluded.linkit_bot_id,
-             linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,updated_at=excluded.updated_at",
-            params![saved.linkit_bot_id,saved.linkit_bot_token,saved.linkit_username,now()],
+            "INSERT INTO integration_settings(id,linkit_bot_id,linkit_bot_token,linkit_username,linkit_language,updated_at)
+             VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET linkit_bot_id=excluded.linkit_bot_id,
+             linkit_bot_token=excluded.linkit_bot_token,linkit_username=excluded.linkit_username,
+             linkit_language=excluded.linkit_language,updated_at=excluded.updated_at",
+            params![saved.linkit_bot_id,saved.linkit_bot_token,saved.linkit_username,saved.linkit_language,now()],
         )?;
         Ok(())
     }).await
@@ -290,13 +295,18 @@ pub(super) async fn ensure(
             "Linkit returned a different notification owner",
         ));
     }
-    settings.linkit_username = owner
-        .profile
-        .map(|profile| profile.username)
-        .filter(|username| !username.trim().is_empty())
-        .ok_or_else(|| {
-            ApiError::conflict("Set your Linkit username before notifications can be connected")
-        })?;
+    let profile = owner.profile.ok_or_else(|| {
+        ApiError::conflict("Set your Linkit username before notifications can be connected")
+    })?;
+    settings.linkit_username = profile.username.trim().to_owned();
+    if settings.linkit_username.is_empty() {
+        return Err(ApiError::conflict(
+            "Set your Linkit username before notifications can be connected",
+        ));
+    }
+    // Checkpoints written for this user's threads follow this preference; an
+    // unset or unrecognized tag keeps the English default.
+    settings.linkit_language = profile.lang.unwrap_or_default().trim().to_owned();
     repair_bot(&state, &identity.user, &identity.bearer, &mut settings).await?;
     save_settings(&state, &identity.user, &settings).await?;
     if !token_matches(&state, &settings).await? {
