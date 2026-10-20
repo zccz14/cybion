@@ -5,13 +5,13 @@ import type { CybionToolFunctionCall } from "@/lib/history-payload"
 
 const copy = {
   en: {
-    listContexts: "List contexts", listWorkers: "List Workers", readContext: "Read context", writeContext: "Edit context", createContext: "Create context", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
+    listContexts: "List contexts", listWorkers: "List Workers", readContext: "Read context", loadContext: "Load context", unloadContext: "Unload context", writeContext: "Edit context", createContext: "Create context", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
     getMachine: "Read Ultimate Machine", updateMachine: "Update Ultimate Machine", createMachine: "Create Ultimate Machine", deleteMachine: "Delete Ultimate Machine",
     name: "Name", worker: "Worker", interval: "Interval", state: "State", enabled: "Enabled", paused: "Paused", command: "Command", intent: "Intent",
     addNotes: "Add notes", crossOutNotes: "Cross out notes",
   },
   zh: {
-    listContexts: "列出上下文", listWorkers: "列出 Worker", readContext: "读取上下文", writeContext: "编辑上下文", createContext: "新建上下文", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
+    listContexts: "列出上下文", listWorkers: "列出 Worker", readContext: "读取上下文", loadContext: "加载上下文", unloadContext: "卸载上下文", writeContext: "编辑上下文", createContext: "新建上下文", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
     getMachine: "读取终极机器", updateMachine: "更新终极机器", createMachine: "创建终极机器", deleteMachine: "删除终极机器",
     name: "名称", worker: "Worker", interval: "间隔", state: "状态", enabled: "启用", paused: "已暂停", command: "命令", intent: "意图",
     addNotes: "添加便签", crossOutNotes: "划掉便签",
@@ -37,6 +37,8 @@ export function CybionToolCall({ language, call, workers, contexts, time, childr
   const title = (() => {
     switch (call.tool) {
       case "read_context": return text.readContext
+      case "load_context": return text.loadContext
+      case "unload_context": return text.unloadContext
       case "write_context": return call.contextId !== null ? text.writeContext : text.createContext
       case "cybion_list_contexts": return text.listContexts
       case "cybion_list_workers": return text.listWorkers
@@ -71,7 +73,9 @@ function CybionToolDetail({ language, call, workers, contexts }: {
 }) {
   const text = copy[language]
   switch (call.tool) {
-    case "read_context": {
+    case "read_context":
+    case "load_context":
+    case "unload_context": {
       const context = contexts?.get(call.contextId) ?? null
       if (context === null) return <pre className={monoBlock}>{call.contextId}</pre>
       return <>

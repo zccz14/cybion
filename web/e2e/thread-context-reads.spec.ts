@@ -32,6 +32,31 @@ test("the header shows the Contexts the controller already asked the model to re
   await expect(notice).toContainText("#42")
 })
 
+test("a loaded Context is marked, and one the Thread never read still shows", async ({ page }) => {
+  await page.goto("/e2e/thread-context-reads.html")
+  const loaded = page.locator("#loaded")
+  await expect(loaded).toContainText("已读上下文 1")
+  await expect(loaded).toContainText("已加载 1")
+  const reread = loaded.getByRole("link", { name: /LOL-MODEL/ })
+  await expect(reread).toHaveText("LOL-MODEL已加载")
+  await expect(reread).toHaveAttribute("title", /控制器会持续把它的最新副本送进请求/)
+  // A loaded Context the Thread never read still occupies the request.
+  await expect(loaded.getByRole("link", { name: /量化与投资/ })).toHaveText("量化与投资已加载")
+})
+
+test("the transcript shows a Context being kept loaded and released", async ({ page }) => {
+  await page.goto("/e2e/thread-context-reads.html")
+  const load = page.locator("#load-notice")
+  await expect(load).toContainText("已加载上下文，完整 JSON 已注入请求")
+  await expect(load).toContainText("控制器会自己再补一份最新副本")
+  await expect(load.getByRole("link", { name: "必读上下文" })).toHaveAttribute("href", "#/contexts?context=8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f")
+  await expect(load).toContainText("#43")
+  const unload = page.locator("#unload-notice")
+  await expect(unload).toContainText("已卸载上下文")
+  await expect(unload).toContainText("此后不再刷新")
+  await expect(unload).toContainText("#44")
+})
+
 test("the indicator speaks both languages and keeps its layout in either theme", async ({ page }) => {
   await page.goto("/e2e/thread-context-reads.html")
   await page.getByRole("button", { name: "Theme", exact: true }).click()
@@ -45,4 +70,9 @@ test("the indicator speaks both languages and keeps its layout in either theme",
   await expect(reads.getByRole("link", { name: /Unknown context/ }).nth(1)).toHaveText("Unknown contextgone")
   await expect(page.locator("#empty")).toContainText("no context read in this window")
   await expect(page.locator("#notice")).toContainText("Contexts changed — the model was asked to re-read")
+  await expect(page.locator("#loaded")).toContainText("Read contexts 1")
+  await expect(page.locator("#loaded")).toContainText("loaded 1")
+  await expect(page.locator("#loaded").getByRole("link", { name: /LOL-MODEL/ })).toHaveText("LOL-MODELloaded")
+  await expect(page.locator("#load-notice")).toContainText("Context loaded — its JSON is in the request")
+  await expect(page.locator("#unload-notice")).toContainText("Context unloaded")
 })

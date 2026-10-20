@@ -25,6 +25,11 @@ re-reads instead of trusting a memory of a Context it no longer holds. Asking
 the model for that judgment keeps it the model's decision which Contexts stop
 mattering; read output is never pinned into the request.
 
+A loaded Context is the exception. The controller delivers its current copy again
+after the checkpoint, so the fifth section never lists a loaded Context and the
+model never restates its content: `load_context` is what carries material across
+a compaction.
+
 The final section contains a fenced JSON array with `topic_key`, `status`,
 `message_range`, and `search_keywords`. Calendar times are copied only when
 they are explicit in the source metadata; record-order references are used for

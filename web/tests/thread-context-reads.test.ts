@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { contextDirtyContexts, threadContextReads, type ContextReadState, type ThreadContextReadCall } from "../src/lib/thread-context-reads.ts"
+import { contextDirtyContexts, contextLoadNotice, threadContextReads, type ContextReadState, type ThreadContextReadCall } from "../src/lib/thread-context-reads.ts"
 import type { HistoryRecord } from "../src/lib/thread-history.ts"
 
 const record = (id: number, payload: unknown, state: ContextReadState = "current"): ThreadContextReadCall => ({ id, thread_id: "thread", kind: "response_output", payload, created_at: id, state })
@@ -62,4 +62,26 @@ test("a context_dirty activity names the Contexts the model was asked to re-read
   assert.equal(contextDirtyContexts({ ...notice, kind: "input" }), null)
   assert.equal(contextDirtyContexts({ ...notice, payload: { type: "thread_control", action: "compact" } }), null)
   assert.equal(contextDirtyContexts({ ...notice, payload: { type: "context_dirty", contexts: [] } }), null)
+})
+
+test("a loaded Context travels as its own activity record, kept apart from reads", () => {
+  const loaded: HistoryRecord = {
+    id: 7, thread_id: "thread", kind: "activity", created_at: 7,
+    payload: { type: "context_loaded", context_id: "8F1D2E3A-4B5C-6D7E-8F90-1A2B3C4D5E6F", fingerprint: "aaaa", context: { id: "8F1D2E3A-4B5C-6D7E-8F90-1A2B3C4D5E6F", content: "body" } },
+  }
+  assert.deepEqual(contextLoadNotice(loaded), { context_id: "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f", loaded: true })
+  assert.deepEqual(contextLoadNotice({ ...loaded, payload: { type: "context_unloaded", context_id: "8F1D2E3A-4B5C-6D7E-8F90-1A2B3C4D5E6F", reason: "released" } }), { context_id: "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f", loaded: false })
+  // A load is Thread state, not a read: it never becomes a read chip.
+  assert.deepEqual(threadContextReads([]), [])
+  assert.equal(contextLoadNotice({ ...loaded, kind: "input" }), null)
+  assert.equal(contextLoadNotice({ ...loaded, payload: { type: "context_dirty", contexts: [] } }), null)
+})
+
+test("the reads row shows loaded Contexts and the transcript renders the record", () => {
+  const indicator = readFileSync(new URL("../src/components/thread-context-reads.tsx", import.meta.url), "utf8")
+  const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  assert.match(indicator, /view\.loaded/)
+  assert.match(indicator, /LoadedContextChip/)
+  assert.match(main, /<ContextLoadNotice notice=\{loadNotice\}/)
+  assert.match(main, /contextLoadNotice\(record\)/)
 })

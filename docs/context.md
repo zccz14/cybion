@@ -19,10 +19,11 @@ input | response_output | tool_output | checkpoint
 ```
 
 `activity` records describe runtime state for the UI. They remain in history
-and are outside the model context, except two Cybion-authored kinds that do take
-part in replay: `model_switch` marks a replay barrier, and `context_dirty`
-compiles into the developer message that tells a Thread which Contexts it read
-have changed since.
+and are outside the model context, except the Cybion-authored kinds that do take
+part in replay: `model_switch` marks a replay barrier, `context_dirty` compiles
+into the developer message that tells a Thread which Contexts it read have
+changed since, and `context_loaded`/`context_unloaded` compile into the copies of
+the Contexts a Thread keeps loaded (see [Loaded Contexts](#loaded-contexts)).
 
 ## Compilation
 
@@ -158,6 +159,53 @@ current node and its child metadata are read in one transaction from the
 requesting user's database; common nodes come from the compiled tree instead.
 The model can pass a child's `context_id` to `read_context` to discover the next
 level. Child content and deeper descendants are disclosed only when read.
+
+## Loaded Contexts
+
+A read is message state: the Context body lives in one `tool_output` record, and
+a compaction moves the head past it. `load_context` turns the Thread's decision
+into Thread state instead — one row in `thread_context_loads` (`thread_id`,
+`context_id`, `loaded_at`) — and from then on the Controller keeps the current
+copy in front of the model without being asked. `unload_context` deletes the row.
+
+The copy travels as an `activity` record the compiler replays as a developer
+message, so a Thread receives the Context JSON a `read_context` answer would have
+given it, minus `sort_key`, which orders a sibling list the Thread cannot see.
+Every inference attempt compares the Thread's rows against the range it is about
+to replay and appends only what the range does not already say:
+
+- the first compile after a load, and the first compile after an edit, because
+  the fingerprint of the copy in the range no longer matches the Context that
+  resolves now;
+- the first compile after a checkpoint, because the head moved past the copies
+  and the Context must arrive with the conversation the checkpoint replaced.
+
+Nothing is ever rewritten or removed. A superseded copy stays in the transcript
+as evidence, and it replays upstream exactly as it was stored, so an earlier
+request's prefix stays byte-identical and the provider's prefix cache keeps
+working; the next checkpoint retires the copies with the rest of the range. Each
+delivery states that it supersedes every earlier copy of the same Context, so a
+Thread holding two versions knows which one is current without the Controller
+editing history. A Context that stops resolving — deleted, or hidden by the
+trash — releases itself: the row leaves and one `context_unloaded` notice says
+the copy the Thread holds is stale.
+
+A loaded Context is refreshed by the Controller, so `context_dirty` never
+announces it: the same request carries the current copy, and demanding a re-read
+beside it would contradict it.
+
+`unload_context` deletes the row and nothing else. The copy already in the
+conversation stays until the next checkpoint — the Thread declared that it no
+longer needs the Context kept current, not that it never saw it — and the next
+compile appends one `context_unloaded` notice after which nothing refreshes it.
+Unloading a Context the Thread does not hold changes nothing and answers
+`unloaded: false`.
+
+A Thread holds at most eight loaded Contexts; a further load is refused with the
+way out — unload one first — rather than truncated. The read-context row reports
+the loaded set beside the reads, and a Context the Thread read while it was
+loaded is `current`: what the Thread holds is the copy the Controller delivered,
+not the older tool output.
 
 ## Read-context indicator
 
