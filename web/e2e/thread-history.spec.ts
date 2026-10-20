@@ -2,18 +2,18 @@ import { expect, test } from "@playwright/test"
 
 const groupSelector = '[data-slot="thread-process-group"]'
 
-test("only consecutive process items collapse; input, Activity and assistant replies stay visible", async ({ page }) => {
+test("only consecutive process items collapse; input, Activity, checkpoints and assistant replies stay visible", async ({ page }) => {
   const errors: string[] = []
   page.on("pageerror", (error) => errors.push(error.stack ?? error.message))
   await page.goto("/e2e/thread-history.html")
   const groups = page.locator(groupSelector)
-  await expect(groups).toHaveCount(3)
+  await expect(groups).toHaveCount(2)
   for (const group of await groups.all()) await expect(group).not.toHaveAttribute("open")
   await expect(page.getByText("请检查部署状态。", { exact: true })).toBeVisible()
   await expect(page.getByText("Activity：已完成第一阶段检查。", { exact: true })).toBeVisible()
   await expect(page.getByText("AI 回复：部署检查通过，正在检查服务。", { exact: true })).toBeVisible()
   await expect(page.getByText("正在分析部署记录。", { exact: true })).toBeHidden()
-  await expect(page.getByText("已保存上下文检查点。", { exact: true })).toBeHidden()
+  await expect(page.getByText("已保存上下文检查点。", { exact: true })).toBeVisible()
   await expect(groups.first().locator(":scope > summary")).toContainText("3 条")
   await expect(groups.first().locator(":scope > summary")).toContainText("运行了 01 小时 01 分钟 05 秒")
   await expect(groups.nth(1).locator(":scope > summary")).toContainText("1 条")
@@ -44,7 +44,7 @@ test("keyboard toggles, polling, language changes and streaming handoff preserve
   await expect(summary).toContainText("Ran for 00h 00m 00s")
   await expect(last).toHaveAttribute("open", "")
   await page.getByRole("button", { name: "Append", exact: true }).click()
-  await expect(groups).toHaveCount(3)
+  await expect(groups).toHaveCount(2)
   await expect(last).toHaveAttribute("open", "")
   await expect(summary).toContainText("2 messages")
   await expect(summary).toContainText("Ran for 00h 02m 15s")

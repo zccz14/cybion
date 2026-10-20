@@ -32,6 +32,9 @@ export function threadImage(record: HistoryRecord): ThreadImage | null {
 
 function isStandaloneRecord(record: HistoryRecord) {
   if (record.kind === "input" || record.kind === "activity") return true
+  // A checkpoint is a compression boundary, not process: it stays in the conversation like a
+  // reply, ends the group before it, and starts none.
+  if (record.kind === "checkpoint") return true
   // Image records never join a process group, so a collapsed group cannot hide one.
   if (threadImage(record) !== null) return true
   const payload = record.payload
@@ -101,7 +104,8 @@ export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHis
 }
 
 // Minimal mode keeps one tail candidate per turn: the last activity or message record.
-// Earlier activities, earlier replies, tool turns, and checkpoints all fold around it.
+// Earlier activities, earlier replies, tool turns, and checkpoints all fold around it: a
+// checkpoint keeps its own card only where the turn shows it, so minimal mode still folds it.
 function threadHistoryTailCandidate(record: HistoryRecord) {
   return record.kind === "activity" || (record.kind === "response_output"
     && record.payload !== null && typeof record.payload === "object"
