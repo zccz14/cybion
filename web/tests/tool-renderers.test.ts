@@ -11,6 +11,8 @@ const samples: Record<string, unknown> = {
   computer_use: { type: "function_call", name: "computer_use", arguments: '{"action":"screenshot"}' },
   view_image: { type: "function_call", name: "view_image", arguments: '{"worker_id":"worker-1","path":"/tmp/photo.png"}' },
   read_context: { type: "function_call", name: "read_context", arguments: '{"context_id":"ctx-1"}' },
+  load_context: { type: "function_call", name: "load_context", arguments: '{"context_id":"ctx-1"}' },
+  unload_context: { type: "function_call", name: "unload_context", arguments: '{"context_id":"ctx-1"}' },
   write_context: { type: "function_call", name: "write_context", arguments: '{"name":"Notes","parent_id":"ctx-1"}' },
   cybion_list_contexts: { type: "function_call", name: "cybion_list_contexts", arguments: "{}" },
   cybion_list_workers: { type: "function_call", name: "cybion_list_workers", arguments: "{}" },

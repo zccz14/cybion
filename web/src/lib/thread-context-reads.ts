@@ -12,6 +12,10 @@ export type ThreadContextReadCall = HistoryRecord & { state: ContextReadState }
 export type ThreadContextReadsView = {
   head: number | null
   tail: number | null
+  // Contexts the Thread keeps loaded. These are Thread state rather than message
+  // state: the controller delivers the current copy into every request, so they
+  // survive a compaction that drops the reads.
+  loaded: string[]
   calls: ThreadContextReadCall[]
 }
 
@@ -54,4 +58,19 @@ export function contextDirtyContexts(record: HistoryRecord): string[] | null {
     return typeof object?.context_id === "string" ? [object.context_id] : []
   })
   return ids.length > 0 ? ids : null
+}
+
+// A `context_loaded`/`context_unloaded` activity record: the controller's own
+// note that the Thread now receives this Context's JSON as a developer message,
+// or that it stopped. It is appended before a request compiles, never rewritten,
+// and the compiler replays the same record upstream.
+export type ContextLoadNotice = { context_id: string; loaded: boolean }
+
+export function contextLoadNotice(record: HistoryRecord): ContextLoadNotice | null {
+  if (record.kind !== "activity") return null
+  const payload = historyPayloadObject(record.payload)
+  if (payload?.type !== "context_loaded" && payload?.type !== "context_unloaded") return null
+  return typeof payload.context_id === "string"
+    ? { context_id: payload.context_id.toLowerCase(), loaded: payload.type === "context_loaded" }
+    : null
 }

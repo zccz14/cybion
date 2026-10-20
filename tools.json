@@ -40,6 +40,42 @@
     },
     {
       "type": "function",
+      "name": "load_context",
+      "description": "Bind a Context to this Thread so the Controller keeps it loaded. The full Context JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Context changes or a compaction replaces the history, so the Thread never reads it again to stay current. Use it for material the Thread must keep working from across context windows; read_context stays the way to look something up once. Resolves local Contexts first, then the read-only Cybion Common Context. A Thread holds at most 8 loaded Contexts; unload_context releases one.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "context_id": {
+            "type": "string",
+            "description": "Exact context_id from cybion_list_contexts, from children returned by read_context, or from a Context this Thread already knows."
+          }
+        },
+        "required": [
+          "context_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "unload_context",
+      "description": "Release a Context this Thread loaded, which stops the Controller from refreshing it. The copy already in the conversation stays until the next compaction and is no longer maintained, and a notice tells the Thread not to rely on it; load_context brings it back. Answers unloaded: false when the Context was not loaded in this Thread.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "context_id": {
+            "type": "string",
+            "description": "Exact context_id of a Context this Thread loaded."
+          }
+        },
+        "required": [
+          "context_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
       "name": "write_context",
       "description": "Create or edit one of the user's local Contexts from the controller — title, Use When description, body, and parent. Omit context_id to create a new Context: name is required and it starts at the top level or under parent_id. Pass context_id to edit that Context; omitted fields keep their current values, and parent_id takes an exact context_id, null for the top level, or the special value \"TRASH\" to move the Context into the trash (updates only). A trashed Context disappears from every Context tool, while the user still sees it in the Contexts page and can restore it. Returns the Context metadata. The read-only Cybion Common Context cannot be written, and a Context hidden by the trash cannot be written until it is restored. A Context its owner locked refuses every write_context change — title, Use When description, body, parent, and TRASH — and answers with its child Contexts, which stay writable.",
       "parameters": {

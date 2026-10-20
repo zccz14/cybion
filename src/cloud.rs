@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 mod admin_users;
 mod common_contexts;
+mod context_loads;
 mod history;
 mod linkit_notifications;
 mod machines;
@@ -144,7 +145,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 46;
+const USER_SCHEMA_VERSION: i64 = 47;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1599,6 +1600,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
     transaction.execute_batch(notes::SCHEMA)?;
+    transaction.execute_batch(context_loads::SCHEMA)?;
 
     if version < 44 {
         // COMPATIBILITY: schema <=43 expressed a global note by leaving
@@ -4009,6 +4011,10 @@ struct ThreadContextReadsView {
     head: Option<i64>,
     /// Context tail: the newest protocol record the head reaches.
     tail: Option<i64>,
+    /// Contexts this Thread keeps loaded. The controller delivers the current
+    /// copy into every request, so what the Thread holds is current by
+    /// construction and outlives a compaction the way a read does not.
+    loaded: Vec<String>,
     /// `read_context` calls in `[head, tail]`, oldest first.
     calls: Vec<ContextReadCall>,
 }
@@ -4079,6 +4085,7 @@ fn load_context_reads(
     id: &str,
 ) -> Result<ThreadContextReadsView, ApiError> {
     load_thread(connection, id)?;
+    let loaded = context_loads::loaded_ids(connection, id)?;
     let tail: Option<i64> = connection.query_row(
         &format!("SELECT MAX(id) FROM history_records WHERE thread_id=? AND {PROTOCOL_RECORDS}"),
         [id],
@@ -4088,18 +4095,25 @@ fn load_context_reads(
         return Ok(ThreadContextReadsView {
             head: None,
             tail: None,
+            loaded,
             calls: Vec::new(),
         });
     };
     let head = context_idx_head(connection, id, tail)?;
     let mut calls = Vec::new();
     for record in read_context_calls(connection, id, head, tail)? {
-        let state = read_version(connection, id, &record, tail)?.state();
+        // A loaded Context is replaced in place by the controller, so the copy
+        // the Thread holds is the current one even when the read output is not.
+        let state = match read_call_context_id(&record.payload) {
+            Some(context_id) if loaded.contains(&context_id) => ContextReadState::Current,
+            _ => read_version(connection, id, &record, tail)?.state(),
+        };
         calls.push(ContextReadCall { record, state });
     }
     Ok(ThreadContextReadsView {
         head: Some(head),
         tail: Some(tail),
+        loaded,
         calls,
     })
 }
@@ -4212,9 +4226,17 @@ fn unannounced_changes(
     tail: i64,
 ) -> Result<Vec<(String, i64, String)>, ApiError> {
     let announced = announced_changes(connection, thread_id, head, tail)?;
+    // A loaded Context is refreshed by the controller in the same request, so
+    // demanding a re-read would contradict the copy delivered beside it.
+    let loaded = context_loads::loaded_ids(connection, thread_id)?
+        .into_iter()
+        .collect::<HashSet<_>>();
     let calls = read_context_calls(connection, thread_id, head, tail)?;
     let mut changes = Vec::new();
     for (context_id, call) in latest_reads(calls) {
+        if loaded.contains(&context_id) {
+            continue;
+        }
         let version = read_version(connection, thread_id, &call, tail)?;
         let ReadVersion::Changed(current_hash) = version else {
             continue;
@@ -5427,7 +5449,7 @@ impl CompiledThreadContext {
 /// replay barrier, not an upstream item: it counts as a protocol record so it
 /// advances the replay tail, and it marks where the Thread started replaying
 /// with another `(upstream, model)` pair.
-const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','context_dirty')))";
+const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','context_dirty','context_loaded','context_unloaded')))";
 
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     connection
@@ -5818,7 +5840,9 @@ fn load_protocol_items(
     for (id, created_at, kind, payload) in rows {
         let mut item: Value =
             serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if let Some(notice) = context_dirty_message(&item) {
+        if let Some(notice) =
+            context_dirty_message(&item).or_else(|| context_loads::notice_message(&item))
+        {
             item = notice;
         }
         if reinjected.contains(&id) {
@@ -6936,6 +6960,10 @@ newer information into one checkpoint instead of copying the old text verbatim.
 restate is reachable again only by reading that Context. So decide which Contexts are still worth
 reading and why, instead of trusting a memory of them.
 
+A Context the thread keeps loaded is the exception: the controller delivers its current copy again
+after this checkpoint without any tool call, so never list a loaded Context in
+`## Contexts worth re-reading` and never restate its content.
+
 Use terse bullets rather than prose paragraphs, and keep every heading in this exact order. Write
 `(none)` for an empty section; never drop a section.
 
@@ -6964,6 +6992,8 @@ const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 这份检查点会在下一次请求里取代此前的历史。要保留：概念与术语、权威资源与精确位置、有因果关系的时序、生效中的决策与约束、当前目标与下一步、未完成的工作与取证路径。原始历史靠引用记录 ID 保持可追溯；不要把凭证、令牌、口令、Cookie、API Key 或密钥写进来。保留彼此独立的因果事件，只合并同一事件的重复报告。如果来源里已经有一份 `# Durable working context` 检查点，就把它合并进来：仍然成立的事实向前带、过时的丢掉，与新信息合成一份，不要照抄旧文本。
 
 `read_context` 的输出不会随这份检查点一起走下去：检查点没有复述的部分，只能重新读取那个 Context 才能拿回来。所以要判断哪些 Context 仍然值得读、并说明理由，而不是凭对它们的记忆办事。
+
+本 Thread 加载着的 Context 是例外：检查点之后控制器会自动把它的最新副本重新送达，不需要任何工具调用。所以已加载的 Context 不要写进 `## Contexts worth re-reading`，也不要复述它的正文。
 
 用小圆点短句，不要写散文段落；各小节标题必须按下面的顺序、逐字使用英文原文，不要翻译。空小节写 `(none)`，任何小节都不许省略。
 
@@ -8848,6 +8878,8 @@ async fn controller_tool_output(
 ) -> Option<Result<Value, ApiError>> {
     Some(match name {
         "read_context" => read_context_tool_output(state, user, input).await,
+        "load_context" => context_loads::load_tool_output(state, user, thread_id, input).await,
+        "unload_context" => context_loads::unload_tool_output(state, user, thread_id, input).await,
         "write_context" => write_context_tool_output(state, user, input).await,
         "cybion_list_contexts" => list_contexts_tool_output(state, user).await,
         "cybion_list_workers" => list_workers_tool_output(state, user).await,
@@ -9631,6 +9663,10 @@ mod objects_tests;
 #[cfg(test)]
 #[path = "cloud_context_reads_tests.rs"]
 mod context_reads_tests;
+
+#[cfg(test)]
+#[path = "cloud_context_loads_tests.rs"]
+mod context_loads_tests;
 
 #[cfg(test)]
 mod tests {
@@ -11441,7 +11477,7 @@ mod tests {
             true,
             true,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 16);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 18);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -11970,35 +12006,39 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
-        assert_eq!(tools.as_array().unwrap().len(), 12);
+        assert_eq!(tools.as_array().unwrap().len(), 14);
         assert_eq!(tools[0]["name"], "cybion_list_contexts");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "read_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[3]["name"], "write_context");
-        assert_eq!(tools[3]["parameters"]["required"], json!(null));
-        assert_eq!(tools[4]["name"], "cybion_list_ultimate_machines");
-        assert_eq!(tools[5]["name"], "cybion_get_ultimate_machine");
-        assert_eq!(tools[6]["name"], "cybion_set_ultimate_machine");
-        assert_eq!(tools[7]["name"], "cybion_delete_ultimate_machine");
-        assert_eq!(tools[5]["parameters"]["required"], json!(["machine_id"]));
+        assert_eq!(tools[3]["name"], "load_context");
+        assert_eq!(tools[3]["parameters"]["required"], json!(["context_id"]));
+        assert_eq!(tools[4]["name"], "unload_context");
+        assert_eq!(tools[4]["parameters"]["required"], json!(["context_id"]));
+        assert_eq!(tools[5]["name"], "write_context");
+        assert_eq!(tools[5]["parameters"]["required"], json!(null));
+        assert_eq!(tools[6]["name"], "cybion_list_ultimate_machines");
+        assert_eq!(tools[7]["name"], "cybion_get_ultimate_machine");
+        assert_eq!(tools[8]["name"], "cybion_set_ultimate_machine");
+        assert_eq!(tools[9]["name"], "cybion_delete_ultimate_machine");
         assert_eq!(tools[7]["parameters"]["required"], json!(["machine_id"]));
-        assert_eq!(tools[8]["name"], "add_notes");
-        assert_eq!(tools[8]["parameters"]["required"], json!(["items"]));
-        assert_eq!(tools[9]["name"], "cross_out_notes");
-        assert_eq!(tools[9]["parameters"]["required"], json!(["note_ids"]));
-        assert_eq!(tools[10], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[9]["parameters"]["required"], json!(["machine_id"]));
+        assert_eq!(tools[10]["name"], "add_notes");
+        assert_eq!(tools[10]["parameters"]["required"], json!(["items"]));
+        assert_eq!(tools[11]["name"], "cross_out_notes");
+        assert_eq!(tools[11]["parameters"]["required"], json!(["note_ids"]));
+        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 16);
-        assert_eq!(worker_and_native[10]["name"], "bash");
-        assert_eq!(worker_and_native[13]["name"], "view_image");
-        assert_eq!(worker_and_native[14]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[15]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 18);
+        assert_eq!(worker_and_native[12]["name"], "bash");
+        assert_eq!(worker_and_native[15]["name"], "view_image");
+        assert_eq!(worker_and_native[16]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[17]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 11);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 13);
         assert_eq!(
-            web_search_only[10],
+            web_search_only[12],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false);
@@ -12013,6 +12053,8 @@ mod tests {
                 "cybion_list_contexts",
                 "cybion_list_workers",
                 "read_context",
+                "load_context",
+                "unload_context",
                 "write_context",
                 "cybion_list_ultimate_machines",
                 "cybion_get_ultimate_machine",
@@ -12041,6 +12083,8 @@ mod tests {
                 "cybion_list_contexts",
                 "cybion_list_workers",
                 "read_context",
+                "load_context",
+                "unload_context",
                 "write_context",
                 "cybion_list_ultimate_machines",
                 "cybion_get_ultimate_machine",
@@ -12294,7 +12338,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 14);
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
@@ -12303,10 +12347,10 @@ mod tests {
         assert_eq!(tools[5], TOOL_CATALOG["context"][5]);
         assert_eq!(tools[6], TOOL_CATALOG["context"][6]);
         assert_eq!(tools[7], TOOL_CATALOG["context"][7]);
-        assert_eq!(tools[8], TOOL_CATALOG["note"][0]);
-        assert_eq!(tools[9], TOOL_CATALOG["note"][1]);
-        assert_eq!(tools[10], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[10], TOOL_CATALOG["note"][0]);
+        assert_eq!(tools[11], TOOL_CATALOG["note"][1]);
+        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

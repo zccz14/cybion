@@ -78,7 +78,7 @@ import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, seriali
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
-import { contextDirtyContexts, threadContextReads, type ThreadContextReadsView } from "@/lib/thread-context-reads"
+import { contextDirtyContexts, contextLoadNotice, threadContextReads, type ThreadContextReadsView } from "@/lib/thread-context-reads"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useComposerImages } from "@/hooks/use-composer-images"
@@ -130,6 +130,7 @@ import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadLi
 import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
 import { ContextDirtyNotice } from "@/components/context-dirty-notice"
+import { ContextLoadNotice } from "@/components/context-load-notice"
 import { ThreadContextReads } from "@/components/thread-context-reads"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
@@ -703,6 +704,8 @@ const copy = {
     toolComputerUse: "Control the desktop",
     toolViewImage: "View an image",
     toolReadContext: "Read contexts",
+    toolLoadContext: "Keep a context loaded",
+    toolUnloadContext: "Release a loaded context",
     toolWriteContext: "Create or edit contexts",
     toolAddNotes: "Add notes",
     toolCrossOutNotes: "Cross out notes",
@@ -1064,6 +1067,8 @@ const copy = {
     toolComputerUse: "控制桌面",
     toolViewImage: "查看图片",
     toolReadContext: "读取上下文",
+    toolLoadContext: "加载并保持上下文",
+    toolUnloadContext: "卸载上下文",
     toolWriteContext: "创建或编辑上下文",
     toolAddNotes: "添加便签",
     toolCrossOutNotes: "划掉便签",
@@ -1732,7 +1737,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
   // fetches only start when the loaded history actually touches a context.
   const readsContexts = useMemo(() => readContexts.length > 0 || records.some((record) => {
     const payload = historyPayloadObject(record.payload)
-    if (payload?.type === "context_dirty") return true
+    if (payload?.type === "context_dirty" || payload?.type === "context_loaded" || payload?.type === "context_unloaded") return true
     return payload?.type === "function_call" && (payload.name === "read_context" || payload.name === "write_context")
   }), [readContexts, records])
   const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: readsContexts })
@@ -1915,7 +1920,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
-              {contextReads.data !== undefined && contextReads.data.head !== null && <div className="border-t pt-3"><ThreadContextReads reads={readContexts} lookup={contextLookup} view={contextReads.data} language={language} /></div>}
+              {contextReads.data !== undefined && (contextReads.data.head !== null || (contextReads.data.loaded ?? []).length > 0) && <div className="border-t pt-3"><ThreadContextReads reads={readContexts} lookup={contextLookup} view={contextReads.data} language={language} /></div>}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton behavior="auto" />
@@ -1988,6 +1993,12 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
   const dirtyContexts = contextDirtyContexts(record)
   if (dirtyContexts) {
     return <ContextDirtyNotice contexts={dirtyContexts} lookup={contexts} language={language} time={time} recordId={record.id} />
+  }
+  // A loaded Context is Thread state the controller maintains; the record is the
+  // same notice the compiler replays upstream as a developer message.
+  const loadNotice = contextLoadNotice(record)
+  if (loadNotice) {
+    return <ContextLoadNotice notice={loadNotice} lookup={contexts} language={language} time={time} recordId={record.id} />
   }
 
   const text = historyRecordText(record)
@@ -3619,6 +3630,8 @@ const toolLabels: Record<string, CopyKey> = {
   cybion_list_contexts: "toolListContexts",
   cybion_list_workers: "toolListWorkers",
   read_context: "toolReadContext",
+  load_context: "toolLoadContext",
+  unload_context: "toolUnloadContext",
   write_context: "toolWriteContext",
   add_notes: "toolAddNotes",
   cross_out_notes: "toolCrossOutNotes",

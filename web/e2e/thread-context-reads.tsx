@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
 import type { ContextSummary } from "../src/components/cybion-tool-call"
 import { ContextDirtyNotice } from "../src/components/context-dirty-notice"
+import { ContextLoadNotice } from "../src/components/context-load-notice"
 import { ThreadContextReads } from "../src/components/thread-context-reads"
 import type { ThreadContextRead } from "../src/lib/thread-context-reads"
 import "../src/styles.css"
@@ -17,9 +18,11 @@ const reads: ThreadContextRead[] = [
   { context_id: unanswered, calls: 1, first_record_id: 31, last_record_id: 31, last_read_at: 31, state: "unanswered" },
   { context_id: gone, calls: 1, first_record_id: 32, last_record_id: 32, last_read_at: 32, state: "missing" },
 ]
+const loadedOnly = "33334444-5555-6666-7777-888899990000"
 const lookup: ReadonlyMap<string, ContextSummary> = new Map([
   [manual, { name: "必读上下文", description: "标准手册" }],
   [edited, { name: "LOL-MODEL", description: "模型与回测" }],
+  [loadedOnly, { name: "量化与投资", description: "策略与仓位" }],
 ])
 
 function Fixture() {
@@ -31,7 +34,10 @@ function Fixture() {
     </header>
     <div id="reads"><ThreadContextReads reads={reads} lookup={lookup} view={{ head: 10, tail: 32 }} language={language} /></div>
     <div id="empty"><ThreadContextReads reads={[]} lookup={lookup} view={{ head: 40, tail: 41 }} language={language} /></div>
+    <div id="loaded"><ThreadContextReads reads={[{ context_id: edited, calls: 1, first_record_id: 50, last_record_id: 50, last_read_at: 50, state: "changed" }]} lookup={lookup} view={{ head: 50, tail: 60, loaded: [edited, loadedOnly] }} language={language} /></div>
     <div id="notice"><ContextDirtyNotice contexts={[edited, manual]} lookup={lookup} language={language} time="10:00" recordId={42} /></div>
+    <div id="load-notice"><ContextLoadNotice notice={{ context_id: manual, loaded: true }} lookup={lookup} language={language} time="10:01" recordId={43} /></div>
+    <div id="unload-notice"><ContextLoadNotice notice={{ context_id: loadedOnly, loaded: false }} lookup={lookup} language={language} time="10:02" recordId={44} /></div>
   </main>
 }
 createRoot(document.getElementById("root")!).render(<StrictMode><HashRouter><Fixture /></HashRouter></StrictMode>)

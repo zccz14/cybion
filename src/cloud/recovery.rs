@@ -111,8 +111,12 @@ pub(super) fn current_context(
         return Err(ApiError::cancelled());
     }
     let tail = latest_protocol_record_id(&tx, thread)?;
+    // Deliver every loaded Context first: the dirty check that follows must see
+    // the bindings, so a Context the Controller just refreshed is not announced
+    // as out of date. Both notices are part of the range that replays upstream.
+    let tail = context_loads::append_injections(&tx, thread, tail)?.unwrap_or(tail);
     // Tell the Thread which Contexts it read have changed before this request
-    // compiles: the notice is part of the range that replays upstream.
+    // compiles.
     let tail = append_context_dirty_notice(&tx, thread, tail)?.unwrap_or(tail);
     let context = compile_thread_context(&tx, data_dir, thread, tail)?;
     tx.commit()?;
