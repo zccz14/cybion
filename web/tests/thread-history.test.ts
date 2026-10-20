@@ -25,25 +25,39 @@ test("empty histories and histories containing only standalone messages do not c
 
 test("all other record types form adjacent groups, including singletons at both ends", () => {
   const records = [
-    record(1, "checkpoint"),
-    record(2, "input"),
-    record(3, "response_output", { type: "reasoning" }),
-    record(4, "response_output", { type: "function_call" }),
-    record(5, "tool_output", { type: "function_call_output" }),
-    record(6, "response_output", { type: "web_search_call" }),
-    record(7, "response_output", { type: "image_generation_call", result: "image" }),
-    record(8, "response_output", { type: "future_protocol_type" }),
-    record(9, "checkpoint"),
-    record(10, "activity"),
-    record(11, "tool_output"),
-    record(12, "response_output", { type: "message" }),
-    record(13, "response_output", { type: "reasoning" }),
+    record(1, "input"),
+    record(2, "response_output", { type: "reasoning" }),
+    record(3, "response_output", { type: "function_call" }),
+    record(4, "tool_output", { type: "function_call_output" }),
+    record(5, "response_output", { type: "web_search_call" }),
+    record(6, "response_output", { type: "image_generation_call", result: "image" }),
+    record(7, "response_output", { type: "future_protocol_type" }),
+    record(8, "activity"),
+    record(9, "tool_output"),
+    record(10, "response_output", { type: "message" }),
+    record(11, "response_output", { type: "reasoning" }),
   ]
   const entries = groupThreadHistory(records)
   // The image_generation_call record stays standalone: image content never joins a process group.
   assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
-    [1], 2, [3, 4, 5, 6], 7, [8, 9], 10, [11], 12, [13],
+    1, [2, 3, 4, 5], 6, [7], 8, [9], 10, [11],
   ])
+})
+
+test("a checkpoint is a compression boundary: it stays in the conversation and splits the groups around it", () => {
+  const entries = groupThreadHistory([
+    record(1, "input"),
+    record(2, "tool_output"),
+    record(3, "checkpoint", { role: "developer", content: "# Durable working context" }),
+    record(4, "tool_output"),
+    record(5, "response_output", { type: "message" }),
+    record(6, "checkpoint"),
+  ])
+  assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
+    1, [2], 3, [4], 5, 6,
+  ])
+  // Minimal mode keeps its own contract: the checkpoint folds into the turn's process group.
+  assert.deepEqual(groupThreadHistoryMinimal([record(1, "input"), record(2, "tool_output"), record(3, "checkpoint"), record(4, "response_output", { type: "message" })]).map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [1, [2, 3], 4])
 })
 
 test("only response message items are standalone; unexpected payload shapes remain inspectable in groups", () => {
@@ -74,7 +88,7 @@ test("elapsed time uses minimum and maximum timestamps, not array endpoints or a
   const entries = groupThreadHistory([
     record(1, "input", null, 0),
     record(2, "tool_output", null, 500),
-    record(3, "checkpoint", null, 100),
+    record(3, "response_output", { type: "function_call" }, 100),
     record(4, "tool_output", null, 3765),
     record(5, "response_output", { type: "reasoning" }, 800),
     record(6, "activity", null, 99999),
@@ -93,6 +107,7 @@ test("only the newest group of a running Thread is live, and only until a messag
   assert.equal(liveThreadProcessKey(open), open[1].key)
   assert.equal(liveThreadProcessKey(groupThreadHistory([...growing, record(4, "response_output", { id: "msg_4", type: "message", content: [] })])), null)
   assert.equal(liveThreadProcessKey(groupThreadHistory([record(1, "input"), record(2, "response_output", { id: "msg_2", type: "message", content: [] })])), null)
+  assert.equal(liveThreadProcessKey(groupThreadHistory([...growing, record(4, "checkpoint")])), null)
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6OZ0AAAAASUVORK5CYII="
   const withTrailingImage = groupThreadHistoryMinimal([...growing, record(4, "tool_output", { type: "image_generation_call", status: "completed", result: png })])
   assert.deepEqual(withTrailingImage.map((entry) => entry.type), ["message", "process", "image-group"])
@@ -106,7 +121,7 @@ test("a live duration runs to the clock without ever rewinding below the recorde
 })
 
 test("singleton and same-timestamp groups have zero elapsed time", () => {
-  for (const records of [[record(1, "tool_output", null, 10)], [record(1, "tool_output", null, 10), record(2, "checkpoint", null, 10)]]) {
+  for (const records of [[record(1, "tool_output", null, 10)], [record(1, "tool_output", null, 10), record(2, "response_output", { type: "function_call" }, 10)]]) {
     const [group] = groupThreadHistory(records)
     assert.equal(group.type, "process")
     if (group.type === "process") assert.equal(group.finishedAt - group.startedAt, 0)

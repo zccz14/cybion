@@ -94,14 +94,22 @@ See [Thread context replay](context.md).
 
 The conversation derives its display from the combined durable history and
 pending response items. Inputs, assistant `response_output` items of type
-`message`, every `activity` record, and image records — a generated image, a
-viewed image, or a ledger-marked screenshot with PNG data — stay outside
-process groups and end the preceding group. All other consecutive records
-form a `ThreadProcessGroup`, including a single record. Expanding the group renders the original records in
-their original order, with their existing payload inspection controls. A
-`checkpoint` record renders its stored Markdown through the shared Markdown
-renderer, the same rendering assistant replies use, and keeps its raw payload
-behind the existing disclosure.
+`message`, every `activity` record, `checkpoint` records, and image records — a
+generated image, a viewed image, or a ledger-marked screenshot with PNG data —
+stay outside process groups and end the preceding group. All other consecutive
+records form a `ThreadProcessGroup`, including a single record. Expanding the
+group renders the original records in their original order, with their existing
+payload inspection controls.
+
+A `checkpoint` is a compression boundary, so it ends the group before it and
+starts none: the Markdown it stores never hides behind a group the reader must
+open first, and the groups on either side keep their own counts and elapsed
+times. The record renders as its own card — label, `内部记录` / `Internal`
+badge, timestamp, and one line of the checkpoint's own first prose, which the
+section headings and any fenced evidence never supply — and its body stays
+folded until the reader opens the card. That body renders the stored Markdown
+through the shared Markdown renderer, the same rendering assistant replies use,
+and keeps the raw payload behind the existing disclosure.
 
 Every Markdown surface shares one renderer. Fenced code blocks labelled
 `mermaid` are drawn as diagrams instead of code: a definition that parses
