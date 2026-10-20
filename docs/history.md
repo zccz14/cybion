@@ -84,12 +84,11 @@ with `has_older` false instead of hiding rows, and a page that finds no older
 `GET /api/threads/{id}/history/reads` serves the header's read-context
 indicator: the `head` and `tail` of the context the Thread replays now, plus the
 `read_context` function calls in that inclusive range in the same record shape as
-the history endpoints, oldest first. Each call adds `read_hash` — the fingerprint
-of the version its tool output delivered — and `current_hash`, the fingerprint of
-what the same read returns now; either is `null` when there is no such version.
-Records outside `[head, tail]` are never returned, so a compaction empties the
-answer down to the calls made after its checkpoint. See
-[Thread context replay](context.md).
+the history endpoints, oldest first. Each call adds the `state` the controller
+judged — `current`, `changed`, `unanswered` or `missing` — so the browser prints
+no identifier or fingerprint. Records outside `[head, tail]` are never returned,
+so a compaction empties the answer down to the calls made after its checkpoint.
+See [Thread context replay](context.md).
 
 ## Conversation process groups
 

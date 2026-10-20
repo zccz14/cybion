@@ -25,7 +25,7 @@ fn context_body(id: &str, name: &str, description: &str, content: &str) -> Value
     })
 }
 
-fn insert_context(connection: &Connection, id: &str, content: &str) -> i64 {
+fn insert_context(connection: &Connection, id: &str, content: &str) {
     connection
         .execute(
             "INSERT INTO contexts(id,name,description,content,parent_id,sort_key,trashed_at)
@@ -33,7 +33,33 @@ fn insert_context(connection: &Connection, id: &str, content: &str) -> i64 {
             params![id, content],
         )
         .unwrap();
-    connection.last_insert_rowid()
+}
+
+/// One turn that read a Context, so a change to it is detected afterwards.
+fn insert_read_turn(connection: &Connection, thread_id: &str, context: &str, content: &str) -> i64 {
+    insert_context(connection, context, content);
+    insert_record(
+        connection,
+        thread_id,
+        "input",
+        json!({ "role": "user", "content": "read the manual" }),
+    );
+    let call = insert_record(
+        connection,
+        thread_id,
+        "response_output",
+        read_context_call(context, "call_read"),
+    );
+    insert_record(
+        connection,
+        thread_id,
+        "tool_output",
+        read_context_output(
+            "call_read",
+            context_body(context, "Manual", "Use when working", content),
+        ),
+    );
+    call
 }
 
 #[tokio::test]
@@ -161,49 +187,29 @@ async fn a_compaction_moves_the_head_past_the_reads_it_replaced() {
 }
 
 #[tokio::test]
-async fn a_read_carries_the_fingerprint_of_the_version_it_answered_with() {
+async fn a_read_of_an_untouched_context_is_current() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "reads-hash").unwrap();
+    let user = user_for_subject(&state, "reads-current").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let thread_id = thread.id.clone();
     let read_id = thread_id.clone();
     user_db(&state, &user, true, move |connection| {
-        let context = "55555555-5555-4555-8555-555555555555";
-        insert_context(connection, context, "# 手册\n\n第一步。");
-        insert_record(
+        insert_read_turn(
             connection,
             &thread_id,
-            "input",
-            json!({ "role": "user", "content": "read the manual" }),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "response_output",
-            read_context_call(context, "call_read"),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "tool_output",
-            read_context_output(
-                "call_read",
-                context_body(context, "Manual", "Use when working", "# 手册\n\n第一步。"),
-            ),
+            "55555555-5555-4555-8555-555555555555",
+            "# 手册\n\n第一步。",
         );
         Ok(())
     })
     .await
     .unwrap();
     let view = context_reads_for(&state, &user, read_id).await.unwrap();
-    let expected = context_fingerprint("Manual", "Use when working", "# 手册\n\n第一步。");
-    assert_eq!(expected.len(), 16);
-    assert_eq!(view.calls[0].read_hash, Some(expected.clone()));
-    assert_eq!(view.calls[0].current_hash, Some(expected));
+    assert!(matches!(view.calls[0].state, ContextReadState::Current));
 }
 
 #[tokio::test]
-async fn a_context_edited_after_the_read_reports_the_new_fingerprint() {
+async fn a_context_edited_after_the_read_is_changed() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "reads-edited").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -211,28 +217,7 @@ async fn a_context_edited_after_the_read_reports_the_new_fingerprint() {
     let read_id = thread_id.clone();
     user_db(&state, &user, true, move |connection| {
         let context = "66666666-6666-4666-8666-666666666666";
-        insert_context(connection, context, "旧正文");
-        insert_record(
-            connection,
-            &thread_id,
-            "input",
-            json!({ "role": "user", "content": "read the manual" }),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "response_output",
-            read_context_call(context, "call_read"),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "tool_output",
-            read_context_output(
-                "call_read",
-                context_body(context, "Manual", "Use when working", "旧正文"),
-            ),
-        );
+        insert_read_turn(connection, &thread_id, context, "旧正文");
         connection
             .execute("UPDATE contexts SET content='新正文' WHERE id=?", [context])
             .unwrap();
@@ -241,18 +226,11 @@ async fn a_context_edited_after_the_read_reports_the_new_fingerprint() {
     .await
     .unwrap();
     let view = context_reads_for(&state, &user, read_id).await.unwrap();
-    assert_eq!(
-        view.calls[0].read_hash,
-        Some(context_fingerprint("Manual", "Use when working", "旧正文"))
-    );
-    assert_eq!(
-        view.calls[0].current_hash,
-        Some(context_fingerprint("Manual", "Use when working", "新正文"))
-    );
+    assert!(matches!(view.calls[0].state, ContextReadState::Changed));
 }
 
 #[tokio::test]
-async fn a_context_hidden_since_the_read_has_no_current_fingerprint() {
+async fn a_context_hidden_since_the_read_is_missing() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "reads-trashed").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -260,28 +238,7 @@ async fn a_context_hidden_since_the_read_has_no_current_fingerprint() {
     let read_id = thread_id.clone();
     user_db(&state, &user, true, move |connection| {
         let context = "77777777-7777-4777-8777-777777777777";
-        insert_context(connection, context, "正文");
-        insert_record(
-            connection,
-            &thread_id,
-            "input",
-            json!({ "role": "user", "content": "read the manual" }),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "response_output",
-            read_context_call(context, "call_read"),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "tool_output",
-            read_context_output(
-                "call_read",
-                context_body(context, "Manual", "Use when working", "正文"),
-            ),
-        );
+        insert_read_turn(connection, &thread_id, context, "正文");
         connection
             .execute("UPDATE contexts SET trashed_at=1 WHERE id=?", [context])
             .unwrap();
@@ -290,23 +247,18 @@ async fn a_context_hidden_since_the_read_has_no_current_fingerprint() {
     .await
     .unwrap();
     let view = context_reads_for(&state, &user, read_id).await.unwrap();
-    assert_eq!(
-        view.calls[0].read_hash,
-        Some(context_fingerprint("Manual", "Use when working", "正文"))
-    );
-    assert_eq!(view.calls[0].current_hash, None);
+    assert!(matches!(view.calls[0].state, ContextReadState::Missing));
 }
 
 #[tokio::test]
-async fn a_read_the_model_never_received_carries_no_fingerprint() {
+async fn a_read_the_model_never_received_is_unanswered() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "reads-unanswered").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let thread_id = thread.id.clone();
     let read_id = thread_id.clone();
     user_db(&state, &user, true, move |connection| {
-        let context = "88888888-8888-4888-8888-888888888888";
-        insert_context(connection, context, "正文");
+        insert_context(connection, "88888888-8888-4888-8888-888888888888", "正文");
         insert_record(
             connection,
             &thread_id,
@@ -317,18 +269,14 @@ async fn a_read_the_model_never_received_carries_no_fingerprint() {
             connection,
             &thread_id,
             "response_output",
-            read_context_call(context, "call_read"),
+            read_context_call("88888888-8888-4888-8888-888888888888", "call_read"),
         );
         Ok(())
     })
     .await
     .unwrap();
     let view = context_reads_for(&state, &user, read_id).await.unwrap();
-    assert_eq!(view.calls[0].read_hash, None);
-    assert_eq!(
-        view.calls[0].current_hash,
-        Some(context_fingerprint("Manual", "Use when working", "正文"))
-    );
+    assert!(matches!(view.calls[0].state, ContextReadState::Unanswered));
 }
 
 #[tokio::test]
@@ -376,8 +324,131 @@ async fn a_common_context_read_compares_against_the_compiled_copy() {
     .await
     .unwrap();
     let view = context_reads_for(&state, &user, read_id).await.unwrap();
-    assert_eq!(view.calls[0].read_hash, view.calls[0].current_hash);
-    assert!(view.calls[0].read_hash.is_some());
+    assert!(matches!(view.calls[0].state, ContextReadState::Current));
+}
+
+#[tokio::test]
+async fn a_changed_context_is_announced_once_and_compiled_as_a_developer_message() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "dirty-notice").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let data_dir = state.data_dir.clone();
+    let context = "99999999-9999-4999-8999-999999999999";
+    let (first, second, items) = user_db(&state, &user, true, move |connection| {
+        let read = insert_read_turn(connection, &thread_id, context, "旧正文");
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        connection
+            .execute("UPDATE contexts SET content='新正文' WHERE id=?", [context])
+            .unwrap();
+        let notice = append_context_dirty_notice(connection, &thread_id, tail).unwrap();
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        let repeat = append_context_dirty_notice(connection, &thread_id, tail).unwrap();
+        let compiled = compile_thread_context(connection, &data_dir, &thread_id, tail).unwrap();
+        let messages = compiled
+            .items
+            .iter()
+            .filter(|item| item["role"] == "developer" && item["content"].is_string())
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok((read, (notice, repeat), messages))
+    })
+    .await
+    .unwrap();
+    let (notice, repeat) = second;
+    assert!(notice.is_some());
+    assert!(notice.is_some_and(|id| id > first));
+    assert_eq!(repeat, None, "the same change is announced once");
+    assert_eq!(items.len(), 1);
+    let content = items[0]["content"].as_str().unwrap();
+    assert!(
+        content.contains(context),
+        "the notice names the Context: {content}"
+    );
+    assert!(content.contains(&format!("record #{first}")));
+    assert!(content.contains("read_context"));
+}
+
+#[tokio::test]
+async fn a_reread_after_the_change_is_announced_no_further() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "dirty-reread").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let context = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let repeat = user_db(&state, &user, true, move |connection| {
+        insert_read_turn(connection, &thread_id, context, "旧正文");
+        connection
+            .execute("UPDATE contexts SET content='新正文' WHERE id=?", [context])
+            .unwrap();
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        append_context_dirty_notice(connection, &thread_id, tail).unwrap();
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            read_context_call(context, "call_reread"),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "tool_output",
+            read_context_output(
+                "call_reread",
+                context_body(context, "Manual", "Use when working", "新正文"),
+            ),
+        );
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        append_context_dirty_notice(connection, &thread_id, tail)
+    })
+    .await
+    .unwrap();
+    assert_eq!(repeat, None, "the Thread now holds the new version");
+}
+
+#[tokio::test]
+async fn a_context_that_changes_again_is_announced_again() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "dirty-twice").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let context = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let (first, second) = user_db(&state, &user, true, move |connection| {
+        insert_read_turn(connection, &thread_id, context, "第一版");
+        connection
+            .execute("UPDATE contexts SET content='第二版' WHERE id=?", [context])
+            .unwrap();
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        let first = append_context_dirty_notice(connection, &thread_id, tail).unwrap();
+        connection
+            .execute("UPDATE contexts SET content='第三版' WHERE id=?", [context])
+            .unwrap();
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        let second = append_context_dirty_notice(connection, &thread_id, tail).unwrap();
+        Ok((first, second))
+    })
+    .await
+    .unwrap();
+    assert!(first.is_some());
+    assert!(second.is_some());
+}
+
+#[tokio::test]
+async fn a_context_notice_replays_only_as_a_developer_message() {
+    let payload = json!({
+        "type": "context_dirty",
+        "contexts": [{ "context_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "read_record_id": 7, "current_hash": "hash" }],
+    });
+    let message = context_dirty_message(&payload).unwrap();
+    assert_eq!(message["role"], "developer");
+    assert_eq!(
+        context_dirty_message(&json!({ "type": "model_switch" })),
+        None
+    );
+    assert_eq!(
+        context_dirty_message(&json!({ "type": "context_dirty", "contexts": [] })),
+        None
+    );
 }
 
 #[tokio::test]

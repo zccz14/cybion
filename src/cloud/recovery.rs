@@ -111,6 +111,9 @@ pub(super) fn current_context(
         return Err(ApiError::cancelled());
     }
     let tail = latest_protocol_record_id(&tx, thread)?;
+    // Tell the Thread which Contexts it read have changed before this request
+    // compiles: the notice is part of the range that replays upstream.
+    let tail = append_context_dirty_notice(&tx, thread, tail)?.unwrap_or(tail);
     let context = compile_thread_context(&tx, data_dir, thread, tail)?;
     tx.commit()?;
     Ok(context)
