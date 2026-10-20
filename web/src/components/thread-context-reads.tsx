@@ -66,6 +66,5 @@ function ContextReadChip({ read, context, language }: {
   >
     <span className="truncate font-medium">{context?.name ?? text.unknown}</span>
     {read.state !== "current" && <span className={`shrink-0 ${stateTone[read.state]}`}>{text.state[read.state]}</span>}
-    {read.calls > 1 && <span className="shrink-0 tabular-nums text-muted-foreground">×{read.calls}</span>}
   </Link>
 }

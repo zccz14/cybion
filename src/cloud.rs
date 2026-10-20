@@ -4176,6 +4176,9 @@ fn read_output_fingerprint(payload: &str) -> Option<String> {
 }
 
 fn read_call_context_id(payload: &Value) -> Option<String> {
+    if payload.get("name").and_then(Value::as_str) != Some("read_context") {
+        return None;
+    }
     let arguments = serde_json::from_str::<Value>(payload.get("arguments")?.as_str()?).ok()?;
     Uuid::parse_str(arguments.get("context_id")?.as_str()?)
         .ok()
@@ -4216,9 +4219,16 @@ fn current_context_fingerprint(
     )
 }
 
-/// A `context_dirty` activity replays as the developer message it stands for.
-fn context_dirty_message(payload: &Value) -> Option<Value> {
-    if payload.get("type").and_then(Value::as_str) != Some("context_dirty") {
+fn is_context_dirty_record(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("context_dirty")
+}
+
+/// A `context_dirty` activity replays as the developer message it stands for,
+/// minus the Contexts the Thread has read again since: once the copy is fresh the
+/// demand is met, and the notice leaves the replay instead of nagging every
+/// request. The record itself stays in history as evidence.
+fn context_dirty_message(payload: &Value, latest_reads: &HashMap<String, i64>) -> Option<Value> {
+    if !is_context_dirty_record(payload) {
         return None;
     }
     let contexts = payload.get("contexts")?.as_array()?;
@@ -4227,6 +4237,9 @@ fn context_dirty_message(payload: &Value) -> Option<Value> {
         .filter_map(|context| {
             let id = context.get("context_id")?.as_str()?;
             let record = context.get("read_record_id")?.as_i64()?;
+            if latest_reads.get(id).is_some_and(|read| *read > record) {
+                return None;
+            }
             Some(format!(
                 "- {id} (your stale copy came from record #{record})"
             ))
@@ -5654,9 +5667,6 @@ fn load_protocol_items(
     for (id, created_at, kind, payload) in rows {
         let mut item: Value =
             serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if let Some(notice) = context_dirty_message(&item) {
-            item = notice;
-        }
         if reinjected.contains(&id) {
             screenshot_replay_item(&mut item);
         } else {
@@ -5665,7 +5675,26 @@ fn load_protocol_items(
         materialize_media(data_dir, &mut item)?;
         records.push((id, created_at, kind, item));
     }
-    Ok(records)
+    let mut latest_reads: HashMap<String, i64> = HashMap::new();
+    for (id, _, _, item) in &records {
+        if let Some(context_id) = read_call_context_id(item) {
+            let read = latest_reads.entry(context_id).or_insert(*id);
+            *read = (*read).max(*id);
+        }
+    }
+    let mut compiled = Vec::with_capacity(records.len());
+    for (id, created_at, kind, item) in records {
+        if !is_context_dirty_record(&item) {
+            compiled.push((id, created_at, kind, item));
+            continue;
+        }
+        // INVARIANT: a notice whose Contexts were all read again carries nothing the
+        // Thread still owes, so it leaves the replay while its record stays in history.
+        if let Some(notice) = context_dirty_message(&item, &latest_reads) {
+            compiled.push((id, created_at, kind, notice));
+        }
+    }
+    Ok(compiled)
 }
 
 fn compile_thread_context(

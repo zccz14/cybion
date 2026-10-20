@@ -6,7 +6,7 @@ test("each read Context shows its name and only the states worth noticing", asyn
   await expect(reads).toContainText("已读上下文 4")
   await expect(reads).toContainText("#10–#32")
   const manual = reads.getByRole("link", { name: /必读上下文/ })
-  await expect(manual).toHaveText("必读上下文×2")
+  await expect(manual).toHaveText("必读上下文")
   await expect(manual).toHaveAttribute("href", "#/contexts?context=8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f")
   await expect(manual).toHaveAttribute("title", "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f\n最近读取 #27\n读取 2 次")
   await expect(reads.getByRole("link", { name: /LOL-MODEL/ })).toHaveText("LOL-MODEL已改")
@@ -16,6 +16,8 @@ test("each read Context shows its name and only the states worth noticing", asyn
   // The chip carries no id or fingerprint: a UUID means nothing to a reader.
   await expect(reads).not.toContainText("8f1d2e3a")
   await expect(reads).not.toContainText("aaaaaaaa")
+  // The read count is detail, not a chip label.
+  await expect(reads).not.toContainText("×2")
   const empty = page.locator("#empty")
   await expect(empty).toContainText("已读上下文 0")
   await expect(empty).toContainText("本窗口内没有读取上下文")

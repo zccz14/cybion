@@ -171,10 +171,10 @@ Each Context appears once, in the order the Thread first read it, with the newes
 read deciding its state: a Thread that read a Context before and after an edit
 holds the edit. The chip shows the Context's name, a link to it, and only the
 states worth noticing — edited, never answered, gone. A current Context is not
-marked, a repeat read shows its count, and the tooltip carries the full id and
-the record that read it. No identifier or fingerprint is printed on the chip: a
-UUID means nothing to a reader, and both are already in the activity record and
-the tool output behind it.
+marked. No identifier, fingerprint or read count is printed on the chip: a UUID
+means nothing to a reader, and the rest is already in the activity record and the
+tool output behind it. The tooltip carries the full id, the record that last read
+it, and how many times the Thread read it.
 
 The row also shows the record range it was computed from, so a head that moved to
 a checkpoint is visible. A Thread with no protocol record yet reports `head` and
@@ -201,8 +201,11 @@ while a notice already made is not repeated.
 The announcement runs in the transaction that compiles the request, after the
 request boundary and the Thread's status are confirmed, so it belongs to the
 range that request replays and cannot race a newer input. A Context the Thread
-re-read after the change is current again and is not announced. A Context that is
-no longer readable — deleted, or hidden by the trash — is not announced, because
+re-read after the change is current again: it is not announced again, and the
+notice it was announced with leaves the replay once every Context it names has
+been read again, so the demand is not repeated to a Thread that already complied.
+The record itself stays in history as evidence. A Context that is no longer
+readable — deleted, or hidden by the trash — is not announced, because
 there is nothing left to re-read; the header marks it instead. The notice names
 ids rather than titles: the ids are what `read_context` takes, and a title may
 itself have changed.

@@ -446,15 +446,161 @@ async fn a_context_notice_replays_only_as_a_developer_message() {
         "type": "context_dirty",
         "contexts": [{ "context_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "read_record_id": 7, "current_hash": "hash" }],
     });
-    let message = context_dirty_message(&payload).unwrap();
+    let reads = HashMap::new();
+    let message = context_dirty_message(&payload, &reads).unwrap();
     assert_eq!(message["role"], "developer");
     assert_eq!(
-        context_dirty_message(&json!({ "type": "model_switch" })),
+        context_dirty_message(&json!({ "type": "model_switch" }), &reads),
         None
     );
     assert_eq!(
-        context_dirty_message(&json!({ "type": "context_dirty", "contexts": [] })),
+        context_dirty_message(&json!({ "type": "context_dirty", "contexts": [] }), &reads),
         None
+    );
+}
+
+#[tokio::test]
+async fn a_notice_stops_replaying_once_the_context_is_read_again() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "notice-cleared").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let data_dir = state.data_dir.clone();
+    let context = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    let (before, after) = user_db(&state, &user, true, move |connection| {
+        insert_read_turn(connection, &thread_id, context, "旧正文");
+        connection
+            .execute("UPDATE contexts SET content='新正文' WHERE id=?", [context])
+            .unwrap();
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        let notice = append_context_dirty_notice(connection, &thread_id, tail)
+            .unwrap()
+            .unwrap();
+        let before = compile_thread_context(connection, &data_dir, &thread_id, notice).unwrap();
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            read_context_call(context, "call_reread"),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "tool_output",
+            read_context_output(
+                "call_reread",
+                context_body(context, "Manual", "Use when working", "新正文"),
+            ),
+        );
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        let after = compile_thread_context(connection, &data_dir, &thread_id, tail).unwrap();
+        Ok((before, after))
+    })
+    .await
+    .unwrap();
+    assert!(before.items.iter().any(|item| item["role"] == "developer"));
+    assert!(
+        !after.items.iter().any(|item| item["role"] == "developer"),
+        "a read Context is no longer stale, so the notice stops replaying"
+    );
+    assert!(
+        after.record_ids.contains(&after.idx_tail),
+        "the re-read record is the tail"
+    );
+}
+
+#[tokio::test]
+async fn a_notice_keeps_only_the_contexts_still_stale() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "notice-partial").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let data_dir = state.data_dir.clone();
+    let first = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    let second = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    let message: Option<String> = user_db(&state, &user, true, move |connection| {
+        insert_context(connection, first, "第一份");
+        insert_context(connection, second, "第二份");
+        insert_record(
+            connection,
+            &thread_id,
+            "input",
+            json!({ "role": "user", "content": "read both" }),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            read_context_call(first, "call_first"),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "tool_output",
+            read_context_output(
+                "call_first",
+                context_body(first, "Manual", "Use when working", "第一份"),
+            ),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            read_context_call(second, "call_second"),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "tool_output",
+            read_context_output(
+                "call_second",
+                context_body(second, "Manual", "Use when working", "第二份"),
+            ),
+        );
+        connection
+            .execute(
+                "UPDATE contexts SET content='第一份（改）' WHERE id=?",
+                [first],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE contexts SET content='第二份（改）' WHERE id=?",
+                [second],
+            )
+            .unwrap();
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        append_context_dirty_notice(connection, &thread_id, tail).unwrap();
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            read_context_call(first, "call_first_again"),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "tool_output",
+            read_context_output(
+                "call_first_again",
+                context_body(first, "Manual", "Use when working", "第一份（改）"),
+            ),
+        );
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        let compiled = compile_thread_context(connection, &data_dir, &thread_id, tail).unwrap();
+        Ok(compiled
+            .items
+            .iter()
+            .find(|item| item["role"] == "developer")
+            .and_then(|item| item["content"].as_str().map(str::to_owned)))
+    })
+    .await
+    .unwrap();
+    let message = message.expect("the unre-read Context still owes a notice");
+    assert!(message.contains(second));
+    assert!(
+        !message.contains(first),
+        "the re-read Context leaves the notice: {message}"
     );
 }
 
