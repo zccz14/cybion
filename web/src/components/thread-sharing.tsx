@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { CopyIcon, Share2Icon } from "lucide-react"
-import { LinkitUserPicker } from "linkit-react-components"
+import { LinkitUserInfo, LinkitUserPicker } from "linkit-react-components"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -76,8 +76,8 @@ function ThreadSharingControl({ userId, sessionId, threadId, language, request }
   const link = typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}#${sharedThreadPath(userId, threadId)}`
   const error = grants.error || grant.error || revoke.error
   return <Dialog open={open} onOpenChange={setOpen}><DialogTrigger asChild>
-    <Button variant={active ? "secondary" : "outline"} size="sm" title={active ? t.ongoing : t.description}>
-      <Share2Icon />{grants.error ? t.unknown : active ? `${t.shared} · ${active}` : t.share}
+    <Button variant={active ? "secondary" : "outline"} size="icon-sm" aria-label={grants.error ? t.unknown : active ? `${t.shared} · ${active}` : t.share} title={active ? t.ongoing : t.description}>
+      <Share2Icon />
     </Button></DialogTrigger>
     <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>{t.title}</DialogTitle><DialogDescription>{t.description}</DialogDescription></DialogHeader>
       <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (recipient && !invalid && consent && !busy) grant.mutate(recipient) }}>
@@ -93,7 +93,7 @@ function ThreadSharingControl({ userId, sessionId, threadId, language, request }
       {error && <SharingError error={error} language={language} retry={grants.error ? () => void grants.refetch() : undefined} />}
       <h3 className="text-sm font-medium">{t.recipients}</h3><p className="text-sm text-muted-foreground">{t.owner}</p>
       {grants.isPending && <p role="status">{t.loading}</p>}{grants.data?.length === 0 && <p className="text-sm text-muted-foreground">{t.empty}</p>}
-      <ul className="divide-y">{grants.data?.map((g) => <li key={g.grant_id} className="flex flex-wrap items-center gap-2 py-3"><code className="min-w-0 basis-full break-all text-xs sm:flex-1 sm:basis-auto">{g.grantee_user_id}</code><Badge variant="outline">{g.revoked_at === null ? t.viewer : t.revoked}</Badge>{g.revision !== g.synced_revision && <span className="text-xs text-muted-foreground">{g.revoked_at === null ? t.pending : t.revocationPending}</span>}{g.revoked_at === null && <Button size="sm" variant="outline" disabled={busy} onClick={() => { if (window.confirm(t.revokeConfirm.replace("{uid}", g.grantee_user_id))) revoke.mutate(g.grantee_user_id) }}>{t.revoke}</Button>}</li>)}</ul>
+      <ul className="divide-y">{grants.data?.map((g) => <li key={g.grant_id} className="flex flex-wrap items-center gap-2 py-3"><LinkitUserInfo userId={g.grantee_user_id} compact /><Badge variant="outline">{g.revoked_at === null ? t.viewer : t.revoked}</Badge>{g.revision !== g.synced_revision && <span className="text-xs text-muted-foreground">{g.revoked_at === null ? t.pending : t.revocationPending}</span>}{g.revoked_at === null && <Button size="sm" variant="outline" disabled={busy} onClick={() => { if (window.confirm(t.revokeConfirm.replace("{uid}", g.grantee_user_id))) revoke.mutate(g.grantee_user_id) }}>{t.revoke}</Button>}</li>)}</ul>
       <Button variant="outline" onClick={async () => { try { await navigator.clipboard.writeText(link); setCopyStatus("copied") } catch { setCopyStatus("failed") } }}><CopyIcon />{t.copy}</Button>
       {copyStatus && <p role="status" className="text-xs text-muted-foreground">{copyStatus === "copied" ? t.copied : t.copyFailed}</p>}
       {copyStatus === "failed" && <Input aria-label={t.copy} readOnly value={link} onFocus={(event) => event.target.select()} />}

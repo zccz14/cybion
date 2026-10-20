@@ -23,11 +23,22 @@ test("only authentication and authorization failures end the reader, temporary f
 test("both sharing surfaces pick recipients through the package-owned Linkit user picker", () => {
   for (const file of ["../src/components/worker-sharing.tsx", "../src/components/thread-sharing.tsx"]) {
     const source = readFileSync(new URL(file, import.meta.url), "utf8")
-    assert.match(source, /import \{ LinkitUserPicker \} from "linkit-react-components"/)
+    assert.match(source, /import \{ (?:LinkitUserInfo, )?LinkitUserPicker \} from "linkit-react-components"/)
     assert.match(source, /<LinkitUserPicker lang=\{language === "zh" \? "zh-CN" : "en-US"\} label=\{t\.recipient\} value=\{recipient\} onValueChange=\{\(next\) => \{ setRecipient\(next\); setConsent\(false\); grant\.reset\(\) \}\} \/>/)
     assert.doesNotMatch(source, /Recipient user ID/)
     assert.doesNotMatch(source, /aria-invalid/)
   }
+})
+
+test("the Thread share control is an icon-only button that keeps its accessible name and granted count", () => {
+  const source = readFileSync(new URL("../src/components/thread-sharing.tsx", import.meta.url), "utf8")
+  assert.match(source, /size="icon-sm" aria-label=\{grants\.error \? t\.unknown : active \? `\$\{t\.shared\} · \$\{active\}` : t\.share\} title=\{active \? t\.ongoing : t\.description\}>\s*<Share2Icon \/>\s*<\/Button>/)
+})
+
+test("granted people render through the package-owned Linkit user info instead of raw IDs", () => {
+  const source = readFileSync(new URL("../src/components/thread-sharing.tsx", import.meta.url), "utf8")
+  assert.match(source, /<LinkitUserInfo userId=\{g\.grantee_user_id\} compact \/>/)
+  assert.doesNotMatch(source, /<code className="min-w-0 basis-full/)
 })
 
 test("production integration keeps the shared reader separate from owner execution and configuration", () => {
