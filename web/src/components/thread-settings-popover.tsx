@@ -17,11 +17,11 @@ export type ModelCatalog = {
   error: string | null
 }
 
-type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint" | "minimalMode" | "minimalModeHint" | "minimalModeDefault" | "minimalModeOn" | "minimalModeOff" | "imageGeneration" | "imageGenerationHint" | "imageGenerationDefault" | "imageGenerationDisabled"
+type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint" | "loadedManualCap" | "loadedManualCapHint" | "minimalMode" | "minimalModeHint" | "minimalModeDefault" | "minimalModeOn" | "minimalModeOff" | "imageGeneration" | "imageGenerationHint" | "imageGenerationDefault" | "imageGenerationDisabled"
 
 const copy = {
-  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default.", minimalMode: "Minimal mode", minimalModeHint: "Only the final reply or status of each turn stays open.", minimalModeDefault: "Follow default", minimalModeOn: "On", minimalModeOff: "Off", imageGeneration: "Image generation", imageGenerationHint: "The image model served by this thread's upstream; Disabled turns image generation off.", imageGenerationDefault: "Follow default", imageGenerationDisabled: "Disabled" },
-  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "重放预算", contextBudgetHint: "超过后自动压缩；留空跟随默认值。", minimalMode: "极简模式", minimalModeHint: "每轮仅展开最后一条回复或状态。", minimalModeDefault: "跟随默认", minimalModeOn: "开启", minimalModeOff: "关闭", imageGeneration: "图像生成", imageGenerationHint: "由该线程的上游提供的图像模型；选择关闭即禁用图像生成。", imageGenerationDefault: "跟随默认", imageGenerationDisabled: "关闭" },
+  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default.", loadedManualCap: "Loaded manuals", loadedManualCapHint: "Manuals this thread may keep loaded at once; empty follows the default.", minimalMode: "Minimal mode", minimalModeHint: "Only the final reply or status of each turn stays open.", minimalModeDefault: "Follow default", minimalModeOn: "On", minimalModeOff: "Off", imageGeneration: "Image generation", imageGenerationHint: "The image model served by this thread's upstream; Disabled turns image generation off.", imageGenerationDefault: "Follow default", imageGenerationDisabled: "Disabled" },
+  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "重放预算", contextBudgetHint: "超过后自动压缩；留空跟随默认值。", loadedManualCap: "已加载手册上限", loadedManualCapHint: "本线程可同时保持加载的手册数；留空跟随默认值。", minimalMode: "极简模式", minimalModeHint: "每轮仅展开最后一条回复或状态。", minimalModeDefault: "跟随默认", minimalModeOn: "开启", minimalModeOff: "关闭", imageGeneration: "图像生成", imageGenerationHint: "由该线程的上游提供的图像模型；选择关闭即禁用图像生成。", imageGenerationDefault: "跟随默认", imageGenerationDisabled: "关闭" },
 } satisfies Record<"en" | "zh", Record<ThreadSettingsCopyKey, string>>
 
 // A model is chosen as an upstream/model pair; the encoded value keeps the two
@@ -57,7 +57,7 @@ export function imageModelOptions(catalogs: ModelCatalog[] | undefined, upstream
   return [...models]
 }
 
-export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, minimalMode, imageGeneration, disabled, onModelChange, onReasoningChange, onFastChange }: {
+export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, loadedManualCap, minimalMode, imageGeneration, disabled, onModelChange, onReasoningChange, onFastChange }: {
   model: string
   upstreamId: string | null
   catalogs: ModelCatalog[] | undefined
@@ -65,6 +65,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
   fast: boolean
   language: "en" | "zh"
   contextBudget?: { override: number | null; fallback: number; onChange: (value: number | null) => void }
+  loadedManualCap?: { override: number | null; fallback: number; onChange: (value: number | null) => void }
   minimalMode?: { override: boolean | null; fallback: boolean; onChange: (value: boolean | null) => void }
   imageGeneration?: { override: string | null; fallback: string; catalogs: ModelCatalog[] | undefined; onChange: (value: string | null) => void }
   disabled?: boolean
@@ -123,6 +124,28 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
           }}
         />
         <p className="text-xs text-muted-foreground">{t.contextBudgetHint}</p>
+      </div>}
+      {loadedManualCap && <div className="flex flex-col gap-2">
+        <Label htmlFor="thread-settings-loaded-manual-cap">{t.loadedManualCap}</Label>
+        <Input
+          id="thread-settings-loaded-manual-cap"
+          type="number"
+          min={1}
+          max={64}
+          step={1}
+          inputMode="numeric"
+          disabled={disabled}
+          placeholder={String(loadedManualCap.fallback)}
+          value={loadedManualCap.override === null ? "" : String(loadedManualCap.override)}
+          onChange={(event) => {
+            const raw = event.target.value.trim()
+            const parsed = Number(raw)
+            // The controller refuses a cap outside 1–64 and the Thread keeps its
+            // previous value, so clamp rather than send a value it cannot store.
+            loadedManualCap.onChange(raw === "" || !Number.isFinite(parsed) ? null : Math.min(64, Math.max(1, Math.trunc(parsed))))
+          }}
+        />
+        <p className="text-xs text-muted-foreground">{t.loadedManualCapHint}</p>
       </div>}
       {minimalMode && <div className="flex flex-col gap-2">
         <Label>{t.minimalMode}</Label>

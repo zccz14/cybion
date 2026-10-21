@@ -769,3 +769,61 @@ async fn schema_48_upgrade_adds_reasoning_cost_columns_and_keeps_the_audits() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn schema_50_upgrade_adds_the_loaded_manual_cap_columns() {
+    // A deployed schema 50 database: current tables, but neither the User
+    // default for the loaded-Manual cap nor the per-Thread override.
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "loaded-cap-upgrade").unwrap();
+    user_db(&state, &user, true, move |connection| {
+        connection.execute_batch(
+            "ALTER TABLE threads DROP COLUMN max_loaded_manuals;
+             ALTER TABLE thread_defaults DROP COLUMN max_loaded_manuals;
+             INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('t','T','m','idle',1,1);
+             PRAGMA user_version=50;",
+        )?;
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        for table in ["threads", "thread_defaults"] {
+            assert_eq!(
+                connection.query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='max_loaded_manuals'"),
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1,
+                "{table} gains the cap column"
+            );
+        }
+        let thread_cap: Option<i64> = connection.query_row(
+            "SELECT max_loaded_manuals FROM threads WHERE id='t'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            thread_cap, None,
+            "an existing Thread keeps following the user default"
+        );
+        connection.execute(
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast) VALUES(1,'m','medium',0)",
+            [],
+        )?;
+        let user_cap: i64 = connection.query_row(
+            "SELECT max_loaded_manuals FROM thread_defaults WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            user_cap,
+            manual_loads::DEFAULT_MAX_LOADED_MANUALS,
+            "the added column matches the built-in cap"
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}

@@ -103,7 +103,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
     assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2"});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","max_loaded_manuals":12});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -502,6 +502,7 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
         context_budget_tokens: 150_000,
         minimal_mode: false,
         image_generation_model: String::new(),
+        max_loaded_manuals: 12,
     };
     assert_eq!(
         update_thread_defaults(
@@ -659,6 +660,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         context_budget_tokens: 150_000,
         minimal_mode: false,
         image_generation_model: String::new(),
+        max_loaded_manuals: 12,
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -739,6 +741,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         context_budget_tokens: initial.context_budget_tokens,
         minimal_mode: false,
         image_generation_model: String::new(),
+        max_loaded_manuals: 12,
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -785,6 +788,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         context_budget_tokens: 150_000,
         minimal_mode: false,
         image_generation_model: String::new(),
+        max_loaded_manuals: 12,
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -809,6 +813,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 context_budget_tokens: 150_000,
                 minimal_mode: false,
                 image_generation_model: String::new(),
+                max_loaded_manuals: 12,
             }),
         )
         .await
@@ -826,6 +831,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             context_budget_tokens: 150_000,
             minimal_mode: false,
             image_generation_model: "not a model".to_owned(),
+            max_loaded_manuals: 12,
         }),
     )
     .await
@@ -858,6 +864,28 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 context_budget_tokens: budget,
                 minimal_mode: false,
                 image_generation_model: String::new(),
+                max_loaded_manuals: 12,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+    // The cap on loaded Manuals is a request-size bound, so an unset or absurd
+    // value is refused at the settings boundary instead of clamped.
+    for cap in [0_i64, manual_loads::MAX_CONFIGURED_LOADED_MANUALS + 1] {
+        let error = update_thread_defaults(
+            State(state.clone()),
+            browser_identity_for(&user),
+            Json(ThreadDefaults {
+                model: "gpt-6-astra".to_owned(),
+                upstream_id: Some(upstream.id.clone()),
+                reasoning_effort: "high".to_owned(),
+                service_tier_fast: true,
+                context_budget_tokens: 150_000,
+                minimal_mode: false,
+                image_generation_model: String::new(),
+                max_loaded_manuals: cap,
             }),
         )
         .await
@@ -875,6 +903,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             context_budget_tokens: 150_000,
             minimal_mode: false,
             image_generation_model: String::new(),
+            max_loaded_manuals: 12,
         }),
     )
     .await
@@ -945,6 +974,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
                 context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
                 minimal_mode: false,
                 image_generation_model: String::new(),
+                max_loaded_manuals: 12,
             }
         );
     }
@@ -1090,6 +1120,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
                 context_budget_tokens: None,
                 minimal_mode: Some(override_value),
                 image_generation_model: None,
+                max_loaded_manuals: None,
                 archived: None,
             }),
         )
@@ -1106,6 +1137,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
         context_budget_tokens: 150_000,
         minimal_mode: true,
         image_generation_model: String::new(),
+        max_loaded_manuals: 12,
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -1170,6 +1202,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
                 context_budget_tokens: None,
                 minimal_mode: None,
                 image_generation_model: override_value,
+                max_loaded_manuals: None,
                 archived: None,
             }),
         )
@@ -1191,6 +1224,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
             context_budget_tokens: None,
             minimal_mode: None,
             image_generation_model: Some(Some("not a model".to_owned())),
+            max_loaded_manuals: None,
             archived: None,
         }),
     )
@@ -1205,6 +1239,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
         context_budget_tokens: 150_000,
         minimal_mode: false,
         image_generation_model: "gpt-image-2".to_owned(),
+        max_loaded_manuals: 12,
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -1215,6 +1250,103 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
     .unwrap()
     .0;
     assert_eq!(saved.image_generation_model, "gpt-image-2");
+    assert_eq!(
+        read_thread_defaults(State(state), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0,
+        defaults
+    );
+}
+
+#[tokio::test]
+async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "loaded-cap-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "loaded-cap", "http://127.0.0.1:9/v1").await;
+    let thread = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    // Both levels start at the built-in cap: twelve, not the old eight.
+    assert_eq!(thread.max_loaded_manuals, None);
+    assert_eq!(
+        read_thread_defaults(State(state.clone()), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0
+            .max_loaded_manuals,
+        manual_loads::DEFAULT_MAX_LOADED_MANUALS
+    );
+    assert_eq!(manual_loads::DEFAULT_MAX_LOADED_MANUALS, 12);
+    for (override_value, expected) in [(Some(Some(3_i64)), Some(3)), (Some(None), None)] {
+        let patched = update_thread(
+            State(state.clone()),
+            browser_identity_for(&user),
+            AxumPath(thread.id.clone()),
+            Json(UpdateThreadInput {
+                title: None,
+                model: None,
+                upstream_id: None,
+                reasoning_effort: None,
+                service_tier_fast: None,
+                context_budget_tokens: None,
+                minimal_mode: None,
+                image_generation_model: None,
+                max_loaded_manuals: override_value,
+                archived: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(patched.max_loaded_manuals, expected);
+    }
+    for cap in [0_i64, manual_loads::MAX_CONFIGURED_LOADED_MANUALS + 1] {
+        let error = update_thread(
+            State(state.clone()),
+            browser_identity_for(&user),
+            AxumPath(thread.id.clone()),
+            Json(UpdateThreadInput {
+                title: None,
+                model: None,
+                upstream_id: None,
+                reasoning_effort: None,
+                service_tier_fast: None,
+                context_budget_tokens: None,
+                minimal_mode: None,
+                image_generation_model: None,
+                max_loaded_manuals: Some(Some(cap)),
+                archived: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+    let defaults = ThreadDefaults {
+        model: "gpt-6-astra".to_owned(),
+        upstream_id: Some(upstream.id.clone()),
+        reasoning_effort: "high".to_owned(),
+        service_tier_fast: false,
+        context_budget_tokens: 150_000,
+        minimal_mode: false,
+        image_generation_model: String::new(),
+        max_loaded_manuals: 20,
+    };
+    let saved = update_thread_defaults(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(defaults.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(saved.max_loaded_manuals, 20);
     assert_eq!(
         read_thread_defaults(State(state), browser_identity_for(&user))
             .await

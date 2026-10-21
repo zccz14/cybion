@@ -150,7 +150,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_columns`.
-const USER_SCHEMA_VERSION: i64 = 50;
+const USER_SCHEMA_VERSION: i64 = 51;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1095,6 +1095,7 @@ CREATE TABLE IF NOT EXISTS threads (
   context_budget_tokens INTEGER,
   minimal_mode INTEGER,
   image_generation_model TEXT,
+  max_loaded_manuals INTEGER,
   archived_at INTEGER,
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
@@ -1111,7 +1112,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   service_tier_fast INTEGER NOT NULL CHECK(service_tier_fast IN (0,1)),
   context_budget_tokens INTEGER NOT NULL DEFAULT 200000,
   minimal_mode INTEGER NOT NULL DEFAULT 0,
-  image_generation_model TEXT NOT NULL DEFAULT ''
+  image_generation_model TEXT NOT NULL DEFAULT '',
+  max_loaded_manuals INTEGER NOT NULL DEFAULT 12
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1861,6 +1863,12 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             "image_generation_model",
             "TEXT NOT NULL DEFAULT ''",
         ),
+        ("threads", "max_loaded_manuals", "INTEGER"),
+        (
+            "thread_defaults",
+            "max_loaded_manuals",
+            "INTEGER NOT NULL DEFAULT 12",
+        ),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
         ("worker_calls", "received_at", "INTEGER"),
@@ -2129,6 +2137,9 @@ struct ThreadView {
     /// Per-thread image generation model override; `None` follows the user
     /// default and an empty string disables image generation for the Thread.
     image_generation_model: Option<String>,
+    /// Per-thread cap on the Manuals this Thread keeps loaded; `None` follows
+    /// the user default.
+    max_loaded_manuals: Option<i64>,
     /// When the thread was archived; `None` keeps it in the thread list.
     archived_at: Option<i64>,
     /// Input tokens of the most recent inference request, for the context display.
@@ -2437,10 +2448,18 @@ struct ThreadDefaults {
     /// image generation.
     #[serde(default)]
     image_generation_model: String,
+    /// Loaded Manuals a Thread may keep at once when it carries no override of
+    /// its own. A load past the cap is refused, never truncated.
+    #[serde(default = "default_max_loaded_manuals")]
+    max_loaded_manuals: i64,
 }
 
 fn default_context_budget_tokens() -> i64 {
     DEFAULT_CONTEXT_BUDGET_TOKENS
+}
+
+fn default_max_loaded_manuals() -> i64 {
+    manual_loads::DEFAULT_MAX_LOADED_MANUALS
 }
 
 impl Default for ThreadDefaults {
@@ -2453,6 +2472,7 @@ impl Default for ThreadDefaults {
             context_budget_tokens: DEFAULT_CONTEXT_BUDGET_TOKENS,
             minimal_mode: false,
             image_generation_model: String::new(),
+            max_loaded_manuals: manual_loads::DEFAULT_MAX_LOADED_MANUALS,
         }
     }
 }
@@ -2480,6 +2500,10 @@ struct UpdateThreadInput {
     // disables image generation for the thread; a model name enables it.
     #[serde(default, deserialize_with = "deserialize_double_option_string")]
     image_generation_model: Option<Option<String>>,
+    // `null` clears the override back to the user default; a number sets the
+    // cap on Manuals this Thread keeps loaded.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    max_loaded_manuals: Option<Option<i64>>,
     /// `true` archives the thread and hides it from the thread list; `false`
     /// restores it. Omitted keeps the current state.
     #[serde(default)]
@@ -2728,8 +2752,9 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let output_tokens: i64 = row.get(11)?;
     let cached_tokens: i64 = row.get(12)?;
     let missing_cache_requests: i64 = row.get(13)?;
-    let cost_usd_nanos: i64 = row.get(22)?;
-    let cost_settled_requests: i64 = row.get(23)?;
+    let max_loaded_manuals: Option<i64> = row.get(22)?;
+    let cost_usd_nanos: i64 = row.get(23)?;
+    let cost_settled_requests: i64 = row.get(24)?;
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
@@ -2748,6 +2773,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         context_tokens: row.get(15)?,
         minimal_mode: row.get(16)?,
         image_generation_model: row.get(21)?,
+        max_loaded_manuals,
         archived_at: row.get(18)?,
         usage: ThreadUsage {
             input_tokens,
@@ -2976,7 +3002,7 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -2988,6 +3014,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                     context_budget_tokens: row.get(4)?,
                     minimal_mode: row.get::<_, i64>(5)? != 0,
                     image_generation_model: row.get(6)?,
+                    max_loaded_manuals: row.get(7)?,
                 })
             },
         )
@@ -3022,14 +3049,15 @@ async fn update_thread_defaults(
         context_budget_tokens: context_budget_tokens(input.context_budget_tokens)?,
         minimal_mode: input.minimal_mode,
         image_generation_model: image_generation_model(input.image_generation_model)?,
+        max_loaded_manuals: manual_loads::max_loaded_manuals(input.max_loaded_manuals)?,
     };
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = defaults.upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model) VALUES(1,?,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals) VALUES(1,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals",
             params![
                 defaults.model,
                 defaults.upstream_id,
@@ -3037,7 +3065,8 @@ async fn update_thread_defaults(
                 defaults.service_tier_fast,
                 defaults.context_budget_tokens,
                 defaults.minimal_mode,
-                defaults.image_generation_model
+                defaults.image_generation_model,
+                defaults.max_loaded_manuals
             ],
         )?;
         Ok(defaults)
@@ -3148,6 +3177,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
          ORDER BY ra.id DESC LIMIT 1),
        t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref,
        t.image_generation_model,
+       t.max_loaded_manuals,
        COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0)
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
@@ -3238,6 +3268,7 @@ async fn create_thread_for(
             context_budget_tokens: None,
             minimal_mode: None,
             image_generation_model: None,
+            max_loaded_manuals: None,
             archived_at: None,
             context_tokens: None,
             status: "idle".to_owned(),
@@ -3754,6 +3785,10 @@ async fn update_thread(
         .image_generation_model
         .map(|value| value.map(image_generation_model).transpose())
         .transpose()?;
+    let max_loaded_manuals = input
+        .max_loaded_manuals
+        .map(|value| value.map(manual_loads::max_loaded_manuals).transpose())
+        .transpose()?;
     if title.is_none()
         && model.is_none()
         && upstream_id.is_none()
@@ -3762,6 +3797,7 @@ async fn update_thread(
         && input.context_budget_tokens.is_none()
         && input.minimal_mode.is_none()
         && image_generation_model.is_none()
+        && max_loaded_manuals.is_none()
         && input.archived.is_none()
     {
         return Err(ApiError::bad_request("thread update is empty"));
@@ -3773,7 +3809,7 @@ async fn update_thread(
             require_upstream(connection, id)?;
         }
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -3786,6 +3822,8 @@ async fn update_thread(
                 input.minimal_mode.flatten(),
                 image_generation_model.is_some(),
                 image_generation_model.flatten(),
+                max_loaded_manuals.is_some(),
+                max_loaded_manuals.flatten(),
                 input.archived.is_some(),
                 input.archived.map(|archived| archived.then_some(updated_at)),
                 updated_at,
@@ -4166,6 +4204,9 @@ struct ThreadManualLoadsView {
     tail: Option<i64>,
     /// Manuals this Thread keeps loaded, in the order it loaded them.
     loaded: Vec<String>,
+    /// The cap these bindings count against: the Thread's own override, then
+    /// the user default, then the built-in one.
+    limit: i64,
 }
 
 async fn thread_manual_loads(
@@ -4199,17 +4240,20 @@ fn loaded_manuals_view(
         [id],
         |row| row.get(0),
     )?;
+    let limit = manual_loads::loaded_manual_cap(connection, id)?;
     let Some(tail) = tail else {
         return Ok(ThreadManualLoadsView {
             head: None,
             tail: None,
             loaded,
+            limit,
         });
     };
     Ok(ThreadManualLoadsView {
         head: Some(context_idx_head(connection, id, tail)?),
         tail: Some(tail),
         loaded,
+        limit,
     })
 }
 
@@ -4987,6 +5031,7 @@ async fn process_request(
                 context_budget_tokens: None,
                 minimal_mode: None,
                 image_generation_model: None,
+                max_loaded_manuals: None,
                 archived_at: None,
                 context_tokens: None,
                 status: "failed".to_owned(),
@@ -10123,6 +10168,7 @@ mod tests {
             context_budget_tokens: None,
             minimal_mode: None,
             image_generation_model: None,
+            max_loaded_manuals: None,
             archived: Some(archived),
         }
     }

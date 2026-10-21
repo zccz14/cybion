@@ -32,10 +32,43 @@ CREATE TABLE IF NOT EXISTS thread_manual_loads (
 );
 "#;
 
-/// Loaded Manuals one Thread may hold. Every one of them is delivered into each
-/// request, so the cap bounds what a single request carries; a load past it is
-/// refused rather than truncated.
-pub(super) const MAX_LOADED_THREAD: i64 = 8;
+/// Loaded Manuals a Thread may hold when neither the Thread nor the User set a
+/// cap of their own. Every loaded Manual is delivered into each request, so the
+/// cap bounds what a single request carries; a load past it is refused rather
+/// than truncated.
+pub(super) const DEFAULT_MAX_LOADED_MANUALS: i64 = 12;
+
+/// The largest cap a User default or a Thread override may name. A configured
+/// cap still bounds what every request of that Thread carries, so it stays
+/// inside a range the conversation can afford; a value past it is refused at
+/// the settings boundary, not silently clamped.
+pub(super) const MAX_CONFIGURED_LOADED_MANUALS: i64 = 64;
+
+/// Validates a cap a User default or a Thread override names.
+pub(super) fn max_loaded_manuals(value: i64) -> Result<i64, ApiError> {
+    if !(1..=MAX_CONFIGURED_LOADED_MANUALS).contains(&value) {
+        return Err(ApiError::bad_request(format!(
+            "loaded Manual cap must be between 1 and {MAX_CONFIGURED_LOADED_MANUALS}"
+        )));
+    }
+    Ok(value)
+}
+
+/// The cap in force for one Thread: its own override, then the User default,
+/// then `DEFAULT_MAX_LOADED_MANUALS`. Lowering a cap unloads nothing, so a
+/// Thread can end up holding more Manuals than its cap and has to release the
+/// bindings itself before it loads another.
+pub(super) fn loaded_manual_cap(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
+    Ok(connection
+        .query_row(
+            "SELECT COALESCE(t.max_loaded_manuals, d.max_loaded_manuals, ?1)
+             FROM threads t LEFT JOIN thread_defaults d ON d.id=1 WHERE t.id=?2",
+            params![DEFAULT_MAX_LOADED_MANUALS, thread_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(DEFAULT_MAX_LOADED_MANUALS))
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -269,10 +302,11 @@ pub(super) async fn load_tool_output(
                 [&thread],
                 |row| row.get(0),
             )?;
-            if count >= MAX_LOADED_THREAD {
+            let cap = loaded_manual_cap(connection, &thread)?;
+            if count >= cap {
                 return Ok(json!({
                     "error": format!(
-                        "this Thread already holds {MAX_LOADED_THREAD} loaded Manuals; call unload_manual on one this Thread no longer needs first"
+                        "this Thread holds {count} loaded Manuals and its cap is {cap}; call unload_manual on one this Thread no longer needs first"
                     ),
                 }));
             }

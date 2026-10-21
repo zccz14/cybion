@@ -20,6 +20,38 @@ fn load(connection: &Connection, thread_id: &str, manual_id: &str) {
         .unwrap();
 }
 
+/// A User default row with only the cap chosen; every other column keeps the
+/// value schema migration would have written.
+fn set_user_cap(connection: &Connection, cap: i64) {
+    connection
+        .execute(
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals)
+             VALUES(1,'gpt-6-astra','medium',0,200000,0,'',?)
+             ON CONFLICT(id) DO UPDATE SET max_loaded_manuals=excluded.max_loaded_manuals",
+            [cap],
+        )
+        .unwrap();
+}
+
+fn set_thread_cap(connection: &Connection, thread_id: &str, cap: Option<i64>) {
+    connection
+        .execute(
+            "UPDATE threads SET max_loaded_manuals=? WHERE id=?",
+            params![cap, thread_id],
+        )
+        .unwrap();
+}
+
+fn insert_manuals(connection: &Connection, count: i64) -> Vec<String> {
+    (0..count)
+        .map(|index| {
+            let id = format!("00000000-0000-4000-8000-0000000030{index:02}");
+            insert_manual(connection, &id, "正文");
+            id
+        })
+        .collect()
+}
+
 fn developer_messages(items: &[Value]) -> Vec<String> {
     items
         .iter()
@@ -304,7 +336,7 @@ async fn the_loaded_set_is_capped() {
     let thread_id = thread.id.clone();
     user_db(&state, &user, true, move |connection| {
         insert_manual(connection, manual, "正文");
-        for index in 0..manual_loads::MAX_LOADED_THREAD {
+        for index in 0..manual_loads::DEFAULT_MAX_LOADED_MANUALS {
             let id = format!("00000000-0000-4000-8000-0000000020{index:02}");
             insert_manual(connection, &id, "正文");
             load(connection, &thread_id, &id);
@@ -325,6 +357,126 @@ async fn the_loaded_set_is_capped() {
         refused["error"].as_str().unwrap().contains("unload_manual"),
         "{refused}"
     );
+    // Twelve is the built-in cap a Thread with no setting of its own inherits.
+    assert_eq!(manual_loads::DEFAULT_MAX_LOADED_MANUALS, 12);
+    assert!(
+        refused["error"].as_str().unwrap().contains("its cap is 12"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn the_user_default_caps_every_thread() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "loads-user-cap").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let extra = "15151515-1515-4515-8515-151515151515";
+    user_db(&state, &user, true, move |connection| {
+        set_user_cap(connection, 2);
+        for id in insert_manuals(connection, 2) {
+            load(connection, &thread_id, &id);
+        }
+        insert_manual(connection, extra, "正文");
+        assert_eq!(manual_loads::loaded_manual_cap(connection, &thread_id)?, 2);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let refused = manual_loads::load_tool_output(
+        &state,
+        &user,
+        &thread.id,
+        &json!({ "manual_id": extra }).to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        refused["error"].as_str().unwrap().contains("its cap is 2"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn a_thread_override_beats_the_user_default() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "loads-thread-cap").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let extra = "17171717-1717-4717-8717-171717171717";
+    user_db(&state, &user, true, move |connection| {
+        set_user_cap(connection, 3);
+        set_thread_cap(connection, &thread_id, Some(1));
+        let ids = insert_manuals(connection, 2);
+        load(connection, &thread_id, &ids[0]);
+        insert_manual(connection, extra, "正文");
+        assert_eq!(manual_loads::loaded_manual_cap(connection, &thread_id)?, 1);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let refused = manual_loads::load_tool_output(
+        &state,
+        &user,
+        &thread.id,
+        &json!({ "manual_id": extra }).to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        refused["error"].as_str().unwrap().contains("its cap is 1"),
+        "{refused}"
+    );
+    // Dropping the override hands the Thread back to the user default, which
+    // has room for one more.
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, true, move |connection| {
+        set_thread_cap(connection, &thread_id, None);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let loaded = manual_loads::load_tool_output(
+        &state,
+        &user,
+        &thread.id,
+        &json!({ "manual_id": extra }).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded["loaded"], json!(true), "{loaded}");
+}
+
+#[tokio::test]
+async fn lowering_the_cap_refuses_the_next_load_and_releases_nothing() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "loads-lower-cap").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    let extra = "19191919-1919-4919-8919-191919191919";
+    let bound = user_db(&state, &user, true, move |connection| {
+        for id in insert_manuals(connection, 3) {
+            load(connection, &thread_id, &id);
+        }
+        insert_manual(connection, extra, "正文");
+        set_thread_cap(connection, &thread_id, Some(2));
+        manual_loads::loaded_ids(connection, &thread_id)
+    })
+    .await
+    .unwrap();
+    assert_eq!(bound.len(), 3, "a lower cap never unloads anything");
+    let refused = manual_loads::load_tool_output(
+        &state,
+        &user,
+        &thread.id,
+        &json!({ "manual_id": extra }).to_string(),
+    )
+    .await
+    .unwrap();
+    let error = refused["error"].as_str().unwrap();
+    assert!(error.contains("holds 3 loaded Manuals"), "{refused}");
+    assert!(error.contains("its cap is 2"), "{refused}");
+    assert!(error.contains("unload_manual"), "{refused}");
 }
 
 #[tokio::test]
@@ -349,6 +501,7 @@ async fn the_loaded_view_reports_the_bound_manuals() {
         .await
         .unwrap();
     assert_eq!(view.loaded, vec![first.to_owned(), second.to_owned()]);
+    assert_eq!(view.limit, manual_loads::DEFAULT_MAX_LOADED_MANUALS);
     let (head, tail) = (
         view.head.expect("a started Thread has a head"),
         view.tail.unwrap(),
