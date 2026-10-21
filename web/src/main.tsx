@@ -650,8 +650,8 @@ const copy = {
     savingDefaults: "Saving…",
     defaultsSaved: "Defaults saved",
     saveDefaultsError: "Could not save thread defaults",
-    contextBudget: "Manual budget",
-    contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed manual exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
+    contextBudget: "Context budget",
+    contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
     minimalMode: "Minimal mode",
     minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
     imageGenerationModel: "Image generation model",
@@ -857,7 +857,7 @@ const copy = {
     manualContent: "正文",
     manualContentEditHint: "用 Markdown 编写手册。可在编辑器上方切换编辑、源码和预览模式。",
     manualUseWhenHelp: "用于引导 AI 路由：这是渐进式手册的判定条件——「什么时候需要查看」。AI 先读这一行，再决定是否加载正文；请写判据，不要写内容摘要。",
-    manualBodyHelp: "正文按需加载：不会默认占用对话手册，AI 只在需要时读取。",
+    manualBodyHelp: "正文按需加载：不会默认占用对话上下文，AI 只在需要时读取。",
     manualFieldHelp: "说明",
     newManual: "新建手册",
     editManual: "编辑手册",
@@ -1886,7 +1886,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
             <ThreadStatusSummary status={current.display_status} language={language} />
-            {contextBudget !== undefined && <ThreadContextUsage manual={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
+            {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
           </div>
         </div>}
         <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />

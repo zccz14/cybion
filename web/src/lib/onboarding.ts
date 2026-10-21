@@ -28,7 +28,7 @@ const en = {
 
   chatQuestion: "Where is the chat box?", chatAnswer: "Open My conversations and choose New conversation. A confirmed empty workspace opens the composer directly, including on a phone.",
   libraryQuestion: "Where is the library?", libraryAnswer: "Cybion does not host a separate original-material library. Your material stays on devices or network sources. Manuals is where you describe your material sources.",
-  budgetQuestion: "Is Manual budget the same as Manuals?", budgetAnswer: "No. Manuals record where your material lives and how to read it. Manual budget controls how much conversation information the model replays before automatic compaction; it is not a storage quota for your manuals.",
+  budgetQuestion: "Is the context budget the same as Manuals?", budgetAnswer: "No. Manuals record where your material lives and how to read it. The context budget controls how much conversation information the model replays before automatic compaction; it is not a storage quota for your manuals.",
   modelQuestion: "What if a message fails?", modelAnswer: "Read the error first. For model connection, authorization or quota errors, check Personal settings and the selected provider. Installing a Worker does not fix model-service errors. For device tasks, check the specific device's connection and permissions.",
   modelAction: "Check model settings", preparing: "Preparing the default model connection…", connectionFailed: "The default model connection could not be prepared.",
   connectionRecovery: "Retry the connection or check model settings. Existing configured upstreams can still be used; this notice does not block them.",
