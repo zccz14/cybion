@@ -11,7 +11,7 @@ const updated_at = Math.floor(Date.now() / 1000) - 90
 
 function Fixture() {
   const [language, setLanguage] = useState<"en" | "zh">("zh")
-  const [usage, setUsage] = useState<ThreadUsage>({ input_tokens: 1000000, output_tokens: 234567, total_tokens: 1234567, cached_tokens: 750000, cache_hit_rate: 0.75 })
+  const [usage, setUsage] = useState<ThreadUsage>({ input_tokens: 1000000, output_tokens: 234567, total_tokens: 1234567, cached_tokens: 750000, cache_hit_rate: 0.75, cost_usd_nanos: 12345678, cost_settled_requests: 3 })
   return <main className="p-4">
     <header className="mb-4 flex flex-wrap gap-3"><button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button><button onClick={() => setUsage({ ...usage, total_tokens: usage.total_tokens + 1000, input_tokens: usage.input_tokens + 1000, cache_hit_rate: usage.cached_tokens / (usage.input_tokens + 1000) })}>Poll update</button><button onClick={() => setUsage({ ...usage, cache_hit_rate: null })}>No cache data</button></header>
     <div className="flex flex-col gap-4 lg:flex-row">

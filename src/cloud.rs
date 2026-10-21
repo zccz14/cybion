@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 mod admin_users;
 mod common_manuals;
+mod cost;
 mod history;
 mod linkit_notifications;
 mod machines;
@@ -144,8 +145,8 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // never runs for one left at the old number. Adding a column therefore means
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
-// guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 48;
+// guard is `a_previous_version_database_receives_the_audit_columns`.
+const USER_SCHEMA_VERSION: i64 = 49;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -394,6 +395,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
     tokio::spawn(recovery::supervise(state.clone()));
     tokio::spawn(stats::supervise(state.clone()));
     tokio::spawn(machines::supervise(state.clone()));
+    tokio::spawn(cost::supervise(state.clone()));
     axum::serve(listener, app(state)).await?;
     Ok(())
 }
@@ -1116,7 +1118,9 @@ CREATE TABLE IF NOT EXISTS reasoning_audits (
   openai_lb_request_id TEXT,
   idx_head INTEGER,
   idx_tail INTEGER,
-  error TEXT
+  error TEXT,
+  cost_usd_nanos INTEGER,
+  cost_attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS response_states (
   audit_id INTEGER PRIMARY KEY REFERENCES reasoning_audits(id) ON DELETE CASCADE,
@@ -1689,6 +1693,27 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
              ON CONFLICT(id) DO NOTHING;",
         )?;
     }
+    // Reasoning cost: what the upstream's request-cost query answered for a
+    // call, and how many times this worker has asked. Columns are added in
+    // place so a database written before them keeps its audits.
+    for (name, definition) in [
+        ("cost_usd_nanos", "INTEGER"),
+        ("cost_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('reasoning_audits') WHERE name=?)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            transaction
+                .execute(
+                    &format!("ALTER TABLE reasoning_audits ADD COLUMN {name} {definition}"),
+                    [],
+                )
+                .map_err(ApiError::internal)?;
+        }
+    }
     let (name, definition) = ("api_key", "TEXT NOT NULL DEFAULT ''");
     let exists: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
@@ -2084,6 +2109,12 @@ struct ThreadUsage {
     total_tokens: i64,
     cached_tokens: i64,
     cache_hit_rate: Option<f64>,
+    /// Summed cost the gateway reported for this Thread's calls, in USD
+    /// nanodollars. Only calls whose upstream answered the request-cost query
+    /// contribute, so `cost_settled_requests` tells how much of the Thread the
+    /// amount covers.
+    cost_usd_nanos: i64,
+    cost_settled_requests: i64,
 }
 
 #[derive(Clone, Serialize)]
@@ -2639,6 +2670,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let output_tokens: i64 = row.get(11)?;
     let cached_tokens: i64 = row.get(12)?;
     let missing_cache_requests: i64 = row.get(13)?;
+    let cost_usd_nanos: i64 = row.get(22)?;
+    let cost_settled_requests: i64 = row.get(23)?;
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
@@ -2665,6 +2698,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
             cached_tokens,
             cache_hit_rate: (input_tokens > 0 && missing_cache_requests == 0)
                 .then(|| cached_tokens as f64 / input_tokens as f64),
+            cost_usd_nanos,
+            cost_settled_requests,
         },
     })
 }
@@ -3054,7 +3089,8 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
          WHERE ra.thread_id=t.id AND ra.request_kind='inference' AND ra.input_tokens IS NOT NULL
          ORDER BY ra.id DESC LIMIT 1),
        t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref,
-       t.image_generation_model
+       t.image_generation_model,
+       COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0)
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT MAX(id) FROM (
@@ -3075,7 +3111,9 @@ SELECT thread_id,SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_
        SUM(cached_tokens) AS cached_tokens,
        SUM(CASE WHEN input_tokens > 0 AND cached_tokens IS NULL THEN 1
                 WHEN input_tokens IS NULL AND cached_tokens IS NOT NULL THEN 1
-                ELSE 0 END) AS missing_cache_requests
+                ELSE 0 END) AS missing_cache_requests,
+       COALESCE(SUM(cost_usd_nanos),0) AS cost_usd_nanos,
+       SUM(CASE WHEN cost_usd_nanos IS NOT NULL THEN 1 ELSE 0 END) AS cost_settled_requests
 FROM reasoning_audits
 "#;
 
@@ -9299,6 +9337,10 @@ async fn worker_call_received(
 }
 
 #[cfg(test)]
+#[path = "cloud_cost_tests.rs"]
+mod cost_tests;
+
+#[cfg(test)]
 #[path = "cloud_thread_usage_tests.rs"]
 mod thread_usage_tests;
 
@@ -11153,13 +11195,15 @@ mod tests {
     /// added by the current one: the version gate, not the column loop, decides
     /// whether a migration runs at all.
     #[test]
-    fn a_previous_version_database_receives_the_audit_upstream_column() {
+    fn a_previous_version_database_receives_the_audit_columns() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("previous.sqlite3");
         let connection = open_user(&path, true).unwrap();
         connection
             .execute_batch(
                 "ALTER TABLE reasoning_audits DROP COLUMN upstream_id;
+                 ALTER TABLE reasoning_audits DROP COLUMN cost_usd_nanos;
+                 ALTER TABLE reasoning_audits DROP COLUMN cost_attempts;
                  PRAGMA user_version = 39;",
             )
             .unwrap();
@@ -11173,10 +11217,12 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert!(
-            columns.iter().any(|column| column == "upstream_id"),
-            "the schema version must admit every pending column migration"
-        );
+        for column in ["upstream_id", "cost_usd_nanos", "cost_attempts"] {
+            assert!(
+                columns.iter().any(|present| present == column),
+                "the schema version must admit every pending column migration: {column}"
+            );
+        }
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
