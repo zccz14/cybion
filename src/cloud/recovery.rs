@@ -153,6 +153,14 @@ pub(super) async fn wait_retry(
     Ok(())
 }
 
+/// Seconds still ahead of a `delay_seconds` call whose countdown started when
+/// its record was committed. A wait that already elapsed during downtime is
+/// over, not renewed.
+fn remaining_wait(committed_at: i64, seconds: u64, at: i64) -> u64 {
+    let deadline = committed_at.saturating_add(seconds.min(i64::MAX as u64) as i64);
+    deadline.saturating_sub(at).max(0) as u64
+}
+
 pub(super) async fn wait_seconds(
     seconds: u64,
     cancellation: &mut watch::Receiver<bool>,
@@ -203,12 +211,14 @@ pub(super) async fn settle_tools(
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(), ApiError> {
     let id = thread.id.clone();
+    // INVARIANT: a delayed call counts down from the record that committed it,
+    // so a restart in the middle of the wait keeps waiting only what is left.
     let pending=user_db(state,user,false,move |c| {
         if request_superseded(c,&id,input)? {return Err(ApiError::cancelled());}
-        let mut q=c.prepare("SELECT h.payload FROM history_records h WHERE h.thread_id=? AND h.id>? AND h.kind='response_output' AND json_extract(h.payload,'$.type') IN ('function_call','custom_tool_call','tool_search_call') AND NOT EXISTS(SELECT 1 FROM history_records o WHERE o.thread_id=h.thread_id AND o.id>h.id AND o.kind='tool_output' AND json_extract(o.payload,'$.call_id')=json_extract(h.payload,'$.call_id')) ORDER BY h.id")?;
-        Ok(q.query_map(params![id,input],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut q=c.prepare("SELECT h.payload,h.created_at FROM history_records h WHERE h.thread_id=? AND h.id>? AND h.kind='response_output' AND json_extract(h.payload,'$.type') IN ('function_call','custom_tool_call','tool_search_call') AND NOT EXISTS(SELECT 1 FROM history_records o WHERE o.thread_id=h.thread_id AND o.id>h.id AND o.kind='tool_output' AND json_extract(o.payload,'$.call_id')=json_extract(h.payload,'$.call_id')) ORDER BY h.id")?;
+        Ok(q.query_map(params![id,input],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }).await?;
-    for item in pending {
+    for (item, committed_at) in pending {
         state
             .set_phase(user, &thread.id, input, Phase::Kernel)
             .await;
@@ -248,7 +258,7 @@ pub(super) async fn settle_tools(
                 output_type,
                 seconds,
             }) => {
-                wait_seconds(seconds, cancellation).await?;
+                wait_seconds(remaining_wait(committed_at, seconds, now()), cancellation).await?;
                 let id = match enqueue_worker_call(
                     state,
                     user,

@@ -743,3 +743,72 @@ async fn cancellation_notices_cover_user_stops_and_unconfirmed_timeouts() {
     .await
     .unwrap();
 }
+
+#[test]
+fn delayed_call_countdown_runs_from_its_record_not_from_the_restart() {
+    assert_eq!(
+        remaining_wait(1_000, 2_100, 1_000),
+        2_100,
+        "a call that was just committed waits its whole delay"
+    );
+    assert_eq!(
+        remaining_wait(1_000, 2_100, 2_050),
+        1_050,
+        "a restart waits only what the delay still has ahead of it"
+    );
+    assert_eq!(
+        remaining_wait(1_000, 2_100, 3_100),
+        0,
+        "a delay that elapsed while the process was down is over, not renewed"
+    );
+    assert_eq!(
+        remaining_wait(i64::MAX, u64::MAX, i64::MAX),
+        0,
+        "an oversized delay saturates instead of overflowing"
+    );
+}
+
+#[tokio::test]
+async fn restart_dispatches_a_delayed_call_whose_wait_already_elapsed() {
+    let (_root, state, user, thread, input) = fixture().await;
+    let worker = seed_worker(&state, &user).await;
+    let item=ResponseItem::from_value(json!({"type":"function_call","id":"delayed","call_id":"delayed-call","name":"bash","arguments":json!({"worker_id":worker,"command":"echo after wait","delay_seconds":2100}).to_string()})).unwrap();
+    append_response_output_items(&state, &user, &thread, input, &[item])
+        .await
+        .unwrap();
+    let (base, _requests, server) = model(vec![]).await;
+    bind_mock(&state, &user, &thread, &base).await;
+    user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |c| {
+            c.execute(
+                "UPDATE history_records SET created_at=created_at-2100 WHERE thread_id=? AND kind='response_output'",
+                [&thread_id],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    recover_interrupted_requests(&state.data_dir).unwrap();
+    resume_running(&state).await.unwrap();
+    let dispatched = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let queued: i64 = user_db(&state, &user, false, |c| {
+                Ok(c.query_row("SELECT COUNT(*) FROM worker_calls", [], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
+            if queued > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        dispatched.is_ok(),
+        "a delay that elapsed during downtime must dispatch at once instead of waiting again"
+    );
+    server.abort();
+}

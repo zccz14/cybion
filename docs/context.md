@@ -113,7 +113,10 @@ becomes one `bash` call with `delay_seconds = 300` instead of waking the model
 up in between. The model picks the wait; it must be at least one second and has
 no upper bound. The delay is controller time, never part of the Worker call;
 the Worker call duration measures only the command, and a stop or a newer input
-cancels the wait before anything is dispatched.
+cancels the wait before anything is dispatched. The countdown is anchored to the
+record that committed the call, so a Controller restart does not restart it:
+recovery waits only the part still ahead, and a wait that elapsed while the
+Controller was down dispatches at once.
 
 ## Bash command timeouts
 

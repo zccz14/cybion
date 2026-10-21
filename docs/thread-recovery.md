@@ -15,7 +15,9 @@ stream no longer invent failures for Worker commands already dispatched.
 Connection failures, HTTP 408/429/5xx, idle/closed streams, rate limiting and
 provider overload retry with backoff. HTTP authentication/invalid-request/quota
 failures do not.
-Retry-After and the retry count/next time survive Controller restarts. Five
+Retry-After and the retry count/next time survive Controller restarts, and a
+`delay_seconds` wait keeps the deadline of the record that committed it, so a
+restart only waits what is left instead of counting down again. Five
 consecutive failed attempts exhaust the budget; completed model responses
 reset it. Retry waits and stale operations respect cancellation. Linkit
 notifications are optional; inference requires only model credentials.
