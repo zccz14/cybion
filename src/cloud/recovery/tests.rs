@@ -235,6 +235,62 @@ async fn transient_requests_retry_but_permanent_errors_do_not() {
     }
 }
 
+/// A peer transaction that outlives the busy timeout is contention, not a bug:
+/// the Thread retries instead of ending the turn.
+#[tokio::test]
+async fn a_busy_database_retries_instead_of_failing_the_thread() {
+    let (_root, state, user, thread, input) = fixture().await;
+    let busy = ApiError::from(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+            code: rusqlite::ErrorCode::DatabaseBusy,
+            extended_code: 5,
+        },
+        Some("database is locked".to_owned()),
+    ));
+    assert_eq!(busy.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(matches!(busy.kind, ApiErrorKind::Transient { .. }));
+    assert!(
+        retry(&state, &user, &thread.id, input, &busy)
+            .await
+            .unwrap(),
+        "the first busy failure must still leave the Thread retrying"
+    );
+    assert_eq!(
+        read_thread_for(&state, &user, thread.id.clone())
+            .await
+            .unwrap()
+            .status,
+        "running"
+    );
+    user_db(&state, &user, false, move |c| {
+        assert_eq!(
+            c.query_row(
+                "SELECT retry_count FROM threads WHERE id=?",
+                [thread.id],
+                |r| r.get::<_, i64>(0)
+            )?,
+            1
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Every other SQLite failure is still a fault worth surfacing.
+#[test]
+fn non_contention_database_errors_stay_permanent() {
+    let broken = ApiError::from(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+            code: rusqlite::ErrorCode::ConstraintViolation,
+            extended_code: 19,
+        },
+        Some("FOREIGN KEY constraint failed".to_owned()),
+    ));
+    assert_eq!(broken.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(matches!(broken.kind, ApiErrorKind::Ordinary));
+}
+
 #[tokio::test]
 async fn retry_budget_is_durable_and_exhaustion_cannot_be_reset_by_restart() {
     let (_root, state, user, thread, input) = fixture().await;
