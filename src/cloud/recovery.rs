@@ -197,7 +197,7 @@ pub(super) async fn retry(
         let at=now().saturating_add(seconds.min(i64::MAX as u64) as i64);
         tx.execute("UPDATE threads SET retry_count=?,next_retry_at=?,status=CASE WHEN ?>=5 THEN 'failed' ELSE status END WHERE id=?",params![failures,at,failures,id])?;
         if failures<MAX_FAILURES {
-            persist_history_record(&tx,HistoryRecordInsert{thread_id:&id,kind:"activity",payload:&json!({"role":"system","content":format!("Transient model error; retry {failures}/{} scheduled: {message}",MAX_FAILURES-1),"next_retry_at":at}),created_at:now()})?;
+            persist_history_record(&tx,HistoryRecordInsert{thread_id:&id,kind:"activity",payload:&json!({"role":"system","content":format!("Transient error; retry {failures}/{} scheduled: {message}",MAX_FAILURES-1),"next_retry_at":at}),created_at:now()})?;
         }
         tx.commit()?;Ok(failures<MAX_FAILURES)
     }).await

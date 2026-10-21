@@ -84,6 +84,10 @@ const WORKER_ANDROID_RELEASE_BASE_URL: &str =
     "https://github.com/zccz14/cybion-worker-for-android/releases/download";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "deepseek-flash";
+/// How long one user-database operation waits for a peer's write transaction.
+/// Every request, worker poll and patrol opens its own connection to the same
+/// file, so the wait has to cover a neighbour's slow write rather than fail.
+const USER_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 // Intercepted web search calls the Thread's own upstream web-search endpoint;
 // hosted gateways route /web-search by the requested source, so the controller
 // pins this source (DeepSeek answers with titles and snippets the model can
@@ -327,6 +331,20 @@ impl IntoResponse for ApiError {
 
 impl From<rusqlite::Error> for ApiError {
     fn from(cause: rusqlite::Error) -> Self {
+        // SQLITE_BUSY/SQLITE_LOCKED is contention between Cybion's own
+        // connections: a request or a background patrol held the write lock
+        // past this connection's busy timeout. That lock always clears, so the
+        // failure is transient — the Thread retries with backoff instead of
+        // ending a turn over a lock it wins on the next attempt.
+        if let rusqlite::Error::SqliteFailure(error, _) = &cause
+            && matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+        {
+            tracing::warn!(%cause, "user database is busy");
+            return Self::transient("the user database is busy", Some(1_000));
+        }
         Self::internal(cause)
     }
 }
@@ -817,8 +835,10 @@ fn open_user(path: &Path, create: bool) -> Result<Connection, ApiError> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
     };
     let mut connection = Connection::open_with_flags(path, flags).map_err(ApiError::internal)?;
+    // A Thread's own writes and the background patrols share one file, so a
+    // request may wait out a peer's transaction instead of failing the turn.
     connection
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(USER_BUSY_TIMEOUT)
         .map_err(ApiError::internal)?;
     connection
         .pragma_update(None, "journal_mode", "WAL")
