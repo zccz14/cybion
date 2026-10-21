@@ -4,7 +4,7 @@ import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 
-test("the title row offers generating a title from the full thread context", () => {
+test("the title row offers generating a title from the full thread manual", () => {
   assert.match(
     source,
     /api<Thread>\(sdk, `\/api\/threads\/\$\{encodeURIComponent\(threadId\)\}\/title`, \{ method: "POST" \}\)/,
@@ -12,7 +12,7 @@ test("the title row offers generating a title from the full thread context", () 
   assert.match(source, /const generateTitle = useMutation/)
   assert.match(source, /<Button type="button" size="icon-sm" variant="outline" aria-label=\{t\("generateTitle"\)\}/)
   assert.match(source, /generateTitle: "Generate a title from the full conversation"/)
-  assert.match(source, /generateTitle: "引用全部上下文生成标题"/)
+  assert.match(source, /generateTitle: "引用全部重放内容生成标题"/)
 })
 
 test("a generated title replaces the saved one and refreshes thread views", () => {

@@ -229,14 +229,14 @@ export function computerUseFunctionCall(payload: unknown): ComputerUseFunctionCa
 
 // The controller-side Cybion tools as stored in the Responses item. The
 // list tools carry no displayable arguments; a machine update is a call that
-// names its machine, and a context write names its context or, when creating,
+// names its machine, and a manual write names its manual or, when creating,
 // its title. A create shows whichever fields it provides; missing identifiers
 // keep the generic protocol rendering.
 export type CybionToolFunctionCall =
-  | { tool: "load_context"; contextId: string }
-  | { tool: "unload_context"; contextId: string }
-  | { tool: "write_context"; contextId: string | null; trashed: boolean; name: string | null; parentId: string | null }
-  | { tool: "cybion_list_contexts" }
+  | { tool: "load_manual"; manualId: string }
+  | { tool: "unload_manual"; manualId: string }
+  | { tool: "write_manual"; manualId: string | null; trashed: boolean; name: string | null; parentId: string | null }
+  | { tool: "list_manuals" }
   | { tool: "cybion_list_workers" }
   | { tool: "cybion_list_ultimate_machines" }
   | { tool: "cybion_get_ultimate_machine"; machineId: string }
@@ -251,22 +251,22 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
   const args = parseFunctionArguments(object.arguments)
   if (args === null) return null
   switch (object.name) {
-    // A load or unload names a Context, so the card shows the Context's title and
+    // A load or unload names a Manual, so the card shows the Manual's title and
     // its Use When description.
-    case "load_context": {
-      const contextId = nonEmptyString(args.context_id)
-      return contextId === null ? null : { tool: "load_context", contextId }
+    case "load_manual": {
+      const manualId = nonEmptyString(args.manual_id)
+      return manualId === null ? null : { tool: "load_manual", manualId }
     }
-    case "unload_context": {
-      const contextId = nonEmptyString(args.context_id)
-      return contextId === null ? null : { tool: "unload_context", contextId }
+    case "unload_manual": {
+      const manualId = nonEmptyString(args.manual_id)
+      return manualId === null ? null : { tool: "unload_manual", manualId }
     }
-    case "write_context": {
-      const contextId = nonEmptyString(args.context_id)
+    case "write_manual": {
+      const manualId = nonEmptyString(args.manual_id)
       const name = nonEmptyString(args.name)
-      return contextId === null && name === null
+      return manualId === null && name === null
         ? null
-        : { tool: "write_context", contextId, trashed: args.parent_id === "TRASH", name, parentId: nonEmptyString(args.parent_id) }
+        : { tool: "write_manual", manualId, trashed: args.parent_id === "TRASH", name, parentId: nonEmptyString(args.parent_id) }
     }
     case "add_notes": {
       const items = Array.isArray(args.items) ? args.items : []
@@ -281,8 +281,8 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
         .filter((id): id is string => typeof id === "string" && id.trim() !== "")
       return noteIds.length === 0 ? null : { tool: "cross_out_notes", noteIds }
     }
-    case "cybion_list_contexts":
-      return { tool: "cybion_list_contexts" }
+    case "list_manuals":
+      return { tool: "list_manuals" }
     case "cybion_list_workers":
       return { tool: "cybion_list_workers" }
     case "cybion_list_ultimate_machines":

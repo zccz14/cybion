@@ -1,4 +1,4 @@
-// A checkpoint's first content is its `# Durable working context` title, so a preview has to
+// A checkpoint's first content is its `# Durable working manual` title, so a preview has to
 // skip structure and stop at the first prose: a heading, table, quote, rule or fence opening
 // describes the shape of the checkpoint, never what it holds. The first fenced block ends the
 // search, because everything after it is evidence (code, JSON) rather than prose.

@@ -6,14 +6,14 @@ const copy = {
   zh: {
     total: "累计 Token", input: "输入 Token", output: "输出 Token", cached: "缓存 Token", cache: "缓存率", shortCache: "缓存",
     scope: "累计本线程审计记录中的输入与输出用量，包含推理、压缩和标题生成。缓存 Token 属于输入，不重复计入总量；缓存率按缓存输入 ÷ 输入总量计算。",
-    context: "上下文", contextOff: "自动压缩关闭",
-    contextScope: "最近一次推理请求实际送出的输入 Token，与自动压缩预算（超过后压缩为 checkpoint）。",
+    manual: "手册", manualOff: "自动压缩关闭",
+    manualScope: "最近一次推理请求实际送出的输入 Token，与自动压缩预算（超过后压缩为 checkpoint）。",
   },
   en: {
     total: "Total tokens", input: "Input tokens", output: "Output tokens", cached: "Cached tokens", cache: "Cache rate", shortCache: "Cache",
     scope: "Adds input and output usage from this thread's audit records, including inference, compaction and title generation. Cached tokens are part of input, not added again. Cache rate = cached input ÷ total input.",
-    context: "Context", contextOff: "auto-compaction off",
-    contextScope: "Input tokens of the most recent inference request, against the automatic compaction budget (compacts into a checkpoint once exceeded).",
+    manual: "Manual", manualOff: "auto-compaction off",
+    manualScope: "Input tokens of the most recent inference request, against the automatic compaction budget (compacts into a checkpoint once exceeded).",
   },
 } as const
 
@@ -47,12 +47,12 @@ export function ThreadUsagePanel({ usage, language }: Props) {
   </details>
 }
 
-export function ThreadContextUsage({ context, language }: { context: { tokens: number | null; budget: number }; language: "en" | "zh" }) {
+export function ThreadContextUsage({ manual, language }: { manual: { tokens: number | null; budget: number }; language: "en" | "zh" }) {
   const t = copy[language]
-  const tokens = context.tokens === null ? "—" : compactTokenCount(context.tokens)
-  const budget = context.budget > 0 ? compactTokenCount(context.budget) : t.contextOff
-  const over = context.tokens !== null && context.budget > 0 && context.tokens >= context.budget
-  return <span data-slot="thread-context-usage" title={t.contextScope} className={`whitespace-nowrap text-xs tabular-nums ${over ? "text-destructive" : "text-muted-foreground"}`}>
-    {t.context} <strong className="font-medium">{tokens}</strong> / {budget}
+  const tokens = manual.tokens === null ? "—" : compactTokenCount(manual.tokens)
+  const budget = manual.budget > 0 ? compactTokenCount(manual.budget) : t.manualOff
+  const over = manual.tokens !== null && manual.budget > 0 && manual.tokens >= manual.budget
+  return <span data-slot="thread-context-usage" title={t.manualScope} className={`whitespace-nowrap text-xs tabular-nums ${over ? "text-destructive" : "text-muted-foreground"}`}>
+    {t.manual} <strong className="font-medium">{tokens}</strong> / {budget}
   </span>
 }

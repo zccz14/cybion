@@ -8,9 +8,9 @@ function tinyPng() {
   const canvas = document.createElement("canvas")
   canvas.width = 4
   canvas.height = 4
-  const context = canvas.getContext("2d")!
-  context.fillStyle = "#3366cc"
-  context.fillRect(0, 0, 4, 4)
+  const manual = canvas.getContext("2d")!
+  manual.fillStyle = "#3366cc"
+  manual.fillRect(0, 0, 4, 4)
   return canvas.toDataURL("image/png")
 }
 const png = tinyPng()

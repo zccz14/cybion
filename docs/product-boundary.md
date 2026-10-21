@@ -102,21 +102,21 @@ the first authenticated browser session initializes that key atomically.
 - `tools.json` is the single source for the upstream tool catalog. The request
   builder sends it and the Configuration → Tools page renders it, so the
   capability list cannot drift from the tools a Thread can actually use.
-- The Cybion Common Context is compiled into the controller from
-  `common-contexts/` (a `tree.json` skeleton plus Markdown nodes, each node in
+- The Cybion Common Manual is compiled into the controller from
+  `common-manuals/` (a `tree.json` skeleton plus Markdown nodes, each node in
   English and Simplified Chinese). Every user reads the same read-only tree:
-  `cybion_list_contexts` lists its root first with `source: "common"`,
-  `load_context` resolves it after local Contexts, and Configuration → Contexts
-  renders it from `GET /api/common-contexts?lang=` in the UI language. The
+  `list_manuals` lists its root first with `source: "common"`,
+  `load_manual` resolves it after local Manuals, and Configuration → Manuals
+  renders it from `GET /api/common-manuals?lang=` in the UI language. The
   controller never stores or mutates it; content changes ship with releases.
-- Threads create and edit the user's Contexts through `write_context`: title,
-  Use When description, body, and parent — an exact `context_id`, `null` for
-  the top level, or the literal `TRASH` to move the Context into a trash.
-  Omitting `context_id` creates a new Context (a `name` is required) at the
-  top level or under `parent_id`; a trashed Context and its subtree leave
-  every Context tool, while the Contexts page still shows it under Trash and
-  restores it to its original place. A Context its owner locked refuses every
-  `write_context` change and answers with its child Contexts, which stay
+- Threads create and edit the user's Manuals through `write_manual`: title,
+  Use When description, body, and parent — an exact `manual_id`, `null` for
+  the top level, or the literal `TRASH` to move the Manual into a trash.
+  Omitting `manual_id` creates a new Manual (a `name` is required) at the
+  top level or under `parent_id`; a trashed Manual and its subtree leave
+  every Manual tool, while the Manuals page still shows it under Trash and
+  restores it to its original place. A Manual its owner locked refuses every
+  `write_manual` change and answers with its child Manuals, which stay
   writable — so a hand-written manual cannot be rewritten by a Thread.
 - **Sticky notes** are the third governed-context kind beside the Manual and the
   Archive: short items owned by one user, each belonging to exactly one Thread

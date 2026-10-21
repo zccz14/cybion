@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS notes (
 /// Open notes one Thread may carry. The cap bounds the injected block; an add
 /// past it is refused instead of truncated.
 pub(super) const MAX_OPEN_THREAD: i64 = 10;
-/// Prompt-scale default: a note may lean on its Thread's context, because no
+/// Prompt-scale default: a note may lean on its Thread's manual, because no
 /// other Thread ever reads it. System configuration overrides it.
 pub(super) const DEFAULT_THREAD_MAX_CHARS: i64 = 120;
 pub(super) const MAX_CHARS_CEILING: i64 = 2000;
@@ -274,7 +274,7 @@ pub(super) fn tear(connection: &Connection, id: &str) -> Result<bool, ApiError> 
 }
 
 /// A Thread's notes live and die with it: the note was written against that
-/// Thread's context, so it has no meaning once the Thread is gone. The delete
+/// Thread's manual, so it has no meaning once the Thread is gone. The delete
 /// confirmation lists what goes.
 pub(super) fn tear_thread(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     Ok(connection.execute("DELETE FROM notes WHERE thread_id=?", [thread_id])? as i64)

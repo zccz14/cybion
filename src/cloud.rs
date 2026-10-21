@@ -35,11 +35,11 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod admin_users;
-mod common_contexts;
-mod context_loads;
+mod common_manuals;
 mod history;
 mod linkit_notifications;
 mod machines;
+mod manual_loads;
 mod normai;
 mod notes;
 mod objects;
@@ -145,7 +145,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_upstream_column`.
-const USER_SCHEMA_VERSION: i64 = 47;
+const USER_SCHEMA_VERSION: i64 = 48;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -503,10 +503,7 @@ fn app(state: AppState) -> Router {
             "/api/threads/{id}/history/window",
             get(thread_history_window),
         )
-        .route(
-            "/api/threads/{id}/history/loaded",
-            get(thread_context_loads),
-        )
+        .route("/api/threads/{id}/history/loaded", get(thread_manual_loads))
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
         .route("/api/threads/{id}/cancel", post(thread_controls::cancel))
@@ -527,7 +524,7 @@ fn app(state: AppState) -> Router {
             "/api/workers/{id}/grants/{grantee}",
             axum::routing::put(worker_sharing::grant).delete(worker_sharing::revoke),
         )
-        .route("/api/contexts", get(list_contexts).post(create_context))
+        .route("/api/manuals", get(list_manuals).post(create_manual))
         .route("/api/notes", get(notes::list_notes))
         .route("/api/notes/{id}/done", post(notes::cross_out_note))
         .route("/api/notes/{id}", delete(notes::delete_note))
@@ -535,18 +532,18 @@ fn app(state: AppState) -> Router {
             "/api/note-settings",
             get(notes::settings).put(notes::update_settings),
         )
-        .route("/api/contexts/{id}/move", axum::routing::post(move_context))
+        .route("/api/manuals/{id}/move", axum::routing::post(move_manual))
         .route(
-            "/api/contexts/{id}/restore",
-            axum::routing::post(restore_context),
+            "/api/manuals/{id}/restore",
+            axum::routing::post(restore_manual),
         )
         .route(
-            "/api/contexts/{id}",
-            get(read_context_api)
-                .patch(update_context)
-                .delete(delete_context),
+            "/api/manuals/{id}",
+            get(read_manual_api)
+                .patch(update_manual)
+                .delete(delete_manual),
         )
-        .route("/api/common-contexts", get(common_contexts::documents))
+        .route("/api/common-manuals", get(common_manuals::documents))
         .route("/api/admin/users", get(admin_users::list))
         .route("/api/system/resources", get(system_resources))
         .route("/api/status", get(status))
@@ -1205,12 +1202,12 @@ CREATE TABLE IF NOT EXISTS machines (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS machines_enabled_created ON machines(enabled,created_at);
-CREATE TABLE IF NOT EXISTS contexts (
+CREATE TABLE IF NOT EXISTS manuals (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT NOT NULL,
   content TEXT NOT NULL,
-  parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
+  parent_id TEXT REFERENCES manuals(id) ON DELETE SET NULL,
   sort_key TEXT NOT NULL DEFAULT '',
   trashed_at INTEGER,
   locked INTEGER NOT NULL DEFAULT 0
@@ -1599,11 +1596,66 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         )?;
         check_user_foreign_keys(&transaction)?;
     }
+    if version < 48 {
+        // The Manual kind replaced the Context kind. Tables, columns and the
+        // activity types that name it are renamed in place, so a Thread keeps
+        // the Manuals it loaded and its replay keeps the same items: the copy
+        // itself comes from `manuals` through `thread_manual_loads`, and the
+        // activity record only marks when the Thread bound it.
+        let table_exists = |name: &str| -> Result<bool, ApiError> {
+            Ok(transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [name],
+                |row| row.get(0),
+            )?)
+        };
+        if table_exists("contexts")? && !table_exists("manuals")? {
+            transaction.execute_batch("ALTER TABLE contexts RENAME TO manuals;")?;
+        }
+        if table_exists("thread_context_loads")? && !table_exists("thread_manual_loads")? {
+            transaction.execute_batch(
+                "ALTER TABLE thread_context_loads RENAME TO thread_manual_loads;
+                 ALTER TABLE thread_manual_loads RENAME COLUMN context_id TO manual_id;",
+            )?;
+        }
+        if table_exists("history_records")? {
+            transaction
+                .execute_batch(
+                    "DROP INDEX IF EXISTS contexts_parent_sort;
+                 DROP INDEX IF EXISTS contexts_parent_name;
+                 UPDATE history_records SET payload = json_set(payload,'$.type','manual_loaded')
+                   WHERE kind='activity' AND json_valid(payload)
+                     AND json_extract(payload,'$.type')='context_loaded';
+                 UPDATE history_records SET payload = json_set(payload,'$.type','manual_unloaded')
+                   WHERE kind='activity' AND json_valid(payload)
+                     AND json_extract(payload,'$.type')='context_unloaded';
+                 UPDATE history_records SET payload = json_set(payload,'$.type','manual_dirty')
+                   WHERE kind='activity' AND json_valid(payload)
+                     AND json_extract(payload,'$.type')='context_dirty';
+                 UPDATE history_records
+                    SET payload = json_remove(
+                          json_set(payload,'$.manual_id',json_extract(payload,'$.context_id')),
+                          '$.context_id')
+                  WHERE kind='activity' AND json_valid(payload)
+                    AND json_extract(payload,'$.type') IN ('manual_loaded','manual_unloaded')
+                    AND json_type(payload,'$.context_id') IS NOT NULL;
+                 UPDATE history_records
+                    SET payload = json_remove(
+                          json_set(payload,'$.manual',json_extract(payload,'$.context')),
+                          '$.context')
+                  WHERE kind='activity' AND json_valid(payload)
+                    AND json_extract(payload,'$.type')='manual_loaded'
+                    AND json_type(payload,'$.context') IS NOT NULL;",
+                )
+                .map_err(ApiError::internal)?;
+        }
+        check_user_foreign_keys(&transaction)?;
+    }
     transaction
         .execute_batch(USER_SCHEMA)
         .map_err(ApiError::internal)?;
     transaction.execute_batch(notes::SCHEMA)?;
-    transaction.execute_batch(context_loads::SCHEMA)?;
+    transaction.execute_batch(manual_loads::SCHEMA)?;
 
     if version < 44 {
         // COMPATIBILITY: schema <=43 expressed a global note by leaving
@@ -1849,26 +1901,26 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         transaction.execute_batch(USER_STATS_SCHEMA)?;
     }
     if version < 37 {
-        // Contexts move to fractional sort keys so the tree keeps the order the
+        // Manuals move to fractional sort keys so the tree keeps the order the
         // user arranged; existing rows backfill in the order the tree showed
         // before the upgrade. Retire this upgrade once every user database is
         // audited at schema 37+; retain the backfill test.
-        migrate_context_sort_keys(&transaction)?;
+        migrate_manual_sort_keys(&transaction)?;
     }
     if version < 39 {
-        // Contexts gain the trash marker: a trashed Context stays restorable
-        // from the Contexts page and hidden from the Context tools. Retire this
+        // Manuals gain the trash marker: a trashed Manual stays restorable
+        // from the Manuals page and hidden from the Manual tools. Retire this
         // upgrade once every user database is audited at schema 39+; retain the
         // column test.
-        migrate_context_trash(&transaction)?;
+        migrate_manual_trash(&transaction)?;
     }
     if version < 45 {
-        // Contexts gain the lock flag: a Context its owner locked refuses
-        // every `write_context` edit while its child Contexts stay writable,
+        // Manuals gain the lock flag: a Manual its owner locked refuses
+        // every `write_manual` edit while its child Manuals stay writable,
         // so a hand-written manual keeps its own words. Retire this upgrade
         // once every user database is audited at schema 45+; retain the column
         // test.
-        migrate_context_lock(&transaction)?;
+        migrate_manual_lock(&transaction)?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -2441,40 +2493,40 @@ struct WorkerView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ContextView {
+struct ManualView {
     id: String,
     name: String,
     description: String,
     content: String,
     parent_id: Option<String>,
     sort_key: String,
-    // The owner's lock. While set, `write_context` refuses to change this
-    // Context and answers with its child Contexts instead; every read carries
+    // The owner's lock. While set, `write_manual` refuses to change this
+    // Manual and answers with its child Manuals instead; every read carries
     // the flag so a Thread can plan around a manual it may not rewrite.
     locked: bool,
-    // Only trashed rows carry the marker; live Context reads keep their
+    // Only trashed rows carry the marker; live Manual reads keep their
     // existing wire shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     trashed_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ContextSummary {
-    context_id: String,
+struct ManualSummary {
+    manual_id: String,
     name: String,
     description: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ContextReadView {
+struct ManualReadView {
     #[serde(flatten)]
-    context: ContextView,
-    children: Vec<ContextSummary>,
+    manual: ManualView,
+    children: Vec<ManualSummary>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CreateContextInput {
+struct CreateManualInput {
     name: String,
     #[serde(default)]
     description: String,
@@ -2486,7 +2538,7 @@ struct CreateContextInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UpdateContextInput {
+struct UpdateManualInput {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -2501,7 +2553,7 @@ struct UpdateContextInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MoveContextInput {
+struct MoveManualInput {
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
@@ -2617,8 +2669,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     })
 }
 
-fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextView> {
-    Ok(ContextView {
+fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManualView> {
+    Ok(ManualView {
         id: row.get(0)?,
         name: row.get(1)?,
         description: row.get(2)?,
@@ -2697,10 +2749,10 @@ fn context_content(value: String) -> Result<String, ApiError> {
     context_text(value, "content", 200_000, false)
 }
 
-fn context_id(value: &str) -> Result<String, ApiError> {
+fn manual_id(value: &str) -> Result<String, ApiError> {
     Uuid::parse_str(value)
         .map(|id| id.to_string())
-        .map_err(|_| ApiError::not_found("context not found"))
+        .map_err(|_| ApiError::not_found("manual not found"))
 }
 
 fn optional_title(value: Option<String>) -> Result<String, ApiError> {
@@ -3680,7 +3732,7 @@ async fn request_thread_title(
     thread: &ThreadView,
     upstream: &Upstream,
 ) -> Result<String, ApiError> {
-    let context = user_db(state, user, false, {
+    let manual = user_db(state, user, false, {
         let thread_id = thread.id.clone();
         let data_dir = state.data_dir.clone();
         move |connection| {
@@ -3694,7 +3746,7 @@ async fn request_thread_title(
         idx_head,
         idx_tail,
         ..
-    } = context;
+    } = manual;
     items.push(json!({"role": "user", "content": THREAD_TITLE_PROMPT}));
     let response = responses_request_with_options(
         state,
@@ -3751,7 +3803,7 @@ async fn delete_thread(
             return Err(ApiError::not_found("thread not found"));
         }
         stats::note_thread_deleted(connection, &id)?;
-        // A note was written against this Thread's context and no other Thread
+        // A note was written against this Thread's manual and no other Thread
         // can read it, so it leaves with the Thread.
         let deleted_notes = notes::tear_thread(connection, &id)?;
         connection.execute("DELETE FROM threads WHERE id=?", [id])?;
@@ -4004,67 +4056,67 @@ fn thread_history_older_page(
     Ok(ThreadHistoryWindow { records, has_older })
 }
 
-/// What this Thread keeps loaded: the Contexts the Controller delivers into
+/// What this Thread keeps loaded: the Manuals the Controller delivers into
 /// every request, and the record range that answer was computed from. A
 /// compaction moves the head to its checkpoint, and the copies before it leave
 /// the range, which is exactly when the next compile delivers them again.
 #[derive(Serialize)]
-struct ThreadContextLoadsView {
-    /// Context head: the checkpoint, or the oldest protocol record, that replay starts at.
+struct ThreadManualLoadsView {
+    /// Replay head: the checkpoint, or the oldest protocol record, that replay starts at.
     head: Option<i64>,
-    /// Context tail: the newest protocol record the head reaches.
+    /// Replay tail: the newest protocol record the head reaches.
     tail: Option<i64>,
-    /// Contexts this Thread keeps loaded, in the order it loaded them.
+    /// Manuals this Thread keeps loaded, in the order it loaded them.
     loaded: Vec<String>,
 }
 
-async fn thread_context_loads(
+async fn thread_manual_loads(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ThreadContextLoadsView>, ApiError> {
+) -> Result<Json<ThreadManualLoadsView>, ApiError> {
     let id = thread_id(&id)?;
-    Ok(Json(loaded_contexts_for(&state, &identity.user, id).await?))
+    Ok(Json(loaded_manuals_for(&state, &identity.user, id).await?))
 }
 
-async fn loaded_contexts_for(
+async fn loaded_manuals_for(
     state: &AppState,
     user: &User,
     id: String,
-) -> Result<ThreadContextLoadsView, ApiError> {
+) -> Result<ThreadManualLoadsView, ApiError> {
     user_db(state, user, true, move |connection| {
-        loaded_contexts_view(connection, &id)
+        loaded_manuals_view(connection, &id)
     })
     .await
 }
 
-fn loaded_contexts_view(
+fn loaded_manuals_view(
     connection: &Connection,
     id: &str,
-) -> Result<ThreadContextLoadsView, ApiError> {
+) -> Result<ThreadManualLoadsView, ApiError> {
     load_thread(connection, id)?;
-    let loaded = context_loads::loaded_ids(connection, id)?;
+    let loaded = manual_loads::loaded_ids(connection, id)?;
     let tail: Option<i64> = connection.query_row(
         &format!("SELECT MAX(id) FROM history_records WHERE thread_id=? AND {PROTOCOL_RECORDS}"),
         [id],
         |row| row.get(0),
     )?;
     let Some(tail) = tail else {
-        return Ok(ThreadContextLoadsView {
+        return Ok(ThreadManualLoadsView {
             head: None,
             tail: None,
             loaded,
         });
     };
-    Ok(ThreadContextLoadsView {
+    Ok(ThreadManualLoadsView {
         head: Some(context_idx_head(connection, id, tail)?),
         tail: Some(tail),
         loaded,
     })
 }
 
-/// The fingerprint of one Context version as the Controller hands it to the
-/// model: its title, Use When description, and body. Moving a Context, reordering
+/// The fingerprint of one Manual version as the Controller hands it to the
+/// model: its title, Use When description, and body. Moving a Manual, reordering
 /// its siblings, or editing a child leaves it unchanged, because a load registers
 /// that node's own content rather than the tree around it.
 fn context_fingerprint(name: &str, description: &str, content: &str) -> String {
@@ -4079,39 +4131,6 @@ fn context_fingerprint(name: &str, description: &str, content: &str) -> String {
         .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-/// COMPATIBILITY: `context_dirty` records were appended while a copied Context
-/// could go stale, and old Threads still carry them. Replaying one exactly as it
-/// was written keeps those Threads' replay prefixes byte-identical, so the text
-/// below is frozen even though the tool it names is retired.
-fn context_dirty_message(payload: &Value) -> Option<Value> {
-    if payload.get("type").and_then(Value::as_str) != Some("context_dirty") {
-        return None;
-    }
-    let contexts = payload.get("contexts")?.as_array()?;
-    let lines = contexts
-        .iter()
-        .filter_map(|context| {
-            let id = context.get("context_id")?.as_str()?;
-            let record = context.get("read_record_id")?.as_i64()?;
-            Some(format!(
-                "- {id} (your stale copy came from record #{record})"
-            ))
-        })
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return None;
-    }
-    Some(json!({
-        "role": "developer",
-        "content": format!(
-            "Contexts you read are out of date. The copies of them in this conversation are stale — do not use them again.\n\n\
-             Required, not optional: before your next tool call or answer, call read_context once for each Context below and rely only on what it returns.\n{}\n\n\
-             Skipping this means answering from superseded material. If a read fails, say so and ask the user; never fall back to the old copy.",
-            lines.join("\n")
-        ),
-    }))
 }
 
 async fn thread_input(
@@ -4208,49 +4227,49 @@ async fn delete_api_key(
 
 use worker_sharing::list_workers;
 
-/// Moves the Contexts table to schema 37: adds the fractional `sort_key`
+/// Moves the Manuals table to schema 37: adds the fractional `sort_key`
 /// column, swaps the sibling index, and backfills keys in the name order the
 /// tree showed before the upgrade.
-fn migrate_context_sort_keys(connection: &Connection) -> Result<(), ApiError> {
+fn migrate_manual_sort_keys(connection: &Connection) -> Result<(), ApiError> {
     let has_sort_key: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('contexts') WHERE name='sort_key')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('manuals') WHERE name='sort_key')",
         [],
         |row| row.get(0),
     )?;
     if !has_sort_key {
         connection
-            .execute_batch("ALTER TABLE contexts ADD COLUMN sort_key TEXT NOT NULL DEFAULT ''")
+            .execute_batch("ALTER TABLE manuals ADD COLUMN sort_key TEXT NOT NULL DEFAULT ''")
             .map_err(ApiError::internal)?;
     }
     connection
         .execute_batch(
-            "DROP INDEX IF EXISTS contexts_parent_name;
-             CREATE INDEX IF NOT EXISTS contexts_parent_sort ON contexts(parent_id,sort_key,name,id);",
+            "DROP INDEX IF EXISTS manuals_parent_name;
+             CREATE INDEX IF NOT EXISTS manuals_parent_sort ON manuals(parent_id,sort_key,name,id);",
         )
         .map_err(ApiError::internal)?;
-    backfill_context_sort_keys(connection)
+    backfill_manual_sort_keys(connection)
 }
 
 /// Assigns keys to rows that predate the fractional order, preserving the
 /// historical sibling order (name then id) inside every parent group.
-fn backfill_context_sort_keys(connection: &Connection) -> Result<(), ApiError> {
+fn backfill_manual_sort_keys(connection: &Connection) -> Result<(), ApiError> {
     let parents: Vec<Option<String>> = connection
-        .prepare("SELECT DISTINCT parent_id FROM contexts WHERE sort_key = ''")?
+        .prepare("SELECT DISTINCT parent_id FROM manuals WHERE sort_key = ''")?
         .query_map([], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     for parent_id in parents {
         let mut last = connection
             .query_row(
-                "SELECT sort_key FROM contexts WHERE parent_id IS ?1 AND sort_key != '' ORDER BY sort_key DESC LIMIT 1",
+                "SELECT sort_key FROM manuals WHERE parent_id IS ?1 AND sort_key != '' ORDER BY sort_key DESC LIMIT 1",
                 [parent_id.as_deref()],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .map(|key| parse_context_sort_key(&key))
+            .map(|key| parse_manual_sort_key(&key))
             .transpose()?;
         let ids: Vec<String> = connection
             .prepare(
-                "SELECT id FROM contexts WHERE parent_id IS ?1 AND sort_key = '' ORDER BY name,id",
+                "SELECT id FROM manuals WHERE parent_id IS ?1 AND sort_key = '' ORDER BY name,id",
             )?
             .query_map([parent_id.as_deref()], |row| row.get(0))?
             .collect::<std::result::Result<_, _>>()?;
@@ -4260,7 +4279,7 @@ fn backfill_context_sort_keys(connection: &Connection) -> Result<(), ApiError> {
                 None => FractionalIndex::default(),
             };
             connection.execute(
-                "UPDATE contexts SET sort_key = ?2 WHERE id = ?1",
+                "UPDATE manuals SET sort_key = ?2 WHERE id = ?1",
                 params![id, index.to_string()],
             )?;
             last = Some(index);
@@ -4269,76 +4288,74 @@ fn backfill_context_sort_keys(connection: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Moves the Contexts table to schema 39: adds the nullable trash marker.
-fn migrate_context_trash(connection: &Connection) -> Result<(), ApiError> {
+/// Moves the Manuals table to schema 39: adds the nullable trash marker.
+fn migrate_manual_trash(connection: &Connection) -> Result<(), ApiError> {
     let has_trashed_at: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('contexts') WHERE name='trashed_at')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('manuals') WHERE name='trashed_at')",
         [],
         |row| row.get(0),
     )?;
     if !has_trashed_at {
         connection
-            .execute_batch("ALTER TABLE contexts ADD COLUMN trashed_at INTEGER")
+            .execute_batch("ALTER TABLE manuals ADD COLUMN trashed_at INTEGER")
             .map_err(ApiError::internal)?;
     }
     Ok(())
 }
 
-/// Moves the Contexts table to schema 44: adds the lock flag a Context's owner
-/// sets on the Contexts page, which makes `write_context` refuse to change that
-/// Context while its child Contexts stay writable.
-fn migrate_context_lock(connection: &Connection) -> Result<(), ApiError> {
+/// Moves the Manuals table to schema 44: adds the lock flag a Manual's owner
+/// sets on the Manuals page, which makes `write_manual` refuse to change that
+/// Manual while its child Manuals stay writable.
+fn migrate_manual_lock(connection: &Connection) -> Result<(), ApiError> {
     let has_locked: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('contexts') WHERE name='locked')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('manuals') WHERE name='locked')",
         [],
         |row| row.get(0),
     )?;
     if !has_locked {
         connection
-            .execute_batch("ALTER TABLE contexts ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
+            .execute_batch("ALTER TABLE manuals ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
             .map_err(ApiError::internal)?;
     }
     Ok(())
 }
 
-/// Keys a brand-new Context after the last sibling under the same parent.
-fn append_context_sort_key(
+/// Keys a brand-new Manual after the last sibling under the same parent.
+fn append_manual_sort_key(
     connection: &Connection,
     parent_id: Option<&str>,
 ) -> Result<String, ApiError> {
     let last: Option<String> = connection
         .query_row(
-            "SELECT sort_key FROM contexts WHERE parent_id IS ?1 AND sort_key != '' ORDER BY sort_key DESC LIMIT 1",
+            "SELECT sort_key FROM manuals WHERE parent_id IS ?1 AND sort_key != '' ORDER BY sort_key DESC LIMIT 1",
             [parent_id],
             |row| row.get(0),
         )
         .optional()?;
     let index = match last {
-        Some(key) => FractionalIndex::new_after(&parse_context_sort_key(&key)?),
+        Some(key) => FractionalIndex::new_after(&parse_manual_sort_key(&key)?),
         None => FractionalIndex::default(),
     };
     Ok(index.to_string())
 }
 
-/// Keys the moved Context between `after_id` and its next sibling, the same
+/// Keys the moved Manual between `after_id` and its next sibling, the same
 /// placement model the CTX documents use.
-fn move_context_sort_key(
+fn move_manual_sort_key(
     connection: &Connection,
     parent_id: Option<&str>,
     after_id: Option<&str>,
     moving_id: &str,
 ) -> Result<String, ApiError> {
     let children: Vec<(String, String)> = connection
-        .prepare(
-            "SELECT id,sort_key FROM contexts WHERE parent_id IS ?1 ORDER BY sort_key,name,id",
-        )?
+        .prepare("SELECT id,sort_key FROM manuals WHERE parent_id IS ?1 ORDER BY sort_key,name,id")?
         .query_map([parent_id], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<std::result::Result<_, _>>()?;
     let after_position = match after_id {
         None => None,
         Some(after_id) if after_id == moving_id => {
             return Err(ApiError::bad_request(
-                "a context cannot be moved after itself",
+                "a manual cannot be moved after itself",
             ));
         }
         Some(after_id) => match children.iter().position(|(id, _)| id == after_id) {
@@ -4352,7 +4369,7 @@ fn move_context_sort_key(
     };
     let (lower, upper_start) = match after_position {
         Some(position) => (
-            Some(parse_context_sort_key(&children[position].1)?),
+            Some(parse_manual_sort_key(&children[position].1)?),
             position + 1,
         ),
         None => (None, 0),
@@ -4360,7 +4377,7 @@ fn move_context_sort_key(
     let upper = children[upper_start..]
         .iter()
         .find(|(id, _)| id != moving_id)
-        .map(|(_, key)| parse_context_sort_key(key))
+        .map(|(_, key)| parse_manual_sort_key(key))
         .transpose()?;
     let index = match (lower, upper) {
         (Some(lower), Some(upper)) => FractionalIndex::new_between(&lower, &upper),
@@ -4373,57 +4390,57 @@ fn move_context_sort_key(
     })
 }
 
-fn parse_context_sort_key(key: &str) -> Result<FractionalIndex, ApiError> {
-    FractionalIndex::from_string(key).map_err(|_| ApiError::internal("invalid context sort key"))
+fn parse_manual_sort_key(key: &str) -> Result<FractionalIndex, ApiError> {
+    FractionalIndex::from_string(key).map_err(|_| ApiError::internal("invalid manual sort key"))
 }
 
-fn validate_context_parent(
+fn validate_manual_parent(
     connection: &Connection,
-    context_id: Option<&str>,
+    manual_id: Option<&str>,
     parent_id: Option<&str>,
 ) -> Result<(), ApiError> {
     let Some(parent_id) = parent_id else {
         return Ok(());
     };
-    if context_id == Some(parent_id) {
-        return Err(ApiError::conflict("a context cannot be its own parent"));
+    if manual_id == Some(parent_id) {
+        return Err(ApiError::conflict("a manual cannot be its own parent"));
     }
     let exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM contexts WHERE id=?)",
+        "SELECT EXISTS(SELECT 1 FROM manuals WHERE id=?)",
         [parent_id],
         |row| row.get(0),
     )?;
     if !exists {
-        return Err(ApiError::not_found("parent context not found"));
+        return Err(ApiError::not_found("parent manual not found"));
     }
-    if let Some(context_id) = context_id {
+    if let Some(manual_id) = manual_id {
         let creates_cycle: bool = connection.query_row(
             "WITH RECURSIVE descendants(id) AS (
                SELECT ?1
                UNION ALL
-               SELECT contexts.id FROM contexts JOIN descendants ON contexts.parent_id=descendants.id
+               SELECT manuals.id FROM manuals JOIN descendants ON manuals.parent_id=descendants.id
              )
              SELECT EXISTS(SELECT 1 FROM descendants WHERE id=?2)",
-            params![context_id, parent_id],
+            params![manual_id, parent_id],
             |row| row.get(0),
         )?;
         if creates_cycle {
-            return Err(ApiError::conflict("context parent would create a cycle"));
+            return Err(ApiError::conflict("manual parent would create a cycle"));
         }
     }
     Ok(())
 }
 
-/// A Context is hidden when it or any ancestor sits in the trash. Tools treat
-/// hidden Contexts as missing, and the Contexts page keeps their subtrees out
+/// A Manual is hidden when it or any ancestor sits in the trash. Tools treat
+/// hidden Manuals as missing, and the Manuals page keeps their subtrees out
 /// of the normal tree.
 fn context_hidden(connection: &Connection, id: &str) -> Result<bool, ApiError> {
     let hidden: bool = connection.query_row(
         "WITH RECURSIVE ancestors(id,parent_id,trashed_at) AS (
-           SELECT id,parent_id,trashed_at FROM contexts WHERE id=?1
+           SELECT id,parent_id,trashed_at FROM manuals WHERE id=?1
            UNION ALL
-           SELECT contexts.id,contexts.parent_id,contexts.trashed_at
-           FROM contexts JOIN ancestors ON contexts.id=ancestors.parent_id
+           SELECT manuals.id,manuals.parent_id,manuals.trashed_at
+           FROM manuals JOIN ancestors ON manuals.id=ancestors.parent_id
          )
          SELECT EXISTS(SELECT 1 FROM ancestors WHERE trashed_at IS NOT NULL)",
         [id],
@@ -4432,39 +4449,36 @@ fn context_hidden(connection: &Connection, id: &str) -> Result<bool, ApiError> {
     Ok(hidden)
 }
 
-async fn list_contexts(
+async fn list_manuals(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
-) -> Result<Json<Vec<ContextView>>, ApiError> {
-    let contexts = user_db(&state, &identity.user, true, |connection| {
+) -> Result<Json<Vec<ManualView>>, ApiError> {
+    let manuals = user_db(&state, &identity.user, true, |connection| {
         let mut statement = connection.prepare(
-            "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
+            "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM manuals ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
         )?;
         let rows = statement.query_map([], context_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     })
     .await?;
-    Ok(Json(contexts))
+    Ok(Json(manuals))
 }
 
-async fn create_context(
+async fn create_manual(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
-    Json(input): Json<CreateContextInput>,
-) -> Result<Json<ContextView>, ApiError> {
+    Json(input): Json<CreateManualInput>,
+) -> Result<Json<ManualView>, ApiError> {
     let name = context_name(input.name)?;
     let description = context_description(input.description)?;
     let content = context_content(input.content)?;
-    let parent_id = input
-        .parent_id
-        .map(|value| context_id(&value))
-        .transpose()?;
-    let context = user_db(&state, &identity.user, true, move |connection| {
+    let parent_id = input.parent_id.map(|value| manual_id(&value)).transpose()?;
+    let manual = user_db(&state, &identity.user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_context_parent(&transaction, None, parent_id.as_deref())?;
-        let sort_key = append_context_sort_key(&transaction, parent_id.as_deref())?;
-        let context = ContextView {
+        validate_manual_parent(&transaction, None, parent_id.as_deref())?;
+        let sort_key = append_manual_sort_key(&transaction, parent_id.as_deref())?;
+        let manual = ManualView {
             id: Uuid::new_v4().to_string(),
             name,
             description,
@@ -4475,141 +4489,138 @@ async fn create_context(
             trashed_at: None,
         };
         transaction.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id,sort_key) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO manuals(id,name,description,content,parent_id,sort_key) VALUES(?,?,?,?,?,?)",
             params![
-                &context.id,
-                &context.name,
-                &context.description,
-                &context.content,
-                &context.parent_id,
-                &context.sort_key,
+                &manual.id,
+                &manual.name,
+                &manual.description,
+                &manual.content,
+                &manual.parent_id,
+                &manual.sort_key,
             ],
         )?;
         transaction.commit()?;
-        Ok(context)
+        Ok(manual)
     })
     .await?;
-    Ok(Json(context))
+    Ok(Json(manual))
 }
 
-async fn move_context(
+async fn move_manual(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-    Json(input): Json<MoveContextInput>,
-) -> Result<Json<ContextView>, ApiError> {
-    let id = context_id(&id)?;
-    let parent_id = input
-        .parent_id
-        .map(|value| context_id(&value))
-        .transpose()?;
-    let after_id = input.after_id.map(|value| context_id(&value)).transpose()?;
-    let context = user_db(&state, &identity.user, true, move |connection| {
+    Json(input): Json<MoveManualInput>,
+) -> Result<Json<ManualView>, ApiError> {
+    let id = manual_id(&id)?;
+    let parent_id = input.parent_id.map(|value| manual_id(&value)).transpose()?;
+    let after_id = input.after_id.map(|value| manual_id(&value)).transpose()?;
+    let manual = user_db(&state, &identity.user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM manuals WHERE id=?",
                 [&id],
                 context_from_row,
             )
             .optional()?;
         let Some(current) = current else {
-            return Err(ApiError::not_found("context not found"));
+            return Err(ApiError::not_found("manual not found"));
         };
-        validate_context_parent(&transaction, Some(&id), parent_id.as_deref())?;
+        validate_manual_parent(&transaction, Some(&id), parent_id.as_deref())?;
         let sort_key =
-            move_context_sort_key(&transaction, parent_id.as_deref(), after_id.as_deref(), &id)?;
+            move_manual_sort_key(&transaction, parent_id.as_deref(), after_id.as_deref(), &id)?;
         transaction.execute(
-            "UPDATE contexts SET parent_id=?,sort_key=? WHERE id=?",
+            "UPDATE manuals SET parent_id=?,sort_key=? WHERE id=?",
             params![&parent_id, &sort_key, &id],
         )?;
         transaction.commit()?;
-        Ok(ContextView {
+        Ok(ManualView {
             parent_id,
             sort_key,
             ..current
         })
     })
     .await?;
-    Ok(Json(context))
+    Ok(Json(manual))
 }
 
-async fn restore_context(
+async fn restore_manual(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ContextView>, ApiError> {
-    let id = context_id(&id)?;
-    let context = user_db(&state, &identity.user, true, move |connection| {
+) -> Result<Json<ManualView>, ApiError> {
+    let id = manual_id(&id)?;
+    let manual = user_db(&state, &identity.user, true, move |connection| {
         let changed = connection.execute(
-            "UPDATE contexts SET trashed_at=NULL WHERE id=? AND trashed_at IS NOT NULL",
+            "UPDATE manuals SET trashed_at=NULL WHERE id=? AND trashed_at IS NOT NULL",
             [&id],
         )?;
         if changed == 0 {
-            return Err(ApiError::not_found("trashed context not found"));
+            return Err(ApiError::not_found("trashed manual not found"));
         }
         connection
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM manuals WHERE id=?",
                 [&id],
                 context_from_row,
             )
             .map_err(Into::into)
     })
     .await?;
-    Ok(Json(context))
+    Ok(Json(manual))
 }
 
-async fn read_context_api(
+async fn read_manual_api(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-    Query(query): Query<common_contexts::LanguageQuery>,
-) -> Result<Json<ContextReadView>, ApiError> {
-    let context = read_context_for(
+    Query(query): Query<common_manuals::LanguageQuery>,
+) -> Result<Json<ManualReadView>, ApiError> {
+    let manual = read_manual_for(
         &state,
         &identity.user,
         id,
-        common_contexts::parse_language(query.lang.as_deref()),
+        common_manuals::parse_language(query.lang.as_deref()),
     )
     .await?;
-    Ok(Json(context))
+    Ok(Json(manual))
 }
 
-// The browser reads every Context through this route: local contexts first,
-// then the compiled common nodes, matching the Contexts tools so the unified
+// The browser reads every Manual through this route: local manuals first,
+// then the compiled common nodes, matching the Manuals tools so the unified
 // tree can read both sources. `language` selects the common copy.
-async fn read_context_for(
+async fn read_manual_for(
     state: &AppState,
     user: &User,
     id: String,
     language: &str,
-) -> Result<ContextReadView, ApiError> {
-    let id = context_id(&id)?;
-    if let Some(context) = local_context(state, user, id.clone()).await? {
-        return Ok(context);
+) -> Result<ManualReadView, ApiError> {
+    let id = manual_id(&id)?;
+    if let Some(manual) = local_manual(state, user, id.clone()).await? {
+        return Ok(manual);
     }
-    if let Some(context) = common_contexts::read(&id, language) {
-        return Ok(context);
+    if let Some(manual) = common_manuals::read(&id, language) {
+        return Ok(manual);
     }
-    Err(ApiError::not_found("context not found"))
+    Err(ApiError::not_found("manual not found"))
 }
 
-async fn local_context(
+async fn local_manual(
     state: &AppState,
     user: &User,
     id: String,
-) -> Result<Option<ContextReadView>, ApiError> {
+) -> Result<Option<ManualReadView>, ApiError> {
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction()?;
-        let context = transaction
+        let manual = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM manuals WHERE id=?",
                 [&id],
                 context_from_row,
             )
             .optional()?;
-        let Some(context) = context else {
+        let Some(manual) = manual else {
             return Ok(None);
         };
         if context_hidden(&transaction, &id)? {
@@ -4617,29 +4628,29 @@ async fn local_context(
         }
         let children = context_summaries(&transaction, Some(&id))?;
         transaction.commit()?;
-        Ok(Some(ContextReadView { context, children }))
+        Ok(Some(ManualReadView { manual, children }))
     })
     .await
 }
 
-async fn update_context(
+async fn update_manual(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-    Json(input): Json<UpdateContextInput>,
-) -> Result<Json<ContextView>, ApiError> {
-    let id = context_id(&id)?;
-    let context = user_db(&state, &identity.user, true, move |connection| {
+    Json(input): Json<UpdateManualInput>,
+) -> Result<Json<ManualView>, ApiError> {
+    let id = manual_id(&id)?;
+    let manual = user_db(&state, &identity.user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM manuals WHERE id=?",
                 [&id],
                 context_from_row,
             )
             .optional()?;
         let Some(current) = current else {
-            return Err(ApiError::not_found("context not found"));
+            return Err(ApiError::not_found("manual not found"));
         };
         let name = input
             .name
@@ -4658,10 +4669,10 @@ async fn update_context(
             .unwrap_or(current.content);
         let parent_id = input
             .parent_id
-            .map(|value| value.map(|value| context_id(&value)).transpose())
+            .map(|value| value.map(|value| manual_id(&value)).transpose())
             .transpose()?
             .unwrap_or_else(|| current.parent_id.clone());
-        validate_context_parent(&transaction, Some(&id), parent_id.as_deref())?;
+        validate_manual_parent(&transaction, Some(&id), parent_id.as_deref())?;
         // The lock is the owner's own flag: an edit that says nothing about it
         // keeps it, so ordinary saves never unlock a manual by accident.
         let locked = input.locked.unwrap_or(current.locked);
@@ -4670,14 +4681,14 @@ async fn update_context(
         let sort_key = if parent_id == current.parent_id {
             current.sort_key
         } else {
-            append_context_sort_key(&transaction, parent_id.as_deref())?
+            append_manual_sort_key(&transaction, parent_id.as_deref())?
         };
         transaction.execute(
-            "UPDATE contexts SET name=?,description=?,content=?,parent_id=?,sort_key=?,locked=? WHERE id=?",
+            "UPDATE manuals SET name=?,description=?,content=?,parent_id=?,sort_key=?,locked=? WHERE id=?",
             params![&name, &description, &content, &parent_id, &sort_key, locked, &id],
         )?;
         transaction.commit()?;
-        Ok(ContextView {
+        Ok(ManualView {
             id,
             name,
             description,
@@ -4689,19 +4700,19 @@ async fn update_context(
         })
     })
     .await?;
-    Ok(Json(context))
+    Ok(Json(manual))
 }
 
-async fn delete_context(
+async fn delete_manual(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    let id = context_id(&id)?;
+    let id = manual_id(&id)?;
     user_db(&state, &identity.user, true, move |connection| {
-        let changed = connection.execute("DELETE FROM contexts WHERE id=?", [&id])?;
+        let changed = connection.execute("DELETE FROM manuals WHERE id=?", [&id])?;
         if changed == 0 {
-            return Err(ApiError::not_found("context not found"));
+            return Err(ApiError::not_found("manual not found"));
         }
         Ok(())
     })
@@ -5153,13 +5164,7 @@ impl CompiledThreadContext {
 /// replay barrier, not an upstream item: it counts as a protocol record so it
 /// advances the replay tail, and it marks where the Thread started replaying
 /// with another `(upstream, model)` pair.
-///
-/// COMPATIBILITY: `context_dirty` belongs here only while old Threads still
-/// carry those records. Leaving it out would drop a replayed item out of the
-/// middle of an existing prefix, so the record stays a protocol record — and
-/// keeps replaying as the message it was stored as — until no Thread can reach
-/// one; then it leaves this list and `context_dirty_message` goes with it.
-const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','context_dirty','context_loaded','context_unloaded')))";
+const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','manual_loaded','manual_unloaded')))";
 
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     connection
@@ -5550,9 +5555,7 @@ fn load_protocol_items(
     for (id, created_at, kind, payload) in rows {
         let mut item: Value =
             serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if let Some(notice) =
-            context_dirty_message(&item).or_else(|| context_loads::notice_message(&item))
-        {
+        if let Some(notice) = manual_loads::notice_message(&item) {
             item = notice;
         }
         if reinjected.contains(&id) {
@@ -5954,13 +5957,13 @@ fn registered_workers(connection: &Connection) -> Result<Vec<WorkerSummary>, Api
 fn context_summaries(
     connection: &Connection,
     parent_id: Option<&str>,
-) -> Result<Vec<ContextSummary>, ApiError> {
+) -> Result<Vec<ManualSummary>, ApiError> {
     let mut statement = connection.prepare(
-        "SELECT id,name,description FROM contexts WHERE parent_id IS ? AND trashed_at IS NULL ORDER BY sort_key,name,id",
+        "SELECT id,name,description FROM manuals WHERE parent_id IS ? AND trashed_at IS NULL ORDER BY sort_key,name,id",
     )?;
     let rows = statement.query_map([parent_id], |row| {
-        Ok(ContextSummary {
-            context_id: row.get(0)?,
+        Ok(ManualSummary {
+            manual_id: row.get(0)?,
             name: row.get(1)?,
             description: row.get(2)?,
         })
@@ -6019,7 +6022,7 @@ async fn request_agent(
             .await
             .map_err(|e| (thread.clone(), Box::new(e)))?;
         let thread = &current;
-        let mut context = user_db(state, user, false, {
+        let mut manual = user_db(state, user, false, {
             let id = thread.id.clone();
             let data_dir = state.data_dir.clone();
             move |c| recovery::current_context(c, &data_dir, &id, source_record_idx)
@@ -6032,7 +6035,7 @@ async fn request_agent(
         if budget > 0 && proactive_compactions < PROACTIVE_COMPACTION_RETRY_LIMIT {
             let estimate = user_db(state, user, false, {
                 let thread_id = thread.id.clone();
-                let (idx_head, idx_tail) = (context.idx_head, context.idx_tail);
+                let (idx_head, idx_tail) = (manual.idx_head, manual.idx_tail);
                 move |connection| {
                     estimate_context_tokens(connection, &thread_id, idx_head, idx_tail)
                 }
@@ -6045,7 +6048,7 @@ async fn request_agent(
                     state,
                     user,
                     thread,
-                    &context,
+                    &manual,
                     upstream,
                     source_record_idx,
                     cancellation,
@@ -6068,7 +6071,7 @@ async fn request_agent(
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let has_workers = !workers.is_empty();
         let image_generation = effective_image_generation_model(thread, &defaults).is_some();
-        let mut request_items = std::mem::take(&mut context.items);
+        let mut request_items = std::mem::take(&mut manual.items);
         if let Some(block) = note_block.as_deref() {
             // The notes block lives only in the request copy: history records
             // stay exactly what happened, and compaction and title requests
@@ -6081,8 +6084,8 @@ async fn request_agent(
             &thread.id,
             Some(source_record_idx),
             "inference",
-            context.idx_head,
-            context.idx_tail,
+            manual.idx_head,
+            manual.idx_tail,
             upstream,
             &thread.model,
             Some(&thread.reasoning_effort),
@@ -6104,10 +6107,10 @@ async fn request_agent(
                 checkpoint_retries += 1;
                 // INVARIANT: the request consumed the compiled items, so the
                 // checkpoint rebuilds the same record range before compacting.
-                context = user_db(state, user, false, {
+                manual = user_db(state, user, false, {
                     let id = thread.id.clone();
                     let data_dir = state.data_dir.clone();
-                    let tail = context.idx_tail;
+                    let tail = manual.idx_tail;
                     move |connection| compile_thread_context(connection, &data_dir, &id, tail)
                 })
                 .await
@@ -6116,7 +6119,7 @@ async fn request_agent(
                     state,
                     user,
                     thread,
-                    &context,
+                    &manual,
                     upstream,
                     source_record_idx,
                     cancellation,
@@ -6342,7 +6345,7 @@ async fn compact_thread_context(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
-    context: &CompiledThreadContext,
+    manual: &CompiledThreadContext,
     upstream: &Upstream,
     source_record_idx: i64,
     cancellation: &mut watch::Receiver<bool>,
@@ -6350,7 +6353,7 @@ async fn compact_thread_context(
     if *cancellation.borrow() {
         return Err(ApiError::cancelled());
     }
-    if context.record_ids.last().copied() != Some(context.idx_tail) {
+    if manual.record_ids.last().copied() != Some(manual.idx_tail) {
         return Err(ApiError::conflict(
             "checkpoint source records do not reach its context tail",
         ));
@@ -6360,12 +6363,12 @@ async fn compact_thread_context(
         user,
         thread.id.as_str(),
         source_record_idx,
-        context.idx_head,
-        context.idx_tail,
+        manual.idx_head,
+        manual.idx_tail,
         upstream,
         &thread.model,
-        &context.items,
-        &context.record_metadata,
+        &manual.items,
+        &manual.record_metadata,
         cancellation.clone(),
     )
     .await?;
@@ -6377,7 +6380,7 @@ async fn compact_thread_context(
         user,
         thread,
         source_record_idx,
-        context.idx_tail,
+        manual.idx_tail,
         summary,
     )
     .await
@@ -6663,16 +6666,16 @@ timeline, active decisions and constraints, current objective, next step, unfini
 evidence routes. Keep raw history durable by citing its record IDs; do not retain credentials,
 tokens, passwords, cookies, API keys, or secrets. Preserve distinct causal events and only merge
 duplicate reports of the same event. When the source already contains a prior `# Durable working
-context` checkpoint, consolidate it: carry still-true facts forward, drop stale ones, and merge
+manual` checkpoint, consolidate it: carry still-true facts forward, drop stale ones, and merge
 newer information into one checkpoint instead of copying the old text verbatim.
 
-Context detail does not travel with this checkpoint: whatever the checkpoint does not restate is
-reachable again only by opening that Context. So decide which Contexts are still worth opening and
+Manual detail does not travel with this checkpoint: whatever the checkpoint does not restate is
+reachable again only by opening that Manual. So decide which Manuals are still worth opening and
 why, instead of trusting a memory of them.
 
-A Context the thread keeps loaded is the exception: the controller delivers its current copy again
-after this checkpoint without any tool call, so never list a loaded Context in
-`## Contexts worth re-reading` and never restate its content.
+A Manual the thread keeps loaded is the exception: the controller delivers its current copy again
+after this checkpoint without any tool call, so never list a loaded Manual in
+`## Manuals worth re-reading` and never restate its content.
 
 Use terse bullets rather than prose paragraphs, and keep every heading in this exact order. Write
 `(none)` for an empty section; never drop a section.
@@ -6681,19 +6684,19 @@ Use terse bullets rather than prose paragraphs, and keep every heading in this e
 ## Resources and authoritative locations
 ## Chronicle timeline
 ## Active decisions and constraints
-## Contexts worth re-reading
+## Manuals worth re-reading
 ## Current objective and next step
 ## Open work and evidence routes
 
-`## Contexts worth re-reading` lists one bullet per Context this thread still needs and whose
-detail the rest of the checkpoint does not carry: the exact `context_id`, then why it must be
-opened again and which decision or next step depends on it. Point at the Context; never copy its
+`## Manuals worth re-reading` lists one bullet per Manual this thread still needs and whose
+detail the rest of the checkpoint does not carry: the exact `manual_id`, then why it must be
+opened again and which decision or next step depends on it. Point at the Manual; never copy its
 content, and never list Workers, files, or URLs there. Write `(none)` when no detail is missing.
 
 The final section must include a fenced JSON array whose entries contain `topic_key`, `status`,
 `message_range`, and `search_keywords`. Exact calendar times are allowed only when present in the
 source records; otherwise use record-order anchors marked as inferred. Write the checkpoint in
-English. Do not mention this summarization request or that the context was compacted."#;
+English. Do not mention this summarization request or that the manual was compacted."#;
 
 const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 
@@ -6701,9 +6704,9 @@ const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 
 这份检查点会在下一次请求里取代此前的历史。要保留：概念与术语、权威资源与精确位置、有因果关系的时序、生效中的决策与约束、当前目标与下一步、未完成的工作与取证路径。原始历史靠引用记录 ID 保持可追溯；不要把凭证、令牌、口令、Cookie、API Key 或密钥写进来。保留彼此独立的因果事件，只合并同一事件的重复报告。如果来源里已经有一份 `# Durable working context` 检查点，就把它合并进来：仍然成立的事实向前带、过时的丢掉，与新信息合成一份，不要照抄旧文本。
 
-Context 的细节不会随这份检查点一起走下去：检查点没有复述的部分，只能重新打开那个 Context 才能拿回来。所以要判断哪些 Context 仍然值得打开、并说明理由，而不是凭对它们的记忆办事。
+Manual 的细节不会随这份检查点一起走下去：检查点没有复述的部分，只能重新打开那个 Manual 才能拿回来。所以要判断哪些 Manual 仍然值得打开、并说明理由，而不是凭对它们的记忆办事。
 
-本 Thread 加载着的 Context 是例外：检查点之后控制器会自动把它的最新副本重新送达，不需要任何工具调用。所以已加载的 Context 不要写进 `## Contexts worth re-reading`，也不要复述它的正文。
+本 Thread 加载着的 Manual 是例外：检查点之后控制器会自动把它的最新副本重新送达，不需要任何工具调用。所以已加载的 Manual 不要写进 `## Manuals worth re-reading`，也不要复述它的正文。
 
 用小圆点短句，不要写散文段落；各小节标题必须按下面的顺序、逐字使用英文原文，不要翻译。空小节写 `(none)`，任何小节都不许省略。
 
@@ -6711,11 +6714,11 @@ Context 的细节不会随这份检查点一起走下去：检查点没有复述
 ## Resources and authoritative locations
 ## Chronicle timeline
 ## Active decisions and constraints
-## Contexts worth re-reading
+## Manuals worth re-reading
 ## Current objective and next step
 ## Open work and evidence routes
 
-`## Contexts worth re-reading` 一行一个 Context，只列 Thread 之后还需要、而细节没有被检查点其余部分带走的那些：写精确的 `context_id`，随后写为什么必须重新打开、哪项决策或下一步依赖它。只指向 Context，不要复制其正文；Worker、文件、URL 不属于这一节。没有丢失的细节就写 `(none)`。
+`## Manuals worth re-reading` 一行一个 Manual，只列 Thread 之后还需要、而细节没有被检查点其余部分带走的那些：写精确的 `manual_id`，随后写为什么必须重新打开、哪项决策或下一步依赖它。只指向 Manual，不要复制其正文；Worker、文件、URL 不属于这一节。没有丢失的细节就写 `(none)`。
 
 最后一个小节必须包含一段围栏 JSON 数组，条目含 `topic_key`、`status`、`message_range`、`search_keywords`。只有来源记录里明确出现的日历时间才可写入，否则用以记录序号为锚的相对时序并标注为推断。检查点正文用简体中文书写。不要提及这次摘要请求，也不要提及上下文被压缩过。"#;
 
@@ -6764,7 +6767,7 @@ fn validate_checkpoint_text(text: &str) -> Result<(), anyhow::Error> {
         "## Resources and authoritative locations",
         "## Chronicle timeline",
         "## Active decisions and constraints",
-        "## Contexts worth re-reading",
+        "## Manuals worth re-reading",
         "## Current objective and next step",
         "## Open work and evidence routes",
     ];
@@ -6772,7 +6775,7 @@ fn validate_checkpoint_text(text: &str) -> Result<(), anyhow::Error> {
         || required.iter().any(|section| !text.contains(section))
     {
         return Err(anyhow::anyhow!(
-            "checkpoint output does not satisfy the durable working-context contract"
+            "checkpoint output does not satisfy the durable working-manual contract"
         ));
     }
     Ok(())
@@ -7051,7 +7054,7 @@ fn serialize_responses_payload(payload: Value) -> Result<Vec<u8>, ApiError> {
 
 /// Rough serialized size of a value; string contents dominate every payload,
 /// so reserving the estimate up front avoids the doubling copies of a growing
-/// buffer while a large context is serialized.
+/// buffer while a large manual is serialized.
 fn serialized_size_estimate(value: &Value) -> usize {
     match value {
         Value::Null => 4,
@@ -7078,7 +7081,7 @@ async fn send_responses_request(
     service_tier_fast: bool,
     input: Value,
     include_worker_tools: bool,
-    include_context_tools: bool,
+    include_manual_tools: bool,
     web_search: bool,
     image_generation: bool,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
@@ -7089,7 +7092,7 @@ async fn send_responses_request(
         service_tier_fast,
         input,
         include_worker_tools,
-        include_context_tools,
+        include_manual_tools,
         web_search,
         image_generation,
     );
@@ -7298,7 +7301,7 @@ async fn send_responses_request(
     let value = &result.value;
     if context_overflow_value(value) {
         let error = ApiError::context_overflow(format!(
-            "upstream Responses request exceeded the context window: {}",
+            "upstream Responses request exceeded the manual window: {}",
             upstream_error_detail(&value.to_string())
         ));
         if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
@@ -7657,7 +7660,7 @@ fn responses_payload_with_options(
     service_tier_fast: bool,
     input: Value,
     include_worker_tools: bool,
-    include_context_tools: bool,
+    include_manual_tools: bool,
     web_search: bool,
     image_generation: bool,
 ) -> Value {
@@ -7669,7 +7672,7 @@ fn responses_payload_with_options(
     let mut payload = Value::Object(payload);
     if let Some(reasoning_effort) = reasoning_effort {
         // Codex requests summaries explicitly so the summary event stream is
-        // available for both rendering and the next Thread context.
+        // available for both rendering and the next Thread manual.
         payload["reasoning"] = json!({"effort": reasoning_effort, "summary": "auto"});
         payload["include"] = json!(["reasoning.encrypted_content"]);
     }
@@ -7678,7 +7681,7 @@ fn responses_payload_with_options(
     }
     let tools = responses_tools(
         include_worker_tools,
-        include_context_tools,
+        include_manual_tools,
         web_search,
         image_generation,
     );
@@ -7786,7 +7789,7 @@ fn worker_tools() -> Value {
 }
 
 fn context_tools() -> Value {
-    TOOL_CATALOG["context"].clone()
+    TOOL_CATALOG["kernel"].clone()
 }
 
 fn note_tools() -> Value {
@@ -7799,12 +7802,12 @@ fn is_worker_tool(name: &str) -> bool {
 
 fn responses_tools(
     include_worker_tools: bool,
-    include_context_tools: bool,
+    include_manual_tools: bool,
     web_search: bool,
     image_generation: bool,
 ) -> Value {
     let mut tools = Vec::new();
-    if include_context_tools {
+    if include_manual_tools {
         tools.extend(context_tools().as_array().cloned().unwrap_or_default());
         tools.extend(note_tools().as_array().cloned().unwrap_or_default());
     }
@@ -7843,15 +7846,15 @@ struct WorkerArguments {
     delay_seconds: Option<u64>,
 }
 
-/// The one parent value write_context reads as the trash: pointing a Context's
-/// parent at TRASH hides it until the user restores it from the Contexts page.
+/// The one parent value write_manual reads as the trash: pointing a Manual's
+/// parent at TRASH hides it until the user restores it from the Manuals page.
 const TRASH_CONTEXT_ID: &str = "TRASH";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WriteContextArguments {
+struct WriteManualArguments {
     #[serde(default)]
-    context_id: Option<String>,
+    manual_id: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -7872,31 +7875,31 @@ where
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
-enum WriteContextParent {
+enum WriteManualParent {
     Keep,
     TopLevel,
     Trash,
-    Context(String),
+    Manual(String),
 }
 
-async fn write_context_tool_output(
+async fn write_manual_tool_output(
     state: &AppState,
     user: &User,
     input: &str,
 ) -> Result<Value, ApiError> {
-    let arguments: WriteContextArguments = serde_json::from_str(input).map_err(|error| {
-        ApiError::bad_request(format!("write_context arguments are invalid: {error}"))
+    let arguments: WriteManualArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!("write_manual arguments are invalid: {error}"))
     })?;
     let parent = match arguments.parent_id {
-        None => WriteContextParent::Keep,
-        Some(None) => WriteContextParent::TopLevel,
-        Some(Some(value)) if value == TRASH_CONTEXT_ID => WriteContextParent::Trash,
-        Some(Some(value)) => WriteContextParent::Context(context_id(&value)?),
+        None => WriteManualParent::Keep,
+        Some(None) => WriteManualParent::TopLevel,
+        Some(Some(value)) if value == TRASH_CONTEXT_ID => WriteManualParent::Trash,
+        Some(Some(value)) => WriteManualParent::Manual(manual_id(&value)?),
     };
-    let context = match arguments.context_id {
+    let manual = match arguments.manual_id {
         Some(value) => {
-            let id = context_id(&value)?;
-            edit_context_tool_output(
+            let id = manual_id(&value)?;
+            edit_manual_tool_output(
                 state,
                 user,
                 id,
@@ -7908,7 +7911,7 @@ async fn write_context_tool_output(
             .await?
         }
         None => {
-            create_context_tool_output(
+            create_manual_tool_output(
                 state,
                 user,
                 arguments.name,
@@ -7919,55 +7922,55 @@ async fn write_context_tool_output(
             .await?
         }
     };
-    Ok(context)
+    Ok(manual)
 }
 
-/// The one answer a locked Context gives `write_context`: name the lock and
-/// point at the child Contexts, which the lock deliberately leaves writable.
-fn locked_context_message(id: &str) -> String {
+/// The one answer a locked Manual gives `write_manual`: name the lock and
+/// point at the child Manuals, which the lock deliberately leaves writable.
+fn locked_manual_message(id: &str) -> String {
     format!(
-        "context {id} is locked by the user, so write_context cannot change it; \
-         its child Contexts stay writable — load_context {id} delivers them, and \
-         write_context with parent_id {id} creates a new child."
+        "manual {id} is locked by the user, so write_manual cannot change it; \
+         its child Manuals stay writable — load_manual {id} delivers them, and \
+         write_manual with parent_id {id} creates a new child."
     )
 }
 
-/// The create half of write_context: a new Context starts visible, at the top
+/// The create half of write_manual: a new Manual starts visible, at the top
 /// level or under a visible parent; the trash marker is an update-only value.
-async fn create_context_tool_output(
+async fn create_manual_tool_output(
     state: &AppState,
     user: &User,
     name: Option<String>,
     description: Option<String>,
     content: Option<String>,
-    parent: WriteContextParent,
+    parent: WriteManualParent,
 ) -> Result<Value, ApiError> {
     let name = name
-        .ok_or_else(|| ApiError::bad_request("creating a context requires name"))
+        .ok_or_else(|| ApiError::bad_request("creating a manual requires name"))
         .and_then(context_name)?;
     let description = context_description(description.unwrap_or_default())?;
     let content = context_content(content.unwrap_or_default())?;
     let parent_id = match parent {
-        WriteContextParent::Keep | WriteContextParent::TopLevel => None,
-        WriteContextParent::Trash => {
+        WriteManualParent::Keep | WriteManualParent::TopLevel => None,
+        WriteManualParent::Trash => {
             return Err(ApiError::bad_request(
-                "TRASH applies to updates only; a new Context starts at the top level or under a parent",
+                "TRASH applies to updates only; a new Manual starts at the top level or under a parent",
             ));
         }
-        WriteContextParent::Context(parent_id) => Some(parent_id),
+        WriteManualParent::Manual(parent_id) => Some(parent_id),
     };
-    let context = user_db(state, user, true, move |connection| {
+    let manual = user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(parent_id) = parent_id.as_deref() {
-            validate_context_parent(&transaction, None, Some(parent_id))?;
+            validate_manual_parent(&transaction, None, Some(parent_id))?;
             if context_hidden(&transaction, parent_id)? {
-                return Err(ApiError::not_found("parent context not found"));
+                return Err(ApiError::not_found("parent manual not found"));
             }
         }
-        let sort_key = append_context_sort_key(&transaction, parent_id.as_deref())?;
+        let sort_key = append_manual_sort_key(&transaction, parent_id.as_deref())?;
         let id = Uuid::new_v4().to_string();
         transaction.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id,sort_key) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO manuals(id,name,description,content,parent_id,sort_key) VALUES(?,?,?,?,?,?)",
             params![&id, &name, &description, &content, &parent_id, &sort_key],
         )?;
         transaction.commit()?;
@@ -7980,27 +7983,27 @@ async fn create_context_tool_output(
         }))
     })
     .await?;
-    Ok(context)
+    Ok(manual)
 }
 
-/// The edit half of write_context: the current row loads inside the write
+/// The edit half of write_manual: the current row loads inside the write
 /// transaction, omitted fields keep their values, and an explicit null parent
-/// moves the Context to the top level.
-async fn edit_context_tool_output(
+/// moves the Manual to the top level.
+async fn edit_manual_tool_output(
     state: &AppState,
     user: &User,
     id: String,
     name: Option<String>,
     description: Option<String>,
     content: Option<String>,
-    parent: WriteContextParent,
+    parent: WriteManualParent,
 ) -> Result<Value, ApiError> {
     let requested_id = id.clone();
     let summary = user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = transaction
             .query_row(
-                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM contexts WHERE id=?",
+                "SELECT id,name,description,content,parent_id,sort_key,trashed_at,locked FROM manuals WHERE id=?",
                 [&id],
                 context_from_row,
             )
@@ -8012,7 +8015,7 @@ async fn edit_context_tool_output(
             return Ok(None);
         }
         if current.locked {
-            return Err(ApiError::bad_request(locked_context_message(&id)));
+            return Err(ApiError::bad_request(locked_manual_message(&id)));
         }
         let name = name.map(context_name).transpose()?.unwrap_or(current.name);
         let description = description
@@ -8024,13 +8027,13 @@ async fn edit_context_tool_output(
             .transpose()?
             .unwrap_or(current.content);
         let (parent_id, trashed_at) = match parent {
-            WriteContextParent::Keep => (current.parent_id.clone(), current.trashed_at),
-            WriteContextParent::Trash => (current.parent_id.clone(), Some(now())),
-            WriteContextParent::TopLevel => (None, current.trashed_at),
-            WriteContextParent::Context(parent_id) => {
-                validate_context_parent(&transaction, Some(&id), Some(&parent_id))?;
+            WriteManualParent::Keep => (current.parent_id.clone(), current.trashed_at),
+            WriteManualParent::Trash => (current.parent_id.clone(), Some(now())),
+            WriteManualParent::TopLevel => (None, current.trashed_at),
+            WriteManualParent::Manual(parent_id) => {
+                validate_manual_parent(&transaction, Some(&id), Some(&parent_id))?;
                 if context_hidden(&transaction, &parent_id)? {
-                    return Err(ApiError::not_found("parent context not found"));
+                    return Err(ApiError::not_found("parent manual not found"));
                 }
                 (Some(parent_id), current.trashed_at)
             }
@@ -8038,10 +8041,10 @@ async fn edit_context_tool_output(
         let sort_key = if parent_id == current.parent_id {
             current.sort_key
         } else {
-            append_context_sort_key(&transaction, parent_id.as_deref())?
+            append_manual_sort_key(&transaction, parent_id.as_deref())?
         };
         transaction.execute(
-            "UPDATE contexts SET name=?,description=?,content=?,parent_id=?,sort_key=?,trashed_at=? WHERE id=?",
+            "UPDATE manuals SET name=?,description=?,content=?,parent_id=?,sort_key=?,trashed_at=? WHERE id=?",
             params![&name, &description, &content, &parent_id, &sort_key, &trashed_at, &id],
         )?;
         transaction.commit()?;
@@ -8055,35 +8058,35 @@ async fn edit_context_tool_output(
     })
     .await?;
     let Some(summary) = summary else {
-        if common_contexts::read(&requested_id, common_contexts::SOURCE_LANGUAGE).is_some() {
+        if common_manuals::read(&requested_id, common_manuals::SOURCE_LANGUAGE).is_some() {
             return Err(ApiError::bad_request(
-                "the Cybion Common Context is read-only",
+                "the Cybion Common Manual is read-only",
             ));
         }
-        return Err(ApiError::not_found("context not found"));
+        return Err(ApiError::not_found("manual not found"));
     };
     Ok(summary)
 }
 
-async fn list_contexts_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
-    let mut contexts = vec![common_contexts::root_summary(
-        common_contexts::SOURCE_LANGUAGE,
+async fn list_manuals_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
+    let mut manuals = vec![common_manuals::root_summary(
+        common_manuals::SOURCE_LANGUAGE,
     )];
     let local = user_db(state, user, false, |connection| {
         context_summaries(connection, None)
     })
     .await?;
-    contexts.extend(
+    manuals.extend(
         local
             .iter()
             .map(|summary| context_summary_item(summary, "local")),
     );
-    Ok(json!({ "contexts": contexts }))
+    Ok(json!({ "manuals": manuals }))
 }
 
-fn context_summary_item(summary: &ContextSummary, source: &str) -> Value {
+fn context_summary_item(summary: &ManualSummary, source: &str) -> Value {
     json!({
-        "context_id": summary.context_id.as_str(),
+        "manual_id": summary.manual_id.as_str(),
         "name": summary.name.as_str(),
         "description": summary.description.as_str(),
         "source": source,
@@ -8561,17 +8564,10 @@ async fn controller_tool_output(
     input: &str,
 ) -> Option<Result<Value, ApiError>> {
     Some(match name {
-        // COMPATIBILITY: the tool is retired, but a long Thread that still holds
-        // it in its history can repeat the call. Answering with the replacement
-        // keeps that Thread working; retire this arm once no Thread can plausibly
-        // reach it.
-        "read_context" => Ok(json!({
-            "error": "read_context is retired. Call load_context with this context_id instead: the Controller delivers the Context JSON in a developer message and keeps it current, and unload_context releases it once this Thread no longer needs it.",
-        })),
-        "load_context" => context_loads::load_tool_output(state, user, thread_id, input).await,
-        "unload_context" => context_loads::unload_tool_output(state, user, thread_id, input).await,
-        "write_context" => write_context_tool_output(state, user, input).await,
-        "cybion_list_contexts" => list_contexts_tool_output(state, user).await,
+        "load_manual" => manual_loads::load_tool_output(state, user, thread_id, input).await,
+        "unload_manual" => manual_loads::unload_tool_output(state, user, thread_id, input).await,
+        "write_manual" => write_manual_tool_output(state, user, input).await,
+        "list_manuals" => list_manuals_tool_output(state, user).await,
         "cybion_list_workers" => list_workers_tool_output(state, user).await,
         "add_notes" => notes::add_tool_output(state, user, thread_id, input).await,
         "cross_out_notes" => notes::cross_out_tool_output(state, user, thread_id, input).await,
@@ -9335,11 +9331,11 @@ mod machine_tests;
 mod machine_tool_tests;
 
 #[cfg(test)]
-#[path = "cloud_common_context_tests.rs"]
-mod common_context_tests;
+#[path = "cloud_common_manual_tests.rs"]
+mod common_manual_tests;
 
 #[cfg(test)]
-#[path = "cloud_context_sort_tests.rs"]
+#[path = "cloud_manual_sort_tests.rs"]
 mod context_sort_tests;
 
 #[cfg(test)]
@@ -9351,7 +9347,7 @@ mod notes_tests;
 mod objects_tests;
 
 #[cfg(test)]
-#[path = "cloud_context_loads_tests.rs"]
+#[path = "cloud_manual_loads_tests.rs"]
 mod context_loads_tests;
 
 #[cfg(test)]
@@ -9556,7 +9552,7 @@ mod tests {
 
     fn valid_checkpoint(summary: &str) -> String {
         format!(
-            "# Durable working context\n\n## Concepts and terminology\n- {summary}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1 inferred {summary}\n\n## Active decisions and constraints\n- preserve raw history\n\n## Contexts worth re-reading\n- 6bf29f77 — reload the operating rules\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
+            "# Durable working context\n\n## Concepts and terminology\n- {summary}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1 inferred {summary}\n\n## Active decisions and constraints\n- preserve raw history\n\n## Manuals worth re-reading\n- 6bf29f77 — reload the operating rules\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
         )
     }
 
@@ -10974,8 +10970,8 @@ mod tests {
         connection.execute_batch(USER_SCHEMA).unwrap();
         connection
             .execute_batch(
-                "DROP INDEX IF EXISTS contexts_parent_name;
-                 DROP TABLE contexts;
+                "DROP INDEX IF EXISTS manuals_parent_name;
+                 DROP TABLE manuals;
                  PRAGMA user_version = 7;",
             )
             .unwrap();
@@ -10996,7 +10992,7 @@ mod tests {
             .unwrap();
         assert_eq!(title, "kept");
         let columns = connection
-            .prepare("PRAGMA table_info(contexts)")
+            .prepare("PRAGMA table_info(manuals)")
             .unwrap()
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap()
@@ -11021,6 +11017,69 @@ mod tests {
         assert_eq!(version, USER_SCHEMA_VERSION);
     }
 
+    /// Schema 48 renames the Context kind to Manual in place: the tables, the
+    /// binding column, and the activity payloads a Thread already carries. A
+    /// Thread that loaded a Manual before the upgrade must still resolve it
+    /// afterwards, so this test upgrades a v47 database rather than trusting the
+    /// fresh-schema path.
+    #[test]
+    fn context_tables_and_activity_kinds_rename_to_manuals() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("v47.sqlite3");
+        let connection = open_user(&path, true).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE manuals RENAME TO contexts;
+                 ALTER TABLE thread_manual_loads RENAME TO thread_context_loads;
+                 ALTER TABLE thread_context_loads RENAME COLUMN manual_id TO context_id;
+                 INSERT INTO threads(id,title,model,status,created_at,updated_at)
+                 VALUES('th','T','m','idle',1,1);
+                 INSERT INTO contexts(id,name,description,content,parent_id,sort_key)
+                 VALUES('kept','Kept','Read when kept','Kept content',NULL,'a1');
+                 INSERT INTO thread_context_loads(thread_id,context_id,loaded_at)
+                 VALUES('th','kept',1);
+                 INSERT INTO history_records(thread_id,kind,payload,created_at)
+                 VALUES('th','activity',
+                   '{\"type\":\"context_loaded\",\"context_id\":\"kept\",\"context\":{\"name\":\"Kept\"},\"fingerprint\":\"abc\"}',
+                   1);
+                 PRAGMA user_version = 47;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        let tables: Vec<String> = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(tables.iter().any(|name| name == "manuals"), "{tables:?}");
+        assert!(!tables.iter().any(|name| name == "contexts"), "{tables:?}");
+        let bound: String = connection
+            .query_row(
+                "SELECT manual_id FROM thread_manual_loads WHERE thread_id='th'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, "kept");
+        let payload: String = connection
+            .query_row(
+                "SELECT payload FROM history_records WHERE kind='activity'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["type"], "manual_loaded");
+        assert_eq!(payload["manual_id"], "kept");
+        assert_eq!(payload["manual"]["name"], "Kept");
+        assert!(payload.get("context").is_none());
+        assert!(payload.get("context_id").is_none());
+    }
+
     #[test]
     fn context_trash_marker_upgrades_an_existing_database() {
         let root = tempfile::tempdir().unwrap();
@@ -11028,15 +11087,15 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE contexts (
+                "CREATE TABLE manuals (
                    id TEXT PRIMARY KEY,
                    name TEXT NOT NULL,
                    description TEXT NOT NULL,
                    content TEXT NOT NULL,
-                   parent_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
+                   parent_id TEXT REFERENCES manuals(id) ON DELETE SET NULL,
                    sort_key TEXT NOT NULL DEFAULT ''
                  );
-                 INSERT INTO contexts(id,name,description,content,parent_id,sort_key)
+                 INSERT INTO manuals(id,name,description,content,parent_id,sort_key)
                  VALUES('kept','Kept','Read when kept','Kept content',NULL,'a1');
                  PRAGMA user_version = 38;",
             )
@@ -11046,7 +11105,7 @@ mod tests {
         let connection = open_user(&path, true).unwrap();
         let (name, trashed_at): (String, Option<i64>) = connection
             .query_row(
-                "SELECT name,trashed_at FROM contexts WHERE id='kept'",
+                "SELECT name,trashed_at FROM manuals WHERE id='kept'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -11060,14 +11119,14 @@ mod tests {
     }
 
     #[test]
-    fn context_lock_marker_upgrades_an_existing_database() {
+    fn manual_lock_marker_upgrades_an_existing_database() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("v44.sqlite3");
         let connection = open_user(&path, true).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE contexts DROP COLUMN locked;
-                 INSERT INTO contexts(id,name,description,content,parent_id,sort_key)
+                "ALTER TABLE manuals DROP COLUMN locked;
+                 INSERT INTO manuals(id,name,description,content,parent_id,sort_key)
                  VALUES('kept','Kept','Read when kept','Kept content',NULL,'a1');
                  PRAGMA user_version = 44;",
             )
@@ -11077,7 +11136,7 @@ mod tests {
         let connection = open_user(&path, true).unwrap();
         let (name, locked): (String, bool) = connection
             .query_row(
-                "SELECT name,locked FROM contexts WHERE id='kept'",
+                "SELECT name,locked FROM manuals WHERE id='kept'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -11229,7 +11288,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_prompt_asks_for_contexts_to_reread() {
+    fn checkpoint_prompt_asks_for_manuals_to_reread() {
         for language in [CheckpointLanguage::En, CheckpointLanguage::Zh] {
             let prompt = checkpoint_developer_prompt(language);
             assert!(!prompt.contains("read_context"), "{language:?}");
@@ -11239,7 +11298,7 @@ mod tests {
                 "## Resources and authoritative locations",
                 "## Chronicle timeline",
                 "## Active decisions and constraints",
-                "## Contexts worth re-reading",
+                "## Manuals worth re-reading",
                 "## Current objective and next step",
                 "## Open work and evidence routes",
             ] {
@@ -11249,7 +11308,7 @@ mod tests {
                 );
             }
             assert!(
-                prompt.find("## Contexts worth re-reading")
+                prompt.find("## Manuals worth re-reading")
                     < prompt.find("## Current objective and next step"),
                 "{language:?}"
             );
@@ -11282,33 +11341,33 @@ mod tests {
     fn checkpoint_validation_requires_the_reload_section() {
         let complete = valid_checkpoint("state");
         assert!(validate_checkpoint_text(&complete).is_ok());
-        let dropped = "## Contexts worth re-reading\n- 6bf29f77 — reload the operating rules\n\n";
+        let dropped = "## Manuals worth re-reading\n- 6bf29f77 — reload the operating rules\n\n";
         let missing = complete.replace(dropped, "");
-        assert!(!missing.contains("## Contexts worth re-reading"));
+        assert!(!missing.contains("## Manuals worth re-reading"));
         assert!(validate_checkpoint_text(&missing).is_err());
     }
 
     #[test]
     fn context_parent_validation_rejects_cycles() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("contexts.sqlite3");
+        let path = root.path().join("manuals.sqlite3");
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(USER_SCHEMA).unwrap();
         let first = Uuid::new_v4().to_string();
         let second = Uuid::new_v4().to_string();
         connection
             .execute(
-                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+                "INSERT INTO manuals(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
                 params![&first, "First", "", "", Option::<String>::None],
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+                "INSERT INTO manuals(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
                 params![&second, "Second", "", "", &first],
             )
             .unwrap();
-        assert!(validate_context_parent(&connection, Some(&first), Some(&second)).is_err());
+        assert!(validate_manual_parent(&connection, Some(&first), Some(&second)).is_err());
     }
 
     #[tokio::test]
@@ -11343,7 +11402,7 @@ mod tests {
                     connection,
                     &thread_id,
                     "activity",
-                    json!({"role":"system","content":"not context"}),
+                    json!({"role":"system","content":"not manual"}),
                 );
                 let second = insert_record(
                     connection,
@@ -11363,24 +11422,24 @@ mod tests {
         .await
         .unwrap();
         let data_dir = state.data_dir.clone();
-        let context = user_db(&state, &user, false, {
+        let manual = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
             move |connection| compile_thread_context(connection, &data_dir, &thread_id, ids.2)
         })
         .await
         .unwrap();
-        assert_eq!(context.idx_head, ids.1);
-        assert_eq!(context.idx_tail, ids.2);
-        assert_eq!(context.record_ids, vec![ids.1, ids.2]);
-        assert_eq!(context.items.len(), 2);
+        assert_eq!(manual.idx_head, ids.1);
+        assert_eq!(manual.idx_tail, ids.2);
+        assert_eq!(manual.record_ids, vec![ids.1, ids.2]);
+        assert_eq!(manual.items.len(), 2);
         assert!(
-            !context
+            !manual
                 .items
                 .iter()
                 .any(|item| item.to_string().contains("sibling"))
         );
         assert!(
-            !context
+            !manual
                 .items
                 .iter()
                 .any(|item| item.to_string().contains("future"))
@@ -11453,14 +11512,14 @@ mod tests {
             .is_err()
         );
         let data_dir = state.data_dir.clone();
-        let context = user_db(&state, &user, false, {
+        let manual = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
             move |connection| compile_thread_context(connection, &data_dir, &thread_id, input)
         })
         .await
         .unwrap();
-        assert_eq!(context.idx_head, input);
-        assert_eq!(context.idx_tail, input);
+        assert_eq!(manual.idx_head, input);
+        assert_eq!(manual.idx_tail, input);
     }
 
     #[tokio::test]
@@ -11531,15 +11590,15 @@ mod tests {
         .unwrap();
         assert_eq!(stored_kind, "activity");
         let data_dir = state.data_dir.clone();
-        let context = user_db(&state, &user, false, {
+        let manual = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
             move |connection| compile_thread_context(connection, &data_dir, &thread_id, third_input)
         })
         .await
         .unwrap();
-        assert_eq!(context.idx_tail, third_input);
+        assert_eq!(manual.idx_tail, third_input);
         assert!(
-            context
+            manual
                 .items
                 .iter()
                 .all(|item| !item.to_string().contains("late"))
@@ -11693,13 +11752,13 @@ mod tests {
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
         assert_eq!(tools.as_array().unwrap().len(), 13);
-        assert_eq!(tools[0]["name"], "cybion_list_contexts");
+        assert_eq!(tools[0]["name"], "list_manuals");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
-        assert_eq!(tools[2]["name"], "load_context");
-        assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[3]["name"], "unload_context");
-        assert_eq!(tools[3]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[4]["name"], "write_context");
+        assert_eq!(tools[2]["name"], "load_manual");
+        assert_eq!(tools[2]["parameters"]["required"], json!(["manual_id"]));
+        assert_eq!(tools[3]["name"], "unload_manual");
+        assert_eq!(tools[3]["parameters"]["required"], json!(["manual_id"]));
+        assert_eq!(tools[4]["name"], "write_manual");
         assert_eq!(tools[4]["parameters"]["required"], json!(null));
         assert_eq!(tools[5]["name"], "cybion_list_ultimate_machines");
         assert_eq!(tools[6]["name"], "cybion_get_ultimate_machine");
@@ -11734,11 +11793,11 @@ mod tests {
                 .map(|tool| tool["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             [
-                "cybion_list_contexts",
+                "list_manuals",
                 "cybion_list_workers",
-                "load_context",
-                "unload_context",
-                "write_context",
+                "load_manual",
+                "unload_manual",
+                "write_manual",
                 "cybion_list_ultimate_machines",
                 "cybion_get_ultimate_machine",
                 "cybion_set_ultimate_machine",
@@ -11763,11 +11822,11 @@ mod tests {
         assert_eq!(
             names(context_tools()),
             [
-                "cybion_list_contexts",
+                "list_manuals",
                 "cybion_list_workers",
-                "load_context",
-                "unload_context",
-                "write_context",
+                "load_manual",
+                "unload_manual",
+                "write_manual",
                 "cybion_list_ultimate_machines",
                 "cybion_get_ultimate_machine",
                 "cybion_set_ultimate_machine",
@@ -11780,45 +11839,45 @@ mod tests {
             ["bash", "browser_control", "computer_use", "view_image"]
         );
         let catalog = context_tools();
-        let load_context = catalog
+        let load_manual = catalog
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["name"] == "load_context")
+            .find(|tool| tool["name"] == "load_manual")
             .unwrap();
         assert!(
-            load_context["description"]
+            load_manual["description"]
                 .as_str()
                 .unwrap()
                 .contains("direct children")
         );
         assert!(
-            !load_context["description"]
+            !load_manual["description"]
                 .as_str()
                 .unwrap()
                 .contains("read_context")
         );
-        let write_context = catalog
+        let write_manual = catalog
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["name"] == "write_context")
+            .find(|tool| tool["name"] == "write_manual")
             .unwrap();
         assert!(
-            write_context["description"]
+            write_manual["description"]
                 .as_str()
                 .unwrap()
                 .contains("trash")
         );
         assert!(
-            write_context["description"]
+            write_manual["description"]
                 .as_str()
                 .unwrap()
                 .contains("locked")
         );
-        assert_eq!(write_context["parameters"]["required"], json!(null));
+        assert_eq!(write_manual["parameters"]["required"], json!(null));
         assert!(
-            write_context["parameters"]["properties"]["context_id"]["description"]
+            write_manual["parameters"]["properties"]["manual_id"]["description"]
                 .as_str()
                 .unwrap()
                 .contains("Omit to create")
@@ -12015,13 +12074,13 @@ mod tests {
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 13);
-        assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
-        assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
-        assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
-        assert_eq!(tools[3], TOOL_CATALOG["context"][3]);
-        assert_eq!(tools[4], TOOL_CATALOG["context"][4]);
-        assert_eq!(tools[5], TOOL_CATALOG["context"][5]);
-        assert_eq!(tools[6], TOOL_CATALOG["context"][6]);
+        assert_eq!(tools[0], TOOL_CATALOG["kernel"][0]);
+        assert_eq!(tools[1], TOOL_CATALOG["kernel"][1]);
+        assert_eq!(tools[2], TOOL_CATALOG["kernel"][2]);
+        assert_eq!(tools[3], TOOL_CATALOG["kernel"][3]);
+        assert_eq!(tools[4], TOOL_CATALOG["kernel"][4]);
+        assert_eq!(tools[5], TOOL_CATALOG["kernel"][5]);
+        assert_eq!(tools[6], TOOL_CATALOG["kernel"][6]);
         assert_eq!(tools[9], TOOL_CATALOG["note"][0]);
         assert_eq!(tools[10], TOOL_CATALOG["note"][1]);
         assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_web_search"]);
@@ -12279,7 +12338,7 @@ mod tests {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "screenshot-replay-user").unwrap();
         let thread = create_test_thread(&state, &user).await;
-        let context = user_db(&state, &user, false, {
+        let manual = user_db(&state, &user, false, {
             let thread_id = thread.id.clone();
             let data_dir = state.data_dir.clone();
             move |connection| {
@@ -12324,7 +12383,7 @@ mod tests {
         .await
         .unwrap();
         let output = |call_id: &str| {
-            context
+            manual
                 .items
                 .iter()
                 .find(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
@@ -12591,9 +12650,9 @@ mod tests {
                     [shot],
                     |r| r.get(0),
                 )?;
-                let context = compile_thread_context(connection, &data_dir, &thread_id, failed)?;
+                let manual = compile_thread_context(connection, &data_dir, &thread_id, failed)?;
                 let output = |call_id: &str| {
-                    context
+                    manual
                         .items
                         .iter()
                         .find(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))

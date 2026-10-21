@@ -8,20 +8,20 @@ import { createTestServer } from "./vite-server.ts"
 
 const renderInRouter = (element: ReactElement) => renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ["/"] }, element))
 
-test("cybion tool calls render context and machine details with escaped text in both languages", async () => {
+test("cybion tool calls render manual and machine details with escaped text in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
     const render = (language: string, call: unknown, workers: { id: string; label: string }[] | undefined) => renderInRouter(createElement(CybionToolCall, {
-      language, call, workers, contexts: undefined, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+      language, call, workers, manuals: undefined, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
     const updateCall = {
       tool: "cybion_set_ultimate_machine", machineId: "machine-1", name: "磁盘检查", workerId: "worker-1",
       intervalSeconds: 600, enabled: true, command: 'echo "<script>alert(1)</script>"', intent: "确保根分区低于 90%",
     }
     for (const language of ["en", "zh"]) {
-      const load = render(language, { tool: "load_context", contextId: "ctx-1" }, undefined)
-      assert.ok(load.includes(language === "zh" ? "加载上下文" : "Load context"))
+      const load = render(language, { tool: "load_manual", manualId: "ctx-1" }, undefined)
+      assert.ok(load.includes(language === "zh" ? "加载手册" : "Load manual"))
       assert.ok(load.includes("ctx-1"))
       const getMachine = render(language, { tool: "cybion_get_ultimate_machine", machineId: "machine-1" }, undefined)
       assert.ok(getMachine.includes(language === "zh" ? "读取终极机器" : "Read Ultimate Machine"))
@@ -29,8 +29,8 @@ test("cybion tool calls render context and machine details with escaped text in 
       const deleteMachine = render(language, { tool: "cybion_delete_ultimate_machine", machineId: "machine-1" }, undefined)
       assert.ok(deleteMachine.includes(language === "zh" ? "删除终极机器" : "Delete Ultimate Machine"))
       assert.ok(deleteMachine.includes("machine-1"))
-      const list = render(language, { tool: "cybion_list_contexts" }, undefined)
-      assert.ok(list.includes(language === "zh" ? "列出上下文" : "List contexts"))
+      const list = render(language, { tool: "list_manuals" }, undefined)
+      assert.ok(list.includes(language === "zh" ? "列出手册" : "List manuals"))
       assert.ok(!list.includes("<pre"))
       const update = render(language, updateCall, [{ id: "worker-1", label: "MacMini" }])
       assert.ok(update.includes(language === "zh" ? "更新终极机器" : "Update Ultimate Machine"))
@@ -56,61 +56,61 @@ test("cybion tool calls render context and machine details with escaped text in 
   }
 })
 
-test("context calls link to the context page with the title and Use When", async () => {
+test("manual calls link to the manual page with the title and Use When", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
-    const render = (contextId: string, contexts: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
-      language: "zh", call: { tool: "load_context", contextId }, workers: undefined, contexts, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+    const render = (manualId: string, manuals: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
+      language: "zh", call: { tool: "load_manual", manualId }, workers: undefined, manuals, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
-    const contexts = new Map([["ctx-1", { name: "个人简介 <script>alert(1)</script>", description: "了解 CZ 背景时使用 & 引用" }]])
-    const resolved = render("ctx-1", contexts)
+    const manuals = new Map([["ctx-1", { name: "个人简介 <script>alert(1)</script>", description: "了解 CZ 背景时使用 & 引用" }]])
+    const resolved = render("ctx-1", manuals)
     assert.ok(resolved.includes("个人简介 &lt;script&gt;alert(1)&lt;/script&gt;"))
     assert.ok(!resolved.includes("<script>"))
     assert.ok(resolved.includes("了解 CZ 背景时使用 &amp; 引用"))
-    assert.match(resolved, /<a[^>]*href="\/contexts\?context=ctx-1"[^>]*>/)
+    assert.match(resolved, /<a[^>]*href="\/manuals\?manual=ctx-1"[^>]*>/)
     assert.ok(resolved.includes("<details>Raw protocol</details>"))
     assert.ok(!resolved.includes("ctx-1</pre>"))
     assert.equal((resolved.match(/<p /g) ?? []).length, 1)
-    const unresolved = render("ctx-2", contexts)
+    const unresolved = render("ctx-2", manuals)
     assert.ok(unresolved.includes("ctx-2</pre>"))
     assert.ok(!unresolved.includes("<a "))
     const encoded = render("a b", new Map([["a b", { name: "Space", description: "" }]]))
-    assert.match(encoded, /href="\/contexts\?context=a%20b"/)
+    assert.match(encoded, /href="\/manuals\?manual=a%20b"/)
     assert.equal((encoded.match(/<p /g) ?? []).length, 0)
   } finally {
     await server.close()
   }
 })
 
-test("write context calls link to the context, flag the trash, and show creates", async () => {
+test("write manual calls link to the manual, flag the trash, and show creates", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
-    const render = (call: unknown, contexts: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
-      language: "zh", call, workers: undefined, contexts, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+    const render = (call: unknown, manuals: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
+      language: "zh", call, workers: undefined, manuals, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
-    const contexts = new Map([["ctx-1", { name: "项目手册", description: "记录资料位置时使用" }]])
-    const edit = { tool: "write_context", contextId: "ctx-1", trashed: false, name: null, parentId: null }
-    const updated = render(edit, contexts)
-    assert.ok(updated.includes("编辑上下文"))
+    const manuals = new Map([["ctx-1", { name: "项目手册", description: "记录资料位置时使用" }]])
+    const edit = { tool: "write_manual", manualId: "ctx-1", trashed: false, name: null, parentId: null }
+    const updated = render(edit, manuals)
+    assert.ok(updated.includes("编辑手册"))
     assert.ok(updated.includes("项目手册"))
     assert.ok(updated.includes("记录资料位置时使用"))
-    assert.match(updated, /<a[^>]*href="\/contexts\?context=ctx-1"[^>]*>/)
+    assert.match(updated, /<a[^>]*href="\/manuals\?manual=ctx-1"[^>]*>/)
     assert.ok(!updated.includes("已移入回收站"))
     assert.ok(updated.includes("<details>Raw protocol</details>"))
-    const trashed = render({ ...edit, trashed: true }, contexts)
+    const trashed = render({ ...edit, trashed: true }, manuals)
     assert.ok(trashed.includes("项目手册"))
     assert.ok(trashed.includes("已移入回收站"))
     const unresolved = render({ ...edit, trashed: true }, undefined)
     assert.ok(unresolved.includes("ctx-1</pre>"))
     assert.ok(unresolved.includes("已移入回收站"))
-    const created = render({ tool: "write_context", contextId: null, trashed: false, name: "新笔记", parentId: "ctx-1" }, contexts)
-    assert.ok(created.includes("新建上下文"))
+    const created = render({ tool: "write_manual", manualId: null, trashed: false, name: "新笔记", parentId: "ctx-1" }, manuals)
+    assert.ok(created.includes("新建手册"))
     assert.ok(created.includes("新笔记"))
     assert.ok(created.includes("父级：项目手册"))
     assert.ok(!created.includes("已移入回收站"))
-    const createdTopLevel = render({ tool: "write_context", contextId: null, trashed: false, name: "新笔记", parentId: null }, contexts)
+    const createdTopLevel = render({ tool: "write_manual", manualId: null, trashed: false, name: "新笔记", parentId: null }, manuals)
     assert.ok(createdTopLevel.includes("新笔记"))
     assert.ok(!createdTopLevel.includes("父级"))
   } finally {
@@ -121,20 +121,20 @@ test("write context calls link to the context, flag the trash, and show creates"
 test("thread view renders cybion tool calls before the generic protocol renderer", () => {
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   assert.ok(source.indexOf("const cybionCall = cybionToolFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))
-  assert.match(source, /<CybionToolCall language=\{language\} call=\{cybionCall\} workers=\{workers\} contexts=\{contexts\} time=\{time\}>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/CybionToolCall>/)
+  assert.match(source, /<CybionToolCall language=\{language\} call=\{cybionCall\} workers=\{workers\} manuals=\{manuals\} time=\{time\}>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/CybionToolCall>/)
 })
 
-test("loaded context titles resolve through gated context caches", () => {
+test("loaded manual titles resolve through gated manual caches", () => {
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   for (const needle of [
-    "const loadsContexts = useMemo",
-    'queryKey: ["contexts"]',
-    'queryKey: ["common-contexts", language]',
-    "contexts={contextLookup} />",
-    "contexts={undefined} />",
-    "previous.contexts === next.contexts",
+    "const loadsManuals = useMemo",
+    'queryKey: ["manuals"]',
+    'queryKey: ["common-manuals", language]',
+    "manuals={manualLookup} />",
+    "manuals={undefined} />",
+    "previous.manuals === next.manuals",
   ]) {
     assert.ok(source.includes(needle), needle)
   }
-  assert.equal(source.match(/enabled: loadsContexts/g)?.length, 2)
+  assert.equal(source.match(/enabled: loadsManuals/g)?.length, 2)
 })

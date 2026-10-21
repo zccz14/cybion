@@ -216,5 +216,5 @@ test("short discovery pages keep their continuation and unauthorized links never
   await page.goto(`/e2e/thread-sharing.html#${routePath}`)
   await expect(page.getByText(/This Thread is unavailable/)).toBeVisible()
   await expect(page.getByText("Owner's private task", { exact: true })).toHaveCount(0)
-  expect(calls.slice(before).some((c) => c.path.includes("/history") || c.path.includes("/response"))).toBe(false)
+  expect(calls.slice(before).some((c) => c.path.includes("/archive") || c.path.includes("/response"))).toBe(false)
 })

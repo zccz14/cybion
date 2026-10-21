@@ -28,7 +28,7 @@ automatic compaction budget (`context_budget_tokens` on the thread, falling back
 to the user's default). The chip turns warning-colored once the recorded context
 reaches the budget, and reads "auto-compaction off" when the budget is 0.
 
-The same header area lists the Contexts the Thread has read inside that window:
+The same header area lists the Manuals the Thread has read inside that window:
 a name, a link, and a marker only when the copy the model holds is no longer the
 current one; see [Thread context replay](context.md).
 

@@ -10,7 +10,7 @@ import "../src/styles.css"
 
 const statuses: ThreadDisplayStatus[] = ["running", "completed", "failed", "stopped", "ready", "compacting"]
 const updated_at = Math.floor(Date.now() / 1000) - 90
-const titles = ["重新设计 Thread 列表的状态展示", "修复 Worker 配对与导航", "检查远程服务器连接", "整理历史执行记录", "准备新任务", "压缩长期研究任务的上下文与保存完整执行记录"]
+const titles = ["重新设计 Thread 列表的状态展示", "修复 Worker 配对与导航", "检查远程服务器连接", "整理历史执行记录", "准备新任务", "压缩长期研究任务的手册与保存完整执行记录"]
 function Fixture() {
   const [language, setLanguage] = useState<"zh" | "en">("zh")
   const [runningStatus, setRunningStatus] = useState<ThreadDisplayStatus>("running")

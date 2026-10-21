@@ -21,11 +21,11 @@ input | response_output | tool_output | checkpoint
 `activity` records describe runtime state for the UI. They remain in history
 and are outside the model context, except the Cybion-authored kinds that do take
 part in replay: `model_switch` marks a replay barrier, and
-`context_loaded`/`context_unloaded` compile into the copies of the Contexts a
-Thread keeps loaded (see [Loaded Contexts](#loaded-contexts)). A `context_dirty`
-record written before the read tool was retired still replays as the developer
-message it was stored as, so old Threads keep their request prefixes
-byte-identical; nothing appends a new one.
+`manual_loaded`/`manual_unloaded` compile into the copies of the Manuals a
+Thread keeps loaded (see [Loaded Manuals](#loaded-manuals)). `context_dirty`
+records, written while a copied Manual could go stale, are retired: they were
+renamed to `manual_dirty` by schema 48 and no longer take part in replay, so they
+surface only as activity evidence in the browser.
 
 ## Compilation
 
@@ -50,10 +50,10 @@ record range above. The compiler uses `kind` to select protocol records;
 
 ## Registry tools
 
-Registered Contexts and Workers are disclosed through controller-answered
-tools instead of a replayed prefix. `cybion_list_contexts` returns only
-top-level Context metadata, ordered by source: the Cybion Common Context root
-first, then the user's local Contexts by name and ID. Every item carries a
+Registered Manuals and Workers are disclosed through controller-answered
+tools instead of a replayed prefix. `list_manuals` returns only
+top-level Manual metadata, ordered by source: the Cybion Common Manual root
+first, then the user's local Manuals by name and ID. Every item carries a
 `source` field: `common` or `local`. `cybion_list_workers`
 returns the registered Worker identities (`worker_id`, `label`), ordered by
 label and ID; runtime state such as online status, heartbeat timestamps, and
@@ -62,33 +62,33 @@ resource reports is not listed. The Ultimate Machine tools
 `cybion_set_ultimate_machine`, `cybion_delete_ultimate_machine`) are answered
 the same way; see [Ultimate machines](machines.md).
 
-`write_context` creates or edits one of the user's local Contexts — title, Use
-When description, body, and parent. Omitting `context_id` creates a new
-Context: `name` is required, and it starts at the top level or under
+`write_manual` creates or edits one of the user's local Manuals — title, Use
+When description, body, and parent. Omitting `manual_id` creates a new
+Manual: `name` is required, and it starts at the top level or under
 `parent_id`. Editing keeps omitted fields at their current values; on either
-path a parent is an exact `context_id` or `null` for the top level, and an
-edit may also pass the literal `TRASH`, which moves the Context into the
-trash: the Context and its subtree disappear from every Context tool
-(a hidden Context no longer resolves, so `load_context` refuses it) while
-`GET /api/contexts` still
-returns the row, so the Contexts page shows each trashed root under Trash.
-`POST /api/contexts/{id}/restore` clears the marker and the row returns to its
-original place. The read-only Cybion Common Context cannot be written, and a
-hidden Context cannot be written until it is restored.
+path a parent is an exact `manual_id` or `null` for the top level, and an
+edit may also pass the literal `TRASH`, which moves the Manual into the
+trash: the Manual and its subtree disappear from every Manual tool
+(a hidden Manual no longer resolves, so `load_manual` refuses it) while
+`GET /api/manuals` still
+returns the row, so the Manuals page shows each trashed root under Trash.
+`POST /api/manuals/{id}/restore` clears the marker and the row returns to its
+original place. The read-only Cybion Common Manual cannot be written, and a
+hidden Manual cannot be written until it is restored.
 
-A Context its owner **locked** on the Contexts page refuses every
-`write_context` change — title, Use When description, body, parent, and `TRASH`
-alike — and answers with the lock and the way around it: the child Contexts
+A Manual its owner **locked** on the Manuals page refuses every
+`write_manual` change — title, Use When description, body, parent, and `TRASH`
+alike — and answers with the lock and the way around it: the child Manuals
 stay writable, both an existing one and a new one created with `parent_id` set
 to the locked id. The lock exists so a hand-written manual keeps its own words
 while Threads keep extending it underneath; it belongs to the owner, so nothing
 the model sends can set or clear it. The flag is `contexts.locked`, a read
-carries it as `locked`, and an owner's `PATCH /api/contexts/{id}` sets or clears
+carries it as `locked`, and an owner's `PATCH /api/manuals/{id}` sets or clears
 it with `locked` while an edit that omits the field keeps the current value —
 move, trash, and restore are the page's own routes and never touch it.
 
 Sticky notes are a separate governed-context kind with their own tools
-(`add_notes`, `cross_out_notes`) and their own storage; no Context tool returns
+(`add_notes`, `cross_out_notes`) and their own storage; no Manual tool returns
 or edits them. Every inference request also carries one synthetic `developer`
 message holding the Thread's open notes immediately before the newest user
 input, assembled into the request copy and never into `history_records`. See
@@ -101,7 +101,7 @@ whenever the user has registered Workers, even if all of them are offline, and
 execution checks availability, returning an offline tool error before queueing
 a call.
 
-System-authored prompts and tool descriptions use neutral Context, Worker, and
+System-authored prompts and tool descriptions use neutral Manual, Worker, and
 conversation terminology. User-authored metadata, content, and conversation
 history are preserved as supplied.
 
@@ -128,11 +128,11 @@ no confirmation arrives within another 30 seconds the Controller answers the
 call itself with a `timeout_cancel_unconfirmed` failure whose outcome is
 unknown, so the model can clean up before continuing.
 
-## Progressive Context discovery
+## Progressive Manual discovery
 
-`cybion_list_contexts` lists only top-level Context metadata. `load_context`
-resolves local Contexts first, then the compiled Cybion Common Context;
-`GET /api/contexts/{id}?lang=` resolves the same local and common nodes for the
+`list_manuals` lists only top-level Manual metadata. `load_manual`
+resolves local Manuals first, then the compiled Cybion Common Manual;
+`GET /api/manuals/{id}?lang=` resolves the same local and common nodes for the
 browser, with `lang` selecting the common copy (`zh` when absent). Both return
 the current node's existing `id`, `name`, `description`, `content`, and
 `parent_id` fields, plus `children`:
@@ -146,7 +146,7 @@ the current node's existing `id`, `name`, `description`, `content`, and
   "parent_id": null,
   "children": [
     {
-      "context_id": "child-context-id",
+      "manual_id": "child-context-id",
       "name": "Coding",
       "description": "Coding and testing guidance"
     }
@@ -154,77 +154,77 @@ the current node's existing `id`, `name`, `description`, `content`, and
 }
 ```
 
-Children contain only direct-child metadata (`context_id`, `name`, `description`);
+Children contain only direct-child metadata (`manual_id`, `name`, `description`);
 local children are ordered by name and ID while the Cybion Common
-Context keeps its authored order. A local Context also reports `locked`; a
+Manual keeps its authored order. A local Manual also reports `locked`; a
 common node is `locked: false`, because the compiled tree belongs to no owner
-and the lock is what `write_context` refuses (see above). A leaf always returns
+and the lock is what `write_manual` refuses (see above). A leaf always returns
 `children: []`. The current node and its child metadata are read in one
 transaction from the requesting user's database; common nodes come from the
-compiled tree instead. The model passes a child's `context_id` back to
-`load_context` to reach the next level, so child bodies and deeper descendants
+compiled tree instead. The model passes a child's `manual_id` back to
+`load_manual` to reach the next level, so child bodies and deeper descendants
 are disclosed only when loaded.
 
-## Loaded Contexts
+## Loaded Manuals
 
-A Context handed over inside a tool output is message state: the body lives in
-that one record, and a compaction moves the replay head past it. `load_context`
+A Manual handed over inside a tool output is message state: the body lives in
+that one record, and a compaction moves the replay head past it. `load_manual`
 turns the Thread's decision into Thread state instead — one row in
-`thread_context_loads` (`thread_id`, `context_id`, `loaded_at`) — and from then
+`thread_context_loads` (`thread_id`, `manual_id`, `loaded_at`) — and from then
 on the Controller keeps the current copy in front of the model without being
-asked. `unload_context` deletes the row.
+asked. `unload_manual` deletes the row.
 
 The copy travels as an `activity` record the compiler replays as a developer
-message, so a Thread receives the Context JSON the tool answer would have given
+message, so a Thread receives the Manual JSON the tool answer would have given
 it, minus `sort_key`, which orders a sibling list the Thread cannot see.
 Every inference attempt compares the Thread's rows against the range it is about
 to replay and appends only what the range does not already say:
 
 - the first compile after a load, and the first compile after an edit, because
-  the fingerprint of the copy in the range no longer matches the Context that
+  the fingerprint of the copy in the range no longer matches the Manual that
   resolves now;
 - the first compile after a checkpoint, because the head moved past the copies
-  and the Context must arrive with the conversation the checkpoint replaced.
+  and the Manual must arrive with the conversation the checkpoint replaced.
 
 Nothing is ever rewritten or removed. A superseded copy stays in the transcript
 as evidence, and it replays upstream exactly as it was stored, so an earlier
 request's prefix stays byte-identical and the provider's prefix cache keeps
 working; the next checkpoint retires the copies with the rest of the range. Each
-delivery states that it supersedes every earlier copy of the same Context, so a
+delivery states that it supersedes every earlier copy of the same Manual, so a
 Thread holding two versions knows which one is current without the Controller
-editing history. A Context that stops resolving — deleted, or hidden by the
-trash — releases itself: the row leaves and one `context_unloaded` notice says
+editing history. A Manual that stops resolving — deleted, or hidden by the
+trash — releases itself: the row leaves and one `manual_unloaded` notice says
 the copy the Thread holds is stale.
 
-Nothing else announces a loaded Context: the request that carries the change also
+Nothing else announces a loaded Manual: the request that carries the change also
 carries the current copy, so there is no older version left to warn about and
 nothing to ask the model to fetch.
 
-`unload_context` deletes the row and nothing else. The copy already in the
+`unload_manual` deletes the row and nothing else. The copy already in the
 conversation stays until the next checkpoint — the Thread declared that it no
-longer needs the Context kept current, not that it never saw it — and the next
-compile appends one `context_unloaded` notice after which nothing refreshes it.
-Unloading a Context the Thread does not hold changes nothing and answers
+longer needs the Manual kept current, not that it never saw it — and the next
+compile appends one `manual_unloaded` notice after which nothing refreshes it.
+Unloading a Manual the Thread does not hold changes nothing and answers
 `unloaded: false`.
 
-A Thread holds at most eight loaded Contexts; a further load is refused with the
+A Thread holds at most eight loaded Manuals; a further load is refused with the
 way out — unload one first — rather than truncated. The loaded-context row
-reports the set beside the record range (see below), one chip per bound Context,
+reports the set beside the record range (see below), one chip per bound Manual,
 not one per delivery.
 
 ## Loaded-context indicator
 
-The end of the conversation shows which Contexts the Thread keeps loaded. The row
+The end of the conversation shows which Manuals the Thread keeps loaded. The row
 is the last row of the transcript rather than header chrome, so a Thread that
-loads many Contexts scrolls its list out of the way instead of holding screen
+loads many Manuals scrolls its list out of the way instead of holding screen
 height. `GET /api/threads/{id}/history/loaded` answers with the current `head`
-and `tail` plus the bound `context_id`s in load order. This is the same
+and `tail` plus the bound `manual_id`s in load order. This is the same
 `[idx_head, idx_tail]` the compiler replays, not a separate stored state, so a
 binding whose copy sits behind the head is visible as the range narrows after a
 checkpoint.
 
-Each chip shows the Context's name — resolved through the same caches the
-Contexts page fills — links to that Context on the Contexts page, and carries the
+Each chip shows the Manual's name — resolved through the same caches the
+Manuals page fills — links to that Manual on the Manuals page, and carries the
 full id in its tooltip. No identifier is printed on the chip: a UUID means
 nothing to a reader, and the binding is already in the activity record behind it.
 
@@ -233,21 +233,21 @@ A Thread with no binding and no protocol record reports `head` and `tail` as
 count, because those copies travel in every request whether or not the Thread
 did anything else in the window.
 
-## Cybion Common Context
+## Cybion Common Manual
 
-`common-contexts/` at the repository root holds the Cybion Common Context: a
+`common-manuals/` at the repository root holds the Cybion Common Manual: a
 `tree.json` skeleton (each node carries a UUID, plus `name`, `description`,
 and `content_file` as `{en, zh}` pairs, under a `revision`) and one Markdown
 file per node per language. Rust embeds both via `include_str!`, so the content
 is compiled into the controller, is identical for every user of a build, and is
 never stored, mutated, or synthesized at runtime; changes ship with releases.
-`cybion_list_contexts` lists the root first with `source: "common"`, and
-`GET /api/common-contexts?lang=` serves the same tree — in the requested
-language — to the browser so Configuration → Contexts shows users exactly what
+`list_manuals` lists the root first with `source: "common"`, and
+`GET /api/common-manuals?lang=` serves the same tree — in the requested
+language — to the browser so Configuration → Manuals shows users exactly what
 Threads can read. Language selection: the browser reads (`GET
-/api/common-contexts`, `GET /api/contexts/{id}`) take an optional
+/api/common-manuals`, `GET /api/manuals/{id}`) take an optional
 `lang=zh|en` and fall back to the source language `zh`, which is also what the
-model-side Context tools (`cybion_list_contexts`, `load_context`) use.
+model-side Manual tools (`list_manuals`, `load_manual`) use.
 
 ## Replay cleanup
 

@@ -14,18 +14,18 @@ explicit governed contexts and a replayable archive.
 
 ## Why Cybion
 
-**Explicit context, not hidden memory.** Durable knowledge is a Context you
+**Explicit context, not hidden memory.** Durable knowledge is a Manual you
 write — a title, a "use when" description, a body, and a place in a tree —
-created, edited, and trashed from the Contexts page or with `write_context`,
+created, edited, and trashed from the Manuals page or with `write_manual`,
 and lockable there so a hand-written manual stays out of the Thread's reach.
-Threads find Contexts on demand with `cybion_list_contexts` and load only what
-a task cites; source material stays on your devices and network services. A Thread that must keep working from a Context says so with
-`load_context`, and the controller then delivers its current copy into every
-request — refreshed by itself when the Context changes and restored after a
-compaction — until the Thread releases it with `unload_context`. Sticky notes are the opposite kind of context: short items a
+Threads find Manuals on demand with `list_manuals` and load only what
+a task cites; source material stays on your devices and network services. A Thread that must keep working from a Manual says so with
+`load_manual`, and the controller then delivers its current copy into every
+request — refreshed by itself when the Manual changes and restored after a
+compaction — until the Thread releases it with `unload_manual`. Sticky notes are the opposite kind of context: short items a
 Thread must visibly cross out, so "finished" and "dropped" never look alike. Conversations replay from an append-only history, the
 conversation header shows the live context size against its budget and the
-Contexts the Thread keeps loaded, each refreshed by the controller as soon as it
+Manuals the Thread keeps loaded, each refreshed by the controller as soon as it
 is edited, and long Threads compact into checkpoints instead of overflowing.
 
 **Cloud-hosted inference.** Inference runs in the hosted controller, not on
@@ -125,7 +125,7 @@ Chrome instance that Browser Control launches, are counted separately.
 3. **Start a Thread** — for example: "Check what is filling up `/var` on the
    Linux box and clean it up."
 
-New here? **Using Cybion** (`/#/help`) covers Threads, Contexts, and Worker
+New here? **Using Cybion** (`/#/help`) covers Threads, Manuals, and Worker
 concepts; [First-use guidance](docs/onboarding.md) has the details.
 
 ## What you get
@@ -133,7 +133,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | Area | What it does | Docs |
 | --- | --- | --- |
 | Threads | Durable conversations with full execution history; server-side filters and search; archive, restore, and delete; read-only sharing with other Cybion users. | [Threads](docs/threads.md) · [Sharing](docs/thread-sharing.md) · [Recovery](docs/thread-recovery.md) |
-| Contexts | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_context`, and lock from the UI so a Thread cannot rewrite a hand-written manual; ships with a read-only Common Context. | [Contexts](docs/context.md) · [Compaction](docs/context_compacting.md) |
+| Manuals | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_manual`, and lock from the UI so a Thread cannot rewrite a hand-written manual; ships with a read-only Common Manual. | [Manuals](docs/context.md) · [Compaction](docs/context_compacting.md) |
 | Notes | Short items that clear to zero: written by a Thread and visible only there, injected into every request it runs, crossed out by that Thread and torn off only by you. | [Sticky notes](docs/notes.md) |
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, Windows, and Android (early development); pairing, remote upgrades, and worker sharing; iOS coming soon. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
@@ -184,11 +184,11 @@ base64 data URL. Poll the thread and history endpoints for the result.
 
 ## Documentation
 
-- [First-use guidance](docs/onboarding.md) — Threads, Contexts, and Workers.
+- [First-use guidance](docs/onboarding.md) — Threads, Manuals, and Workers.
 - [Threads](docs/threads.md), [thread statuses](docs/thread-status.md),
   [usage and drafts](docs/thread-usage-and-drafts.md),
   [recovery](docs/thread-recovery.md), [sharing](docs/thread-sharing.md).
-- [Contexts](docs/context.md) and [context compaction](docs/context_compacting.md).
+- [Manuals](docs/context.md) and [context compaction](docs/context_compacting.md).
 - [Sticky notes](docs/notes.md) — the zero-target kind of governed context.
 - [Worker onboarding](docs/worker-onboarding.md) and [worker sharing](docs/worker-sharing.md).
 - [Ultimate machines](docs/machines.md).
@@ -197,7 +197,7 @@ base64 data URL. Poll the thread and history endpoints for the result.
 - [Product boundary](docs/product-boundary.md) — detailed behavior, delivery,
   and storage semantics (the former README fine print).
 
-In the app: **Using Cybion** (`/#/help`), **History** (`/#/history`),
+In the app: **Using Cybion** (`/#/help`), **History** (`/#/archive`),
 **Machines** (`/#/machines`).
 
 ## Viewer clients

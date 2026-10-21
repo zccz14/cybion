@@ -5,10 +5,10 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 
-type Topic = "thread" | "context" | "worker"
+type Topic = "thread" | "manual" | "worker"
 const topics = {
   thread: { icon: MessagesSquareIcon, to: "/threads/new", details: ["threadDetail", "threadOptional"] },
-  context: { icon: FolderTreeIcon, to: "/contexts", details: ["contextDetail", "contextBoundary"] },
+  manual: { icon: FolderTreeIcon, to: "/manuals", details: ["manualDetail", "manualBoundary"] },
   worker: { icon: MonitorIcon, to: "/workers", details: ["workerOptional", "workerBoundary"] },
 } as const
 

@@ -28,7 +28,7 @@ const copy = {
     notesTitle: "Sticky notes",
     notesDescription: "Character limits the service enforces when a note is added. A longer note is refused with a message that asks the model to condense it, so the note is rewritten instead of silently truncated.",
     threadMaxChars: "Note limit",
-    threadMaxCharsDescription: "Characters allowed in a note. A note belongs to one Thread, so it may lean on that Thread's context.",
+    threadMaxCharsDescription: "Characters allowed in a note. A note belongs to one Thread, so it may lean on that Thread's manual.",
     saveNotes: "Save limits",
     saveNotesError: "Could not save the note limits",
     notesInvalid: "Enter a whole number between 1 and 2000.",

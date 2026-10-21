@@ -48,7 +48,7 @@ test("a checkpoint is a compression boundary: it stays in the conversation and s
   const entries = groupThreadHistory([
     record(1, "input"),
     record(2, "tool_output"),
-    record(3, "checkpoint", { role: "developer", content: "# Durable working context" }),
+    record(3, "checkpoint", { role: "developer", content: "# Durable working manual" }),
     record(4, "tool_output"),
     record(5, "response_output", { type: "message" }),
     record(6, "checkpoint"),

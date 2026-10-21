@@ -11,7 +11,7 @@ const copy = {
   en: {
     label: "Checkpoint",
     internal: "Internal",
-    hint: "Context compressed into Markdown — open to read it",
+    hint: "Manual compressed into Markdown — open to read it",
     payload: "View raw payload",
   },
   zh: {

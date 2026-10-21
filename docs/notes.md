@@ -13,7 +13,7 @@ on the conversation it was written in.
 `thread_id` is `NOT NULL` and the controller stamps it from the calling Thread,
 so the model can never write into another Thread's notes. There is no mode that
 shares a note between Threads; a note that has to outlive its Thread belongs in a
-Context, not in a note.
+Manual, not in a note.
 
 The durable state is `done_at`: a note is open while it is NULL and crossed out
 once it is stamped. Crossing out is terminal — there is no edit, no reopen and no
