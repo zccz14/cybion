@@ -3,7 +3,7 @@
     {
       "type": "function",
       "name": "cybion_list_contexts",
-      "description": "List top-level Contexts (context_id, name, description, source) from the controller: first the read-only Cybion Common Context (source \"common\"; product usage guidance compiled into the controller), then the user's own Contexts (source \"local\"). Content is intentionally omitted; use read_context to read a context and discover its direct children.",
+      "description": "List top-level Contexts (context_id, name, description, source) from the controller: first the read-only Cybion Common Context (source \"common\"; product usage guidance compiled into the controller), then the user's own Contexts (source \"local\"). Content is intentionally omitted; use load_context to bring a Context and its direct children into the Thread.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -22,32 +22,14 @@
     },
     {
       "type": "function",
-      "name": "read_context",
-      "description": "Read the full content of a context and its direct children metadata (context_id, name, description) from the controller. Start from a context_id listed by cybion_list_contexts; pass a returned child context_id to explore further levels. Reads resolve local Contexts first, then the read-only Cybion Common Context. A local Context's answer carries `locked`: while true, write_context cannot change that Context, and its child Contexts are where writes go.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "context_id": {
-            "type": "string",
-            "description": "Exact context_id from cybion_list_contexts or from children returned by a previous read_context call."
-          }
-        },
-        "required": [
-          "context_id"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "type": "function",
       "name": "load_context",
-      "description": "Bind a Context to this Thread so the Controller keeps it loaded. The full Context JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Context changes or a compaction replaces the history, so the Thread never reads it again to stay current. Use it for material the Thread must keep working from across context windows; read_context stays the way to look something up once. Resolves local Contexts first, then the read-only Cybion Common Context. A Thread holds at most 8 loaded Contexts; unload_context releases one.",
+      "description": "Bind a Context to this Thread so the Controller keeps it loaded. The full Context JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Context changes or a compaction replaces the history, so the Thread never opens it again to stay current. The copy already carries the Context, its Use When description, its body, and its direct children. Use it for material the Thread must keep working from across context windows; cybion_list_contexts stays the way to find what exists. Resolves local Contexts first, then the read-only Cybion Common Context. A Thread holds at most 8 loaded Contexts; unload_context releases one.",
       "parameters": {
         "type": "object",
         "properties": {
           "context_id": {
             "type": "string",
-            "description": "Exact context_id from cybion_list_contexts, from children returned by read_context, or from a Context this Thread already knows."
+            "description": "Exact context_id from cybion_list_contexts, from children inside a loaded Context's JSON, or from a Context this Thread already knows."
           }
         },
         "required": [
@@ -83,7 +65,7 @@
         "properties": {
           "context_id": {
             "type": "string",
-            "description": "Omit to create a new Context; pass the exact id of an existing local Context to edit it, from cybion_list_contexts or a child listed by read_context."
+            "description": "Omit to create a new Context; pass the exact id of an existing local Context to edit it, from cybion_list_contexts or from the children of a Context this Thread has loaded."
           },
           "name": {
             "type": "string",

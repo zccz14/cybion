@@ -195,75 +195,6 @@ async fn unloading_stops_refreshing_and_is_announced_once() {
 }
 
 #[tokio::test]
-async fn a_loaded_context_is_not_announced_as_changed() {
-    let (_root, state) = test_state();
-    let user = user_for_subject(&state, "loads-dirty").unwrap();
-    let thread = create_test_thread(&state, &user).await;
-    let thread_id = thread.id.clone();
-    let loaded = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-    let read_only = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-    let notice = user_db(&state, &user, true, move |connection| {
-        start_thread(connection, &thread_id);
-        for context in [loaded, read_only] {
-            insert_context(connection, context, "旧正文");
-        }
-        insert_record(
-            connection,
-            &thread_id,
-            "response_output",
-            json!({
-                "type": "function_call",
-                "name": "read_context",
-                "arguments": json!({ "context_id": read_only }).to_string(),
-                "call_id": "call_read",
-            }),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "tool_output",
-            json!({
-                "type": "function_call_output",
-                "call_id": "call_read",
-                "output": json!({
-                    "id": read_only,
-                    "name": "Manual",
-                    "description": "Use when working",
-                    "content": "旧正文",
-                    "parent_id": null,
-                    "children": [],
-                })
-                .to_string(),
-            }),
-        );
-        connection
-            .execute("UPDATE contexts SET content='新正文'", [])
-            .unwrap();
-        load(connection, &thread_id, loaded);
-        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
-        append_context_dirty_notice(connection, &thread_id, tail)
-    })
-    .await
-    .unwrap();
-    let notice = notice.expect("the read-only Context is still announced");
-    let payload: Value = user_db(&state, &user, true, move |connection| {
-        Ok(connection
-            .query_row(
-                "SELECT payload FROM history_records WHERE id=?",
-                [notice],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap())
-    })
-    .await
-    .map(|payload| serde_json::from_str::<Value>(&payload).unwrap())
-    .unwrap();
-    let contexts = payload["contexts"].as_array().unwrap();
-    assert_eq!(contexts.len(), 1);
-    assert_eq!(contexts[0]["context_id"], json!(read_only));
-}
-
-#[tokio::test]
 async fn a_context_that_stops_resolving_releases_itself() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "loads-missing").unwrap();
@@ -400,60 +331,34 @@ async fn the_loaded_set_is_capped() {
 }
 
 #[tokio::test]
-async fn the_reads_view_reports_loaded_contexts_as_current() {
+async fn the_loaded_view_reports_the_bound_contexts() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "loads-view").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let thread_id = thread.id.clone();
-    let context = "14141414-1414-4414-8414-141414141414";
+    let first = "14141414-1414-4414-8414-141414141414";
+    let second = "16161616-1616-4616-8616-161616161616";
     user_db(&state, &user, true, move |connection| {
-        insert_context(connection, context, "旧正文");
         start_thread(connection, &thread_id);
-        insert_record(
-            connection,
-            &thread_id,
-            "response_output",
-            json!({
-                "type": "function_call",
-                "name": "read_context",
-                "arguments": json!({ "context_id": context }).to_string(),
-                "call_id": "call_read",
-            }),
-        );
-        insert_record(
-            connection,
-            &thread_id,
-            "tool_output",
-            json!({
-                "type": "function_call_output",
-                "call_id": "call_read",
-                "output": json!({
-                    "id": context,
-                    "name": "Manual",
-                    "description": "Use when working",
-                    "content": "旧正文",
-                    "parent_id": null,
-                    "children": [],
-                })
-                .to_string(),
-            }),
-        );
-        connection
-            .execute("UPDATE contexts SET content='新正文' WHERE id=?", [context])
-            .unwrap();
-        load(connection, &thread_id, context);
+        insert_context(connection, first, "正文甲");
+        insert_context(connection, second, "正文乙");
+        load(connection, &thread_id, first);
+        load(connection, &thread_id, second);
         Ok(())
     })
     .await
     .unwrap();
-    let view = context_reads_for(&state, &user, thread.id.clone())
+    let view = loaded_contexts_for(&state, &user, thread.id.clone())
         .await
         .unwrap();
-    assert_eq!(view.loaded, vec![context.to_owned()]);
-    assert_eq!(view.calls.len(), 1);
+    assert_eq!(view.loaded, vec![first.to_owned(), second.to_owned()]);
+    let (head, tail) = (
+        view.head.expect("a started Thread has a head"),
+        view.tail.unwrap(),
+    );
     assert!(
-        matches!(view.calls[0].state, ContextReadState::Current),
-        "the controller refreshes a loaded Context in place"
+        head <= tail,
+        "the range the view reports is the one that replays"
     );
 }
 

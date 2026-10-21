@@ -227,13 +227,12 @@ export function computerUseFunctionCall(payload: unknown): ComputerUseFunctionCa
   }
 }
 
-// The ten controller-side Cybion tools as stored in the Responses item. The
+// The controller-side Cybion tools as stored in the Responses item. The
 // list tools carry no displayable arguments; a machine update is a call that
 // names its machine, and a context write names its context or, when creating,
 // its title. A create shows whichever fields it provides; missing identifiers
 // keep the generic protocol rendering.
 export type CybionToolFunctionCall =
-  | { tool: "read_context"; contextId: string }
   | { tool: "load_context"; contextId: string }
   | { tool: "unload_context"; contextId: string }
   | { tool: "write_context"; contextId: string | null; trashed: boolean; name: string | null; parentId: string | null }
@@ -252,12 +251,8 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
   const args = parseFunctionArguments(object.arguments)
   if (args === null) return null
   switch (object.name) {
-    case "read_context": {
-      const contextId = nonEmptyString(args.context_id)
-      return contextId === null ? null : { tool: "read_context", contextId }
-    }
-    // A load or unload names the same Context a read does, so the card shows the
-    // same title and Use When description.
+    // A load or unload names a Context, so the card shows the Context's title and
+    // its Use When description.
     case "load_context": {
       const contextId = nonEmptyString(args.context_id)
       return contextId === null ? null : { tool: "load_context", contextId }

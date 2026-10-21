@@ -16,14 +16,14 @@ The checkpoint keeps the following sections in order:
 6. the current objective and next step;
 7. unfinished work and evidence routes.
 
-`read_context` output is not replayed after a checkpoint: a detail the
-checkpoint drops is recoverable only by reading that Context again. The fifth
-section therefore carries one bullet per Context the thread read whose detail
+Context detail is not replayed after a checkpoint: a detail the checkpoint
+drops is recoverable only by loading that Context again. The fifth section
+therefore carries one bullet per Context the thread still needs and whose detail
 the checkpoint does not restate — the exact `context_id`, then why it must be
-read again and which decision or next step depends on it — so the next request
-re-reads instead of trusting a memory of a Context it no longer holds. Asking
-the model for that judgment keeps it the model's decision which Contexts stop
-mattering; read output is never pinned into the request.
+opened again and which decision or next step depends on it — so the next request
+loads instead of trusting a memory of a Context it no longer holds. Asking the
+model for that judgment keeps it the model's decision which Contexts stop
+mattering; a Context body is never pinned into the checkpoint.
 
 A loaded Context is the exception. The controller delivers its current copy again
 after the checkpoint, so the fifth section never lists a loaded Context and the

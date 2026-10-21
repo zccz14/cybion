@@ -78,7 +78,7 @@ import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, seriali
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
-import { contextDirtyContexts, contextLoadNotice, threadContextReads, type ThreadContextReadsView } from "@/lib/thread-context-reads"
+import { contextLoadNotice, type ThreadContextLoadsView } from "@/lib/thread-context-loads"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useComposerImages } from "@/hooks/use-composer-images"
@@ -129,9 +129,8 @@ import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
 import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
-import { ContextDirtyNotice } from "@/components/context-dirty-notice"
 import { ContextLoadNotice } from "@/components/context-load-notice"
-import { ThreadContextReads } from "@/components/thread-context-reads"
+import { ThreadContextLoads } from "@/components/thread-context-loads"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
@@ -703,7 +702,6 @@ const copy = {
     toolBrowserControl: "Control a browser",
     toolComputerUse: "Control the desktop",
     toolViewImage: "View an image",
-    toolReadContext: "Read contexts",
     toolLoadContext: "Keep a context loaded",
     toolUnloadContext: "Release a loaded context",
     toolWriteContext: "Create or edit contexts",
@@ -1066,7 +1064,6 @@ const copy = {
     toolBrowserControl: "控制浏览器",
     toolComputerUse: "控制桌面",
     toolViewImage: "查看图片",
-    toolReadContext: "读取上下文",
     toolLoadContext: "加载并保持上下文",
     toolUnloadContext: "卸载上下文",
     toolWriteContext: "创建或编辑上下文",
@@ -1723,25 +1720,25 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     ...durableRecords,
     ...pendingResponseRecords(liveResponse.data, durableRecords, threadId),
   ], [durableRecords, liveResponse.data, threadId])
-  // The reads the Thread still holds: the endpoint reports the calls inside the context
-  // replay starts from, so a compaction empties whatever its checkpoint replaced.
-  const contextReads = useQuery({
-    queryKey: ["thread-context-reads", threadId, userId],
-    queryFn: ({ signal }) => api<ThreadContextReadsView>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history/reads`, { signal }),
+  // The Contexts this Thread keeps loaded: the endpoint reports the bindings plus
+  // the range that replays, so a Context whose copy sits behind the head shows up
+  // again once the controller has delivered it.
+  const contextLoads = useQuery({
+    queryKey: ["thread-context-loads", threadId, userId],
+    queryFn: ({ signal }) => api<ThreadContextLoadsView>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history/loaded`, { signal }),
     refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
     enabled: Boolean(threadId),
   })
-  const readContexts = useMemo(() => threadContextReads(contextReads.data?.calls ?? []), [contextReads.data])
-  // A `read_context`/`write_context` card resolves the context's title and Use
+  // A load/unload or `write_context` card resolves the Context's title and Use
   // When description through the same caches the Contexts page fills; the
-  // fetches only start when the loaded history actually touches a context.
-  const readsContexts = useMemo(() => readContexts.length > 0 || records.some((record) => {
+  // fetches only start when the loaded history actually touches a Context.
+  const loadsContexts = useMemo(() => (contextLoads.data?.loaded.length ?? 0) > 0 || records.some((record) => {
     const payload = historyPayloadObject(record.payload)
-    if (payload?.type === "context_dirty" || payload?.type === "context_loaded" || payload?.type === "context_unloaded") return true
-    return payload?.type === "function_call" && (payload.name === "read_context" || payload.name === "write_context")
-  }), [readContexts, records])
-  const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: readsContexts })
-  const commonContexts = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`), enabled: readsContexts })
+    if (payload?.type === "context_loaded" || payload?.type === "context_unloaded") return true
+    return payload?.type === "function_call" && payload.name === "write_context"
+  }), [contextLoads.data, records])
+  const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: loadsContexts })
+  const commonContexts = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`), enabled: loadsContexts })
   const contextLookup = useMemo(() => {
     const lookup = new Map<string, ContextSummary>()
     for (const context of contexts.data ?? []) lookup.set(context.id, { name: context.name, description: context.description })
@@ -1920,7 +1917,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
-              {contextReads.data !== undefined && (contextReads.data.head !== null || (contextReads.data.loaded ?? []).length > 0) && <div className="border-t pt-3"><ThreadContextReads reads={readContexts} lookup={contextLookup} view={contextReads.data} language={language} /></div>}
+              {contextLoads.data !== undefined && (contextLoads.data.head !== null || contextLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadContextLoads view={contextLoads.data} lookup={contextLookup} language={language} /></div>}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton behavior="auto" />
@@ -1989,10 +1986,6 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
         <UserInputMessage language={language} payload={record.payload} footer={`#${record.id} · ${time}`} />
       </MessageContent>
     </Message>
-  }
-  const dirtyContexts = contextDirtyContexts(record)
-  if (dirtyContexts) {
-    return <ContextDirtyNotice contexts={dirtyContexts} lookup={contexts} language={language} time={time} recordId={record.id} />
   }
   // A loaded Context is Thread state the controller maintains; the record is the
   // same notice the compiler replays upstream as a developer message.
@@ -3629,7 +3622,6 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
 const toolLabels: Record<string, CopyKey> = {
   cybion_list_contexts: "toolListContexts",
   cybion_list_workers: "toolListWorkers",
-  read_context: "toolReadContext",
   load_context: "toolLoadContext",
   unload_context: "toolUnloadContext",
   write_context: "toolWriteContext",

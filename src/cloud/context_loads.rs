@@ -1,9 +1,8 @@
 //! Loaded Contexts (已加载上下文).
 //!
-//! `read_context` hands a Context over inside a tool output, which is message
-//! state: a compaction moves the replay head past it, and a Thread that still
-//! needs the material has to read it again. A *loaded* Context is Thread state
-//! instead. `thread_context_loads` holds the Thread's own decision about which
+//! A Context handed over inside a tool output is message state: a compaction
+//! moves the replay head past it, and a Thread that still needs the material has
+//! to ask for it again. A *loaded* Context is Thread state instead. `thread_context_loads` holds the Thread's own decision about which
 //! Contexts it keeps working from, so the decision survives both a compaction
 //! and the model forgetting that it ever read them.
 //!
@@ -57,9 +56,9 @@ pub(super) fn loaded_ids(
         .map_err(Into::into)
 }
 
-/// The Context as `read_context` would hand it over right now: local Contexts
+/// The Context as the Controller hands it to the model right now: local Contexts
 /// first, then the compiled common tree in its source language. A Context hidden
-/// by the trash resolves to nothing, exactly as it does for the tool.
+/// by the trash resolves to nothing, so a load cannot resurrect it.
 fn resolve_context(connection: &Connection, id: &str) -> Result<Option<ContextReadView>, ApiError> {
     let context = connection
         .query_row(
@@ -78,8 +77,8 @@ fn resolve_context(connection: &Connection, id: &str) -> Result<Option<ContextRe
     Ok(common_contexts::read(id, common_contexts::SOURCE_LANGUAGE))
 }
 
-/// The Context JSON a loaded Thread receives. It matches a `read_context` answer
-/// except for `sort_key`, which orders a sibling list the Thread cannot see.
+/// The Context JSON a loaded Thread receives: the Context row plus its direct
+/// children, minus `sort_key`, which orders a sibling list the Thread cannot see.
 fn injected_context(view: &ContextReadView) -> Value {
     let mut value = serde_json::to_value(view).expect("a Context is serializable");
     if let Some(object) = value.as_object_mut() {
@@ -220,7 +219,7 @@ pub(super) fn notice_message(payload: &Value) -> Option<Value> {
             Some(json!({
                 "role": "developer",
                 "content": format!(
-                    "Context {context_id} is loaded in this Thread and this is its current content. The controller maintains this copy: when the Context changes, or when a compaction replaces this history, a newer copy is delivered after this one without any tool call. Treat it as authoritative over any earlier copy of the same Context in this conversation, and never call read_context to refresh it.\n\n```json\n{context}\n```\n\nCall unload_context with this context_id once this Thread no longer needs it."
+                    "Context {context_id} is loaded in this Thread and this is its current content. The controller maintains this copy: when the Context changes, or when a compaction replaces this history, a newer copy is delivered after this one without any tool call. Treat it as authoritative over any earlier copy of the same Context in this conversation, and never ask for it again to stay current.\n\n```json\n{context}\n```\n\nCall unload_context with this context_id once this Thread no longer needs it."
                 ),
             }))
         }
@@ -286,7 +285,7 @@ pub(super) async fn load_tool_output(
             "context_id": id,
             "loaded": true,
             "already_loaded": loaded_at.is_some(),
-            "note": "From now on the controller maintains this Context for this Thread: its JSON arrives in the next developer message and is refreshed by itself when the Context changes or a compaction replaces the history. Do not call read_context to keep it current.",
+            "note": "From now on the controller maintains this Context for this Thread: its JSON arrives in the next developer message and is refreshed by itself when the Context changes or a compaction replaces the history. Nothing needs to be asked for again to keep it current.",
         }))
     })
     .await

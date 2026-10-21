@@ -106,7 +106,7 @@ the first authenticated browser session initializes that key atomically.
   `common-contexts/` (a `tree.json` skeleton plus Markdown nodes, each node in
   English and Simplified Chinese). Every user reads the same read-only tree:
   `cybion_list_contexts` lists its root first with `source: "common"`,
-  `read_context` resolves it after local Contexts, and Configuration → Contexts
+  `load_context` resolves it after local Contexts, and Configuration → Contexts
   renders it from `GET /api/common-contexts?lang=` in the UI language. The
   controller never stores or mutates it; content changes ship with releases.
 - Threads create and edit the user's Contexts through `write_context`: title,
