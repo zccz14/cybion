@@ -51,6 +51,7 @@ mod thread_controls;
 mod thread_sharing;
 mod traffic;
 mod upstreams;
+mod user_databases;
 mod worker_onboarding;
 mod worker_protocol;
 mod worker_sharing;
@@ -84,9 +85,10 @@ const WORKER_ANDROID_RELEASE_BASE_URL: &str =
     "https://github.com/zccz14/cybion-worker-for-android/releases/download";
 const INTEGRATION_NAME: &str = "Cybion";
 const DEFAULT_MODEL: &str = "deepseek-flash";
-/// How long one user-database operation waits for a peer's write transaction.
-/// Every request, worker poll and patrol opens its own connection to the same
-/// file, so the wait has to cover a neighbour's slow write rather than fail.
+/// How long one user-database connection waits for a writer outside Cybion's
+/// own queue — another user's cross-database projection, an administrator tool,
+/// a backup. Operations inside the queue never contend; this is the last resort
+/// that keeps a foreign writer from failing the turn outright.
 const USER_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 // Intercepted web search calls the Thread's own upstream web-search endpoint;
 // hosted gateways route /web-search by the requested source, so the controller
@@ -183,6 +185,8 @@ struct AppState {
     worker_pairing_lock: Arc<Mutex<()>>,
     active_requests: Arc<Mutex<HashMap<String, ActiveRequest>>>,
     resources: Arc<Mutex<resources::ResourceMonitor>>,
+    /// One queue per user database; every operation on a user file goes here.
+    user_databases: Arc<user_databases::UserDatabases>,
     traffic: Arc<traffic::Monitor>,
     stats: Arc<stats::Patrol>,
 }
@@ -405,6 +409,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         worker_pairing_lock: Arc::new(Mutex::new(())),
         active_requests: Arc::new(Mutex::new(HashMap::new())),
         resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
+        user_databases: Arc::new(user_databases::UserDatabases::new()),
         traffic,
         stats: stats::Patrol::new(),
     };
@@ -835,8 +840,8 @@ fn open_user(path: &Path, create: bool) -> Result<Connection, ApiError> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
     };
     let mut connection = Connection::open_with_flags(path, flags).map_err(ApiError::internal)?;
-    // A Thread's own writes and the background patrols share one file, so a
-    // request may wait out a peer's transaction instead of failing the turn.
+    // Cybion's own operations on this file are queued by `UserDatabases`, so the
+    // timeout only ever covers a writer from outside that queue.
     connection
         .busy_timeout(USER_BUSY_TIMEOUT)
         .map_err(ApiError::internal)?;
@@ -856,7 +861,7 @@ fn open_user(path: &Path, create: bool) -> Result<Connection, ApiError> {
 }
 
 async fn user_db<T, F>(
-    _state: &AppState,
+    state: &AppState,
     user: &User,
     create: bool,
     operation: F,
@@ -865,13 +870,10 @@ where
     T: Send + 'static,
     F: FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
 {
-    let path = user.path.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut connection = open_user(&path, create)?;
-        operation(&mut connection)
-    })
-    .await
-    .map_err(ApiError::internal)?
+    state
+        .user_databases
+        .run(&user.path, create, operation)
+        .await
 }
 
 fn admin_user_sync(path: &Path, user_id: &str, bootstrap: bool) -> Result<bool, ApiError> {
@@ -9473,6 +9475,7 @@ mod tests {
                 active_requests: Arc::new(Mutex::new(HashMap::new())),
                 traffic: Arc::new(traffic::Monitor::open(&admin_db_path).unwrap()),
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
+                user_databases: Arc::new(user_databases::UserDatabases::new()),
                 stats: stats::Patrol::new(),
             },
         )
