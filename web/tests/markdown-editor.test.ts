@@ -6,7 +6,7 @@ import { createTestServer } from "./vite-server.ts"
 
 const serverOptions = { server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" } as const
 
-test("the Context editor exposes write, source, and preview modes with an accessible toolbar", async () => {
+test("the Manual editor exposes write, source, and preview modes with an accessible toolbar", async () => {
   const server = await createTestServer(serverOptions)
   try {
     const { MarkdownEditor } = await server.ssrLoadModule("/src/components/markdown-editor.tsx")

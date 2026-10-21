@@ -10,7 +10,7 @@ const checkpoint = `# Durable working context
 ## 概念与术语
 
 - **Thread**：独立的对话与执行单元。
-- **Checkpoint**：把上下文压缩成 Markdown 的持久记录。
+- **Checkpoint**：把手册压缩成 Markdown 的持久记录。
 
 ## 权威资源与精确位置
 

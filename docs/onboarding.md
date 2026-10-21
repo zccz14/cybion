@@ -3,7 +3,7 @@
 Cybion's onboarding teaches three separate concepts:
 
 - A **conversation (Thread)** keeps the messages and execution history for one task.
-- A **Context** is a lightweight reference: the source's purpose, location and
+- A **Manual** is a lightweight reference: the source's purpose, location and
   reading instructions. Original files, books and project folders stay on Worker
   devices or network services. The model discovers references and
   accesses sources as the task requires; registration does not preload everything
@@ -12,7 +12,7 @@ Cybion's onboarding teaches three separate concepts:
   optional for normal conversation, which still requires a working model service.
   Existing pairing consent and execution-permission disclosures remain in place.
 
-The Context editor still stores the existing `name`, `description`, `content` and
+The Manual editor still stores the existing `name`, `description`, `content` and
 `parent_id` fields. This change guides users to store references rather than a
 copy of the original material. It does not migrate existing content, add file
 uploads, index source files or change the model's tool protocol. Material read
@@ -34,7 +34,7 @@ use. Background polling keeps the last observed totals rather than temporarily
 removing the composer while a request is in flight. Counts only select a view;
 no data or permissions are changed by this decision.
 
-Examples fill an empty draft. Context examples fill an editable form and require
+Examples fill an empty draft. Manual examples fill an editable form and require
 an explicit save. “Use in a conversation” uses the saved reference ID/name and
 the existing empty-only draft seeding mechanism. An existing draft is never
 overwritten. None of these actions automatically sends a message or runs a tool.

@@ -159,14 +159,14 @@ async fn stored_references_resolve_for_history_and_replay() {
     assert_eq!(image.payload["result"], encode_base64(bytes));
     assert!(image.payload.get("result_ref").is_none());
 
-    let context = user_db(&state, &user, false, {
+    let manual = user_db(&state, &user, false, {
         let thread_id = thread.id.clone();
         let data_dir = state.data_dir.clone();
         move |connection| compile_thread_context(connection, &data_dir, &thread_id, image_id)
     })
     .await
     .unwrap();
-    let replayed = context
+    let replayed = manual
         .items
         .iter()
         .find(|item| item["type"] == "image_generation_call")

@@ -111,12 +111,12 @@ pub(super) fn current_context(
         return Err(ApiError::cancelled());
     }
     let tail = latest_protocol_record_id(&tx, thread)?;
-    // Deliver every loaded Context before the request compiles, so the copies
+    // Deliver every loaded Manual before the request compiles, so the copies
     // belong to the range this request replays rather than the next one.
-    let tail = context_loads::append_injections(&tx, thread, tail)?.unwrap_or(tail);
-    let context = compile_thread_context(&tx, data_dir, thread, tail)?;
+    let tail = manual_loads::append_injections(&tx, thread, tail)?.unwrap_or(tail);
+    let manual = compile_thread_context(&tx, data_dir, thread, tail)?;
     tx.commit()?;
-    Ok(context)
+    Ok(manual)
 }
 
 pub(super) async fn wait_retry(

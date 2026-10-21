@@ -78,7 +78,7 @@ import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, seriali
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
-import { contextLoadNotice, type ThreadContextLoadsView } from "@/lib/thread-context-loads"
+import { manualLoadNotice, type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useComposerImages } from "@/hooks/use-composer-images"
@@ -117,20 +117,20 @@ import { ImageGenerationCall } from "@/components/image-generation-call"
 import { WebSearchCall } from "@/components/web-search-call"
 import { BrowserControlCall } from "@/components/browser-control-call"
 import { ComputerUseCall } from "@/components/computer-use-call"
-import { CybionToolCall, type ContextSummary } from "@/components/cybion-tool-call"
+import { CybionToolCall, type ManualSummary } from "@/components/cybion-tool-call"
 import { CheckpointMessage } from "@/components/checkpoint-message"
 import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core"
-import { collectSubtreeIds, commonAncestorIds, contextAncestorIds, contextCurrentPlacement, contextPlacementFor, contextTreeIndex, flattenTree, trashedRoots, visibleContexts, type ContextDropZone } from "@/lib/contexts-tree"
-import { contextDraft, draftsMatch, shouldAutosave, type ContextDraft } from "@/lib/context-drafts"
+import { collectSubtreeIds, commonAncestorIds, manualAncestorIds, manualCurrentPlacement, manualPlacementFor, manualTreeIndex, flattenTree, trashedRoots, visibleManuals, type ManualDropZone } from "@/lib/manuals-tree"
+import { manualDraft, draftsMatch, shouldAutosave, type ManualDraft } from "@/lib/manual-drafts"
 import { ThreadHistory } from "@/components/thread-history"
 import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
 import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
 import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
-import { ContextLoadNotice } from "@/components/context-load-notice"
-import { ThreadContextLoads } from "@/components/thread-context-loads"
+import { ManualLoadNotice } from "@/components/manual-load-notice"
+import { ThreadManualLoads } from "@/components/thread-manual-loads"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
@@ -367,17 +367,17 @@ type SystemResources = {
   }
 }
 type CurrentUser = { user_id: string; hosted: boolean; is_admin: boolean }
-type Context = {
+type Manual = {
   id: string
   name: string
   description: string
   content: string
   parent_id: string | null
   sort_key: string
-  // The owner's lock: while set, write_context refuses this context and its
-  // child contexts are where a Thread writes instead.
+  // The owner's lock: while set, write_manual refuses this manual and its
+  // child manuals are where a Thread writes instead.
   locked: boolean
-  // Present only while the context sits in the trash.
+  // Present only while the manual sits in the trash.
   trashed_at?: number
 }
 
@@ -403,7 +403,7 @@ const copy = {
     continueThread: "Continue",
     continueThreadHint: "Continue from saved history without sending a new prompt",
     compactThread: "Compact",
-    compactThreadHint: "Compress context into a checkpoint and keep the original records",
+    compactThreadHint: "Compress manual into a checkpoint and keep the original records",
     threadStopped: "Reasoning stopped. Saved records were kept.",
     threadContinued: "Continued without a new prompt.",
     threadCompactionRequested: "Checkpoint compaction requested.",
@@ -464,9 +464,9 @@ const copy = {
     recordHidden: "Internal",
     recordPayload: "View raw payload",
     navWork: "Work",
-    navGovernedContexts: "Governed contexts",
-    contexts: "Manual",
-    contextsTitle: "Manual",
+    navContexts: "Context",
+    manuals: "Manual",
+    manualsTitle: "Manual",
     notes: "Notes",
     notesTitle: "Notes",
     notesDescription: "One line per note, one action per note. Notes are written by Threads: each one belongs to exactly one Thread, which is the only place it is visible and crossable. Crossing out keeps the text as the record, and only you can tear a note off.",
@@ -479,41 +479,41 @@ const copy = {
     noteCreated: "Created",
     noteCrossedOut: "Crossed out",
     deleteThreadNotes: "This Thread's open notes are torn off with it:",
-    contextLocalTitle: "Your contexts",
-    contextEmpty: "No contexts yet. Create one to record where your material lives and how to read it.",
-    contextTrashTitle: "Trash",
-    contextRestore: "Restore",
-    contextSelectHint: "Select a node in the tree, or create a new context.",
-    contextGlobalBadge: "Read-only",
-    contextGlobalHint: "Compiled into Cybion with each release and shared by every user. The content below is what Threads read through the Contexts tools.",
-    contextLock: "Lock (AI read-only)",
-    contextUnlock: "Unlock",
-    contextLockedBadge: "Locked · AI read-only",
-    contextLockedHint: "Threads cannot change this context with write_context; they write into its child contexts instead. You can still edit it here.",
-    contextName: "Context name",
-    contextDescription: "Use When",
-    contextContent: "Body",
-    contextContentEditHint: "Write the context in Markdown. Toggle Write, Markdown, and Preview above the editor.",
-    contextUseWhenHelp: "Routes the AI: the condition for when this context should be read. Progressive disclosure reads this line first to decide whether to load the body — write when to look, not a summary of the content.",
-    contextBodyHelp: "Loaded on demand: the body never occupies the conversation context by default; the AI reads it only when a task needs it.",
-    contextFieldHelp: "Help",
-    newContext: "New context",
-    editContext: "Edit context",
-    createContext: "Create context",
-    contextAutosaving: "Saving changes…",
-    contextAutosavePending: "Changes waiting to save",
-    contextAutosaved: "All changes saved",
-    contextAutosaveFailed: "Save failed; it will retry automatically",
-    deleteContext: "Delete context",
-    deleteContextTitle: "Delete this context?",
-    deleteContextDescription: "Child contexts will become top-level contexts.",
-    contextCreated: "Context created",
-    contextUpdated: "Context updated",
-    contextDeleted: "Context deleted",
-    contextCollapse: "Collapse context",
-    contextExpand: "Expand context",
-    commonContextTitle: "Cybion Common Context",
-    commonContextHint: "Compiled into Cybion from its source tree and shared by every user, read-only. Threads read it progressively through the Contexts tools; it changes only with releases.",
+    manualLocalTitle: "Your manuals",
+    manualEmpty: "No manuals yet. Create one to record where your material lives and how to read it.",
+    manualTrashTitle: "Trash",
+    manualRestore: "Restore",
+    manualSelectHint: "Select a node in the tree, or create a new manual.",
+    manualGlobalBadge: "Read-only",
+    manualGlobalHint: "Compiled into Cybion with each release and shared by every user. The content below is what Threads read through the Manuals tools.",
+    manualLock: "Lock (AI read-only)",
+    manualUnlock: "Unlock",
+    manualLockedBadge: "Locked · AI read-only",
+    manualLockedHint: "Threads cannot change this manual with write_manual; they write into its child manuals instead. You can still edit it here.",
+    manualName: "Manual name",
+    manualDescription: "Use When",
+    manualContent: "Body",
+    manualContentEditHint: "Write the manual in Markdown. Toggle Write, Markdown, and Preview above the editor.",
+    manualUseWhenHelp: "Routes the AI: the condition for when this manual should be read. Progressive disclosure reads this line first to decide whether to load the body — write when to look, not a summary of the content.",
+    manualBodyHelp: "Loaded on demand: the body never occupies the conversation manual by default; the AI reads it only when a task needs it.",
+    manualFieldHelp: "Help",
+    newManual: "New manual",
+    editManual: "Edit manual",
+    createManual: "Create manual",
+    manualAutosaving: "Saving changes…",
+    manualAutosavePending: "Changes waiting to save",
+    manualAutosaved: "All changes saved",
+    manualAutosaveFailed: "Save failed; it will retry automatically",
+    deleteManual: "Delete manual",
+    deleteManualTitle: "Delete this manual?",
+    deleteManualDescription: "Child manuals will become top-level manuals.",
+    manualCreated: "Manual created",
+    manualUpdated: "Manual updated",
+    manualDeleted: "Manual deleted",
+    manualCollapse: "Collapse manual",
+    manualExpand: "Expand manual",
+    commonManualTitle: "Cybion Common Manual",
+    commonManualHint: "Compiled into Cybion from its source tree and shared by every user, read-only. Threads read it progressively through the Manuals tools; it changes only with releases.",
     navAudit: "Audit",
     usageStats: "Usage statistics",
     navAdministration: "Administration",
@@ -650,8 +650,8 @@ const copy = {
     savingDefaults: "Saving…",
     defaultsSaved: "Defaults saved",
     saveDefaultsError: "Could not save thread defaults",
-    contextBudget: "Context budget",
-    contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
+    contextBudget: "Manual budget",
+    contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed manual exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
     minimalMode: "Minimal mode",
     minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
     imageGenerationModel: "Image generation model",
@@ -702,12 +702,12 @@ const copy = {
     toolBrowserControl: "Control a browser",
     toolComputerUse: "Control the desktop",
     toolViewImage: "View an image",
-    toolLoadContext: "Keep a context loaded",
-    toolUnloadContext: "Release a loaded context",
-    toolWriteContext: "Create or edit contexts",
+    toolLoadManual: "Keep a manual loaded",
+    toolUnloadManual: "Release a loaded manual",
+    toolWriteManual: "Create or edit manuals",
     toolAddNotes: "Add notes",
     toolCrossOutNotes: "Cross out notes",
-    toolListContexts: "List contexts",
+    toolListManuals: "List manuals",
     toolListWorkers: "List Workers",
     toolListUltimateMachines: "List Ultimate Machines",
     toolGetUltimateMachine: "Read an Ultimate Machine",
@@ -717,7 +717,7 @@ const copy = {
     toolImageGeneration: "Image generation",
     phaseKernel: "Kernel",
     phaseDevice: "Device",
-    toolsKernelHint: "Executed by the Cybion Controller: Contexts, Worker and Ultimate Machine management, plus the web search and image generation it intercepts.",
+    toolsKernelHint: "Executed by the Cybion Controller: Manuals, Worker and Ultimate Machine management, plus the web search and image generation it intercepts.",
     toolsDeviceHint: "Executed on the device you pick (a Worker): shell, browser, desktop and image reading.",
     history: "Archive",
     historyDescription: "The append-only archive of every record your Threads sent and received.",
@@ -765,14 +765,14 @@ const copy = {
     continueThread: "继续",
     continueThreadHint: "从已有记录继续，不发送新的提示词",
     compactThread: "压缩",
-    compactThreadHint: "将上下文压缩为 checkpoint，保留原始记录",
+    compactThreadHint: "将重放上下文压缩为检查点，保留原始记录",
     threadStopped: "推理已停止，已保存的记录保留。",
     threadContinued: "已直接继续推理，未发送新提示词。",
-    threadCompactionRequested: "已请求压缩上下文，生成 checkpoint。",
+    threadCompactionRequested: "已请求压缩重放上下文，生成检查点。",
     input: "继续描述你的需求…",
     queued: "排队中",
     rename: "重命名",
-    generateTitle: "引用全部上下文生成标题",
+    generateTitle: "引用全部重放内容生成标题",
     delete: "删除",
     deleteTitle: "删除这个线程？",
     deleteDescription: "该 Thread 的历史、推理审计和 Worker 调用会被删除。其他 Thread 已读取的副本仍保留。",
@@ -826,9 +826,9 @@ const copy = {
     recordHidden: "内部记录",
     recordPayload: "查看原始负载",
     navWork: "工作",
-    navGovernedContexts: "受控上下文",
-    contexts: "手册",
-    contextsTitle: "手册",
+    navContexts: "上下文",
+    manuals: "手册",
+    manualsTitle: "手册",
     notes: "便签",
     notesTitle: "便签",
     notesDescription: "一条一行，一行一件事。便签由线程写下，每条只属于一个线程，也只有那个线程看得见、划得掉。划掉会保留原文作为记录，只有你能撕掉它。",
@@ -841,41 +841,41 @@ const copy = {
     noteCreated: "创建于",
     noteCrossedOut: "划掉于",
     deleteThreadNotes: "本线程未划掉的便签会一并撕掉：",
-    contextLocalTitle: "你的上下文",
-    contextEmpty: "还没有上下文。新建一个，记录资料在哪里、怎样获取。",
-    contextTrashTitle: "回收站",
-    contextRestore: "还原",
-    contextSelectHint: "在左侧树中选择一个节点，或新建上下文。",
-    contextGlobalBadge: "只读",
-    contextGlobalHint: "随 Cybion 版本编译发布、所有用户共享只读。下方内容即 Thread 通过上下文工具读到的正文。",
-    contextLock: "锁定（AI 只读）",
-    contextUnlock: "解除锁定",
-    contextLockedBadge: "已锁定 · AI 只读",
-    contextLockedHint: "AI 不能用 write_context 改动它，只能写进它的子上下文；你在这里仍可编辑。",
-    contextName: "上下文名称",
-    contextDescription: "用途 Use When",
-    contextContent: "正文",
-    contextContentEditHint: "用 Markdown 编写上下文。可在编辑器上方切换编辑、源码和预览模式。",
-    contextUseWhenHelp: "用于引导 AI 路由：这是渐进式上下文的判定条件——「什么时候需要查看」。AI 先读这一行，再决定是否加载正文；请写判据，不要写内容摘要。",
-    contextBodyHelp: "正文按需加载：不会默认占用对话上下文，AI 只在需要时读取。",
-    contextFieldHelp: "说明",
-    newContext: "新建上下文",
-    editContext: "编辑上下文",
-    createContext: "创建上下文",
-    contextAutosaving: "正在保存修改…",
-    contextAutosavePending: "修改等待保存",
-    contextAutosaved: "所有修改已保存",
-    contextAutosaveFailed: "保存失败，将自动重试",
-    deleteContext: "删除上下文",
-    deleteContextTitle: "删除这个上下文？",
-    deleteContextDescription: "子上下文会变成顶层上下文。",
-    contextCreated: "上下文已创建",
-    contextUpdated: "上下文已更新",
-    contextDeleted: "上下文已删除",
-    contextCollapse: "收起上下文",
-    contextExpand: "展开上下文",
-    commonContextTitle: "Cybion 公共上下文",
-    commonContextHint: "随 Cybion 源码编译发布、所有用户共享、只读；Thread 通过上下文工具按需渐进阅读，内容只随版本变化。",
+    manualLocalTitle: "你的手册",
+    manualEmpty: "还没有手册。新建一个，记录资料在哪里、怎样获取。",
+    manualTrashTitle: "回收站",
+    manualRestore: "还原",
+    manualSelectHint: "在左侧树中选择一个节点，或新建手册。",
+    manualGlobalBadge: "只读",
+    manualGlobalHint: "随 Cybion 版本编译发布、所有用户共享只读。下方内容即 Thread 通过手册工具读到的正文。",
+    manualLock: "锁定（AI 只读）",
+    manualUnlock: "解除锁定",
+    manualLockedBadge: "已锁定 · AI 只读",
+    manualLockedHint: "AI 不能用 write_manual 改动它，只能写进它的子手册；你在这里仍可编辑。",
+    manualName: "手册名称",
+    manualDescription: "用途 Use When",
+    manualContent: "正文",
+    manualContentEditHint: "用 Markdown 编写手册。可在编辑器上方切换编辑、源码和预览模式。",
+    manualUseWhenHelp: "用于引导 AI 路由：这是渐进式手册的判定条件——「什么时候需要查看」。AI 先读这一行，再决定是否加载正文；请写判据，不要写内容摘要。",
+    manualBodyHelp: "正文按需加载：不会默认占用对话手册，AI 只在需要时读取。",
+    manualFieldHelp: "说明",
+    newManual: "新建手册",
+    editManual: "编辑手册",
+    createManual: "创建手册",
+    manualAutosaving: "正在保存修改…",
+    manualAutosavePending: "修改等待保存",
+    manualAutosaved: "所有修改已保存",
+    manualAutosaveFailed: "保存失败，将自动重试",
+    deleteManual: "删除手册",
+    deleteManualTitle: "删除这个手册？",
+    deleteManualDescription: "子手册会变成顶层手册。",
+    manualCreated: "手册已创建",
+    manualUpdated: "手册已更新",
+    manualDeleted: "手册已删除",
+    manualCollapse: "收起手册",
+    manualExpand: "展开手册",
+    commonManualTitle: "Cybion 公共手册",
+    commonManualHint: "随 Cybion 源码编译发布、所有用户共享、只读；Thread 通过手册工具按需渐进阅读，内容只随版本变化。",
     navAudit: "审计",
     usageStats: "用量统计",
     navAdministration: "管理员",
@@ -1012,8 +1012,8 @@ const copy = {
     savingDefaults: "保存中…",
     defaultsSaved: "默认设置已保存",
     saveDefaultsError: "无法保存线程默认设置",
-    contextBudget: "上下文预算",
-    contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为 checkpoint；0 表示关闭，内置默认 200000。",
+    contextBudget: "重放预算",
+    contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为检查点；0 表示关闭，内置默认 200000。",
     minimalMode: "极简模式",
     minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
     imageGenerationModel: "图像生成模型",
@@ -1064,12 +1064,12 @@ const copy = {
     toolBrowserControl: "控制浏览器",
     toolComputerUse: "控制桌面",
     toolViewImage: "查看图片",
-    toolLoadContext: "加载并保持上下文",
-    toolUnloadContext: "卸载上下文",
-    toolWriteContext: "创建或编辑上下文",
+    toolLoadManual: "加载并保持手册",
+    toolUnloadManual: "卸载手册",
+    toolWriteManual: "创建或编辑手册",
     toolAddNotes: "添加便签",
     toolCrossOutNotes: "划掉便签",
-    toolListContexts: "列出上下文",
+    toolListManuals: "列出手册",
     toolListWorkers: "列出 Worker",
     toolListUltimateMachines: "列出终极机器",
     toolGetUltimateMachine: "读取终极机器",
@@ -1079,7 +1079,7 @@ const copy = {
     toolImageGeneration: "图像生成",
     phaseKernel: "内核",
     phaseDevice: "设备",
-    toolsKernelHint: "由 Cybion 控制器执行：上下文、Worker 与终极机器管理，以及被控制器接管的网页搜索与图像生成。",
+    toolsKernelHint: "由 Cybion 控制器执行：手册、Worker 与终极机器管理，以及被控制器接管的网页搜索与图像生成。",
     toolsDeviceHint: "发送到你选定的设备（Worker）执行：Shell、浏览器、桌面与图片读取。",
     history: "档案",
     historyDescription: "线程收发记录的全量只读档案。",
@@ -1118,7 +1118,7 @@ const UiContext = createContext<UiContextValue | null>(null)
 
 function useUi() {
   const value = useContext(UiContext)
-  if (!value) throw new Error("UI context is missing")
+  if (!value) throw new Error("UI manual is missing")
   return value
 }
 
@@ -1471,12 +1471,12 @@ function WorkspaceShell({
     { to: "/workers", label: t("workers"), icon: MonitorIcon },
     { to: "/machines", label: t("machines"), icon: PowerIcon },
   ]
-  // Three kinds of governed context, ordered by lifetime: notes clear to zero,
+  // Three kinds of governed manual, ordered by lifetime: notes clear to zero,
   // the manual converges, the archive only grows.
-  const contextNav = [
+  const manualNav = [
     { to: "/notes", label: t("notes"), icon: StickyNoteIcon },
-    { to: "/contexts", label: t("contexts"), icon: FolderTreeIcon },
-    { to: "/history", label: t("history"), icon: DatabaseIcon },
+    { to: "/manuals", label: t("manuals"), icon: FolderTreeIcon },
+    { to: "/archive", label: t("history"), icon: DatabaseIcon },
   ]
   const auditNav = [
     { to: "/insights", label: t("usageStats"), icon: ChartColumnIcon },
@@ -1498,7 +1498,7 @@ function WorkspaceShell({
   ]
   const workspaceNav: WorkspaceNavGroup[] = [
     { id: "work", label: t("navWork"), items: workNav },
-    { id: "contexts", label: t("navGovernedContexts"), items: contextNav },
+    { id: "manuals", label: t("navContexts"), items: manualNav },
     { id: "audit", label: t("navAudit"), items: auditNav },
     ...(administrationNav.length > 0 ? [{ id: "administration", label: t("navAdministration"), items: administrationNav }] : []),
     { id: "configuration", label: t("navConfiguration"), items: configurationNav },
@@ -1536,11 +1536,11 @@ function WorkspaceShell({
             <Route path="/shared-threads" element={<SharedThreadsPage language={language} userId={userId} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />} />
             <Route path="/shared-threads/:ownerId/:threadId" element={<SharedThreadRoute sdk={sdk} userId={userId} />} />
             <Route path="/notes" element={<NotesPage sdk={sdk} />} />
-            <Route path="/contexts" element={<ContextsPage sdk={sdk} />} />
+            <Route path="/manuals" element={<ManualsPage sdk={sdk} />} />
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
-            <Route path="/history" element={<HistoryPage sdk={sdk} />} />
+            <Route path="/archive" element={<HistoryPage sdk={sdk} />} />
             <Route path="/admin/users" element={<Page title={t("users")} description={t("usersDescription")}><AdminUsers language={language} allowed={isAdmin} sessionId={sdk.session.getState().sessionId} request={(signal) => api(sdk, "/api/admin/users", { signal })} /></Page>} />
             <Route path="/admin/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
@@ -1561,11 +1561,11 @@ function WorkspaceShell({
 
 function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/notes")) return t("notesTitle")
-  if (pathname.startsWith("/contexts")) return t("contextsTitle")
+  if (pathname.startsWith("/manuals")) return t("manualsTitle")
   if (pathname.startsWith("/insights")) return t("usageStats")
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
-  if (pathname.startsWith("/history")) return t("history")
+  if (pathname.startsWith("/archive")) return t("history")
   if (pathname.startsWith("/machines")) return t("machines")
   if (pathname.startsWith("/admin/users")) return t("users")
   if (pathname.startsWith("/admin/configuration")) return t("systemConfiguration")
@@ -1720,32 +1720,32 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     ...durableRecords,
     ...pendingResponseRecords(liveResponse.data, durableRecords, threadId),
   ], [durableRecords, liveResponse.data, threadId])
-  // The Contexts this Thread keeps loaded: the endpoint reports the bindings plus
-  // the range that replays, so a Context whose copy sits behind the head shows up
+  // The Manuals this Thread keeps loaded: the endpoint reports the bindings plus
+  // the range that replays, so a Manual whose copy sits behind the head shows up
   // again once the controller has delivered it.
-  const contextLoads = useQuery({
-    queryKey: ["thread-context-loads", threadId, userId],
-    queryFn: ({ signal }) => api<ThreadContextLoadsView>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history/loaded`, { signal }),
+  const manualLoads = useQuery({
+    queryKey: ["thread-manual-loads", threadId, userId],
+    queryFn: ({ signal }) => api<ThreadManualLoadsView>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history/loaded`, { signal }),
     refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
     enabled: Boolean(threadId),
   })
-  // A load/unload or `write_context` card resolves the Context's title and Use
-  // When description through the same caches the Contexts page fills; the
-  // fetches only start when the loaded history actually touches a Context.
-  const loadsContexts = useMemo(() => (contextLoads.data?.loaded.length ?? 0) > 0 || records.some((record) => {
+  // A load/unload or `write_manual` card resolves the Manual's title and Use
+  // When description through the same caches the Manuals page fills; the
+  // fetches only start when the loaded history actually touches a Manual.
+  const loadsManuals = useMemo(() => (manualLoads.data?.loaded.length ?? 0) > 0 || records.some((record) => {
     const payload = historyPayloadObject(record.payload)
-    if (payload?.type === "context_loaded" || payload?.type === "context_unloaded") return true
-    return payload?.type === "function_call" && payload.name === "write_context"
-  }), [contextLoads.data, records])
-  const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts"), enabled: loadsContexts })
-  const commonContexts = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`), enabled: loadsContexts })
-  const contextLookup = useMemo(() => {
-    const lookup = new Map<string, ContextSummary>()
-    for (const context of contexts.data ?? []) lookup.set(context.id, { name: context.name, description: context.description })
-    const root = commonContexts.data?.root
+    if (payload?.type === "manual_loaded" || payload?.type === "manual_unloaded") return true
+    return payload?.type === "function_call" && payload.name === "write_manual"
+  }), [manualLoads.data, records])
+  const manuals = useQuery({ queryKey: ["manuals"], queryFn: () => api<Manual[]>(sdk, "/api/manuals"), enabled: loadsManuals })
+  const commonManuals = useQuery({ queryKey: ["common-manuals", language], queryFn: () => api<{ revision: number; root: CommonManualNode }>(sdk, `/api/common-manuals?lang=${language}`), enabled: loadsManuals })
+  const manualLookup = useMemo(() => {
+    const lookup = new Map<string, ManualSummary>()
+    for (const manual of manuals.data ?? []) lookup.set(manual.id, { name: manual.name, description: manual.description })
+    const root = commonManuals.data?.root
     if (root) for (const node of flattenTree(root)) lookup.set(node.id, { name: node.name, description: node.description })
     return lookup
-  }, [contexts.data, commonContexts.data])
+  }, [manuals.data, commonManuals.data])
   const hasOlder = olderPages[0]?.hasOlder ?? history.data?.hasOlder ?? false
   const loadEarlier = useMutation({
     mutationFn: async () => {
@@ -1886,7 +1886,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
             <ThreadStatusSummary status={current.display_status} language={language} />
-            {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
+            {contextBudget !== undefined && <ThreadContextUsage manual={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
           </div>
         </div>}
         <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
@@ -1913,11 +1913,11 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
             <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
               {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
               {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-              <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} contexts={contextLookup} />} />
+              <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} />} />
               {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
               {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
               {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
-              {contextLoads.data !== undefined && (contextLoads.data.head !== null || contextLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadContextLoads view={contextLoads.data} lookup={contextLookup} language={language} /></div>}
+              {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton behavior="auto" />
@@ -1953,7 +1953,7 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   const { language } = useUi()
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
-  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} contexts={undefined} />} />
+  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} />} />
 }
 
 function SafetyBufferingAlert({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
@@ -1963,7 +1963,7 @@ function SafetyBufferingAlert({ language, view, running }: { language: Language;
   return <MessageScrollerItem><Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{buffering.reasons.join(" · ")}</AlertDescription></Alert></MessageScrollerItem>
 }
 
-const HistoryMessage = memo(function HistoryMessage({ language, record, workers, contexts }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; contexts: ReadonlyMap<string, ContextSummary> | undefined }) {
+const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; manuals: ReadonlyMap<string, ManualSummary> | undefined }) {
   const { t } = useUi()
   const time = formattedTime(language, record.created_at)
   const action = threadControlAction(record)
@@ -1987,11 +1987,11 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
       </MessageContent>
     </Message>
   }
-  // A loaded Context is Thread state the controller maintains; the record is the
+  // A loaded Manual is Thread state the controller maintains; the record is the
   // same notice the compiler replays upstream as a developer message.
-  const loadNotice = contextLoadNotice(record)
+  const loadNotice = manualLoadNotice(record)
   if (loadNotice) {
-    return <ContextLoadNotice notice={loadNotice} lookup={contexts} language={language} time={time} recordId={record.id} />
+    return <ManualLoadNotice notice={loadNotice} lookup={manuals} language={language} time={time} recordId={record.id} />
   }
 
   const text = historyRecordText(record)
@@ -2136,7 +2136,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
 
   const cybionCall = cybionToolFunctionCall(payload)
   if (cybionCall) {
-    return <CybionToolCall language={language} call={cybionCall} workers={workers} contexts={contexts} time={time}>
+    return <CybionToolCall language={language} call={cybionCall} workers={workers} manuals={manuals} time={time}>
       <details className="group mt-2">
         <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
           <span>{t("recordPayload")}</span>
@@ -2190,7 +2190,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
       </div>
     </div>
   </div>
-}, (previous, next) => previous.workers === next.workers && previous.contexts === next.contexts && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
+}, (previous, next) => previous.workers === next.workers && previous.manuals === next.manuals && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")
@@ -2224,18 +2224,18 @@ function historyRecordText(record: HistoryRecord) {
   return historyPayloadText(record.payload)
 }
 
-type CommonContextNode = {
+type CommonManualNode = {
   id: string
   name: string
   description: string
   content: string
-  children: CommonContextNode[]
+  children: CommonManualNode[]
 }
 
-// The Cybion Common Context is compiled into the controller from
-// `common-contexts/`; this card shows users exactly what Threads can read.
+// The Cybion Common Manual is compiled into the controller from
+// `common-manuals/`; this card shows users exactly what Threads can read.
 
-function CommonContextBranch({ node, selectedId, onSelect, collapseLabel, expandLabel }: { node: CommonContextNode; selectedId: string | null; onSelect: (node: CommonContextNode) => void; collapseLabel: string; expandLabel: string }) {
+function CommonManualBranch({ node, selectedId, onSelect, collapseLabel, expandLabel }: { node: CommonManualNode; selectedId: string | null; onSelect: (node: CommonManualNode) => void; collapseLabel: string; expandLabel: string }) {
   const [expanded, setExpanded] = useState(true)
   return <li role="treeitem" aria-expanded={node.children.length > 0 ? expanded : undefined}>
     <div className="flex items-center gap-1">
@@ -2249,30 +2249,30 @@ function CommonContextBranch({ node, selectedId, onSelect, collapseLabel, expand
         </span>
       </Button>
     </div>
-    {expanded && node.children.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{node.children.map((child) => <CommonContextBranch key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
+    {expanded && node.children.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{node.children.map((child) => <CommonManualBranch key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} />)}</ul>}
   </li>
 }
 
-function CommonContextCard({ sdk }: { sdk: AuthMiniApi }) {
+function CommonManualCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const query = useQuery({
-    queryKey: ["common-contexts", language],
-    queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`),
+    queryKey: ["common-manuals", language],
+    queryFn: () => api<{ revision: number; root: CommonManualNode }>(sdk, `/api/common-manuals?lang=${language}`),
   })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const root = query.data?.root ?? null
   useEffect(() => {
     if (root && selectedId === null) setSelectedId(root.id)
   }, [root, selectedId])
-  const selected = root && selectedId ? findCommonContextNode(root, selectedId) : null
+  const selected = root && selectedId ? findCommonManualNode(root, selectedId) : null
   return <Card>
-    <CardHeader><CardTitle>{t("commonContextTitle")}</CardTitle><CardDescription>{t("commonContextHint")}</CardDescription></CardHeader>
+    <CardHeader><CardTitle>{t("commonManualTitle")}</CardTitle><CardDescription>{t("commonManualHint")}</CardDescription></CardHeader>
     <CardContent>
       {query.error && <RequestError error={query.error as Error} onRetry={() => void query.refetch()} />}
       {!root && !query.error && <div className="flex flex-col gap-2"><Skeleton className="h-8" /><Skeleton className="h-8" /></div>}
       {root && <div className="grid gap-6 xl:grid-cols-[minmax(14rem,0.7fr)_minmax(0,1.6fr)]">
-        <ul role="tree" aria-label={t("commonContextTitle")} className="space-y-1">
-          <CommonContextBranch node={root} selectedId={selectedId} onSelect={(node) => setSelectedId(node.id)} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />
+        <ul role="tree" aria-label={t("commonManualTitle")} className="space-y-1">
+          <CommonManualBranch node={root} selectedId={selectedId} onSelect={(node) => setSelectedId(node.id)} collapseLabel={t("manualCollapse")} expandLabel={t("manualExpand")} />
         </ul>
         {selected && <div className="min-w-0">
           <p className="font-medium">{selected.name}</p>
@@ -2286,10 +2286,10 @@ function CommonContextCard({ sdk }: { sdk: AuthMiniApi }) {
   </Card>
 }
 
-function findCommonContextNode(node: CommonContextNode, id: string): CommonContextNode | null {
+function findCommonManualNode(node: CommonManualNode, id: string): CommonManualNode | null {
   if (node.id === id) return node
   for (const child of node.children) {
-    const found = findCommonContextNode(child, id)
+    const found = findCommonManualNode(child, id)
     if (found) return found
   }
   return null
@@ -2298,7 +2298,7 @@ function findCommonContextNode(node: CommonContextNode, id: string): CommonConte
 
 // Auto-save mirrors CTX: edits flush on a change debounce, a periodic
 // interval, focus leaving the form, hiding the page (refresh or close) and
-// leaving the page for another node. Creating a context stays explicit.
+// leaving the page for another node. Creating a manual stays explicit.
 const CONTEXT_AUTOSAVE_DEBOUNCE_MS = 5_000
 const CONTEXT_AUTOSAVE_INTERVAL_MS = 15_000
 
@@ -2384,26 +2384,26 @@ function NotesPage({ sdk }: { sdk: AuthMiniApi }) {
   </Page>
 }
 
-function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
+function ManualsPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const client = useQueryClient()
-  const contexts = useQuery({ queryKey: ["contexts"], queryFn: () => api<Context[]>(sdk, "/api/contexts") })
-  const common = useQuery({ queryKey: ["common-contexts", language], queryFn: () => api<{ revision: number; root: CommonContextNode }>(sdk, `/api/common-contexts?lang=${language}`) })
+  const manuals = useQuery({ queryKey: ["manuals"], queryFn: () => api<Manual[]>(sdk, "/api/manuals") })
+  const common = useQuery({ queryKey: ["common-manuals", language], queryFn: () => api<{ revision: number; root: CommonManualNode }>(sdk, `/api/common-manuals?lang=${language}`) })
   const [searchParams, setSearchParams] = useSearchParams()
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get("context"))
-  const [draft, setDraft] = useState<ContextDraft | null>(null)
-  const [saved, setSaved] = useState<ContextDraft | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get("manual"))
+  const [draft, setDraft] = useState<ManualDraft | null>(null)
+  const [saved, setSaved] = useState<ManualDraft | null>(null)
   const [pending, setPending] = useState<ReadonlySet<string | null>>(new Set<string | null>())
   const [saveFailure, setSaveFailure] = useState<{ id: string | null; error: Error } | null>(null)
   const [initialized, setInitialized] = useState(false)
   // The refs mirror the state for timer callbacks; `drafts` remembers the
-  // newest draft of each context for this session so switching back never
+  // newest draft of each manual for this session so switching back never
   // reloads a stale server copy over edits that are still unsaved.
-  const draftRef = useRef<ContextDraft | null>(null)
-  const savedRef = useRef<ContextDraft | null>(null)
+  const draftRef = useRef<ManualDraft | null>(null)
+  const savedRef = useRef<ManualDraft | null>(null)
   const pendingRef = useRef<ReadonlySet<string | null>>(new Set<string | null>())
-  const draftsRef = useRef(new Map<string, ContextDraft>())
+  const draftsRef = useRef(new Map<string, ManualDraft>())
   const createTargetRef = useRef(false)
   const sdkRef = useRef(sdk)
   useEffect(() => { sdkRef.current = sdk }, [sdk])
@@ -2411,11 +2411,11 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   const commonNodes = useMemo(() => (commonRoot ? flattenTree(commonRoot) : []), [commonRoot])
   // Trash is a display split of the same list: the tree renders only visible
   // rows, and the trash section offers the marked roots back for restore.
-  const visible = useMemo(() => visibleContexts(contexts.data ?? []), [contexts.data])
-  const trashed = useMemo(() => trashedRoots(contexts.data ?? []), [contexts.data])
+  const visible = useMemo(() => visibleManuals(manuals.data ?? []), [manuals.data])
+  const trashed = useMemo(() => trashedRoots(manuals.data ?? []), [manuals.data])
 
-  const rememberDraft = (next: ContextDraft | null) => { draftRef.current = next; setDraft(next) }
-  const rememberSaved = (next: ContextDraft | null) => { savedRef.current = next; setSaved(next) }
+  const rememberDraft = (next: ManualDraft | null) => { draftRef.current = next; setDraft(next) }
+  const rememberSaved = (next: ManualDraft | null) => { savedRef.current = next; setSaved(next) }
   const markPending = (id: string | null, active: boolean) => {
     const next = new Set(pendingRef.current)
     if (active) next.add(id)
@@ -2423,22 +2423,22 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     pendingRef.current = next
     setPending(next)
   }
-  const loadDraft = (context: Context) => draftsRef.current.get(context.id) ?? contextDraft(context)
+  const loadDraft = (manual: Manual) => draftsRef.current.get(manual.id) ?? manualDraft(manual)
 
-  // The selected context id is URL state so a refresh restores the same pane;
+  // The selected manual id is URL state so a refresh restores the same pane;
   // the history entry is replaced so tree clicks never pile up in the back stack.
   const rememberSelection = (id: string | null) => {
     setSearchParams((current) => {
       const next = new URLSearchParams(current)
-      if (id === null) next.delete("context")
-      else next.set("context", id)
+      if (id === null) next.delete("manual")
+      else next.set("manual", id)
       return next
     }, { replace: true })
   }
 
   // Restoring a selection expands the common ancestors that hide it.
   const commonIds = useMemo(() => new Set(commonNodes.map((node) => node.id)), [commonNodes])
-  const localIds = useMemo(() => new Set(visible.map((context) => context.id)), [visible])
+  const localIds = useMemo(() => new Set(visible.map((manual) => manual.id)), [visible])
   const commonExpandedFor = useRef<string | null>(null)
   useEffect(() => {
     if (!selectedId || !commonRoot || commonExpandedFor.current === selectedId) return
@@ -2454,16 +2454,16 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   }, [selectedId, commonRoot, commonIds, localIds])
 
   useEffect(() => {
-    const ready = contexts.data !== undefined &&
+    const ready = manuals.data !== undefined &&
       (commonRoot !== null || common.error !== null)
     if (!ready || initialized) return
     setInitialized(true)
-    // A context id carried in the URL wins over the default first selection.
+    // A manual id carried in the URL wins over the default first selection.
     if (selectedId !== null) {
-      const restored = visible.find((context) => context.id === selectedId)
+      const restored = visible.find((manual) => manual.id === selectedId)
       if (restored) {
         rememberDraft(loadDraft(restored))
-        rememberSaved(contextDraft(restored))
+        rememberSaved(manualDraft(restored))
         return
       }
       if (commonNodes.some((node) => node.id === selectedId)) return
@@ -2472,7 +2472,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     if (firstLocal) {
       setSelectedId(firstLocal.id)
       rememberDraft(loadDraft(firstLocal))
-      rememberSaved(contextDraft(firstLocal))
+      rememberSaved(manualDraft(firstLocal))
     } else if (commonRoot) {
       setSelectedId(commonRoot.id)
     }
@@ -2482,8 +2482,8 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     if (draft?.id) draftsRef.current.set(draft.id, draft)
   }, [draft])
 
-  const finishSave = (value: Context, sent: ContextDraft) => {
-    void client.invalidateQueries({ queryKey: ["contexts"] })
+  const finishSave = (value: Manual, sent: ManualDraft) => {
+    void client.invalidateQueries({ queryKey: ["manuals"] })
     setSaveFailure((failure) => failure && failure.id === sent.id ? null : failure)
     const current = draftRef.current
     if (sent.id === null) {
@@ -2491,7 +2491,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
       createTargetRef.current = false
       if (!creating || current === null || current.id !== null) return
       if (draftsMatch(current, sent)) {
-        const next = contextDraft(value)
+        const next = manualDraft(value)
         rememberDraft(next)
         rememberSaved(next)
       } else {
@@ -2507,12 +2507,12 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     if (current && current.id === sent.id) rememberSaved(sent)
   }
 
-  const saveNow = useCallback((sent: ContextDraft) => {
+  const saveNow = useCallback((sent: ManualDraft) => {
     if (pendingRef.current.has(sent.id)) return
     markPending(sent.id, true)
     void (async () => {
       try {
-        const value = await api<Context>(sdkRef.current, sent.id ? `/api/contexts/${encodeURIComponent(sent.id)}` : "/api/contexts", {
+        const value = await api<Manual>(sdkRef.current, sent.id ? `/api/manuals/${encodeURIComponent(sent.id)}` : "/api/manuals", {
           method: sent.id ? "PATCH" : "POST",
           body: JSON.stringify({
             name: sent.name,
@@ -2545,40 +2545,40 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
   }, [saveNow])
 
   const remove = useMutation({
-    mutationFn: (id: string) => api<unknown>(sdk, `/api/contexts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    mutationFn: (id: string) => api<unknown>(sdk, `/api/manuals/${encodeURIComponent(id)}`, { method: "DELETE" }),
     onSuccess: (_value, id) => {
       draftsRef.current.delete(id)
       setSelectedId((current) => current === id ? null : current)
       rememberSelection(null)
       if (draftRef.current?.id === id) { rememberDraft(null); rememberSaved(null) }
       setSaveFailure((failure) => failure && failure.id === id ? null : failure)
-      void client.invalidateQueries({ queryKey: ["contexts"] })
+      void client.invalidateQueries({ queryKey: ["manuals"] })
     },
   })
   const move = useMutation({
-    mutationFn: (input: { id: string; parentId: string | null; afterId: string | null }) => api<Context>(sdk, `/api/contexts/${encodeURIComponent(input.id)}/move`, {
+    mutationFn: (input: { id: string; parentId: string | null; afterId: string | null }) => api<Manual>(sdk, `/api/manuals/${encodeURIComponent(input.id)}/move`, {
       method: "POST",
       body: JSON.stringify({ parent_id: input.parentId, after_id: input.afterId }),
     }),
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
-    onError: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["manuals"] }),
+    onError: () => void client.invalidateQueries({ queryKey: ["manuals"] }),
   })
   const restore = useMutation({
-    mutationFn: (id: string) => api<Context>(sdk, `/api/contexts/${encodeURIComponent(id)}/restore`, { method: "POST" }),
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
+    mutationFn: (id: string) => api<Manual>(sdk, `/api/manuals/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["manuals"] }),
   })
   // The lock is the owner's flag, so it is its own immediate write instead of
   // riding on the draft: a toggle must land now, and a content save that omits
   // it leaves it alone.
   const lock = useMutation({
-    mutationFn: (input: { id: string; locked: boolean }) => api<Context>(sdk, `/api/contexts/${encodeURIComponent(input.id)}`, {
+    mutationFn: (input: { id: string; locked: boolean }) => api<Manual>(sdk, `/api/manuals/${encodeURIComponent(input.id)}`, {
       method: "PATCH",
       body: JSON.stringify({ locked: input.locked }),
     }),
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["contexts"] }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["manuals"] }),
   })
 
-  const editDraft = useCallback((update: (current: ContextDraft) => ContextDraft) => {
+  const editDraft = useCallback((update: (current: ManualDraft) => ManualDraft) => {
     const current = draftRef.current
     if (!current) return
     const next = update(current)
@@ -2594,12 +2594,12 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
       return updated
     })
   }
-  const selectLocal = (context: Context) => {
+  const selectLocal = (manual: Manual) => {
     saveIfNeeded()
-    setSelectedId(context.id)
-    rememberSelection(context.id)
-    rememberDraft(loadDraft(context))
-    rememberSaved(contextDraft(context))
+    setSelectedId(manual.id)
+    rememberSelection(manual.id)
+    rememberDraft(loadDraft(manual))
+    rememberSaved(manualDraft(manual))
     remove.reset()
   }
   const selectNode = (id: string) => {
@@ -2616,13 +2616,13 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     setSaveFailure((failure) => failure && failure.id === null ? null : failure)
     setSelectedId(null)
     rememberSelection(null)
-    rememberDraft(contextDraft())
+    rememberDraft(manualDraft())
     rememberSaved(null)
     remove.reset()
   }
   const deleteSelected = () => {
     const current = draftRef.current
-    if (!current?.id || remove.isPending || !window.confirm(`${t("deleteContextTitle")}\n\n${t("deleteContextDescription")}`)) return
+    if (!current?.id || remove.isPending || !window.confirm(`${t("deleteManualTitle")}\n\n${t("deleteManualDescription")}`)) return
     remove.mutate(current.id)
   }
 
@@ -2645,44 +2645,44 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
 
   // Selection resolves by id across the two sources, mirroring the
   // controller's read order: a local draft wins, then the common tree.
-  const localSelected = draft ? null : visible.find((context) => context.id === selectedId) ?? null
-  const draftLocked = draft?.id ? (contexts.data ?? []).find((context) => context.id === draft.id)?.locked === true : false
+  const localSelected = draft ? null : visible.find((manual) => manual.id === selectedId) ?? null
+  const draftLocked = draft?.id ? (manuals.data ?? []).find((manual) => manual.id === draft.id)?.locked === true : false
   const commonSelected = draft || localSelected ? null : commonNodes.find((node) => node.id === selectedId) ?? null
 
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     <aside className="border-b bg-sidebar/40 p-3 lg:w-80 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex items-center gap-2 pb-3">
-        <Button type="button" size="sm" variant="outline" className="min-w-0 flex-1 justify-start" onClick={() => createNew()}><PlusIcon data-icon="inline-start" /><span className="truncate">{t("newContext")}</span></Button>
-        <ConceptHelp topic="context" language={language} />
+        <Button type="button" size="sm" variant="outline" className="min-w-0 flex-1 justify-start" onClick={() => createNew()}><PlusIcon data-icon="inline-start" /><span className="truncate">{t("newManual")}</span></Button>
+        <ConceptHelp topic="manual" language={language} />
       </div>
       <div className="flex flex-col gap-4 lg:max-h-[calc(100svh-8rem)] lg:overflow-y-auto">
-        {contexts.error && <RequestError error={contexts.error} onRetry={() => void contexts.refetch()} />}
-        {contexts.isLoading && <div className="flex flex-col gap-2"><Skeleton className="h-8" /><Skeleton className="h-8" /><Skeleton className="h-8" /></div>}
-        {contexts.data && <>
+        {manuals.error && <RequestError error={manuals.error} onRetry={() => void manuals.refetch()} />}
+        {manuals.isLoading && <div className="flex flex-col gap-2"><Skeleton className="h-8" /><Skeleton className="h-8" /><Skeleton className="h-8" /></div>}
+        {manuals.data && <>
           {commonRoot && <section>
-            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("commonContextTitle")}</p>
-            <ul role="tree" aria-label={t("commonContextTitle")} className="space-y-1">
-              <CommonBranch node={commonRoot} selectedId={selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />
+            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("commonManualTitle")}</p>
+            <ul role="tree" aria-label={t("commonManualTitle")} className="space-y-1">
+              <CommonBranch node={commonRoot} selectedId={selectedId} onSelect={selectNode} expanded={expanded} onToggle={toggleExpanded} collapseLabel={t("manualCollapse")} expandLabel={t("manualExpand")} />
             </ul>
           </section>}
           <section>
-            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextLocalTitle")}</p>
+            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("manualLocalTitle")}</p>
             {visible.length === 0
-              ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("contextEmpty")}</p>
-              : <ContextTree contexts={visible} selectedId={selectedId} onSelect={selectLocal} onMove={(input) => move.mutate(input)} movePending={move.isPending} label={t("contextLocalTitle")} collapseLabel={t("contextCollapse")} expandLabel={t("contextExpand")} />}
+              ? <p className="px-2 py-1 text-sm text-muted-foreground">{t("manualEmpty")}</p>
+              : <ManualTree manuals={visible} selectedId={selectedId} onSelect={selectLocal} onMove={(input) => move.mutate(input)} movePending={move.isPending} label={t("manualLocalTitle")} collapseLabel={t("manualCollapse")} expandLabel={t("manualExpand")} />}
             {move.error && <RequestError error={move.error} onRetry={() => { if (move.variables) move.mutate(move.variables) }} />}
           </section>
           {trashed.length > 0 && <section>
-            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("contextTrashTitle")}</p>
-            <ul aria-label={t("contextTrashTitle")} className="space-y-1">
-              {trashed.map((context) => <li key={context.id}>
+            <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">{t("manualTrashTitle")}</p>
+            <ul aria-label={t("manualTrashTitle")} className="space-y-1">
+              {trashed.map((manual) => <li key={manual.id}>
                 <div className="flex items-center gap-1">
                   <span className="flex min-w-0 flex-1 flex-col gap-0.5 px-2 py-2">
-                    <span className="truncate font-medium">{context.name}</span>
-                    {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
+                    <span className="truncate font-medium">{manual.name}</span>
+                    {manual.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{manual.description}</span>}
                   </span>
-                  <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={t("contextRestore")} title={t("contextRestore")} disabled={restore.isPending} onClick={() => restore.mutate(context.id)}>
-                    {restore.isPending && restore.variables === context.id ? <Spinner /> : <ArchiveRestoreIcon className="size-4" />}
+                  <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={t("manualRestore")} title={t("manualRestore")} disabled={restore.isPending} onClick={() => restore.mutate(manual.id)}>
+                    {restore.isPending && restore.variables === manual.id ? <Spinner /> : <ArchiveRestoreIcon className="size-4" />}
                   </Button>
                 </div>
               </li>)}
@@ -2694,7 +2694,7 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
     </aside>
     <section className="flex w-full min-w-0 flex-col lg:min-h-0 lg:flex-1">
       {draft
-        ? <ContextEditorForm
+        ? <ManualEditorForm
             draft={draft}
             editDraft={editDraft}
             remove={remove}
@@ -2710,49 +2710,49 @@ function ContextsPage({ sdk }: { sdk: AuthMiniApi }) {
             onToggleLock={() => { if (draft.id) lock.mutate({ id: draft.id, locked: !draftLocked }) }}
           />
         : commonSelected
-          ? <ContextReadOnlyPane
+          ? <ManualReadOnlyPane
               title={commonSelected.name}
               description={commonSelected.description}
-              badge={t("contextGlobalBadge")}
-              hint={t("contextGlobalHint")}
+              badge={t("manualGlobalBadge")}
+              hint={t("manualGlobalHint")}
               content={commonSelected.content}
               language={language}
             />
-          : <ContextPane><p className="py-16 text-center text-sm text-muted-foreground">{t("contextSelectHint")}</p></ContextPane>}
+          : <ManualPane><p className="py-16 text-center text-sm text-muted-foreground">{t("manualSelectHint")}</p></ManualPane>}
     </section>
   </main>
 }
 
-function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, label, collapseLabel, expandLabel }: {
-  contexts: Context[]
+function ManualTree({ manuals, selectedId, onSelect, onMove, movePending, label, collapseLabel, expandLabel }: {
+  manuals: Manual[]
   selectedId: string | null
-  onSelect: (context: Context) => void
+  onSelect: (manual: Manual) => void
   onMove: (input: { id: string; parentId: string | null; afterId: string | null }) => void
   movePending: boolean
   label: string
   collapseLabel: string
   expandLabel: string
 }) {
-  const index = useMemo(() => contextTreeIndex(contexts), [contexts])
+  const index = useMemo(() => manualTreeIndex(manuals), [manuals])
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [activeId, setActiveId] = useState<string | null>(null)
-  const [dropTarget, setDropTarget] = useState<{ id: string; zone: ContextDropZone } | null>(null)
+  const [dropTarget, setDropTarget] = useState<{ id: string; zone: ManualDropZone } | null>(null)
   const invalidTargets = useMemo(() => new Set(activeId ? [activeId, ...collectSubtreeIds(index, activeId)] : []), [index, activeId])
-  const activeContext = contexts.find((context) => context.id === activeId) ?? null
-  const localIds = useMemo(() => new Set(contexts.map((context) => context.id)), [contexts])
+  const activeManual = manuals.find((manual) => manual.id === activeId) ?? null
+  const localIds = useMemo(() => new Set(manuals.map((manual) => manual.id)), [manuals])
   const expandedFor = useRef<string | null>(null)
   // A restored selection expands the parent chain that hides its row.
   useEffect(() => {
     if (!selectedId || expandedFor.current === selectedId || !localIds.has(selectedId)) return
     expandedFor.current = selectedId
-    const ancestors = contextAncestorIds(contexts, selectedId)
+    const ancestors = manualAncestorIds(manuals, selectedId)
     if (ancestors.length === 0) return
     setExpanded((current) => {
       const next = new Set(current)
       for (const id of ancestors) next.add(id)
       return next
     })
-  }, [selectedId, contexts, localIds])
+  }, [selectedId, manuals, localIds])
   const toggleExpanded = (id: string) => {
     setExpanded((current) => {
       const next = new Set(current)
@@ -2782,7 +2782,7 @@ function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, labe
     }
     const center = translated.top + translated.height / 2
     const ratio = (center - over.rect.top) / over.rect.height
-    const zone: ContextDropZone = ratio < 0.3 ? "before" : ratio > 0.7 ? "after" : "inside"
+    const zone: ManualDropZone = ratio < 0.3 ? "before" : ratio > 0.7 ? "after" : "inside"
     const id = String(over.id)
     setDropTarget((previous) => previous && previous.id === id && previous.zone === zone ? previous : { id, zone })
   }
@@ -2791,12 +2791,12 @@ function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, labe
     const id = String(event.active.id)
     resetDrag()
     if (!target) return
-    const moving = contexts.find((context) => context.id === id)
-    const over = contexts.find((context) => context.id === target.id)
+    const moving = manuals.find((manual) => manual.id === id)
+    const over = manuals.find((manual) => manual.id === target.id)
     if (!moving || !over) return
-    const placement = contextPlacementFor(index, moving, over, target.zone)
+    const placement = manualPlacementFor(index, moving, over, target.zone)
     if (!placement) return
-    const current = contextCurrentPlacement(index, moving)
+    const current = manualCurrentPlacement(index, moving)
     if (placement.parentId === current.parentId && placement.afterId === current.afterId) return
     onMove({ id, ...placement })
   }
@@ -2809,70 +2809,70 @@ function ContextTree({ contexts, selectedId, onSelect, onMove, movePending, labe
     onDragCancel={resetDrag}
   >
     <ul role="tree" aria-label={label} className="space-y-1">
-      {(index.get(null) ?? []).map((context) => <ContextTreeNode key={context.id} context={context} children={index} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={movePending} activeId={activeId} dropTarget={dropTarget} expanded={expanded} onToggleExpanded={toggleExpanded} />)}
+      {(index.get(null) ?? []).map((manual) => <ManualTreeNode key={manual.id} manual={manual} children={index} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={movePending} activeId={activeId} dropTarget={dropTarget} expanded={expanded} onToggleExpanded={toggleExpanded} />)}
     </ul>
     <DragOverlay dropAnimation={null}>
-      {activeContext ? <div className="flex w-64 items-center gap-2 rounded-md border bg-background px-3 py-1.5 shadow-lg">
-        <span className="truncate text-sm">{activeContext.name}</span>
+      {activeManual ? <div className="flex w-64 items-center gap-2 rounded-md border bg-background px-3 py-1.5 shadow-lg">
+        <span className="truncate text-sm">{activeManual.name}</span>
       </div> : null}
     </DragOverlay>
   </DndContext>
 }
 
-function ContextTreeNode({ context, children, selectedId, onSelect, collapseLabel, expandLabel, disabled, activeId, dropTarget, expanded, onToggleExpanded }: {
-  context: Context
-  children: Map<string | null, Context[]>
+function ManualTreeNode({ manual, children, selectedId, onSelect, collapseLabel, expandLabel, disabled, activeId, dropTarget, expanded, onToggleExpanded }: {
+  manual: Manual
+  children: Map<string | null, Manual[]>
   selectedId: string | null
-  onSelect: (context: Context) => void
+  onSelect: (manual: Manual) => void
   collapseLabel: string
   expandLabel: string
   disabled: boolean
   activeId: string | null
-  dropTarget: { id: string; zone: ContextDropZone } | null
+  dropTarget: { id: string; zone: ManualDropZone } | null
   expanded: ReadonlySet<string>
   onToggleExpanded: (id: string) => void
 }) {
-  const nested = children.get(context.id) ?? []
-  const isExpanded = expanded.has(context.id)
-  const isDragging = activeId === context.id
-  const dropZone = dropTarget && dropTarget.id === context.id ? dropTarget.zone : null
+  const nested = children.get(manual.id) ?? []
+  const isExpanded = expanded.has(manual.id)
+  const isDragging = activeId === manual.id
+  const dropZone = dropTarget && dropTarget.id === manual.id ? dropTarget.zone : null
   const rowRef = useRef<HTMLDivElement | null>(null)
   // A restored or fresh selection scrolls its row into the visible tree area.
   useEffect(() => {
-    if (selectedId !== context.id) return
+    if (selectedId !== manual.id) return
     rowRef.current?.scrollIntoView({ block: "nearest" })
-  }, [selectedId, context.id])
-  const { listeners, setNodeRef: setDraggableNode } = useDraggable({ id: context.id, disabled })
-  const { setNodeRef: setDroppableNode } = useDroppable({ id: context.id, disabled })
+  }, [selectedId, manual.id])
+  const { listeners, setNodeRef: setDraggableNode } = useDraggable({ id: manual.id, disabled })
+  const { setNodeRef: setDroppableNode } = useDroppable({ id: manual.id, disabled })
   const setNodeRefs = (node: HTMLDivElement | null) => {
     setDraggableNode(node)
     setDroppableNode(node)
     rowRef.current = node
   }
   return <li role="treeitem" aria-expanded={nested.length > 0 ? isExpanded : undefined}>
-    <div ref={setNodeRefs} className="relative" data-context-id={context.id}>
+    <div ref={setNodeRefs} className="relative" data-manual-id={manual.id}>
       {dropZone === "before" && <div aria-hidden="true" className="absolute inset-x-2 top-0 z-10 h-0.5 rounded-full bg-primary" />}
       <div {...listeners} className={`flex cursor-grab items-center gap-1 rounded-md select-none ${isDragging ? "opacity-40" : ""} ${dropZone === "inside" ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}>
-        <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} disabled={nested.length === 0} onClick={() => onToggleExpanded(context.id)}>
+        <Button type="button" size="icon-sm" variant="ghost" className="shrink-0" aria-label={isExpanded ? collapseLabel : expandLabel} disabled={nested.length === 0} onClick={() => onToggleExpanded(manual.id)}>
           {nested.length > 0 && <ChevronDownIcon className={isExpanded ? "" : "-rotate-90"} />}
         </Button>
-        <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === context.id ? "bg-accent" : ""}`} onClick={() => onSelect(context)}>
+        <Button type="button" variant="ghost" className={`h-auto min-w-0 flex-1 justify-start px-2 py-2 text-left ${selectedId === manual.id ? "bg-accent" : ""}`} onClick={() => onSelect(manual)}>
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span className="flex min-w-0 items-center gap-1">
-              <span className="truncate font-medium">{context.name}</span>
-              {context.locked && <LockIcon data-locked="true" aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />}
+              <span className="truncate font-medium">{manual.name}</span>
+              {manual.locked && <LockIcon data-locked="true" aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />}
             </span>
-            {context.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{context.description}</span>}
+            {manual.description && <span className="hidden truncate text-xs text-muted-foreground sm:inline">{manual.description}</span>}
           </span>
         </Button>
       </div>
       {dropZone === "after" && <div aria-hidden="true" className="absolute inset-x-2 bottom-0 z-10 h-0.5 rounded-full bg-primary" />}
     </div>
-    {isExpanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ContextTreeNode key={child.id} context={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={disabled} activeId={activeId} dropTarget={dropTarget} expanded={expanded} onToggleExpanded={onToggleExpanded} />)}</ul>}
+    {isExpanded && nested.length > 0 && <ul role="group" className="ml-5 border-l pl-2">{nested.map((child) => <ManualTreeNode key={child.id} manual={child} children={children} selectedId={selectedId} onSelect={onSelect} collapseLabel={collapseLabel} expandLabel={expandLabel} disabled={disabled} activeId={activeId} dropTarget={dropTarget} expanded={expanded} onToggleExpanded={onToggleExpanded} />)}</ul>}
   </li>
 }
 
-function CommonBranch({ node, selectedId, onSelect, expanded, onToggle, collapseLabel, expandLabel }: { node: CommonContextNode; selectedId: string | null; onSelect: (id: string) => void; expanded: ReadonlySet<string>; onToggle: (id: string, next: boolean) => void; collapseLabel: string; expandLabel: string }) {
+function CommonBranch({ node, selectedId, onSelect, expanded, onToggle, collapseLabel, expandLabel }: { node: CommonManualNode; selectedId: string | null; onSelect: (id: string) => void; expanded: ReadonlySet<string>; onToggle: (id: string, next: boolean) => void; collapseLabel: string; expandLabel: string }) {
   const isExpanded = expanded.has(node.id)
   const hasChildren = node.children.length > 0
   const rowRef = useRef<HTMLDivElement | null>(null)
@@ -2899,7 +2899,7 @@ function CommonBranch({ node, selectedId, onSelect, expanded, onToggle, collapse
 
 // One reading and editing surface shared by the right column: the content
 // sits in a centered column and the pane scrolls inside the page at desktop.
-function ContextPane({ children }: { children: ReactNode }) {
+function ManualPane({ children }: { children: ReactNode }) {
   // `relative` keeps absolutely positioned pane furniture (Select companion
   // inputs and inline popovers) inside this scroll container instead of letting
   // it stretch the shell's scroll area.
@@ -2908,8 +2908,8 @@ function ContextPane({ children }: { children: ReactNode }) {
   </div>
 }
 
-function ContextReadOnlyPane({ title, description, badge, hint, content, language, meta }: { title: string; description: string; badge: string | null; hint: string | null; content: string; language: "en" | "zh"; meta?: ReactNode }) {
-  return <ContextPane>
+function ManualReadOnlyPane({ title, description, badge, hint, content, language, meta }: { title: string; description: string; badge: string | null; hint: string | null; content: string; language: "en" | "zh"; meta?: ReactNode }) {
+  return <ManualPane>
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0">
         <p className="truncate font-heading text-base font-medium">{title}</p>
@@ -2920,14 +2920,14 @@ function ContextReadOnlyPane({ title, description, badge, hint, content, languag
     {meta ? <div className="flex flex-wrap items-center gap-3">{meta}</div> : null}
     {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
     <MarkdownEditor language={language} value={content} onChange={() => {}} readOnly />
-  </ContextPane>
+  </ManualPane>
 }
 
-function ContextFieldHelp({ label, help }: { label: string; help: string }) {
+function ManualFieldHelp({ label, help }: { label: string; help: string }) {
   const { t } = useUi()
   return <Dialog>
     <DialogTrigger asChild>
-      <Button type="button" size="icon-sm" variant="ghost" className="size-5 text-muted-foreground" aria-label={`${label} ${t("contextFieldHelp")}`}><InfoIcon className="size-3.5" /></Button>
+      <Button type="button" size="icon-sm" variant="ghost" className="size-5 text-muted-foreground" aria-label={`${label} ${t("manualFieldHelp")}`}><InfoIcon className="size-3.5" /></Button>
     </DialogTrigger>
     <DialogContent className="sm:max-w-md">
       <DialogHeader>
@@ -2938,9 +2938,9 @@ function ContextFieldHelp({ label, help }: { label: string; help: string }) {
   </Dialog>
 }
 
-function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSelected, saving, dirty, saveError, locked, lockPending, lockError, onToggleLock }: {
-  draft: ContextDraft
-  editDraft: (update: (current: ContextDraft) => ContextDraft) => void
+function ManualEditorForm({ draft, editDraft, remove, submit, flush, deleteSelected, saving, dirty, saveError, locked, lockPending, lockError, onToggleLock }: {
+  draft: ManualDraft
+  editDraft: (update: (current: ManualDraft) => ManualDraft) => void
   remove: UseMutationResult<unknown, Error, string>
   submit: () => void
   flush: () => void
@@ -2954,29 +2954,29 @@ function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSele
   onToggleLock: () => void
 }) {
   const { t, language } = useUi()
-  const autosaveStatus = saving ? t("contextAutosaving") : saveError ? t("contextAutosaveFailed") : dirty ? t("contextAutosavePending") : t("contextAutosaved")
+  const autosaveStatus = saving ? t("manualAutosaving") : saveError ? t("manualAutosaveFailed") : dirty ? t("manualAutosavePending") : t("manualAutosaved")
   // New drafts keep the title in editing until they exist — the name is what
-  // creates them; an existing context falls back to the display heading on
+  // creates them; an existing manual falls back to the display heading on
   // blur, so the heading always shows the saved name.
   const [renaming, setRenaming] = useState(draft.id === null)
   useEffect(() => {
     setRenaming(draft.id === null)
   }, [draft.id])
-  return <ContextPane>
+  return <ManualPane>
     <div className="flex min-w-0 items-center gap-2">
       {renaming
-        ? <Input id="context-name" aria-label={t("contextName")} placeholder={t("contextName")} autoFocus className="min-w-0 flex-1 font-heading text-lg font-semibold" value={draft.name} onChange={(event) => editDraft((current) => ({ ...current, name: event.target.value }))} onBlur={() => { if (draft.id) setRenaming(false) }} onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); if (!draft.id) submit() } }} />
-        : <h2 className="min-w-0 flex-1 truncate font-heading text-lg font-semibold">{draft.name.trim() || t("newContext")}</h2>}
+        ? <Input id="manual-name" aria-label={t("manualName")} placeholder={t("manualName")} autoFocus className="min-w-0 flex-1 font-heading text-lg font-semibold" value={draft.name} onChange={(event) => editDraft((current) => ({ ...current, name: event.target.value }))} onBlur={() => { if (draft.id) setRenaming(false) }} onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); if (!draft.id) submit() } }} />
+        : <h2 className="min-w-0 flex-1 truncate font-heading text-lg font-semibold">{draft.name.trim() || t("newManual")}</h2>}
       {!renaming && <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setRenaming(true)}><PencilIcon className="size-4" /></Button>}
-      {draft.id && <Button type="button" size="icon-sm" variant="ghost" aria-label={t("deleteContext")} title={t("deleteContext")} disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon />}</Button>}
+      {draft.id && <Button type="button" size="icon-sm" variant="ghost" aria-label={t("deleteManual")} title={t("deleteManual")} disabled={remove.isPending} onClick={deleteSelected}>{remove.isPending ? <Spinner /> : <Trash2Icon />}</Button>}
     </div>
     {draft.id && <div className="flex flex-wrap items-center gap-2">
-      {locked && <Badge variant="outline">{t("contextLockedBadge")}</Badge>}
-      <Button type="button" size="sm" variant="outline" aria-label={locked ? t("contextUnlock") : t("contextLock")} title={locked ? t("contextUnlock") : t("contextLock")} disabled={lockPending} onClick={onToggleLock}>
+      {locked && <Badge variant="outline">{t("manualLockedBadge")}</Badge>}
+      <Button type="button" size="sm" variant="outline" aria-label={locked ? t("manualUnlock") : t("manualLock")} title={locked ? t("manualUnlock") : t("manualLock")} disabled={lockPending} onClick={onToggleLock}>
         {lockPending ? <Spinner /> : locked ? <LockOpenIcon data-icon="inline-start" /> : <LockIcon data-icon="inline-start" />}
-        <span>{locked ? t("contextUnlock") : t("contextLock")}</span>
+        <span>{locked ? t("manualUnlock") : t("manualLock")}</span>
       </Button>
-      {locked && <p className="text-xs text-muted-foreground">{t("contextLockedHint")}</p>}
+      {locked && <p className="text-xs text-muted-foreground">{t("manualLockedHint")}</p>}
     </div>}
     {lockError && <RequestError error={lockError} onRetry={onToggleLock} />}
     <form
@@ -2987,23 +2987,23 @@ function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSele
       <FieldGroup>
         <Field>
           <div className="flex items-center gap-1">
-            <FieldLabel htmlFor="context-description">{t("contextDescription")}</FieldLabel>
-            <ContextFieldHelp label={t("contextDescription")} help={t("contextUseWhenHelp")} />
+            <FieldLabel htmlFor="manual-description">{t("manualDescription")}</FieldLabel>
+            <ManualFieldHelp label={t("manualDescription")} help={t("manualUseWhenHelp")} />
           </div>
-          <Textarea id="context-description" value={draft.description} onChange={(event) => editDraft((current) => ({ ...current, description: event.target.value }))} rows={3} />
+          <Textarea id="manual-description" value={draft.description} onChange={(event) => editDraft((current) => ({ ...current, description: event.target.value }))} rows={3} />
         </Field>
         <Field>
           <div className="flex items-center gap-1">
-            <FieldLabel htmlFor="context-content">{t("contextContent")}</FieldLabel>
-            <ContextFieldHelp label={t("contextContent")} help={t("contextBodyHelp")} />
+            <FieldLabel htmlFor="manual-content">{t("manualContent")}</FieldLabel>
+            <ManualFieldHelp label={t("manualContent")} help={t("manualBodyHelp")} />
           </div>
           <MarkdownEditor
-            id="context-content"
+            id="manual-content"
             language={language}
             value={draft.content}
             onChange={(content) => editDraft((current) => ({ ...current, content }))}
           />
-          <FieldDescription id="context-content-hint">{t("contextContentEditHint")}</FieldDescription>
+          <FieldDescription id="manual-content-hint">{t("manualContentEditHint")}</FieldDescription>
         </Field>
       </FieldGroup>
       {saveError && <RequestError error={saveError} onRetry={submit} />}
@@ -3011,10 +3011,10 @@ function ContextEditorForm({ draft, editDraft, remove, submit, flush, deleteSele
       <div className="flex flex-wrap items-center gap-3">
         {draft.id
           ? <span role="status" className={`flex items-center gap-2 text-sm ${saveError && !saving ? "text-destructive" : "text-muted-foreground"}`}>{saving && <Spinner />}{autosaveStatus}</span>
-          : <Button type="submit" disabled={!draft.name.trim() || saving}>{saving ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("createContext")}</Button>}
+          : <Button type="submit" disabled={!draft.name.trim() || saving}>{saving ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("createManual")}</Button>}
       </div>
     </form>
-  </ContextPane>
+  </ManualPane>
 }
 
 function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
@@ -3333,9 +3333,9 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
             <Switch id="default-thread-fast" aria-describedby="default-thread-fast-description" checked={value.service_tier_fast} disabled={save.isPending} onCheckedChange={(fast) => edit({ ...value, service_tier_fast: fast })} />
           </Field>
           <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-context-budget">{t("contextBudget")}</FieldLabel>
-            <Input id="default-thread-context-budget" type="number" min={0} max={10000000} step={1000} inputMode="numeric" disabled={save.isPending} value={String(value.context_budget_tokens)} onChange={(event) => { const parsed = Number(event.target.value); if (Number.isFinite(parsed)) edit({ ...value, context_budget_tokens: parsed }) }} />
-            <FieldDescription id="default-thread-context-budget-description">{t("contextBudgetDescription")}</FieldDescription>
+            <FieldLabel htmlFor="default-thread-manual-budget">{t("contextBudget")}</FieldLabel>
+            <Input id="default-thread-manual-budget" type="number" min={0} max={10000000} step={1000} inputMode="numeric" disabled={save.isPending} value={String(value.context_budget_tokens)} onChange={(event) => { const parsed = Number(event.target.value); if (Number.isFinite(parsed)) edit({ ...value, context_budget_tokens: parsed }) }} />
+            <FieldDescription id="default-thread-manual-budget-description">{t("contextBudgetDescription")}</FieldDescription>
           </Field>
           <Field orientation="horizontal" data-disabled={save.isPending}>
             <FieldContent>
@@ -3620,11 +3620,11 @@ function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
 // INVARIANT: every built-in and Worker tool in tools.json needs a label here;
 // the web tests assert coverage in both languages.
 const toolLabels: Record<string, CopyKey> = {
-  cybion_list_contexts: "toolListContexts",
+  list_manuals: "toolListManuals",
   cybion_list_workers: "toolListWorkers",
-  load_context: "toolLoadContext",
-  unload_context: "toolUnloadContext",
-  write_context: "toolWriteContext",
+  load_manual: "toolLoadManual",
+  unload_manual: "toolUnloadManual",
+  write_manual: "toolWriteManual",
   add_notes: "toolAddNotes",
   cross_out_notes: "toolCrossOutNotes",
   cybion_list_ultimate_machines: "toolListUltimateMachines",
@@ -3643,10 +3643,10 @@ function ToolsPage() {
   const { t } = useUi()
   // INVARIANT: tools.json is the single source for who executes a tool, and it
   // has exactly two responsible parties. `worker` runs on the user's device;
-  // `context` and `native` both run in the Controller, because the native tools
+  // `manual` and `native` both run in the Controller, because the native tools
   // are intercepted there instead of being executed by the upstream.
   const groups = [
-    { title: t("phaseKernel"), hint: t("toolsKernelHint"), names: [...toolCatalog.context.map((tool) => tool.name), ...toolCatalog.note.map((tool) => tool.name), ...Object.keys(toolCatalog.native)] },
+    { title: t("phaseKernel"), hint: t("toolsKernelHint"), names: [...toolCatalog.kernel.map((tool) => tool.name), ...toolCatalog.note.map((tool) => tool.name), ...Object.keys(toolCatalog.native)] },
     { title: t("phaseDevice"), hint: t("toolsDeviceHint"), names: toolCatalog.worker.map((tool) => tool.name) },
   ]
   return <Page title={t("tools")} description={t("toolsDescription")}>{groups.map((group) => <Card key={group.title}>

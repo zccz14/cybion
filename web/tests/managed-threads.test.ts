@@ -30,65 +30,65 @@ test("new thread preparation waits for the first message before creating a threa
   assert.match(source, /newThreadPrompt/)
 })
 
-test("contexts are managed through a progressive disclosure tree", () => {
-  assert.match(source, /path="\/contexts" element=\{<ContextsPage/)
-  assert.match(source, /\/api\/contexts/)
+test("manuals are managed through a progressive disclosure tree", () => {
+  assert.match(source, /path="\/manuals" element=\{<ManualsPage/)
+  assert.match(source, /\/api\/manuals/)
   assert.match(source, /<ul role="tree"/)
   assert.match(source, /parent_id/)
-  assert.match(source, /contextContent/)
-  const nodes = source.slice(source.indexOf("function CommonBranch("), source.indexOf("function ContextPane("))
+  assert.match(source, /manualContent/)
+  const nodes = source.slice(source.indexOf("function CommonBranch("), source.indexOf("function ManualPane("))
   assert.match(nodes, /onSelect\(node\.id\)/)
   assert.match(source, /<span className="flex min-w-0 flex-1 flex-col gap-0\.5">/)
   assert.doesNotMatch(source, /min-w-0 truncate font-medium/)
   assert.match(source, /useState<ReadonlySet<string>>\(new Set\(\)\)/)
   assert.doesNotMatch(source, /ctxSectionExpansionId/)
-  assert.match(source, /const nested = children\.get\(context\.id\) \?\? \[\]/)
-  assert.match(source, /const isExpanded = expanded\.has\(context\.id\)/)
-  // the selected context id lives in the URL: refresh restores the pane, and
+  assert.match(source, /const nested = children\.get\(manual\.id\) \?\? \[\]/)
+  assert.match(source, /const isExpanded = expanded\.has\(manual\.id\)/)
+  // the selected manual id lives in the URL: refresh restores the pane, and
   // the tree expands the ancestor chain and scrolls the row into view
-  assert.match(source, /searchParams\.get\("context"\)/)
-  assert.match(source, /contextAncestorIds\(contexts, selectedId\)/)
+  assert.match(source, /searchParams\.get\("manual"\)/)
+  assert.match(source, /manualAncestorIds\(manuals, selectedId\)/)
   assert.match(source, /commonAncestorIds\(commonRoot, selectedId\)/)
   assert.match(source, /scrollIntoView\(\{ block: "nearest" \}\)/)
   // the editor keeps parenting on the tree and moves deletion up next to the
   // heading; the old parent selector and the use-in-conversation block are gone
-  const form = source.slice(source.indexOf("function ContextEditorForm("), source.indexOf("function InsightsPage("))
-  assert.doesNotMatch(form, /contextParent|context-parent/)
-  assert.doesNotMatch(form, /useReference|contextReferencePrompt/)
+  const form = source.slice(source.indexOf("function ManualEditorForm("), source.indexOf("function InsightsPage("))
+  assert.doesNotMatch(form, /manualParent|manual-parent/)
+  assert.doesNotMatch(form, /useReference|manualReferencePrompt/)
   assert.match(form, /deleteSelected/)
   // the name is the heading itself with rename and delete icons after it, and
   // the fields carry their own click-to-open help modals; the old hint is gone
-  assert.doesNotMatch(source, /contextEditorHint/)
+  assert.doesNotMatch(source, /manualEditorHint/)
   assert.match(form, /aria-label=\{t\("rename"\)\}/)
-  assert.match(form, /aria-label=\{t\("deleteContext"\)\}/)
-  assert.match(source, /function ContextFieldHelp\(\{ label, help \}/)
-  assert.match(form, /<ContextFieldHelp label=\{t\("contextDescription"\)\} help=\{t\("contextUseWhenHelp"\)\} \/>/)
-  assert.match(form, /<ContextFieldHelp label=\{t\("contextContent"\)\} help=\{t\("contextBodyHelp"\)\} \/>/)
+  assert.match(form, /aria-label=\{t\("deleteManual"\)\}/)
+  assert.match(source, /function ManualFieldHelp\(\{ label, help \}/)
+  assert.match(form, /<ManualFieldHelp label=\{t\("manualDescription"\)\} help=\{t\("manualUseWhenHelp"\)\} \/>/)
+  assert.match(form, /<ManualFieldHelp label=\{t\("manualContent"\)\} help=\{t\("manualBodyHelp"\)\} \/>/)
   assert.match(source, /<DialogTrigger asChild>/)
   assert.match(source, /<DialogDescription className="text-pretty">/)
   assert.match(form, /renaming/)
   // the local branch drags with the CTX interaction: dnd-kit sensors, three
-  // drop zones, and a fractional-key move through /api/contexts/{id}/move
+  // drop zones, and a fractional-key move through /api/manuals/{id}/move
   assert.match(source, /from "@dnd-kit\/core"/)
   assert.match(source, /<DndContext/)
   assert.match(source, /MouseSensor, \{ activationConstraint: \{ distance: 4 \} \}/)
   assert.match(source, /TouchSensor, \{ activationConstraint: \{ delay: 220, tolerance: 6 \} \}/)
   assert.match(source, /useDraggable/)
   assert.match(source, /useDroppable/)
-  assert.match(source, /contextTreeIndex\(contexts\)/)
-  assert.match(source, /contextPlacementFor\(index, moving, over, target\.zone\)/)
-  assert.match(source, /contextCurrentPlacement\(index, moving\)/)
-  assert.match(source, /\/api\/contexts\/\$\{encodeURIComponent\(input\.id\)\}\/move/)
+  assert.match(source, /manualTreeIndex\(manuals\)/)
+  assert.match(source, /manualPlacementFor\(index, moving, over, target\.zone\)/)
+  assert.match(source, /manualCurrentPlacement\(index, moving\)/)
+  assert.match(source, /\/api\/manuals\/\$\{encodeURIComponent\(input\.id\)\}\/move/)
   assert.match(source, /sort_key: string/)
 })
 
-test("the Contexts page is an edge-to-edge tree beside a full-width reading pane", () => {
-  const contexts = source.slice(source.indexOf("function ContextsPage("), source.indexOf("function ContextEditorForm("))
-  assert.match(contexts, /<main className="flex min-h-\[calc\(100svh-3\.5rem\)\] flex-col lg:flex-row">/)
-  assert.match(contexts, /<aside className="border-b bg-sidebar\/40 p-3 lg:w-80 lg:shrink-0 lg:border-b-0 lg:border-r">/)
-  assert.match(contexts, /<section className="flex w-full min-w-0 flex-col lg:min-h-0 lg:flex-1">/)
-  assert.match(contexts, /content=\{commonSelected\.content\}/)
-  assert.doesNotMatch(contexts, /<Page |CtxIntegrationCard/)
+test("the Manuals page is an edge-to-edge tree beside a full-width reading pane", () => {
+  const manuals = source.slice(source.indexOf("function ManualsPage("), source.indexOf("function ManualEditorForm("))
+  assert.match(manuals, /<main className="flex min-h-\[calc\(100svh-3\.5rem\)\] flex-col lg:flex-row">/)
+  assert.match(manuals, /<aside className="border-b bg-sidebar\/40 p-3 lg:w-80 lg:shrink-0 lg:border-b-0 lg:border-r">/)
+  assert.match(manuals, /<section className="flex w-full min-w-0 flex-col lg:min-h-0 lg:flex-1">/)
+  assert.match(manuals, /content=\{commonSelected\.content\}/)
+  assert.doesNotMatch(manuals, /<Page |CtxIntegrationCard/)
 })
 
 test("every thread renders through the shared chat primitives", () => {
@@ -131,8 +131,8 @@ test("thread settings live in the composer popover and the image tool follows it
 test("the tools page groups the shared tool catalog by responsible party", () => {
   const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
   assert.match(source, /import toolCatalog from "\.\.\/\.\.\/tools\.json"/)
-  // `context`, `note` and `native` share one Controller group; `worker` is the device.
-  assert.match(source, /\[\.\.\.toolCatalog\.context\.map\(\(tool\) => tool\.name\), \.\.\.toolCatalog\.note\.map\(\(tool\) => tool\.name\), \.\.\.Object\.keys\(toolCatalog\.native\)\]/)
+  // `manual`, `note` and `native` share one Controller group; `worker` is the device.
+  assert.match(source, /\[\.\.\.toolCatalog\.kernel\.map\(\(tool\) => tool\.name\), \.\.\.toolCatalog\.note\.map\(\(tool\) => tool\.name\), \.\.\.Object\.keys\(toolCatalog\.native\)\]/)
   assert.match(source, /toolCatalog\.worker\.map/)
   assert.match(source, /title: t\("phaseKernel"\)/)
   assert.match(source, /title: t\("phaseDevice"\)/)
@@ -140,7 +140,7 @@ test("the tools page groups the shared tool catalog by responsible party", () =>
   assert.match(source, /toolsDeviceHint/)
   assert.doesNotMatch(source, /toolCybion|toolOpenAi/)
   const names = [
-    ...catalog.context.map((tool: { name: string }) => tool.name),
+    ...catalog.kernel.map((tool: { name: string }) => tool.name),
     ...catalog.note.map((tool: { name: string }) => tool.name),
     ...catalog.worker.map((tool: { name: string }) => tool.name),
     ...Object.keys(catalog.native),
@@ -174,7 +174,7 @@ test("the hosted shell keeps the outer navigation and Linkit account surface", (
   for (const group of ["navWork", "navAudit", "navAdministration", "navConfiguration"]) {
     assert.match(source, new RegExp(`${group}:`))
   }
-  for (const route of ["/reasoning-audit", "/history", "/system", "/configuration"]) {
+  for (const route of ["/reasoning-audit", "/archive", "/system", "/configuration"]) {
     assert.match(source, new RegExp(`to: \"${route}\"`))
   }
   assert.match(source, /<LinkitProvider/)
@@ -182,7 +182,7 @@ test("the hosted shell keeps the outer navigation and Linkit account surface", (
   assert.doesNotMatch(source, /<LinkitMyInfo/)
 })
 
-test("the shadcn tooltip context and layered error boundaries protect the shell", () => {
+test("the shadcn tooltip manual and layered error boundaries protect the shell", () => {
   // the shared provider still wraps the shell, but the editor reads no
   // per-field tooltip parts any more: the field help is a modal
   assert.match(source, /import \{ TooltipProvider \} from "@\/components\/ui\/tooltip"/)

@@ -52,16 +52,16 @@ test("system editors mount only after verified administrator access and scope ca
   assert.doesNotMatch(system, /user_agent|originator|RequestHeaders/)
 })
 
-test("governed contexts groups notes, the manual and the archive by lifetime", () => {
+test("governed manuals groups notes, the manual and the archive by lifetime", () => {
   const work = main.match(/const workNav = \[([\s\S]*?)\n  \]/)![1]
-  const contexts = main.match(/const contextNav = \[([\s\S]*?)\n  \]/)![1]
+  const manuals = main.match(/const manualNav = \[([\s\S]*?)\n  \]/)![1]
   const audit = main.match(/const auditNav = \[([\s\S]*?)\n  \]/)![1]
-  assert.deepEqual([...contexts.matchAll(/to: "([^"]+)"/g)].map((match) => match[1]), ["/notes", "/contexts", "/history"])
-  assert.doesNotMatch(work, /"\/contexts"/)
+  assert.deepEqual([...manuals.matchAll(/to: "([^"]+)"/g)].map((match) => match[1]), ["/notes", "/manuals", "/archive"])
+  assert.doesNotMatch(work, /"\/manuals"/)
   assert.doesNotMatch(audit, /"\/history"/)
-  assert.match(main, /id: "contexts", label: t\("navGovernedContexts"\), items: contextNav/)
-  assert.match(main, /navGovernedContexts: "受控上下文"/)
-  assert.match(main, /navGovernedContexts: "Governed contexts"/)
+  assert.match(main, /id: "manuals", label: t\("navContexts"\), items: manualNav/)
+  assert.match(main, /navContexts: "上下文"/)
+  assert.match(main, /navContexts: "Context"/)
   assert.match(main, /notes: "便签"/)
   assert.match(main, /notes: "Notes"/)
   assert.match(main, /path="\/notes" element=\{<NotesPage sdk=\{sdk\} \/>/)

@@ -56,11 +56,11 @@ test("usage stays visible in narrow light/dark layouts and both languages", asyn
   await page.screenshot({ path: "test-results/thread-usage-mobile.png", fullPage: true })
 })
 
-test("the header shows the latest context against the compaction budget", async ({ page }) => {
+test("the header shows the latest context size against the compaction budget", async ({ page }) => {
   await page.goto("/e2e/thread-usage.html#/threads/measured")
   const chip = page.locator('[data-slot="thread-context-usage"]')
-  await expect(chip).toContainText("上下文 411.3K / 200K")
+  await expect(chip).toContainText("手册 411.3K / 200K")
   await expect(chip).toHaveClass(/text-destructive/)
   await page.getByRole("button", { name: "Language", exact: true }).click()
-  await expect(chip).toContainText("Context 411.3K / 200K")
+  await expect(chip).toContainText("Manual 411.3K / 200K")
 })

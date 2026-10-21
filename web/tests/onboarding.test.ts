@@ -24,29 +24,29 @@ test("the first composer requires a positive unfiltered zero count and retains t
   assert.doesNotMatch(main, /localStorage\.(?:getItem|setItem)\(["'].*onboard/)
 })
 
-test("Chinese and English help are complete, context-first and honest about retained results", () => {
+test("Chinese and English help are complete, manual-first and honest about retained results", () => {
   assert.deepEqual(Object.keys(onboardingCopy.en), Object.keys(onboardingCopy.zh))
   for (const language of ["en", "zh"] as const) for (const value of Object.values(onboardingCopy[language])) assert.ok(value.trim())
-  assert.match(onboardingCopy.zh.contextSummary, /Markdown.*不是资料本体/)
-  assert.match(onboardingCopy.zh.contextDetail, /Worker.*根据任务需要/)
-  assert.match(onboardingCopy.zh.contextBoundary, /读取的内容仍可能进入.*对话记录/)
-  assert.match(onboardingCopy.en.contextBoundary, /retrieved.*conversation's records/)
+  assert.match(onboardingCopy.zh.manualSummary, /Markdown.*不是资料本体/)
+  assert.match(onboardingCopy.zh.manualDetail, /Worker.*根据任务需要/)
+  assert.match(onboardingCopy.zh.manualBoundary, /读取的内容仍可能进入.*对话记录/)
+  assert.match(onboardingCopy.en.manualBoundary, /retrieved.*conversation's records/)
   assert.match(onboardingCopy.zh.workerOptional, /普通对话不需要 Worker/)
   assert.match(onboardingCopy.en.workerOptional, /Optional for normal conversation/)
 })
 
-test("the Contexts page never seeds conversations, uploads files or mentions references", () => {
-  assert.doesNotMatch(main, /useReference|contextReferencePrompt/)
-  assert.doesNotMatch(onboarding, /useReference|contextReferencePrompt/)
-  const contexts = main.slice(main.indexOf("function ContextsPage("), main.indexOf("function ContextEditorForm("))
-  assert.doesNotMatch(contexts, /CtxIntegrationCard|integrations\/ctx/)
-  assert.doesNotMatch(contexts, /type="file"|\/threads\/start/)
+test("the Manuals page never seeds conversations, uploads files or mentions references", () => {
+  assert.doesNotMatch(main, /useReference|manualReferencePrompt/)
+  assert.doesNotMatch(onboarding, /useReference|manualReferencePrompt/)
+  const manuals = main.slice(main.indexOf("function ManualsPage("), main.indexOf("function ManualEditorForm("))
+  assert.doesNotMatch(manuals, /CtxIntegrationCard|integrations\/ctx/)
+  assert.doesNotMatch(manuals, /type="file"|\/threads\/start/)
 })
 
-test("contexts are never presented as \"references\" in user-facing copy", () => {
+test("manuals are never presented as \"references\" in user-facing copy", () => {
   for (const source of [main, onboarding]) {
-    assert.doesNotMatch(source, /上下文引用/)
-    assert.doesNotMatch(source, /Context references?/i)
+    assert.doesNotMatch(source, /手册引用/)
+    assert.doesNotMatch(source, /Manual references?/i)
   }
 })
 

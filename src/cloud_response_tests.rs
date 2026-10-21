@@ -411,19 +411,19 @@ async fn tool_output(
     serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap()
 }
 
-/// The Context tree the way the browser route serves it: the same resolution the
-/// Controller uses before it binds a Context to a Thread.
+/// The Manual tree the way the browser route serves it: the same resolution the
+/// Controller uses before it binds a Manual to a Thread.
 async fn context_tree(state: &AppState, user: &User, id: &str) -> Value {
-    let view = read_context_for(state, user, id.to_owned(), common_contexts::SOURCE_LANGUAGE)
+    let view = read_manual_for(state, user, id.to_owned(), common_manuals::SOURCE_LANGUAGE)
         .await
         .unwrap();
     serde_json::to_value(view).unwrap()
 }
 
 #[tokio::test]
-async fn a_context_tree_lists_direct_children_and_reaches_further_levels_without_workers() {
+async fn a_manual_tree_lists_direct_children_and_reaches_further_levels_without_workers() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "context-tree-user").unwrap();
+    let user = user_for_subject(&state, "manual-tree-user").unwrap();
     // The inserts below open the user database without creating it, so the
     // Thread that materializes it comes first.
     let _thread = create_test_thread(&state, &user).await;
@@ -453,7 +453,7 @@ async fn a_context_tree_lists_direct_children_and_reaches_further_levels_without
             (unrelated, "Unrelated", "unrelated content", None),
         ] {
             connection.execute(
-                "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+                "INSERT INTO manuals(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
                 params![id, name, format!("Metadata for {name}"), content, parent_id],
             )?;
         }
@@ -473,20 +473,20 @@ async fn a_context_tree_lists_direct_children_and_reaches_further_levels_without
             "sort_key":"",
             "locked":false,
             "children":[
-                {"context_id":child_a,"name":"Alpha","description":"Metadata for Alpha"},
-                {"context_id":child_b,"name":"Alpha","description":"Metadata for Alpha"},
-                {"context_id":child_z,"name":"Zulu","description":"Metadata for Zulu"}
+                {"manual_id":child_a,"name":"Alpha","description":"Metadata for Alpha"},
+                {"manual_id":child_b,"name":"Alpha","description":"Metadata for Alpha"},
+                {"manual_id":child_z,"name":"Zulu","description":"Metadata for Zulu"}
             ]
         })
     );
-    let Json(api_content) = read_context_api(
+    let Json(api_content) = read_manual_api(
         State(state.clone()),
         axum::Extension(BrowserIdentity {
             user: user.clone(),
             bearer: String::new(),
         }),
         AxumPath(parent.to_owned()),
-        Query(common_contexts::LanguageQuery { lang: None }),
+        Query(common_manuals::LanguageQuery { lang: None }),
     )
     .await
     .unwrap();
@@ -494,7 +494,7 @@ async fn a_context_tree_lists_direct_children_and_reaches_further_levels_without
     let child = context_tree(
         &state,
         &user,
-        content["children"][0]["context_id"].as_str().unwrap(),
+        content["children"][0]["manual_id"].as_str().unwrap(),
     )
     .await;
     assert_eq!(child["id"], child_a);
@@ -503,13 +503,13 @@ async fn a_context_tree_lists_direct_children_and_reaches_further_levels_without
     assert_eq!(
         child["children"],
         json!([
-            {"context_id":grandchild,"name":"Grandchild","description":"Metadata for Grandchild"}
+            {"manual_id":grandchild,"name":"Grandchild","description":"Metadata for Grandchild"}
         ])
     );
     let leaf = context_tree(
         &state,
         &user,
-        child["children"][0]["context_id"].as_str().unwrap(),
+        child["children"][0]["manual_id"].as_str().unwrap(),
     )
     .await;
     assert_eq!(leaf["id"], grandchild);
@@ -526,34 +526,34 @@ async fn a_context_tree_lists_direct_children_and_reaches_further_levels_without
 }
 
 #[tokio::test]
-async fn a_context_tree_cannot_disclose_another_users_nodes() {
+async fn a_manual_tree_cannot_disclose_another_users_nodes() {
     let (_root, state) = test_state();
-    let owner = user_for_subject(&state, "context-owner").unwrap();
-    let other = user_for_subject(&state, "context-other").unwrap();
+    let owner = user_for_subject(&state, "manual-owner").unwrap();
+    let other = user_for_subject(&state, "manual-other").unwrap();
     let foreign = "00000000-0000-4000-8000-000000000099";
     user_db(&state, &owner, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Private','Private description','Private content')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Private','Private description','Private content')",
             [foreign],
         )?;
         Ok(())
     }).await.unwrap();
     for id in [foreign, "00000000-0000-4000-8000-000000000098"] {
-        let error = read_context_for(
+        let error = read_manual_for(
             &state,
             &other,
             id.to_owned(),
-            common_contexts::SOURCE_LANGUAGE,
+            common_manuals::SOURCE_LANGUAGE,
         )
         .await
-        .expect_err("another user's Context must not resolve");
+        .expect_err("another user's Manual must not resolve");
         assert_eq!(error.status, axum::http::StatusCode::NOT_FOUND);
     }
-    let error = read_context_for(
+    let error = read_manual_for(
         &state,
         &other,
         "invalid-id".to_owned(),
-        common_contexts::SOURCE_LANGUAGE,
+        common_manuals::SOURCE_LANGUAGE,
     )
     .await
     .expect_err("a malformed id is refused");
@@ -565,7 +565,7 @@ async fn context_place(state: &AppState, user: &User, id: &str) -> (Option<Strin
     user_db(state, user, false, move |connection| {
         connection
             .query_row(
-                "SELECT parent_id,sort_key FROM contexts WHERE id=?",
+                "SELECT parent_id,sort_key FROM manuals WHERE id=?",
                 [&id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -576,20 +576,20 @@ async fn context_place(state: &AppState, user: &User, id: &str) -> (Option<Strin
 }
 
 #[tokio::test]
-async fn write_context_edits_fields_and_reparents() {
+async fn write_manual_edits_fields_and_reparents() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "write-context-user").unwrap();
+    let user = user_for_subject(&state, "write-manual-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let parent = "00000000-0000-4000-8000-0000000000c0";
     let child = "00000000-0000-4000-8000-0000000000c1";
     user_db(&state, &user, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
             [parent],
         )?;
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Notes','Read when notes matter','old body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Notes','Read when notes matter','old body')",
             [child],
         )?;
         Ok(())
@@ -603,9 +603,9 @@ async fn write_context_edits_fields_and_reparents() {
         &thread,
         input,
         "write-fields",
-        "write_context",
+        "write_manual",
         json!({
-            "context_id": child,
+            "manual_id": child,
             "name": "Notes v2",
             "description": "Read when notes changed",
             "content": "new body",
@@ -626,7 +626,7 @@ async fn write_context_edits_fields_and_reparents() {
     let stored = user_db(&state, &user, false, move |connection| {
         connection
             .query_row(
-                "SELECT name,description,content,parent_id,trashed_at FROM contexts WHERE id=?",
+                "SELECT name,description,content,parent_id,trashed_at FROM manuals WHERE id=?",
                 [child],
                 |row| {
                     Ok((
@@ -654,15 +654,15 @@ async fn write_context_edits_fields_and_reparents() {
     );
 
     // Omitted fields keep their value; an explicit null parent moves the
-    // Context back to the top level.
+    // Manual back to the top level.
     let top_level = tool_output(
         &state,
         &user,
         &thread,
         input,
         "write-root",
-        "write_context",
-        json!({"context_id": child, "parent_id": null}),
+        "write_manual",
+        json!({"manual_id": child, "parent_id": null}),
     )
     .await;
     assert_eq!(
@@ -678,9 +678,9 @@ async fn write_context_edits_fields_and_reparents() {
 }
 
 #[tokio::test]
-async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() {
+async fn write_manual_trash_hides_the_manual_and_its_subtree_from_the_tools() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "context-trash-user").unwrap();
+    let user = user_for_subject(&state, "manual-trash-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let parent = "00000000-0000-4000-8000-0000000000d0";
@@ -688,15 +688,15 @@ async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() 
     let sibling = "00000000-0000-4000-8000-0000000000d2";
     user_db(&state, &user, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Trashed parent','Read when trashed','parent body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Trashed parent','Read when trashed','parent body')",
             [parent],
         )?;
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,'Trashed child','Read when nested','child body',?)",
+            "INSERT INTO manuals(id,name,description,content,parent_id) VALUES(?,'Trashed child','Read when nested','child body',?)",
             params![child, parent],
         )?;
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Kept sibling','Read when kept','sibling body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Kept sibling','Read when kept','sibling body')",
             [sibling],
         )?;
         Ok(())
@@ -710,8 +710,8 @@ async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() 
         &thread,
         input,
         "trash-write",
-        "write_context",
-        json!({"context_id": parent, "parent_id": "TRASH"}),
+        "write_manual",
+        json!({"manual_id": parent, "parent_id": "TRASH"}),
     )
     .await;
     assert_eq!(
@@ -731,29 +731,29 @@ async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() 
         &thread,
         input,
         "trash-list",
-        "cybion_list_contexts",
+        "list_manuals",
         json!({}),
     )
     .await;
-    let names: Vec<&str> = listed["contexts"]
+    let names: Vec<&str> = listed["manuals"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|manual| manual["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"Kept sibling"));
     assert!(!names.contains(&"Trashed parent"));
     assert!(!names.contains(&"Trashed child"));
 
     for id in [parent, child] {
-        let error = read_context_for(
+        let error = read_manual_for(
             &state,
             &user,
             id.to_owned(),
-            common_contexts::SOURCE_LANGUAGE,
+            common_manuals::SOURCE_LANGUAGE,
         )
         .await
-        .expect_err("a trashed Context stays hidden");
+        .expect_err("a trashed Manual stays hidden");
         assert_eq!(error.status, axum::http::status::StatusCode::NOT_FOUND);
     }
     let write_again = tool_output(
@@ -762,15 +762,15 @@ async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() 
         &thread,
         input,
         "trash-write-again",
-        "write_context",
-        json!({"context_id": parent, "name": "Nope"}),
+        "write_manual",
+        json!({"manual_id": parent, "name": "Nope"}),
     )
     .await;
-    assert_eq!(write_again, json!({"error": "context not found"}));
+    assert_eq!(write_again, json!({"error": "manual not found"}));
     let trashed_at: Option<i64> = user_db(&state, &user, false, move |connection| {
         connection
             .query_row(
-                "SELECT trashed_at FROM contexts WHERE id=?",
+                "SELECT trashed_at FROM manuals WHERE id=?",
                 [parent],
                 |row| row.get(0),
             )
@@ -782,9 +782,9 @@ async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() 
 }
 
 #[tokio::test]
-async fn write_context_trash_keeps_the_original_place_for_restore() {
+async fn write_manual_trash_keeps_the_original_place_for_restore() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "context-restore-user").unwrap();
+    let user = user_for_subject(&state, "manual-restore-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let parent = "00000000-0000-4000-8000-0000000000e0";
@@ -792,15 +792,15 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
     let other = "00000000-0000-4000-8000-0000000000e2";
     user_db(&state, &user, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Parent','Read when parent matters','parent body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Parent','Read when parent matters','parent body')",
             [parent],
         )?;
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,'Child','Read when child matters','child body',?)",
+            "INSERT INTO manuals(id,name,description,content,parent_id) VALUES(?,'Child','Read when child matters','child body',?)",
             params![child, parent],
         )?;
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Other','Read when other matters','other body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Other','Read when other matters','other body')",
             [other],
         )?;
         Ok(())
@@ -817,15 +817,15 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
         &thread,
         input,
         "restore-trash",
-        "write_context",
-        json!({"context_id": child, "parent_id": "TRASH"}),
+        "write_manual",
+        json!({"manual_id": child, "parent_id": "TRASH"}),
     )
     .await;
     assert_eq!(trashed["trashed"], json!(true));
     assert_eq!(context_place(&state, &user, child).await, before);
     let children = context_tree(&state, &user, parent).await;
     assert_eq!(children["children"], json!([]));
-    let Json(views) = list_contexts(
+    let Json(views) = list_manuals(
         State(state.clone()),
         axum::Extension(BrowserIdentity {
             user: user.clone(),
@@ -837,21 +837,21 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
     let listed = views.iter().find(|view| view.id == child).unwrap();
     assert!(listed.trashed_at.is_some());
 
-    // A Context cannot move under a hidden one.
+    // A Manual cannot move under a hidden one.
     let blocked = tool_output(
         &state,
         &user,
         &thread,
         input,
         "restore-blocked",
-        "write_context",
-        json!({"context_id": other, "parent_id": child}),
+        "write_manual",
+        json!({"manual_id": other, "parent_id": child}),
     )
     .await;
-    assert_eq!(blocked, json!({"error": "parent context not found"}));
+    assert_eq!(blocked, json!({"error": "parent manual not found"}));
 
     // Restore returns the row to the tree exactly where it sat.
-    let Json(restored) = restore_context(
+    let Json(restored) = restore_manual(
         State(state.clone()),
         axum::Extension(BrowserIdentity {
             user: user.clone(),
@@ -865,8 +865,8 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
     assert_eq!(restored.trashed_at, None);
     assert_eq!(context_place(&state, &user, child).await, before);
     let children = context_tree(&state, &user, parent).await;
-    assert_eq!(children["children"][0]["context_id"], json!(child));
-    let error = restore_context(
+    assert_eq!(children["children"][0]["manual_id"], json!(child));
+    let error = restore_manual(
         State(state.clone()),
         axum::Extension(BrowserIdentity {
             user: user.clone(),
@@ -880,15 +880,15 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
 }
 
 #[tokio::test]
-async fn write_context_creates_new_contexts() {
+async fn write_manual_creates_new_manuals() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "create-context-user").unwrap();
+    let user = user_for_subject(&state, "create-manual-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let parent = "00000000-0000-4000-8000-0000000000f0";
     user_db(&state, &user, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
             [parent],
         )?;
         Ok(())
@@ -896,14 +896,14 @@ async fn write_context_creates_new_contexts() {
     .await
     .unwrap();
 
-    // Omitting context_id creates a child under the given parent.
+    // Omitting manual_id creates a child under the given parent.
     let created = tool_output(
         &state,
         &user,
         &thread,
         input,
         "write-create-child",
-        "write_context",
+        "write_manual",
         json!({
             "name": "Release notes",
             "description": "Read when a release ships",
@@ -922,7 +922,7 @@ async fn write_context_creates_new_contexts() {
     assert_eq!(
         read["children"],
         json!([{
-            "context_id": created_id,
+            "manual_id": created_id,
             "name": "Release notes",
             "description": "Read when a release ships",
         }])
@@ -935,7 +935,7 @@ async fn write_context_creates_new_contexts() {
         &thread,
         input,
         "write-create-top",
-        "write_context",
+        "write_manual",
         json!({"name": "Scratch"}),
     )
     .await;
@@ -947,15 +947,15 @@ async fn write_context_creates_new_contexts() {
         &thread,
         input,
         "write-create-list",
-        "cybion_list_contexts",
+        "list_manuals",
         json!({}),
     )
     .await;
-    let names: Vec<&str> = listed["contexts"]
+    let names: Vec<&str> = listed["manuals"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|manual| manual["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"Scratch"));
 
@@ -966,21 +966,18 @@ async fn write_context_creates_new_contexts() {
         &thread,
         input,
         "write-create-unnamed",
-        "write_context",
+        "write_manual",
         json!({"description": "no title"}),
     )
     .await;
-    assert_eq!(
-        unnamed,
-        json!({"error": "creating a context requires name"})
-    );
+    assert_eq!(unnamed, json!({"error": "creating a manual requires name"}));
     let trashed = tool_output(
         &state,
         &user,
         &thread,
         input,
         "write-create-trash",
-        "write_context",
+        "write_manual",
         json!({"name": "Nope", "parent_id": "TRASH"}),
     )
     .await;
@@ -996,8 +993,8 @@ async fn write_context_creates_new_contexts() {
         &thread,
         input,
         "write-create-blocked",
-        "write_context",
-        json!({"context_id": parent, "parent_id": "TRASH"}),
+        "write_manual",
+        json!({"manual_id": parent, "parent_id": "TRASH"}),
     )
     .await;
     assert_eq!(blocked["trashed"], json!(true));
@@ -1007,28 +1004,28 @@ async fn write_context_creates_new_contexts() {
         &thread,
         input,
         "write-create-hidden",
-        "write_context",
+        "write_manual",
         json!({"name": "Orphan", "parent_id": parent}),
     )
     .await;
-    assert_eq!(hidden, json!({"error": "parent context not found"}));
+    assert_eq!(hidden, json!({"error": "parent manual not found"}));
 }
 
 #[tokio::test]
-async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
+async fn write_manual_refuses_a_locked_manual_and_points_at_its_children() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "locked-context-user").unwrap();
+    let user = user_for_subject(&state, "locked-manual-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let manual = "00000000-0000-4000-8000-0000000000f0";
     let appendix = "00000000-0000-4000-8000-0000000000f1";
     user_db(&state, &user, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content,locked) VALUES(?,'Handbook','Read when the handbook matters','handbook body',1)",
+            "INSERT INTO manuals(id,name,description,content,locked) VALUES(?,'Handbook','Read when the handbook matters','handbook body',1)",
             [manual],
         )?;
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,'Appendix','Read when the appendix matters','appendix body',?)",
+            "INSERT INTO manuals(id,name,description,content,parent_id) VALUES(?,'Appendix','Read when the appendix matters','appendix body',?)",
             params![appendix, manual],
         )?;
         Ok(())
@@ -1036,12 +1033,12 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
     .await
     .unwrap();
 
-    // Every write to the locked Context is refused — body, title, and trash
+    // Every write to the locked Manual is refused — body, title, and trash
     // alike — and each answer names the lock and the children that stay open.
     for (index, arguments) in [
-        json!({"context_id": manual, "content": "rewritten by a Thread"}),
-        json!({"context_id": manual, "name": "Renamed by a Thread"}),
-        json!({"context_id": manual, "parent_id": "TRASH"}),
+        json!({"manual_id": manual, "content": "rewritten by a Thread"}),
+        json!({"manual_id": manual, "name": "Renamed by a Thread"}),
+        json!({"manual_id": manual, "parent_id": "TRASH"}),
     ]
     .into_iter()
     .enumerate()
@@ -1052,7 +1049,7 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
             &thread,
             input,
             &format!("write-locked-{index}"),
-            "write_context",
+            "write_manual",
             arguments,
         )
         .await;
@@ -1060,7 +1057,7 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
         assert!(message.contains(manual), "unexpected output: {refused}");
         assert!(message.contains("locked"), "unexpected output: {refused}");
         assert!(
-            message.contains(&format!("load_context {manual}")),
+            message.contains(&format!("load_manual {manual}")),
             "unexpected output: {refused}"
         );
         assert!(
@@ -1071,7 +1068,7 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
     let stored = user_db(&state, &user, false, move |connection| {
         connection
             .query_row(
-                "SELECT name,content,trashed_at FROM contexts WHERE id=?",
+                "SELECT name,content,trashed_at FROM manuals WHERE id=?",
                 [manual],
                 |row| {
                     Ok((
@@ -1093,7 +1090,7 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
     // Reading it reports the lock, so the next attempt starts from the children.
     let read = context_tree(&state, &user, manual).await;
     assert_eq!(read["locked"], json!(true));
-    assert_eq!(read["children"][0]["context_id"], appendix);
+    assert_eq!(read["children"][0]["manual_id"], appendix);
 
     // Children stay writable: an existing one, and a brand-new one.
     let edited = tool_output(
@@ -1102,8 +1099,8 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
         &thread,
         input,
         "write-locked-child",
-        "write_context",
-        json!({"context_id": appendix, "content": "appendix v2"}),
+        "write_manual",
+        json!({"manual_id": appendix, "content": "appendix v2"}),
     )
     .await;
     assert_eq!(edited["id"], appendix);
@@ -1114,7 +1111,7 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
         &thread,
         input,
         "write-locked-grandchild",
-        "write_context",
+        "write_manual",
         json!({"name": "Observations", "parent_id": manual}),
     )
     .await;
@@ -1122,15 +1119,15 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
 }
 
 #[tokio::test]
-async fn the_owner_locks_a_context_from_the_page_and_keeps_editing_it() {
+async fn the_owner_locks_a_manual_from_the_page_and_keeps_editing_it() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "context-lock-owner").unwrap();
+    let user = user_for_subject(&state, "manual-lock-owner").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
     let manual = "00000000-0000-4000-8000-0000000000f2";
     user_db(&state, &user, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,'Handbook','Read when the handbook matters','handbook body')",
             [manual],
         )?;
         Ok(())
@@ -1138,14 +1135,14 @@ async fn the_owner_locks_a_context_from_the_page_and_keeps_editing_it() {
     .await
     .unwrap();
     let page = |locked: Option<bool>, description: Option<&str>, content: Option<&str>| {
-        update_context(
+        update_manual(
             State(state.clone()),
             axum::Extension(BrowserIdentity {
                 user: user.clone(),
                 bearer: String::new(),
             }),
             AxumPath(manual.to_owned()),
-            Json(UpdateContextInput {
+            Json(UpdateManualInput {
                 name: None,
                 description: description.map(str::to_owned),
                 content: content.map(str::to_owned),
@@ -1163,8 +1160,8 @@ async fn the_owner_locks_a_context_from_the_page_and_keeps_editing_it() {
         &thread,
         input,
         "write-while-locked",
-        "write_context",
-        json!({"context_id": manual, "content": "Thread edit"}),
+        "write_manual",
+        json!({"manual_id": manual, "content": "Thread edit"}),
     )
     .await;
     assert!(refused["error"].is_string(), "unexpected output: {refused}");
@@ -1178,7 +1175,7 @@ async fn the_owner_locks_a_context_from_the_page_and_keeps_editing_it() {
     assert_eq!(saved.description, "Read when revised");
     assert_eq!(saved.content, "owner words");
 
-    // Unlocking hands the Context back to write_context.
+    // Unlocking hands the Manual back to write_manual.
     let unlocked = page(Some(false), None, None).await.unwrap().0;
     assert!(!unlocked.locked);
     let written = tool_output(
@@ -1187,20 +1184,20 @@ async fn the_owner_locks_a_context_from_the_page_and_keeps_editing_it() {
         &thread,
         input,
         "write-after-unlock",
-        "write_context",
-        json!({"context_id": manual, "content": "Thread note"}),
+        "write_manual",
+        json!({"manual_id": manual, "content": "Thread note"}),
     )
     .await;
     assert_eq!(written["id"], manual);
 }
 
 #[tokio::test]
-async fn write_context_refuses_common_contexts_and_malformed_arguments() {
+async fn write_manual_refuses_common_manuals_and_malformed_arguments() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "write-context-common").unwrap();
+    let user = user_for_subject(&state, "write-manual-common").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let input = input_record(&state, &user, &thread).await;
-    let common_id = common_contexts::root_summary(common_contexts::SOURCE_LANGUAGE)["context_id"]
+    let common_id = common_manuals::root_summary(common_manuals::SOURCE_LANGUAGE)["manual_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -1210,8 +1207,8 @@ async fn write_context_refuses_common_contexts_and_malformed_arguments() {
         &thread,
         input,
         "write-common",
-        "write_context",
-        json!({"context_id": common_id, "name": "Rewrite"}),
+        "write_manual",
+        json!({"manual_id": common_id, "name": "Rewrite"}),
     )
     .await;
     assert!(
@@ -1224,20 +1221,20 @@ async fn write_context_refuses_common_contexts_and_malformed_arguments() {
         &thread,
         input,
         "write-unknown-field",
-        "write_context",
-        json!({"context_id": common_id, "body": "x"}),
+        "write_manual",
+        json!({"manual_id": common_id, "body": "x"}),
     )
     .await;
     assert!(
         unknown["error"]
             .as_str()
             .unwrap()
-            .contains("write_context arguments are invalid")
+            .contains("write_manual arguments are invalid")
     );
 }
 
 #[tokio::test]
-async fn registry_tools_list_top_level_contexts_and_registered_workers() {
+async fn registry_tools_list_top_level_manuals_and_registered_workers() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "registry-tool-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -1246,7 +1243,7 @@ async fn registry_tools_list_top_level_contexts_and_registered_workers() {
     let child = "00000000-0000-4000-8000-0000000000b1";
     user_db(&state, &user, true, move |connection| {
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content) VALUES(?,?,?,?)",
+            "INSERT INTO manuals(id,name,description,content) VALUES(?,?,?,?)",
             params![
                 parent,
                 "Skills",
@@ -1255,7 +1252,7 @@ async fn registry_tools_list_top_level_contexts_and_registered_workers() {
             ],
         )?;
         connection.execute(
-            "INSERT INTO contexts(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
+            "INSERT INTO manuals(id,name,description,content,parent_id) VALUES(?,?,?,?,?)",
             params![
                 child,
                 "Bash skill",
@@ -1276,21 +1273,21 @@ async fn registry_tools_list_top_level_contexts_and_registered_workers() {
     })
     .await
     .unwrap();
-    let contexts = tool_output(
+    let manuals = tool_output(
         &state,
         &user,
         &thread,
         input,
-        "list-contexts",
-        "cybion_list_contexts",
+        "list-manuals",
+        "list_manuals",
         json!({}),
     )
     .await;
     assert_eq!(
-        contexts,
-        json!({"contexts":[
-            common_contexts::root_summary(common_contexts::SOURCE_LANGUAGE),
-            {"context_id":parent,"name":"Skills","description":"Reusable worker skills","source":"local"}
+        manuals,
+        json!({"manuals":[
+            common_manuals::root_summary(common_manuals::SOURCE_LANGUAGE),
+            {"manual_id":parent,"name":"Skills","description":"Reusable worker skills","source":"local"}
         ]})
     );
     let workers = tool_output(
@@ -1737,11 +1734,11 @@ async fn inference_injects_web_search_and_the_configured_image_tool() {
     assert_eq!(
         names(&requests[0]),
         [
-            "cybion_list_contexts",
+            "list_manuals",
             "cybion_list_workers",
-            "load_context",
-            "unload_context",
-            "write_context",
+            "load_manual",
+            "unload_manual",
+            "write_manual",
             "cybion_list_ultimate_machines",
             "cybion_get_ultimate_machine",
             "cybion_set_ultimate_machine",
@@ -2013,10 +2010,10 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
         )?;
         assert_eq!(status, "cancelled");
         assert_eq!(output_id, history[2].id);
-        let context = compile_thread_context(connection, &data_dir, &thread.id, second)?;
-        assert_eq!(context.record_ids, [first, second]);
+        let manual = compile_thread_context(connection, &data_dir, &thread.id, second)?;
+        assert_eq!(manual.record_ids, [first, second]);
         assert!(
-            context
+            manual
                 .items
                 .iter()
                 .all(|item| item.get("call_id").is_none())
@@ -2129,7 +2126,7 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
 #[tokio::test]
 async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_title() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "context-title-user").unwrap();
+    let user = user_for_subject(&state, "manual-title-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     user_db(&state, &user, false, {
         let thread_id = thread.id.clone();
@@ -2161,7 +2158,7 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_json_request(&mut socket).await;
-        let body = json!({"id":"r1","end_turn":true,"output":[{"id":"m2","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Context Title"}]}]}).to_string();
+        let body = json!({"id":"r1","end_turn":true,"output":[{"id":"m2","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Manual Title"}]}]}).to_string();
         socket
             .write_all(
                 format!(
@@ -2179,7 +2176,7 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
     let titled = generate_thread_title_for(&state, &user, thread.id.clone())
         .await
         .unwrap();
-    assert_eq!(titled.title, "Context Title");
+    assert_eq!(titled.title, "Manual Title");
     let request = server.await.unwrap();
     let input = request["input"].as_array().unwrap();
     assert_eq!(
@@ -2215,7 +2212,7 @@ async fn manual_title_generation_replays_the_thread_context_and_overwrites_the_t
     })
     .await
     .unwrap();
-    assert_eq!(stored, "Context Title");
+    assert_eq!(stored, "Manual Title");
 }
 
 #[test]
@@ -3256,7 +3253,7 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     .unwrap();
 
     let data_dir = state.data_dir.clone();
-    let context = user_db(&state, &user, false, {
+    let manual = user_db(&state, &user, false, {
         let data_dir = data_dir.clone();
         let thread_id = thread.id.clone();
         move |connection| recovery::current_context(connection, &data_dir, &thread_id, next_input)
@@ -3282,11 +3279,11 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     assert_eq!(payload["from"]["model"], json!(first_model));
     assert_eq!(payload["to"]["model"], json!("next-model"));
     assert_eq!(
-        context.idx_tail, barrier,
+        manual.idx_tail, barrier,
         "the barrier is a protocol record, so it advances the replay tail"
     );
 
-    let replay = replayable_context_items(context.items.clone());
+    let replay = replayable_context_items(manual.items.clone());
     let reasoning = replay
         .iter()
         .find(|item| item["type"] == "reasoning")
@@ -3319,14 +3316,14 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     })
     .await
     .unwrap();
-    let context = user_db(&state, &user, false, {
+    let manual = user_db(&state, &user, false, {
         let data_dir = data_dir.clone();
         let thread_id = thread.id.clone();
         move |connection| compile_thread_context(connection, &data_dir, &thread_id, tail)
     })
     .await
     .unwrap();
-    let replay = replayable_context_items(context.items.clone());
+    let replay = replayable_context_items(manual.items.clone());
     let reasoning = replay
         .iter()
         .filter(|item| item["type"] == "reasoning")

@@ -291,9 +291,9 @@ mod tests {
             COLUMNS.len()
         );
         let data_dir = tempfile::tempdir().unwrap();
-        let context =
+        let manual =
             cloud::compile_thread_context(&connection, data_dir.path(), "thread", 3).unwrap();
-        assert_eq!(context.record_ids, [1, 3]);
+        assert_eq!(manual.record_ids, [1, 3]);
     }
 
     #[test]

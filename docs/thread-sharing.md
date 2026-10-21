@@ -4,7 +4,7 @@ An owner A can give any Cybion user B **viewer** access to one Thread. B does no
 This is a live view of the original Thread: all previous conversation content
 and future updates are included, not a copied snapshot. A remains the sole owner.
 The grant neither transfers execution identity nor grants access to Workers,
-Contexts, upstreams, credentials, account-wide audits or other Threads.
+Manuals, upstreams, credentials, account-wide audits or other Threads.
 Integration API keys and Controller/model tools keep their existing owner scope.
 
 ## User experience

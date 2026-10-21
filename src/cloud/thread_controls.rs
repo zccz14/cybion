@@ -249,7 +249,7 @@ pub(super) async fn compact_request(
     loop {
         recovery::wait_retry(state, user, &thread.id, record_idx, cancellation).await?;
         let result = async {
-            let context = user_db(state, user, false, {
+            let manual = user_db(state, user, false, {
                 let thread_id = thread.id.clone();
                 let data_dir = state.data_dir.clone();
                 move |connection| {
@@ -262,7 +262,7 @@ pub(super) async fn compact_request(
                 state,
                 user,
                 thread,
-                &context,
+                &manual,
                 upstream,
                 record_idx,
                 cancellation,

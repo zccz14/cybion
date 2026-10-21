@@ -1,6 +1,6 @@
 # History table
 
-`#/history` is the Archive of the governed contexts: it browses the
+`#/archive` is the Archive of the governed contexts: it browses the
 authenticated user's `history_records` table across all threads, append-only and
 read only. It is reached from Work → Governed contexts → Archive. Each database
 row is one table row.
@@ -43,9 +43,9 @@ directly from `kind` and `payload`. Every built-in tool call renders through
 its own card: `bash` commands, `browser_control` actions, `computer_use`
 actions, `view_image` pictures, `normai_web_search` queries,
 `normai_image_generation` prompts, and the controller-side context and machine
-tools. A `load_context`/`unload_context` card resolves the Context title and its
-Use When description through the same caches the Contexts page fills and links to
-that Context, and a `write_context` card
+tools. A `load_manual`/`unload_manual` card resolves the Manual title and its
+Use When description through the same caches the Manuals page fills and links to
+that Manual, and a `write_manual` card
 resolves the same way, notes a move into the trash, and shows a create call's
 title and parent; an id that does not resolve keeps the monospace id. A call whose arguments are incomplete or whose action
 is unknown keeps the generic protocol rendering, and every card keeps its raw
@@ -83,8 +83,8 @@ with `has_older` false instead of hiding rows, and a page that finds no older
 
 `GET /api/threads/{id}/history/loaded` serves the header's loaded-context
 indicator: the `head` and `tail` of the context the Thread replays now, plus the
-`context_id`s the Thread keeps loaded in the order it loaded them. The row names
-each Context without printing an id, so the browser needs no fingerprint. See
+`manual_id`s the Thread keeps loaded in the order it loaded them. The row names
+each Manual without printing an id, so the browser needs no fingerprint. See
 [Thread context replay](context.md).
 
 ## Conversation process groups

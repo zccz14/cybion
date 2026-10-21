@@ -9,7 +9,7 @@ import { emptyThreadUsage } from "../src/lib/thread-usage"
 export async function stubWorkspace(page: Page, options: {
   language?: "zh" | "en"; theme?: "light" | "dark"; activeTotal?: number; webTotal?: number; archivedTotal?: number;
   countFails?: boolean; connectionFails?: boolean; startFails?: boolean; fallbackReady?: boolean;
-  contexts?: { id: string; name: string; parent_id?: string | null; trashed_at?: number; locked?: boolean }[];
+  manuals?: { id: string; name: string; parent_id?: string | null; trashed_at?: number; locked?: boolean }[];
   notes?: { id: string; thread_id: string; thread_title: string | null; text: string; created_at: number; done_at: number | null }[];
 } = {}) {
   const language = options.language ?? "zh", theme = options.theme ?? "light"
@@ -38,7 +38,7 @@ export async function stubWorkspace(page: Page, options: {
   const thread = { ...defaults, id: "created-thread", title: "Fixture conversation", status: "idle", display_status: "ready", usage: emptyThreadUsage, context_tokens: 0, archived_at: null, created_at: now, updated_at: now, created_by: "web", external_ref: null }
   const notifications = { enabled: true, configured: true, bot_id: "fixture-bot", recipient_username: "onboarding", last_attempt_at: null, last_success_at: null, last_error: null, conversation_id: null, message_id: null }
   // Mirror the controller: every group keeps fractional-style keys in array order.
-  const renumberContextSortKeys = () => {
+  const renumberManualSortKeys = () => {
     const groups = new Map<string | null, typeof references>()
     for (const reference of references) {
       const key = reference.parent_id ?? null
@@ -46,10 +46,10 @@ export async function stubWorkspace(page: Page, options: {
     }
     for (const group of groups.values()) group.forEach((reference, index) => { reference.sort_key = String(index).padStart(2, "0") })
   }
-  for (const context of options.contexts ?? []) {
-    references.push({ id: context.id, name: context.name, description: `Metadata for ${context.name}`, content: `${context.name} content`, parent_id: context.parent_id ?? null, sort_key: "", locked: context.locked === true, trashed_at: context.trashed_at })
+  for (const manual of options.manuals ?? []) {
+    references.push({ id: manual.id, name: manual.name, description: `Metadata for ${manual.name}`, content: `${manual.name} content`, parent_id: manual.parent_id ?? null, sort_key: "", locked: manual.locked === true, trashed_at: manual.trashed_at })
   }
-  renumberContextSortKeys()
+  renumberManualSortKeys()
   await page.route("**/*", async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname
     const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS", "Access-Control-Allow-Headers": "authorization,content-type" }
@@ -93,16 +93,16 @@ export async function stubWorkspace(page: Page, options: {
       if (path === `/api/threads/${thread.id}/history/loaded`) return json({ head: null, tail: null, loaded: [] })
       if (path === `/api/threads/${thread.id}/response`) return json(null)
       if (path === `/api/threads/${thread.id}/grants`) return json([])
-      if (path === "/api/contexts") {
+      if (path === "/api/manuals") {
         if (request.method() === "POST") {
           const reference = { locked: false, ...request.postDataJSON(), id: references.length === 0 ? "saved-reference" : `saved-reference-${references.length + 1}`, sort_key: "" }
           references.push(reference)
-          renumberContextSortKeys()
+          renumberManualSortKeys()
           return json(reference)
         }
         return json(references)
       }
-      if (/^\/api\/contexts\/[^/]+\/move$/.test(path)) {
+      if (/^\/api\/manuals\/[^/]+\/move$/.test(path)) {
         const reference = references.find((item) => item.id === path.split("/").at(-2))!
         const body = request.postDataJSON() as { parent_id: string | null; after_id: string | null }
         references.splice(references.indexOf(reference), 1)
@@ -114,15 +114,15 @@ export async function stubWorkspace(page: Page, options: {
           const firstIndex = references.findIndex((item) => (item.parent_id ?? null) === (body.parent_id ?? null))
           references.splice(firstIndex === -1 ? references.length : firstIndex, 0, reference)
         }
-        renumberContextSortKeys()
+        renumberManualSortKeys()
         return json(reference)
       }
-      if (/^\/api\/contexts\/[^/]+\/restore$/.test(path)) {
+      if (/^\/api\/manuals\/[^/]+\/restore$/.test(path)) {
         const reference = references.find((item) => item.id === path.split("/").at(-2))!
         reference.trashed_at = undefined
         return json(reference)
       }
-      if (path.startsWith("/api/contexts/")) {
+      if (path.startsWith("/api/manuals/")) {
         const reference = references.find((item) => item.id === path.split("/").at(-1))!
         Object.assign(reference, request.postDataJSON())
         return json(reference)
@@ -139,19 +139,19 @@ export async function stubWorkspace(page: Page, options: {
         notes = notes.filter((item) => item.id !== path.split("/").at(-1))
         return route.fulfill({ status: 204, headers })
       }
-      if (path === "/api/common-contexts") return json({
+      if (path === "/api/common-manuals") return json({
         revision: 1,
         root: url.searchParams.get("lang") === "zh" ? {
           id: "common-root",
-          name: "Cybion 公共上下文",
+          name: "Cybion 公共手册",
           description: "随 Cybion 源码编译发布、所有用户共享、只读",
-          content: "# Cybion 公共上下文\n\n夹具内容。",
+          content: "# Cybion 公共手册\n\n夹具内容。",
           children: [],
         } : {
           id: "common-root",
-          name: "Cybion Common Context",
+          name: "Cybion Common Manual",
           description: "Compiled into Cybion from its source tree, shared by every user, read-only",
-          content: "# Cybion Common Context\n\nFixture content.",
+          content: "# Cybion Common Manual\n\nFixture content.",
           children: [],
         },
       })

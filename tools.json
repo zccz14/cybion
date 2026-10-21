@@ -1,9 +1,9 @@
 {
-  "context": [
+  "kernel": [
     {
       "type": "function",
-      "name": "cybion_list_contexts",
-      "description": "List top-level Contexts (context_id, name, description, source) from the controller: first the read-only Cybion Common Context (source \"common\"; product usage guidance compiled into the controller), then the user's own Contexts (source \"local\"). Content is intentionally omitted; use load_context to bring a Context and its direct children into the Thread.",
+      "name": "list_manuals",
+      "description": "List top-level Manuals (manual_id, name, description, source) from the controller: first the read-only Cybion Common Manual (source \"common\"; product usage guidance compiled into the controller), then the user's own Manuals (source \"local\"). Content is intentionally omitted; use load_manual to bring a Manual and its direct children into the Thread.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -22,50 +22,50 @@
     },
     {
       "type": "function",
-      "name": "load_context",
-      "description": "Bind a Context to this Thread so the Controller keeps it loaded. The full Context JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Context changes or a compaction replaces the history, so the Thread never opens it again to stay current. The copy already carries the Context, its Use When description, its body, and its direct children. Use it for material the Thread must keep working from across context windows; cybion_list_contexts stays the way to find what exists. Resolves local Contexts first, then the read-only Cybion Common Context. A Thread holds at most 8 loaded Contexts; unload_context releases one.",
+      "name": "load_manual",
+      "description": "Bind a Manual to this Thread so the Controller keeps it loaded. The full Manual JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Manual changes or a compaction replaces the history, so the Thread never opens it again to stay current. The copy already carries the Manual, its Use When description, its body, and its direct children. Use it for material the Thread must keep working from across manual windows; list_manuals stays the way to find what exists. Resolves local Manuals first, then the read-only Cybion Common Manual. A Thread holds at most 8 loaded Manuals; unload_manual releases one.",
       "parameters": {
         "type": "object",
         "properties": {
-          "context_id": {
+          "manual_id": {
             "type": "string",
-            "description": "Exact context_id from cybion_list_contexts, from children inside a loaded Context's JSON, or from a Context this Thread already knows."
+            "description": "Exact manual_id from list_manuals, from children inside a loaded Manual's JSON, or from a Manual this Thread already knows."
           }
         },
         "required": [
-          "context_id"
+          "manual_id"
         ],
         "additionalProperties": false
       }
     },
     {
       "type": "function",
-      "name": "unload_context",
-      "description": "Release a Context this Thread loaded, which stops the Controller from refreshing it. The copy already in the conversation stays until the next compaction and is no longer maintained, and a notice tells the Thread not to rely on it; load_context brings it back. Answers unloaded: false when the Context was not loaded in this Thread.",
+      "name": "unload_manual",
+      "description": "Release a Manual this Thread loaded, which stops the Controller from refreshing it. The copy already in the conversation stays until the next compaction and is no longer maintained, and a notice tells the Thread not to rely on it; load_manual brings it back. Answers unloaded: false when the Manual was not loaded in this Thread.",
       "parameters": {
         "type": "object",
         "properties": {
-          "context_id": {
+          "manual_id": {
             "type": "string",
-            "description": "Exact context_id of a Context this Thread loaded."
+            "description": "Exact manual_id of a Manual this Thread loaded."
           }
         },
         "required": [
-          "context_id"
+          "manual_id"
         ],
         "additionalProperties": false
       }
     },
     {
       "type": "function",
-      "name": "write_context",
-      "description": "Create or edit one of the user's local Contexts from the controller — title, Use When description, body, and parent. Omit context_id to create a new Context: name is required and it starts at the top level or under parent_id. Pass context_id to edit that Context; omitted fields keep their current values, and parent_id takes an exact context_id, null for the top level, or the special value \"TRASH\" to move the Context into the trash (updates only). A trashed Context disappears from every Context tool, while the user still sees it in the Contexts page and can restore it. Returns the Context metadata. The read-only Cybion Common Context cannot be written, and a Context hidden by the trash cannot be written until it is restored. A Context its owner locked refuses every write_context change — title, Use When description, body, parent, and TRASH — and answers with its child Contexts, which stay writable.",
+      "name": "write_manual",
+      "description": "Create or edit one of the user's local Manuals from the controller — title, Use When description, body, and parent. Omit manual_id to create a new Manual: name is required and it starts at the top level or under parent_id. Pass manual_id to edit that Manual; omitted fields keep their current values, and parent_id takes an exact manual_id, null for the top level, or the special value \"TRASH\" to move the Manual into the trash (updates only). A trashed Manual disappears from every Manual tool, while the user still sees it in the Manuals page and can restore it. Returns the Manual metadata. The read-only Cybion Common Manual cannot be written, and a Manual hidden by the trash cannot be written until it is restored. A Manual its owner locked refuses every write_manual change — title, Use When description, body, parent, and TRASH — and answers with its child Manuals, which stay writable.",
       "parameters": {
         "type": "object",
         "properties": {
-          "context_id": {
+          "manual_id": {
             "type": "string",
-            "description": "Omit to create a new Context; pass the exact id of an existing local Context to edit it, from cybion_list_contexts or from the children of a Context this Thread has loaded."
+            "description": "Omit to create a new Manual; pass the exact id of an existing local Manual to edit it, from list_manuals or from the children of a Manual this Thread has loaded."
           },
           "name": {
             "type": "string",
@@ -73,7 +73,7 @@
           },
           "description": {
             "type": "string",
-            "description": "Use When description — the condition for when this Context should be read (up to 10,000 characters). Omit to keep the current description, or for an empty one when creating."
+            "description": "Use When description — the condition for when this Manual should be read (up to 10,000 characters). Omit to keep the current description, or for an empty one when creating."
           },
           "content": {
             "type": "string",
@@ -81,7 +81,7 @@
           },
           "parent_id": {
             "type": ["string", "null"],
-            "description": "Parent: an exact context_id to become a child of that Context, null for the top level, or \"TRASH\" to move the Context into the trash where the user can still see and restore it (updates only). Omit to keep the current parent, or to create at the top level."
+            "description": "Parent: an exact manual_id to become a child of that Manual, null for the top level, or \"TRASH\" to move the Manual into the trash where the user can still see and restore it (updates only). Omit to keep the current parent, or to create at the top level."
           }
         },
         "additionalProperties": false
@@ -179,7 +179,7 @@
     {
       "type": "function",
       "name": "add_notes",
-      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, so add one only when something is genuinely owed and do not add background, plans, or reminders to yourself. Every note attaches to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's context. Notes past the limit are refused; cross out or tear off what is done first.",
+      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, so add one only when something is genuinely owed and do not add background, plans, or reminders to yourself. Every note attaches to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's manual. Notes past the limit are refused; cross out or tear off what is done first.",
       "parameters": {
         "type": "object",
         "properties": {

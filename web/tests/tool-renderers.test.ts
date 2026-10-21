@@ -10,10 +10,10 @@ const samples: Record<string, unknown> = {
   browser_control: { type: "function_call", name: "browser_control", arguments: '{"action":"screenshot"}' },
   computer_use: { type: "function_call", name: "computer_use", arguments: '{"action":"screenshot"}' },
   view_image: { type: "function_call", name: "view_image", arguments: '{"worker_id":"worker-1","path":"/tmp/photo.png"}' },
-  load_context: { type: "function_call", name: "load_context", arguments: '{"context_id":"ctx-1"}' },
-  unload_context: { type: "function_call", name: "unload_context", arguments: '{"context_id":"ctx-1"}' },
-  write_context: { type: "function_call", name: "write_context", arguments: '{"name":"Notes","parent_id":"ctx-1"}' },
-  cybion_list_contexts: { type: "function_call", name: "cybion_list_contexts", arguments: "{}" },
+  load_manual: { type: "function_call", name: "load_manual", arguments: '{"manual_id":"ctx-1"}' },
+  unload_manual: { type: "function_call", name: "unload_manual", arguments: '{"manual_id":"ctx-1"}' },
+  write_manual: { type: "function_call", name: "write_manual", arguments: '{"name":"Notes","parent_id":"ctx-1"}' },
+  list_manuals: { type: "function_call", name: "list_manuals", arguments: "{}" },
   cybion_list_workers: { type: "function_call", name: "cybion_list_workers", arguments: "{}" },
   cybion_list_ultimate_machines: { type: "function_call", name: "cybion_list_ultimate_machines", arguments: "{}" },
   cybion_get_ultimate_machine: { type: "function_call", name: "cybion_get_ultimate_machine", arguments: '{"machine_id":"machine-1"}' },
@@ -30,7 +30,7 @@ const samples: Record<string, unknown> = {
 test("every built-in tool in the catalog has exactly one renderer matcher", () => {
   const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
   const names = [
-    ...catalog.context.map((tool: { name: string }) => tool.name),
+    ...catalog.kernel.map((tool: { name: string }) => tool.name),
     ...catalog.note.map((tool: { name: string }) => tool.name),
     ...catalog.worker.map((tool: { name: string }) => tool.name),
     ...Object.keys(catalog.native),

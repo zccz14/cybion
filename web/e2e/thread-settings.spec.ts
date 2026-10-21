@@ -34,7 +34,7 @@ test("the popover groups models by upstream and edits reasoning effort and fast 
   await expect(trigger).toHaveText("meta-llama/Llama-3.1-8B-Instruct (xhigh)")
   await popover.getByRole("switch").click()
   await expect(page.getByTestId("fast")).toHaveText("true")
-  const budget = popover.getByLabel("上下文预算")
+  const budget = popover.getByLabel("重放预算")
   await expect(budget).toHaveAttribute("placeholder", "200000")
   await budget.fill("150000")
   await expect(page.getByTestId("budget")).toHaveText("150000")

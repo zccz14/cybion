@@ -70,7 +70,7 @@ impl PhaseCell {
 }
 
 // INVARIANT: tools.json groups tools by the party that executes them, which is
-// exactly the phase taxonomy. `worker` runs on the user's device; `context`,
+// exactly the phase taxonomy. `worker` runs on the user's device; `manual`,
 // `note` and `native` run here in the Controller, because start_response_tool
 // intercepts the native tools and never asks the upstream to execute them.
 // A native tool executed server-side by the upstream would have to move to
@@ -84,7 +84,7 @@ pub(super) fn tool_phase(name: &str) -> Option<Phase> {
     if group_has("worker") {
         return Some(Phase::Device);
     }
-    if group_has("context") || group_has("note") || TOOL_CATALOG["native"].get(name).is_some() {
+    if group_has("kernel") || group_has("note") || TOOL_CATALOG["native"].get(name).is_some() {
         return Some(Phase::Kernel);
     }
     None
@@ -165,7 +165,7 @@ mod tests {
 
     fn catalog_tools() -> Vec<(&'static str, &'static str)> {
         let mut tools = Vec::new();
-        for group in ["context", "note", "worker"] {
+        for group in ["kernel", "note", "worker"] {
             for tool in TOOL_CATALOG[group].as_array().unwrap() {
                 tools.push((group, tool["name"].as_str().unwrap()));
             }
