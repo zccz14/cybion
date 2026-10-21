@@ -1,9 +1,10 @@
 import type { ThreadListFilters } from "./thread-search"
 
-// A filtered empty result is not proof of a new workspace. Only these two
-// unsearched entry views may request the separate, unfiltered count check.
-export function needsFirstConversationCheck(filters: ThreadListFilters, visibleTotal: number | undefined, archivedTotal: number | undefined) {
-  return (filters.view === "mine" || filters.view === "all") && filters.q.trim() === "" && visibleTotal === 0 && archivedTotal === 0
+// A filtered or searched empty result is not proof of a new workspace. Only these two
+// unsearched entry views may request the separate, unfiltered count check — and only the
+// screen that acts on the answer asks for it, never the Thread List on its way to render.
+export function needsFirstConversationCheck(filters: ThreadListFilters) {
+  return (filters.view === "mine" || filters.view === "all") && filters.q.trim() === ""
 }
 
 const en = {

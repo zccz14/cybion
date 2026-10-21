@@ -22,11 +22,15 @@ test("every execution state has distinct labels and explanatory copy in both lan
 
 test("both thread lists and conversation status use the same server-derived presentation", () => {
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-  assert.equal(source.match(/<ThreadLink /g)?.length, 2)
+  const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
+  // INVARIANT: every surface that lists a Thread renders the same polled row — the narrow
+  // page, the sidebar beside a new Thread, the sidebar beside an open one and the archived
+  // group — so no spot can invent its own status presentation or need a per-row override.
+  assert.equal(list.match(/<ThreadLink /g)?.length, 3)
+  assert.equal(source.match(/<ThreadLink /g), null)
   assert.equal(source.match(/<ThreadStatusBadge status=\{current.display_status\}/g)?.length, 1)
   assert.match(source, /<ThreadStatusSummary status=\{current.display_status\} language=\{language\} \/>/)
   assert.doesNotMatch(source, /StatusDot|statusLabel|latestThreadAction/)
-  assert.match(source, /thread=\{item.id === current.id \? current : item\}/)
 })
 
 test("thread list rows show how long ago each thread was last updated", () => {

@@ -24,8 +24,9 @@ finished or the user's real-world objective has been achieved.
 - The selected row has a neutral background/border and `aria-current="page"`.
   Selection does not change the execution color.
 - The detail header and active-execution message reuse the same icon, label,
-  and color mapping. The currently open row uses the detail query's snapshot
-  so its status agrees with the header even between list polls.
+  and color mapping. Every row renders the list's own polled snapshot, so the
+  open row agrees with the header within one refresh interval; the list never
+  borrows the conversation's snapshot to shortcut that wait.
 - Amber is reserved here for active work, green for successful completion, red
   for failure, and muted ink for neutral states. Each status has a distinct
   shape and visible text; color and animation are supplementary signals.

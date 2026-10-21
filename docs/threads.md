@@ -175,6 +175,18 @@ same way. The archived group sits outside the filter and keeps showing every
 archived Thread. An empty result offers a one-click "Show all" reset to the
 widest selection.
 
+The list owns its own data. The component that renders it runs the paging and
+archived queries, the two-second refresh and the restore action; the shell
+above it passes the filter selection and nothing else. Two properties follow,
+and both are about how the app feels rather than what it stores. Opening a
+Thread never refetches the list and never unmounts it: the conversation column
+is keyed by Thread id, so a switch remounts that column alone. And the list
+renders from rows it already has while `GET /api/threads/{id}` and the history
+window are still in flight, so a slow Thread settles inside its own column
+without blanking the layout around it. One polling window counts as fresh
+cache, so a list that remounts inside it reuses the rows the poll would have
+returned a moment later.
+
 ## Report-purpose Threads
 
 Daily reports were removed from Cybion; new Threads are always purpose

@@ -32,9 +32,12 @@ for (const scenario of ["api-only", "archived", "search", "failed-filter", "unkn
     await page.goto(`/#/threads${query}`)
     await expect(page.getByRole("button", { name: "新建对话", exact: true })).toBeVisible()
     await expect(page.getByText("没有匹配的对话", { exact: true })).toBeVisible()
-    if (scenario === "api-only" || scenario === "unknown-count") await expect.poll(() => fixture.requests.includes("/api/threads?limit=1")).toBe(true)
+    // The count check asks the active rows first and the archived ones only when those are
+    // empty; an archived Thread is what keeps an otherwise empty list from being a new workspace.
+    if (scenario === "api-only" || scenario === "unknown-count" || scenario === "archived") await expect.poll(() => fixture.requests.includes("/api/threads?limit=1")).toBe(true)
+    if (scenario === "archived") await expect.poll(() => fixture.requests.includes("/api/threads?archived=true&limit=1")).toBe(true)
     await expect(page.locator("#new-thread-input")).toHaveCount(0)
-    if (scenario === "search" || scenario === "failed-filter" || scenario === "archived") expect(fixture.requests).not.toContain("/api/threads?limit=1")
+    if (scenario === "search" || scenario === "failed-filter") expect(fixture.requests).not.toContain("/api/threads?limit=1")
     await page.getByRole("button", { name: "新建对话", exact: true }).click()
     await expect(page.locator("#new-thread-input")).toBeVisible()
     expect(fixture.unexpected).toEqual([])
