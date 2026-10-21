@@ -146,7 +146,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
 // guard is `a_previous_version_database_receives_the_audit_columns`.
-const USER_SCHEMA_VERSION: i64 = 49;
+const USER_SCHEMA_VERSION: i64 = 50;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1115,7 +1115,7 @@ CREATE TABLE IF NOT EXISTS reasoning_audits (
   input_tokens INTEGER,
   output_tokens INTEGER,
   cached_tokens INTEGER,
-  openai_lb_request_id TEXT,
+  request_id TEXT,
   idx_head INTEGER,
   idx_tail INTEGER,
   error TEXT,
@@ -1714,6 +1714,24 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                 .map_err(ApiError::internal)?;
         }
     }
+    // The column holds the request ID the *upstream gateway* reported, which is
+    // not necessarily OpenAI-LB's: a chained gateway (NormAI) mints its own and
+    // the same value travels down the chain, so it is also the ID that
+    // gateway's request-cost query answers. Renamed in place so the history
+    // keeps the IDs it already has.
+    let legacy_column: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('reasoning_audits') WHERE name='openai_lb_request_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if legacy_column {
+        transaction
+            .execute(
+                "ALTER TABLE reasoning_audits RENAME COLUMN openai_lb_request_id TO request_id",
+                [],
+            )
+            .map_err(ApiError::internal)?;
+    }
     let (name, definition) = ("api_key", "TEXT NOT NULL DEFAULT ''");
     let exists: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('integration_settings') WHERE name=?)",
@@ -2155,7 +2173,13 @@ struct ReasoningAuditView {
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     cached_tokens: Option<i64>,
-    openai_lb_request_id: Option<String>,
+    /// The request ID the upstream gateway reported for this call, if it
+    /// reported one. Read back as the audit link and as the key the cost
+    /// settlement queries the gateway with.
+    request_id: Option<String>,
+    /// The base URL of the upstream that served the call, so the audit link
+    /// can point at the console that actually recorded (and billed) it.
+    upstream_base_url: String,
     idx_head: Option<i64>,
     idx_tail: Option<i64>,
     error: Option<String>,
@@ -2663,6 +2687,20 @@ struct IntegrationSettings {
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// The request ID the upstream gateway reported for one call. A gateway that
+/// fronts the upstream names the call in `x-normai-request-id` and hands the
+/// same value down the chain, so that is the ID its own audit and request-cost
+/// query answer; a provider reached directly reports only its load-balancer
+/// header. Reading either is what keeps a Thread's audit link and its settled
+/// cost addressable whichever gateway sits in front.
+fn gateway_request_id(headers: &HeaderMap) -> Option<String> {
+    ["x-normai-request-id", "x-openai-lb-request-id"]
+        .iter()
+        .find_map(|name| headers.get(*name))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
@@ -3458,8 +3496,9 @@ async fn reasoning_audits(
     let model = query.model.filter(|value| !value.trim().is_empty());
     user_db(&state, &identity.user, true, move |connection| {
         let mut statement = connection.prepare(
-            "SELECT a.id,a.input_record_id,a.thread_id,COALESCE(t.title,''),a.request_kind,a.model,a.status,a.started_at,a.finished_at,a.input_tokens,a.output_tokens,a.cached_tokens,a.openai_lb_request_id,a.idx_head,a.idx_tail,a.error,a.reasoning_effort
-             FROM reasoning_audits a LEFT JOIN threads t ON t.id=a.thread_id ORDER BY a.started_at DESC,a.id DESC",
+            "SELECT a.id,a.input_record_id,a.thread_id,COALESCE(t.title,''),a.request_kind,a.model,a.status,a.started_at,a.finished_at,a.input_tokens,a.output_tokens,a.cached_tokens,a.request_id,a.idx_head,a.idx_tail,a.error,a.reasoning_effort,COALESCE(u.base_url,'')
+             FROM reasoning_audits a LEFT JOIN threads t ON t.id=a.thread_id
+             LEFT JOIN upstreams u ON u.id=a.upstream_id ORDER BY a.started_at DESC,a.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(ReasoningAuditView {
@@ -3475,7 +3514,8 @@ async fn reasoning_audits(
                 input_tokens: row.get(9)?,
                 output_tokens: row.get(10)?,
                 cached_tokens: row.get(11)?,
-                openai_lb_request_id: row.get(12)?,
+                request_id: row.get(12)?,
+                upstream_base_url: row.get(17)?,
                 idx_head: row.get(13)?,
                 idx_tail: row.get(14)?,
                 error: row.get(15)?,
@@ -7190,11 +7230,7 @@ async fn send_responses_request(
     };
     let response = traffic::upstream_response(response, counters);
     let status = response.status();
-    let response_id = response
-        .headers()
-        .get("x-openai-lb-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let response_id = gateway_request_id(response.headers());
     if !status.is_success() {
         let retry_after_ms = recovery::retry_after(response.headers());
         let body = match read_response_body(response, &mut cancellation).await {
@@ -7646,31 +7682,26 @@ async fn finish_reasoning_audit(
     let status = status.to_owned();
     let request_id = request_id.map(str::to_owned);
     let error = error.map(str::to_owned);
-    let result = user_db(
-        state,
-        &user,
-        false,
-        move |connection| {
-            connection.execute(
-                "UPDATE reasoning_audits
+    let result = user_db(state, &user, false, move |connection| {
+        connection.execute(
+            "UPDATE reasoning_audits
                  SET status=CASE WHEN status='cancelled' THEN status ELSE ? END,
-                     finished_at=?,input_tokens=?,output_tokens=?,cached_tokens=?,openai_lb_request_id=?,
+                     finished_at=?,input_tokens=?,output_tokens=?,cached_tokens=?,request_id=?,
                      error=CASE WHEN status='cancelled' THEN error ELSE ? END
                  WHERE id=?",
-                params![
-                    status,
-                    now(),
-                    input_tokens,
-                    output_tokens,
-                    cached_tokens,
-                    request_id,
-                    error,
-                    audit_id
-                ],
-            )?;
-            Ok(())
-        },
-    )
+            params![
+                status,
+                now(),
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                request_id,
+                error,
+                audit_id
+            ],
+        )?;
+        Ok(())
+    })
     .await;
     if let Err(storage_error) = result {
         tracing::warn!(error = %storage_error.message, "could not finish reasoning audit");
@@ -9425,6 +9456,20 @@ mod tests {
                 stats: stats::Patrol::new(),
             },
         )
+    }
+
+    #[test]
+    fn a_gateway_request_id_prefers_the_gateway_header_and_falls_back_to_the_lb_one() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(gateway_request_id(&headers), None);
+        headers.insert("x-openai-lb-request-id", "lb-id".parse().unwrap());
+        assert_eq!(gateway_request_id(&headers).as_deref(), Some("lb-id"));
+        headers.insert("x-normai-request-id", "gateway-id".parse().unwrap());
+        assert_eq!(
+            gateway_request_id(&headers).as_deref(),
+            Some("gateway-id"),
+            "the chained gateway's ID is the one its cost query answers"
+        );
     }
 
     #[test]

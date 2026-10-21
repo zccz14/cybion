@@ -95,7 +95,7 @@ async fn seed_audit(
     user_db(state, user, false, move |connection| {
         connection
             .execute(
-                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,finished_at,upstream_id,openai_lb_request_id)
+                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,finished_at,upstream_id,request_id)
                  VALUES(?,'inference','fixture','completed',?,?,?,?)",
                 params![thread, now(), now(), upstream_id, request_id],
             )
@@ -111,7 +111,7 @@ async fn read_cost(state: &AppState, user: &User, request_id: &str) -> (Option<i
     user_db(state, user, false, move |connection| {
         connection
             .query_row(
-                "SELECT cost_usd_nanos,cost_attempts FROM reasoning_audits WHERE openai_lb_request_id=?",
+                "SELECT cost_usd_nanos,cost_attempts FROM reasoning_audits WHERE request_id=?",
                 [request_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
