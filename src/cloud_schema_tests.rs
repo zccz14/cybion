@@ -736,3 +736,36 @@ async fn schema_30_upgrade_adds_usage_stats_snapshots_and_insight_indexes() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn schema_48_upgrade_adds_reasoning_cost_columns_and_keeps_the_audits() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "cost-upgrade-user").unwrap();
+    user_db(&state, &user, true, move |connection| {
+        connection.execute_batch(
+            "ALTER TABLE reasoning_audits DROP COLUMN cost_usd_nanos;
+             ALTER TABLE reasoning_audits DROP COLUMN cost_attempts;
+             INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('t','T','m','idle',1,1);
+             INSERT INTO reasoning_audits(id,thread_id,model,status,started_at,openai_lb_request_id)
+               VALUES(3,'t','m','completed',1,'req-1');
+             PRAGMA user_version=48;",
+        )?;
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        let (cost, attempts, request_id): (Option<i64>, i64, Option<String>) = connection
+            .query_row(
+                "SELECT cost_usd_nanos,cost_attempts,openai_lb_request_id FROM reasoning_audits WHERE id=3",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+        assert_eq!(cost, None, "an audit keeps no cost it never received");
+        assert_eq!(attempts, 0);
+        assert_eq!(request_id.as_deref(), Some("req-1"));
+        Ok(())
+    })
+    .await
+    .unwrap();
+}

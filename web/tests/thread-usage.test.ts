@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { compactTokenCount, emptyThreadUsage, threadCacheRate } from "../src/lib/thread-usage.ts"
+import { compactTokenCount, emptyThreadUsage, threadCacheRate, threadCost } from "../src/lib/thread-usage.ts"
 
 test("token counts compact large cumulative values without hiding zero", () => {
   for (const [input, expected] of [[0, "0"], [123, "123"], [125000, "125K"], [1234567, "1.2M"], [3000000000, "3B"], [1000000000000, "1T"]] as const) assert.equal(compactTokenCount(input), expected)
@@ -26,4 +26,13 @@ test("list and detail use server cumulative usage, not a sum of streaming previe
   assert.match(link, /<ThreadUsageSummary usage=\{thread.usage\}/)
   assert.match(link, /<ThreadUsageDetails usage=\{thread.usage\}/)
   assert.doesNotMatch(link, /fetch\(|useQuery/)
+})
+
+test("thread cost formats a reported amount and stays unknown otherwise", () => {
+  const usage = { ...emptyThreadUsage }
+  assert.equal(threadCost(usage, "en"), null, "no reported call means no amount")
+  assert.equal(threadCost({ ...usage, cost_usd_nanos: 0, cost_settled_requests: 1 }, "en"), "$0.000000")
+  assert.equal(threadCost({ ...usage, cost_usd_nanos: 1234, cost_settled_requests: 2 }, "en"), "$0.000001")
+  assert.equal(threadCost({ ...usage, cost_usd_nanos: 12345678, cost_settled_requests: 2 }, "en"), "$0.0123")
+  assert.equal(threadCost({ ...usage, cost_usd_nanos: 1234567890, cost_settled_requests: 9 }, "zh"), "$1.2346")
 })

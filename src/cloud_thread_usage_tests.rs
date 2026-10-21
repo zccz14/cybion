@@ -36,6 +36,8 @@ async fn empty_threads_return_zero_usage_and_no_cache_rate_everywhere() {
             "total_tokens": 0,
             "cached_tokens": 0,
             "cache_hit_rate": null,
+            "cost_usd_nanos": 0,
+            "cost_settled_requests": 0,
         })
     );
 }
@@ -135,6 +137,7 @@ async fn thread_usage_sums_token_fields_and_keeps_cache_rates_nullable() {
                 total_tokens: 150,
                 cached_tokens: 0,
                 cache_hit_rate: None,
+                ..ThreadUsage::default()
             },
         ),
         (
@@ -145,6 +148,7 @@ async fn thread_usage_sums_token_fields_and_keeps_cache_rates_nullable() {
                 total_tokens: 50,
                 cached_tokens: 0,
                 cache_hit_rate: None,
+                ..ThreadUsage::default()
             },
         ),
         (
@@ -155,6 +159,7 @@ async fn thread_usage_sums_token_fields_and_keeps_cache_rates_nullable() {
                 total_tokens: 100,
                 cached_tokens: 50,
                 cache_hit_rate: Some(0.5),
+                ..ThreadUsage::default()
             },
         ),
         (
@@ -165,6 +170,7 @@ async fn thread_usage_sums_token_fields_and_keeps_cache_rates_nullable() {
                 total_tokens: 10,
                 cached_tokens: 5,
                 cache_hit_rate: None,
+                ..ThreadUsage::default()
             },
         ),
         ((None, None, None), ThreadUsage::default()),
@@ -177,6 +183,7 @@ async fn thread_usage_sums_token_fields_and_keeps_cache_rates_nullable() {
                 total_tokens: 150,
                 cached_tokens: 0,
                 cache_hit_rate: Some(0.0),
+                ..ThreadUsage::default()
             },
         ),
     ] {
@@ -305,4 +312,60 @@ async fn audit_updates_do_not_double_count_and_renames_or_thread_status_do_not_r
             .await
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn thread_usage_sums_only_the_costs_the_gateway_answered() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "usage-cost").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let id = thread.id.clone();
+    let seeded = id.clone();
+    user_db(&state, &user, false, move |connection| {
+        let audit_id = audit(
+            connection,
+            &seeded,
+            "inference",
+            "completed",
+            (Some(1000), Some(100), Some(0)),
+        );
+        connection
+            .execute(
+                "UPDATE reasoning_audits SET cost_usd_nanos=1200 WHERE id=?",
+                [audit_id],
+            )
+            .unwrap();
+        let audit_id = audit(
+            connection,
+            &seeded,
+            "inference",
+            "completed",
+            (Some(10), Some(1), Some(0)),
+        );
+        connection
+            .execute(
+                "UPDATE reasoning_audits SET cost_usd_nanos=34 WHERE id=?",
+                [audit_id],
+            )
+            .unwrap();
+        // A call whose upstream never answered the cost query stays unknown and
+        // must not read as free.
+        audit(
+            connection,
+            &seeded,
+            "inference",
+            "completed",
+            (Some(5), Some(1), Some(0)),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let read = read_thread_for(&state, &user, id).await.unwrap();
+    assert_eq!(read.usage.cost_usd_nanos, 1234);
+    assert_eq!(read.usage.cost_settled_requests, 2);
+    let json = serde_json::to_value(&read.usage).unwrap();
+    assert_eq!(json["cost_usd_nanos"], 1234);
+    assert_eq!(json["cost_settled_requests"], 2);
 }
