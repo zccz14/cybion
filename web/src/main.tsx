@@ -1784,6 +1784,14 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     },
   })
   const backToThreads = () => navigate({ pathname: "/threads", search: location.search })
+  const running = thread.data?.status === "running"
+  // Only stored records prove a call is still on the device: a streamed item the
+  // preview renders carries the request's start time, not the call's own.
+  // Every hook sits above the placeholders below: a Thread opened from its URL has no
+  // list row to render from, so the first render is the placeholder and this memo would
+  // only be reached one render later — React then throws #310 ("Rendered more hooks
+  // than during the previous render") and the column dies instead of opening.
+  const inFlightCalls = useMemo(() => inFlightCallIds(running ? durableRecords : []), [durableRecords, running])
   // Only this column settles into a placeholder; the Thread List is a sibling that already
   // rendered, so opening a Thread never blanks the layout around it.
   if (thread.isLoading) return <ThreadPending desktop={desktop} onBack={backToThreads} />
@@ -1791,10 +1799,6 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
   const current = thread.data
   const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
   const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
-  const running = current.status === "running"
-  // Only stored records prove a call is still on the device: a streamed item the
-  // preview renders carries the request's start time, not the call's own.
-  const inFlightCalls = useMemo(() => inFlightCallIds(running ? durableRecords : []), [durableRecords, running])
   const archived = current.archived_at !== null
   const archiveAction = archived
     ? { label: t("restoreThread"), icon: <ArchiveRestoreIcon className="size-4" />, next: false }
