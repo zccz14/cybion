@@ -21,9 +21,9 @@ function Fixture() {
       <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Language</button>
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>
     </header>
-    <div id="loaded"><ThreadManualLoads view={{ head: 10, tail: 32, loaded: [manual, edited] }} lookup={lookup} language={language} /></div>
-    <div id="unknown"><ThreadManualLoads view={{ head: 50, tail: 60, loaded: [edited, unknown] }} lookup={lookup} language={language} /></div>
-    <div id="empty"><ThreadManualLoads view={{ head: 40, tail: 41, loaded: [] }} lookup={lookup} language={language} /></div>
+    <div id="loaded"><ThreadManualLoads view={{ head: 10, tail: 32, loaded: [manual, edited], limit: 12 }} lookup={lookup} language={language} /></div>
+    <div id="unknown"><ThreadManualLoads view={{ head: 50, tail: 60, loaded: [edited, unknown], limit: 12 }} lookup={lookup} language={language} /></div>
+    <div id="empty"><ThreadManualLoads view={{ head: 40, tail: 41, loaded: [], limit: 2 }} lookup={lookup} language={language} /></div>
     <div id="load-notice"><ManualLoadNotice notice={{ manual_id: manual, loaded: true }} lookup={lookup} language={language} time="10:01" recordId={43} /></div>
     <div id="unload-notice"><ManualLoadNotice notice={{ manual_id: edited, loaded: false }} lookup={lookup} language={language} time="10:02" recordId={44} /></div>
   </main>

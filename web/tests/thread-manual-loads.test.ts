@@ -43,6 +43,9 @@ test("the transcript row reads the loaded bindings and nothing re-reads them", (
   assert.doesNotMatch(main, /history\/reads/)
   assert.doesNotMatch(main, /context_dirty/)
   assert.match(indicator, /view\.loaded/)
+  // The row counts against the cap the controller reports, so a Thread that is
+  // full reads as full instead of merely long.
+  assert.match(indicator, /view\.limit/)
   assert.match(indicator, /text\.loadedLabel/)
   assert.doesNotMatch(indicator, /state\[|fingerprint/)
 })

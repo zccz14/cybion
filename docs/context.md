@@ -210,10 +210,17 @@ compile appends one `manual_unloaded` notice after which nothing refreshes it.
 Unloading a Manual the Thread does not hold changes nothing and answers
 `unloaded: false`.
 
-A Thread holds at most eight loaded Manuals; a further load is refused with the
-way out — unload one first — rather than truncated. The loaded-context row
-reports the set beside the record range (see below), one chip per bound Manual,
-not one per delivery.
+A Thread holds twelve loaded Manuals by default. The cap is a setting at two
+levels: the User's new-thread default, and a per-Thread override that falls back
+to it, so an account that routinely works from more Manuals raises the default
+once and a single Thread can still run tighter. A configured cap stays between
+one and sixty-four — it bounds what every request of that Thread carries — and a
+value outside that range is refused at the settings boundary rather than
+clamped. A load past the cap is refused with the count, the cap and the way out
+— unload one first — rather than truncated. Lowering a cap unloads nothing: the
+bindings stay, and the Thread releases them itself before it loads another. The
+loaded-context row reports the set beside the record range and the cap it counts
+against (see below), one chip per bound Manual, not one per delivery.
 
 ## Loaded-context indicator
 
@@ -221,7 +228,8 @@ The end of the conversation shows which Manuals the Thread keeps loaded. The row
 is the last row of the transcript rather than header chrome, so a Thread that
 loads many Manuals scrolls its list out of the way instead of holding screen
 height. `GET /api/threads/{id}/history/loaded` answers with the current `head`
-and `tail` plus the bound `manual_id`s in load order. This is the same
+and `tail`, the bound `manual_id`s in load order, and the `limit` those bindings
+count against. This is the same
 `[idx_head, idx_tail]` the compiler replays, not a separate stored state, so a
 binding whose copy sits behind the head is visible as the range narrows after a
 checkpoint.
@@ -233,8 +241,8 @@ nothing to a reader, and the binding is already in the activity record behind it
 
 A Thread with no binding and no protocol record reports `head` and `tail` as
 `null` and the row stays hidden. A Thread that holds bindings always renders the
-count, because those copies travel in every request whether or not the Thread
-did anything else in the window.
+count beside the cap it counts against (`3 / 12`), because those copies travel
+in every request whether or not the Thread did anything else in the window.
 
 ## Cybion Common Manual
 

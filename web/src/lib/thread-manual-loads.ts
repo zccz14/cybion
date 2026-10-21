@@ -10,6 +10,9 @@ export type ThreadManualLoadsView = {
   // Thread state rather than message state: the controller carries each current
   // copy in every request, so they survive a compaction.
   loaded: string[]
+  // The cap those bindings count against: this Thread's own setting, then the
+  // account default, then the built-in one.
+  limit: number
 }
 
 // A `manual_loaded`/`manual_unloaded` activity record: the controller's own

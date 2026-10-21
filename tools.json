@@ -23,7 +23,7 @@
     {
       "type": "function",
       "name": "load_manual",
-      "description": "Bind a Manual to this Thread so the Controller keeps it loaded. The full Manual JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Manual changes or a compaction replaces the history, so the Thread never opens it again to stay current. The copy already carries the Manual, its Use When description, its body, and its direct children. Use it for material the Thread must keep working from across manual windows; list_manuals stays the way to find what exists. Resolves local Manuals first, then the read-only Cybion Common Manual. A Thread holds at most 8 loaded Manuals; unload_manual releases one.",
+      "description": "Bind a Manual to this Thread so the Controller keeps it loaded. The full Manual JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Manual changes or a compaction replaces the history, so the Thread never opens it again to stay current. The copy already carries the Manual, its Use When description, its body, and its direct children. Use it for material the Thread must keep working from across manual windows; list_manuals stays the way to find what exists. Resolves local Manuals first, then the read-only Cybion Common Manual. A Thread holds 12 loaded Manuals by default; its own setting or the account default may allow more or fewer, and a load past the cap is refused with the count and the cap — unload_manual releases one.",
       "parameters": {
         "type": "object",
         "properties": {
