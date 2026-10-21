@@ -182,9 +182,11 @@ type ThreadDefaults = {
   context_budget_tokens: number
   minimal_mode: boolean
   image_generation_model: string
+  /** Loaded Manuals a Thread keeps at once unless it overrides the cap. */
+  max_loaded_manuals: number
 }
 type ThreadStatus = "idle" | "running" | "failed"
-type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model"> & {
+type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals"> & {
   created_by: "web" | "api"
   external_ref: string | null
   id: string
@@ -195,6 +197,8 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "i
   minimal_mode: boolean | null
   /** `null` follows the account default; `""` disables image generation. */
   image_generation_model: string | null
+  /** `null` follows the account default for the loaded-Manual cap. */
+  max_loaded_manuals: number | null
   archived_at: number | null
   context_tokens: number | null
   usage: ThreadUsage
@@ -211,7 +215,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model"> & { input: string; images: string[] }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals"> & { input: string; images: string[] }
 type ApiKey = {
   id: string
   label: string
@@ -655,6 +659,8 @@ const copy = {
     minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
     imageGenerationModel: "Image generation model",
     imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
+    loadedManualCap: "Loaded manuals",
+    loadedManualCapDescription: "How many Manuals one thread may keep loaded at once. A further load is refused until the thread unloads one; 12 is the built-in default, 1–64 allowed.",
     imageGenerationDisabled: "Disabled",
     normaiTitle: "NormAI upstream",
     normaiDescription: "Model inference runs through NormAI. Configure upstream providers and billing on NormAI; Cybion automatically issues and stores a dedicated consumer credential.",
@@ -1017,6 +1023,8 @@ const copy = {
     minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
     imageGenerationModel: "图像生成模型",
     imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
+    loadedManualCap: "已加载手册上限",
+    loadedManualCapDescription: "单个线程用 load_manual 能同时保持加载的手册数量；超过后新的加载会被拒绝，需要先卸载一份。内置默认 12，可设 1–64。",
     imageGenerationDisabled: "关闭",
     normaiTitle: "NormAI 上游",
     normaiDescription: "模型推理经由 NormAI 完成；上游提供商与计费都在 NormAI 配置，Cybion 会自动签发并保存专用消费者密钥。",
@@ -1762,7 +1770,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null; max_loaded_manuals?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -1862,7 +1870,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || attachments.images.length > 0) && !busy) submit.mutate({ input, images: attachments.images }) }}>
       <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} />
+          <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} />
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
             {action === "send"
@@ -3258,6 +3266,12 @@ function MetricCard({ label, value, detail, progress }: { label: string; value: 
   return <Card><CardHeader><CardDescription>{label}</CardDescription><CardTitle className="text-2xl tabular-nums">{value}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{detail}{progress !== undefined && <Progress className="mt-3" value={Math.max(0, Math.min(100, progress))} />}</CardContent></Card>
 }
 
+// The controller refuses a cap outside 1–64; clamping in the field keeps a
+// keystroke from becoming a save that fails silently.
+function loadedManualCap(value: number) {
+  return Math.min(64, Math.max(1, Math.trunc(value)))
+}
+
 function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
   const client = useQueryClient()
@@ -3282,7 +3296,8 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
     value.service_tier_fast !== defaults.data.service_tier_fast ||
     value.context_budget_tokens !== defaults.data.context_budget_tokens ||
     value.minimal_mode !== defaults.data.minimal_mode ||
-    value.image_generation_model !== defaults.data.image_generation_model
+    value.image_generation_model !== defaults.data.image_generation_model ||
+    value.max_loaded_manuals !== defaults.data.max_loaded_manuals
   )
   function edit(next: ThreadDefaults) {
     setDraft(next)
@@ -3344,6 +3359,11 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
               </SelectGroup></SelectContent>
             </Select>
             <FieldDescription id="default-thread-image-model-description">{t("imageGenerationModelDescription")}</FieldDescription>
+          </Field>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="default-thread-loaded-manual-cap">{t("loadedManualCap")}</FieldLabel>
+            <Input id="default-thread-loaded-manual-cap" type="number" min={1} max={64} step={1} inputMode="numeric" disabled={save.isPending} value={String(value.max_loaded_manuals)} onChange={(event) => { const raw = event.target.value.trim(); if (raw === "") return; const parsed = Number(raw); if (Number.isFinite(parsed)) edit({ ...value, max_loaded_manuals: loadedManualCap(parsed) }) }} />
+            <FieldDescription id="default-thread-loaded-manual-cap-description">{t("loadedManualCapDescription")}</FieldDescription>
           </Field>
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}

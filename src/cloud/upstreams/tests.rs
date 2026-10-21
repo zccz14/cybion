@@ -171,6 +171,7 @@ async fn creating_threads_requires_an_existing_upstream() {
             context_budget_tokens: 200_000,
             minimal_mode: false,
             image_generation_model: String::new(),
+            max_loaded_manuals: 12,
         }),
     )
     .await
@@ -290,6 +291,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
             context_budget_tokens: 200_000,
             minimal_mode: false,
             image_generation_model: String::new(),
+            max_loaded_manuals: 12,
         }),
     )
     .await
@@ -343,6 +345,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
             context_budget_tokens: 200_000,
             minimal_mode: false,
             image_generation_model: String::new(),
+            max_loaded_manuals: 12,
         }),
     )
     .await

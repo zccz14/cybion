@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test"
 test("each loaded Manual shows its name, never the id", async ({ page }) => {
   await page.goto("/e2e/thread-manual-loads.html")
   const loaded = page.locator("#loaded")
-  await expect(loaded).toContainText("已加载手册 2")
+  await expect(loaded).toContainText("已加载手册 2 / 12")
   await expect(loaded).toContainText("#10–#32")
   const manual = loaded.getByRole("link", { name: /必读手册/ })
   await expect(manual).toHaveText("必读手册已加载")
@@ -24,7 +24,7 @@ test("a Manual the lookup cannot name keeps a readable stand-in", async ({ page 
 test("a Thread with nothing loaded says so", async ({ page }) => {
   await page.goto("/e2e/thread-manual-loads.html")
   const empty = page.locator("#empty")
-  await expect(empty).toContainText("已加载手册 0")
+  await expect(empty).toContainText("已加载手册 0 / 2")
   await expect(empty).toContainText("本线程没有加载手册")
   await expect(empty.getByRole("link")).toHaveCount(0)
 })
@@ -47,7 +47,7 @@ test("the row speaks both languages and keeps its layout in either theme", async
   await page.getByRole("button", { name: "Theme", exact: true }).click()
   await page.getByRole("button", { name: "Language", exact: true }).click()
   const loaded = page.locator("#loaded")
-  await expect(loaded).toContainText("Loaded manuals 2")
+  await expect(loaded).toContainText("Loaded manuals 2 / 12")
   await expect(loaded).toContainText("#10–#32")
   await expect(loaded.getByRole("link", { name: /必读手册/ })).toHaveText("必读手册loaded")
   await expect(loaded.getByRole("link", { name: /必读手册/ })).toHaveAttribute("title", /keeps delivering its current copy/)
