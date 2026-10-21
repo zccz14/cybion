@@ -503,7 +503,10 @@ fn app(state: AppState) -> Router {
             "/api/threads/{id}/history/window",
             get(thread_history_window),
         )
-        .route("/api/threads/{id}/history/reads", get(thread_context_reads))
+        .route(
+            "/api/threads/{id}/history/loaded",
+            get(thread_context_loads),
+        )
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
         .route("/api/threads/{id}/cancel", post(thread_controls::cancel))
@@ -4001,89 +4004,44 @@ fn thread_history_older_page(
     Ok(ThreadHistoryWindow { records, has_older })
 }
 
-/// The `read_context` calls inside the context this Thread replays right now.
-/// The browser parses them into the Contexts the model has read, so the page can
-/// show what is still in context and whether it still holds; a compaction moves
-/// the head to its checkpoint and the calls before it fall out of the range.
+/// What this Thread keeps loaded: the Contexts the Controller delivers into
+/// every request, and the record range that answer was computed from. A
+/// compaction moves the head to its checkpoint, and the copies before it leave
+/// the range, which is exactly when the next compile delivers them again.
 #[derive(Serialize)]
-struct ThreadContextReadsView {
+struct ThreadContextLoadsView {
     /// Context head: the checkpoint, or the oldest protocol record, that replay starts at.
     head: Option<i64>,
     /// Context tail: the newest protocol record the head reaches.
     tail: Option<i64>,
-    /// Contexts this Thread keeps loaded. The controller delivers the current
-    /// copy into every request, so what the Thread holds is current by
-    /// construction and outlives a compaction the way a read does not.
+    /// Contexts this Thread keeps loaded, in the order it loaded them.
     loaded: Vec<String>,
-    /// `read_context` calls in `[head, tail]`, oldest first.
-    calls: Vec<ContextReadCall>,
 }
 
-#[derive(Serialize)]
-struct ContextReadCall {
-    #[serde(flatten)]
-    record: HistoryRecord,
-    /// Whether the Context this call read is still the current copy.
-    state: ContextReadState,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ContextReadState {
-    /// The Thread holds the current version.
-    Current,
-    /// The Context changed after the read.
-    Changed,
-    /// The call was never answered with a Context body.
-    Unanswered,
-    /// The Context no longer resolves.
-    Missing,
-}
-
-/// What one read and the same read now amount to. `Changed` carries the current
-/// fingerprint, which is what the Thread is told about and recorded as told.
-enum ReadVersion {
-    Same,
-    Changed(String),
-    Unanswered,
-    Missing,
-}
-
-impl ReadVersion {
-    fn state(&self) -> ContextReadState {
-        match self {
-            Self::Same => ContextReadState::Current,
-            Self::Changed(_) => ContextReadState::Changed,
-            Self::Unanswered => ContextReadState::Unanswered,
-            Self::Missing => ContextReadState::Missing,
-        }
-    }
-}
-
-async fn thread_context_reads(
+async fn thread_context_loads(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ThreadContextReadsView>, ApiError> {
+) -> Result<Json<ThreadContextLoadsView>, ApiError> {
     let id = thread_id(&id)?;
-    Ok(Json(context_reads_for(&state, &identity.user, id).await?))
+    Ok(Json(loaded_contexts_for(&state, &identity.user, id).await?))
 }
 
-async fn context_reads_for(
+async fn loaded_contexts_for(
     state: &AppState,
     user: &User,
     id: String,
-) -> Result<ThreadContextReadsView, ApiError> {
+) -> Result<ThreadContextLoadsView, ApiError> {
     user_db(state, user, true, move |connection| {
-        load_context_reads(connection, &id)
+        loaded_contexts_view(connection, &id)
     })
     .await
 }
 
-fn load_context_reads(
+fn loaded_contexts_view(
     connection: &Connection,
     id: &str,
-) -> Result<ThreadContextReadsView, ApiError> {
+) -> Result<ThreadContextLoadsView, ApiError> {
     load_thread(connection, id)?;
     let loaded = context_loads::loaded_ids(connection, id)?;
     let tail: Option<i64> = connection.query_row(
@@ -4092,203 +4050,22 @@ fn load_context_reads(
         |row| row.get(0),
     )?;
     let Some(tail) = tail else {
-        return Ok(ThreadContextReadsView {
+        return Ok(ThreadContextLoadsView {
             head: None,
             tail: None,
             loaded,
-            calls: Vec::new(),
         });
     };
-    let head = context_idx_head(connection, id, tail)?;
-    let mut calls = Vec::new();
-    for record in read_context_calls(connection, id, head, tail)? {
-        // A loaded Context is replaced in place by the controller, so the copy
-        // the Thread holds is the current one even when the read output is not.
-        let state = match read_call_context_id(&record.payload) {
-            Some(context_id) if loaded.contains(&context_id) => ContextReadState::Current,
-            _ => read_version(connection, id, &record, tail)?.state(),
-        };
-        calls.push(ContextReadCall { record, state });
-    }
-    Ok(ThreadContextReadsView {
-        head: Some(head),
+    Ok(ThreadContextLoadsView {
+        head: Some(context_idx_head(connection, id, tail)?),
         tail: Some(tail),
         loaded,
-        calls,
     })
 }
 
-fn read_context_calls(
-    connection: &Connection,
-    thread_id: &str,
-    head: i64,
-    tail: i64,
-) -> Result<Vec<HistoryRecord>, ApiError> {
-    let mut statement = connection.prepare(
-        "SELECT id,thread_id,kind,payload,created_at FROM history_records
-         WHERE thread_id=? AND kind='response_output' AND id>=? AND id<=?
-           AND json_extract(payload,'$.type')='function_call'
-           AND json_extract(payload,'$.name')='read_context'
-         ORDER BY id",
-    )?;
-    let rows = statement.query_map(params![thread_id, head, tail], history_from_row)?;
-    let mut calls = Vec::new();
-    for row in rows {
-        calls.push(row?);
-    }
-    Ok(calls)
-}
-
-/// The same Context can be read repeatedly; the newest read is the copy the
-/// Thread holds, so it decides both the state and what is re-read.
-fn latest_reads(calls: Vec<HistoryRecord>) -> Vec<(String, HistoryRecord)> {
-    let mut latest: Vec<(String, HistoryRecord)> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    for call in calls {
-        let Some(context_id) = read_call_context_id(&call.payload) else {
-            continue;
-        };
-        match seen.get(&context_id) {
-            Some(index) => latest[*index].1 = call,
-            None => {
-                seen.insert(context_id.clone(), latest.len());
-                latest.push((context_id, call));
-            }
-        }
-    }
-    latest
-}
-
-fn read_version(
-    connection: &Connection,
-    thread_id: &str,
-    call: &HistoryRecord,
-    tail: i64,
-) -> Result<ReadVersion, ApiError> {
-    let Some(read_hash) = read_call_fingerprint(connection, thread_id, call, tail)? else {
-        return Ok(ReadVersion::Unanswered);
-    };
-    let current = match read_call_context_id(&call.payload) {
-        Some(context_id) => current_context_fingerprint(connection, &context_id)?,
-        None => None,
-    };
-    Ok(match current {
-        Some(current) if current == read_hash => ReadVersion::Same,
-        Some(current) => ReadVersion::Changed(current),
-        None => ReadVersion::Missing,
-    })
-}
-
-/// Before a request compiles, the Thread is told which Contexts it read have
-/// changed since. One durable `context_dirty` activity record carries that list:
-/// the compiler replays it as a developer message, the transcript keeps it as
-/// evidence, and the record itself stops the same change from being announced
-/// again.
-fn append_context_dirty_notice(
-    connection: &Connection,
-    thread_id: &str,
-    tail: i64,
-) -> Result<Option<i64>, ApiError> {
-    let head = context_idx_head(connection, thread_id, tail)?;
-    let changes = unannounced_changes(connection, thread_id, head, tail)?;
-    if changes.is_empty() {
-        return Ok(None);
-    }
-    let contexts = changes
-        .iter()
-        .map(|(context_id, record_id, current_hash)| {
-            json!({
-                "context_id": context_id,
-                "read_record_id": record_id,
-                "current_hash": current_hash,
-            })
-        })
-        .collect::<Vec<_>>();
-    let payload = json!({ "type": "context_dirty", "contexts": contexts });
-    let record = persist_history_record(
-        connection,
-        HistoryRecordInsert {
-            thread_id,
-            kind: "activity",
-            payload: &payload,
-            created_at: now(),
-        },
-    )?;
-    Ok(Some(record))
-}
-
-/// The Contexts whose change this Thread has not been told about yet, as
-/// `(context id, the record that read it, the current fingerprint)`.
-fn unannounced_changes(
-    connection: &Connection,
-    thread_id: &str,
-    head: i64,
-    tail: i64,
-) -> Result<Vec<(String, i64, String)>, ApiError> {
-    let announced = announced_changes(connection, thread_id, head, tail)?;
-    // A loaded Context is refreshed by the controller in the same request, so
-    // demanding a re-read would contradict the copy delivered beside it.
-    let loaded = context_loads::loaded_ids(connection, thread_id)?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let calls = read_context_calls(connection, thread_id, head, tail)?;
-    let mut changes = Vec::new();
-    for (context_id, call) in latest_reads(calls) {
-        if loaded.contains(&context_id) {
-            continue;
-        }
-        let version = read_version(connection, thread_id, &call, tail)?;
-        let ReadVersion::Changed(current_hash) = version else {
-            continue;
-        };
-        let change = (context_id, call.id, current_hash);
-        if !announced.contains(&change) {
-            changes.push(change);
-        }
-    }
-    Ok(changes)
-}
-
-/// What earlier notices in the same range already said, so the same verdict is not
-/// repeated attempt after attempt. A Context that changes again is a new entry
-/// and is announced.
-fn announced_changes(
-    connection: &Connection,
-    thread_id: &str,
-    head: i64,
-    tail: i64,
-) -> Result<HashSet<(String, i64, String)>, ApiError> {
-    let mut statement = connection.prepare(
-        "SELECT payload FROM history_records
-         WHERE thread_id=? AND kind='activity' AND id>=? AND id<=?
-           AND json_extract(payload,'$.type')='context_dirty'",
-    )?;
-    let rows = statement.query_map(params![thread_id, head, tail], |row| {
-        row.get::<_, String>(0)
-    })?;
-    let mut announced = HashSet::new();
-    for row in rows {
-        let payload: Value = serde_json::from_str(&row?).map_err(ApiError::internal)?;
-        let Some(contexts) = payload.get("contexts").and_then(Value::as_array) else {
-            continue;
-        };
-        for context in contexts {
-            let (Some(context_id), Some(record_id), Some(current_hash)) = (
-                context.get("context_id").and_then(Value::as_str),
-                context.get("read_record_id").and_then(Value::as_i64),
-                context.get("current_hash").and_then(Value::as_str),
-            ) else {
-                continue;
-            };
-            announced.insert((context_id.to_owned(), record_id, current_hash.to_owned()));
-        }
-    }
-    Ok(announced)
-}
-
-/// The fingerprint of one Context version as `read_context` hands it to the
+/// The fingerprint of one Context version as the Controller hands it to the
 /// model: its title, Use When description, and body. Moving a Context, reordering
-/// its siblings, or editing a child leaves it unchanged, because a read registers
+/// its siblings, or editing a child leaves it unchanged, because a load registers
 /// that node's own content rather than the tree around it.
 fn context_fingerprint(name: &str, description: &str, content: &str) -> String {
     let mut hasher = Sha256::new();
@@ -4304,83 +4081,10 @@ fn context_fingerprint(name: &str, description: &str, content: &str) -> String {
         .collect()
 }
 
-/// The version the model actually received: the tool output this call was
-/// answered with. A superseded answer is stored as `activity` and is not in the
-/// replay, so it does not count as read.
-fn read_call_fingerprint(
-    connection: &Connection,
-    thread_id: &str,
-    call: &HistoryRecord,
-    tail: i64,
-) -> Result<Option<String>, ApiError> {
-    let Some(call_id) = call.payload.get("call_id").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    let output: Option<String> = connection
-        .query_row(
-            "SELECT payload FROM history_records
-             WHERE thread_id=? AND kind='tool_output' AND id>? AND id<=?
-               AND json_extract(payload,'$.call_id')=?
-             ORDER BY id LIMIT 1",
-            params![thread_id, call.id, tail, call_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(output.as_deref().and_then(read_output_fingerprint))
-}
-
-fn read_output_fingerprint(payload: &str) -> Option<String> {
-    let payload = serde_json::from_str::<Value>(payload).ok()?;
-    let output = serde_json::from_str::<Value>(payload.get("output")?.as_str()?).ok()?;
-    Some(context_fingerprint(
-        output.get("name")?.as_str()?,
-        output.get("description")?.as_str()?,
-        output.get("content")?.as_str()?,
-    ))
-}
-
-fn read_call_context_id(payload: &Value) -> Option<String> {
-    let arguments = serde_json::from_str::<Value>(payload.get("arguments")?.as_str()?).ok()?;
-    Uuid::parse_str(arguments.get("context_id")?.as_str()?)
-        .ok()
-        .map(|id| id.to_string())
-}
-
-/// What the same read returns now, resolved the way the tool resolves it: local
-/// Contexts first, then the compiled common tree in its source language.
-fn current_context_fingerprint(
-    connection: &Connection,
-    id: &str,
-) -> Result<Option<String>, ApiError> {
-    let local = connection
-        .query_row(
-            "SELECT name,description,content FROM contexts WHERE id=?",
-            [id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    if let Some((name, description, content)) = local {
-        return Ok((!context_hidden(connection, id)?)
-            .then(|| context_fingerprint(&name, &description, &content)));
-    }
-    Ok(
-        common_contexts::read(id, common_contexts::SOURCE_LANGUAGE).map(|read| {
-            context_fingerprint(
-                &read.context.name,
-                &read.context.description,
-                &read.context.content,
-            )
-        }),
-    )
-}
-
-/// A `context_dirty` activity replays as the developer message it stands for.
+/// COMPATIBILITY: `context_dirty` records were appended while a copied Context
+/// could go stale, and old Threads still carry them. Replaying one exactly as it
+/// was written keeps those Threads' replay prefixes byte-identical, so the text
+/// below is frozen even though the tool it names is retired.
 fn context_dirty_message(payload: &Value) -> Option<Value> {
     if payload.get("type").and_then(Value::as_str) != Some("context_dirty") {
         return None;
@@ -5449,6 +5153,12 @@ impl CompiledThreadContext {
 /// replay barrier, not an upstream item: it counts as a protocol record so it
 /// advances the replay tail, and it marks where the Thread started replaying
 /// with another `(upstream, model)` pair.
+///
+/// COMPATIBILITY: `context_dirty` belongs here only while old Threads still
+/// carry those records. Leaving it out would drop a replayed item out of the
+/// middle of an existing prefix, so the record stays a protocol record — and
+/// keeps replaying as the message it was stored as — until no Thread can reach
+/// one; then it leaves this list and `context_dirty_message` goes with it.
 const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','context_dirty','context_loaded','context_unloaded')))";
 
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
@@ -6956,9 +6666,9 @@ duplicate reports of the same event. When the source already contains a prior `#
 context` checkpoint, consolidate it: carry still-true facts forward, drop stale ones, and merge
 newer information into one checkpoint instead of copying the old text verbatim.
 
-`read_context` output does not travel with this checkpoint: whatever the checkpoint does not
-restate is reachable again only by reading that Context. So decide which Contexts are still worth
-reading and why, instead of trusting a memory of them.
+Context detail does not travel with this checkpoint: whatever the checkpoint does not restate is
+reachable again only by opening that Context. So decide which Contexts are still worth opening and
+why, instead of trusting a memory of them.
 
 A Context the thread keeps loaded is the exception: the controller delivers its current copy again
 after this checkpoint without any tool call, so never list a loaded Context in
@@ -6975,10 +6685,10 @@ Use terse bullets rather than prose paragraphs, and keep every heading in this e
 ## Current objective and next step
 ## Open work and evidence routes
 
-`## Contexts worth re-reading` lists one bullet per Context this thread read whose detail the rest
-of the checkpoint does not carry: the exact `context_id`, then why it must be read again and which
-decision or next step depends on it. Point at the Context; never copy its content, and never list
-Workers, files, or URLs there. Write `(none)` when no read detail is missing.
+`## Contexts worth re-reading` lists one bullet per Context this thread still needs and whose
+detail the rest of the checkpoint does not carry: the exact `context_id`, then why it must be
+opened again and which decision or next step depends on it. Point at the Context; never copy its
+content, and never list Workers, files, or URLs there. Write `(none)` when no detail is missing.
 
 The final section must include a fenced JSON array whose entries contain `topic_key`, `status`,
 `message_range`, and `search_keywords`. Exact calendar times are allowed only when present in the
@@ -6991,7 +6701,7 @@ const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 
 这份检查点会在下一次请求里取代此前的历史。要保留：概念与术语、权威资源与精确位置、有因果关系的时序、生效中的决策与约束、当前目标与下一步、未完成的工作与取证路径。原始历史靠引用记录 ID 保持可追溯；不要把凭证、令牌、口令、Cookie、API Key 或密钥写进来。保留彼此独立的因果事件，只合并同一事件的重复报告。如果来源里已经有一份 `# Durable working context` 检查点，就把它合并进来：仍然成立的事实向前带、过时的丢掉，与新信息合成一份，不要照抄旧文本。
 
-`read_context` 的输出不会随这份检查点一起走下去：检查点没有复述的部分，只能重新读取那个 Context 才能拿回来。所以要判断哪些 Context 仍然值得读、并说明理由，而不是凭对它们的记忆办事。
+Context 的细节不会随这份检查点一起走下去：检查点没有复述的部分，只能重新打开那个 Context 才能拿回来。所以要判断哪些 Context 仍然值得打开、并说明理由，而不是凭对它们的记忆办事。
 
 本 Thread 加载着的 Context 是例外：检查点之后控制器会自动把它的最新副本重新送达，不需要任何工具调用。所以已加载的 Context 不要写进 `## Contexts worth re-reading`，也不要复述它的正文。
 
@@ -7005,7 +6715,7 @@ const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 ## Current objective and next step
 ## Open work and evidence routes
 
-`## Contexts worth re-reading` 一行一个 Context，只列本 Thread 读过、而细节没有被检查点其余部分带走的那些：写精确的 `context_id`，随后写为什么必须重读、哪项决策或下一步依赖它。只指向 Context，不要复制其正文；Worker、文件、URL 不属于这一节。没有丢失的已读细节就写 `(none)`。
+`## Contexts worth re-reading` 一行一个 Context，只列 Thread 之后还需要、而细节没有被检查点其余部分带走的那些：写精确的 `context_id`，随后写为什么必须重新打开、哪项决策或下一步依赖它。只指向 Context，不要复制其正文；Worker、文件、URL 不属于这一节。没有丢失的细节就写 `(none)`。
 
 最后一个小节必须包含一段围栏 JSON 数组，条目含 `topic_key`、`status`、`message_range`、`search_keywords`。只有来源记录里明确出现的日历时间才可写入，否则用以记录序号为锚的相对时序并标注为推断。检查点正文用简体中文书写。不要提及这次摘要请求，也不要提及上下文被压缩过。"#;
 
@@ -8133,32 +7843,6 @@ struct WorkerArguments {
     delay_seconds: Option<u64>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReadContextArguments {
-    context_id: String,
-}
-
-async fn read_context_tool_output(
-    state: &AppState,
-    user: &User,
-    input: &str,
-) -> Result<Value, ApiError> {
-    let arguments: ReadContextArguments = serde_json::from_str(input).map_err(|error| {
-        ApiError::bad_request(format!(
-            "read_context arguments must contain an explicit context_id: {error}"
-        ))
-    })?;
-    let id = context_id(&arguments.context_id)?;
-    if let Some(context) = local_context(state, user, id.clone()).await? {
-        return serde_json::to_value(context).map_err(ApiError::internal);
-    }
-    if let Some(context) = common_contexts::read(&id, common_contexts::SOURCE_LANGUAGE) {
-        return serde_json::to_value(context).map_err(ApiError::internal);
-    }
-    Ok(json!({ "error": "context not found" }))
-}
-
 /// The one parent value write_context reads as the trash: pointing a Context's
 /// parent at TRASH hides it until the user restores it from the Contexts page.
 const TRASH_CONTEXT_ID: &str = "TRASH";
@@ -8243,7 +7927,7 @@ async fn write_context_tool_output(
 fn locked_context_message(id: &str) -> String {
     format!(
         "context {id} is locked by the user, so write_context cannot change it; \
-         its child Contexts stay writable — read_context {id} lists them, and \
+         its child Contexts stay writable — load_context {id} delivers them, and \
          write_context with parent_id {id} creates a new child."
     )
 }
@@ -8877,7 +8561,13 @@ async fn controller_tool_output(
     input: &str,
 ) -> Option<Result<Value, ApiError>> {
     Some(match name {
-        "read_context" => read_context_tool_output(state, user, input).await,
+        // COMPATIBILITY: the tool is retired, but a long Thread that still holds
+        // it in its history can repeat the call. Answering with the replacement
+        // keeps that Thread working; retire this arm once no Thread can plausibly
+        // reach it.
+        "read_context" => Ok(json!({
+            "error": "read_context is retired. Call load_context with this context_id instead: the Controller delivers the Context JSON in a developer message and keeps it current, and unload_context releases it once this Thread no longer needs it.",
+        })),
         "load_context" => context_loads::load_tool_output(state, user, thread_id, input).await,
         "unload_context" => context_loads::unload_tool_output(state, user, thread_id, input).await,
         "write_context" => write_context_tool_output(state, user, input).await,
@@ -9659,10 +9349,6 @@ mod notes_tests;
 #[cfg(test)]
 #[path = "cloud_objects_tests.rs"]
 mod objects_tests;
-
-#[cfg(test)]
-#[path = "cloud_context_reads_tests.rs"]
-mod context_reads_tests;
 
 #[cfg(test)]
 #[path = "cloud_context_loads_tests.rs"]
@@ -11477,7 +11163,7 @@ mod tests {
             true,
             true,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 18);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 17);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -11546,7 +11232,7 @@ mod tests {
     fn checkpoint_prompt_asks_for_contexts_to_reread() {
         for language in [CheckpointLanguage::En, CheckpointLanguage::Zh] {
             let prompt = checkpoint_developer_prompt(language);
-            assert!(prompt.contains("`read_context`"), "{language:?}");
+            assert!(!prompt.contains("read_context"), "{language:?}");
             for heading in [
                 "# Durable working context",
                 "## Concepts and terminology",
@@ -12006,39 +11692,37 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true);
-        assert_eq!(tools.as_array().unwrap().len(), 14);
+        assert_eq!(tools.as_array().unwrap().len(), 13);
         assert_eq!(tools[0]["name"], "cybion_list_contexts");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
-        assert_eq!(tools[2]["name"], "read_context");
+        assert_eq!(tools[2]["name"], "load_context");
         assert_eq!(tools[2]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[3]["name"], "load_context");
+        assert_eq!(tools[3]["name"], "unload_context");
         assert_eq!(tools[3]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[4]["name"], "unload_context");
-        assert_eq!(tools[4]["parameters"]["required"], json!(["context_id"]));
-        assert_eq!(tools[5]["name"], "write_context");
-        assert_eq!(tools[5]["parameters"]["required"], json!(null));
-        assert_eq!(tools[6]["name"], "cybion_list_ultimate_machines");
-        assert_eq!(tools[7]["name"], "cybion_get_ultimate_machine");
-        assert_eq!(tools[8]["name"], "cybion_set_ultimate_machine");
-        assert_eq!(tools[9]["name"], "cybion_delete_ultimate_machine");
-        assert_eq!(tools[7]["parameters"]["required"], json!(["machine_id"]));
-        assert_eq!(tools[9]["parameters"]["required"], json!(["machine_id"]));
-        assert_eq!(tools[10]["name"], "add_notes");
-        assert_eq!(tools[10]["parameters"]["required"], json!(["items"]));
-        assert_eq!(tools[11]["name"], "cross_out_notes");
-        assert_eq!(tools[11]["parameters"]["required"], json!(["note_ids"]));
-        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[4]["name"], "write_context");
+        assert_eq!(tools[4]["parameters"]["required"], json!(null));
+        assert_eq!(tools[5]["name"], "cybion_list_ultimate_machines");
+        assert_eq!(tools[6]["name"], "cybion_get_ultimate_machine");
+        assert_eq!(tools[7]["name"], "cybion_set_ultimate_machine");
+        assert_eq!(tools[8]["name"], "cybion_delete_ultimate_machine");
+        assert_eq!(tools[6]["parameters"]["required"], json!(["machine_id"]));
+        assert_eq!(tools[8]["parameters"]["required"], json!(["machine_id"]));
+        assert_eq!(tools[9]["name"], "add_notes");
+        assert_eq!(tools[9]["parameters"]["required"], json!(["items"]));
+        assert_eq!(tools[10]["name"], "cross_out_notes");
+        assert_eq!(tools[10]["parameters"]["required"], json!(["note_ids"]));
+        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 18);
-        assert_eq!(worker_and_native[12]["name"], "bash");
-        assert_eq!(worker_and_native[15]["name"], "view_image");
-        assert_eq!(worker_and_native[16]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[17]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 17);
+        assert_eq!(worker_and_native[11]["name"], "bash");
+        assert_eq!(worker_and_native[14]["name"], "view_image");
+        assert_eq!(worker_and_native[15]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[16]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 13);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 12);
         assert_eq!(
-            web_search_only[12],
+            web_search_only[11],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false);
@@ -12052,7 +11736,6 @@ mod tests {
             [
                 "cybion_list_contexts",
                 "cybion_list_workers",
-                "read_context",
                 "load_context",
                 "unload_context",
                 "write_context",
@@ -12082,7 +11765,6 @@ mod tests {
             [
                 "cybion_list_contexts",
                 "cybion_list_workers",
-                "read_context",
                 "load_context",
                 "unload_context",
                 "write_context",
@@ -12098,29 +11780,23 @@ mod tests {
             ["bash", "browser_control", "computer_use", "view_image"]
         );
         let catalog = context_tools();
-        let read_context = catalog
+        let load_context = catalog
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["name"] == "read_context")
+            .find(|tool| tool["name"] == "load_context")
             .unwrap();
         assert!(
-            read_context["description"]
+            load_context["description"]
                 .as_str()
                 .unwrap()
                 .contains("direct children")
         );
         assert!(
-            read_context["parameters"]["properties"]["context_id"]["description"]
+            !load_context["description"]
                 .as_str()
                 .unwrap()
-                .contains("children returned by a previous read_context call")
-        );
-        assert!(
-            read_context["description"]
-                .as_str()
-                .unwrap()
-                .contains("`locked`")
+                .contains("read_context")
         );
         let write_context = catalog
             .as_array()
@@ -12338,7 +12014,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 13);
         assert_eq!(tools[0], TOOL_CATALOG["context"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["context"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["context"][2]);
@@ -12346,11 +12022,10 @@ mod tests {
         assert_eq!(tools[4], TOOL_CATALOG["context"][4]);
         assert_eq!(tools[5], TOOL_CATALOG["context"][5]);
         assert_eq!(tools[6], TOOL_CATALOG["context"][6]);
-        assert_eq!(tools[7], TOOL_CATALOG["context"][7]);
-        assert_eq!(tools[10], TOOL_CATALOG["note"][0]);
-        assert_eq!(tools[11], TOOL_CATALOG["note"][1]);
-        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[9], TOOL_CATALOG["note"][0]);
+        assert_eq!(tools[10], TOOL_CATALOG["note"][1]);
+        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

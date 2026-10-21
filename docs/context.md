@@ -20,10 +20,12 @@ input | response_output | tool_output | checkpoint
 
 `activity` records describe runtime state for the UI. They remain in history
 and are outside the model context, except the Cybion-authored kinds that do take
-part in replay: `model_switch` marks a replay barrier, `context_dirty` compiles
-into the developer message that tells a Thread which Contexts it read have
-changed since, and `context_loaded`/`context_unloaded` compile into the copies of
-the Contexts a Thread keeps loaded (see [Loaded Contexts](#loaded-contexts)).
+part in replay: `model_switch` marks a replay barrier, and
+`context_loaded`/`context_unloaded` compile into the copies of the Contexts a
+Thread keeps loaded (see [Loaded Contexts](#loaded-contexts)). A `context_dirty`
+record written before the read tool was retired still replays as the developer
+message it was stored as, so old Threads keep their request prefixes
+byte-identical; nothing appends a new one.
 
 ## Compilation
 
@@ -67,7 +69,8 @@ Context: `name` is required, and it starts at the top level or under
 path a parent is an exact `context_id` or `null` for the top level, and an
 edit may also pass the literal `TRASH`, which moves the Context into the
 trash: the Context and its subtree disappear from every Context tool
-(`read_context` reports them as missing) while `GET /api/contexts` still
+(a hidden Context no longer resolves, so `load_context` refuses it) while
+`GET /api/contexts` still
 returns the row, so the Contexts page shows each trashed root under Trash.
 `POST /api/contexts/{id}/restore` clears the marker and the row returns to its
 original place. The read-only Cybion Common Context cannot be written, and a
@@ -127,11 +130,12 @@ unknown, so the model can clean up before continuing.
 
 ## Progressive Context discovery
 
-`cybion_list_contexts` lists only top-level Context metadata. `read_context`
+`cybion_list_contexts` lists only top-level Context metadata. `load_context`
 resolves local Contexts first, then the compiled Cybion Common Context;
-`GET /api/contexts/{id}?lang=` resolves the same local and common nodes, with
-`lang` selecting the common copy (`zh` when absent). Both return the current node's existing `id`, `name`, `description`,
-`content`, and `parent_id` fields, plus `children`:
+`GET /api/contexts/{id}?lang=` resolves the same local and common nodes for the
+browser, with `lang` selecting the common copy (`zh` when absent). Both return
+the current node's existing `id`, `name`, `description`, `content`, and
+`parent_id` fields, plus `children`:
 
 ```json
 {
@@ -154,23 +158,25 @@ Children contain only direct-child metadata (`context_id`, `name`, `description`
 local children are ordered by name and ID while the Cybion Common
 Context keeps its authored order. A local Context also reports `locked`; a
 common node is `locked: false`, because the compiled tree belongs to no owner
-and the lock is what `write_context` refuses (see above). A leaf always returns `children: []`. The
-current node and its child metadata are read in one transaction from the
-requesting user's database; common nodes come from the compiled tree instead.
-The model can pass a child's `context_id` to `read_context` to discover the next
-level. Child content and deeper descendants are disclosed only when read.
+and the lock is what `write_context` refuses (see above). A leaf always returns
+`children: []`. The current node and its child metadata are read in one
+transaction from the requesting user's database; common nodes come from the
+compiled tree instead. The model passes a child's `context_id` back to
+`load_context` to reach the next level, so child bodies and deeper descendants
+are disclosed only when loaded.
 
 ## Loaded Contexts
 
-A read is message state: the Context body lives in one `tool_output` record, and
-a compaction moves the head past it. `load_context` turns the Thread's decision
-into Thread state instead — one row in `thread_context_loads` (`thread_id`,
-`context_id`, `loaded_at`) — and from then on the Controller keeps the current
-copy in front of the model without being asked. `unload_context` deletes the row.
+A Context handed over inside a tool output is message state: the body lives in
+that one record, and a compaction moves the replay head past it. `load_context`
+turns the Thread's decision into Thread state instead — one row in
+`thread_context_loads` (`thread_id`, `context_id`, `loaded_at`) — and from then
+on the Controller keeps the current copy in front of the model without being
+asked. `unload_context` deletes the row.
 
 The copy travels as an `activity` record the compiler replays as a developer
-message, so a Thread receives the Context JSON a `read_context` answer would have
-given it, minus `sort_key`, which orders a sibling list the Thread cannot see.
+message, so a Thread receives the Context JSON the tool answer would have given
+it, minus `sort_key`, which orders a sibling list the Thread cannot see.
 Every inference attempt compares the Thread's rows against the range it is about
 to replay and appends only what the range does not already say:
 
@@ -190,9 +196,9 @@ editing history. A Context that stops resolving — deleted, or hidden by the
 trash — releases itself: the row leaves and one `context_unloaded` notice says
 the copy the Thread holds is stale.
 
-A loaded Context is refreshed by the Controller, so `context_dirty` never
-announces it: the same request carries the current copy, and demanding a re-read
-beside it would contradict it.
+Nothing else announces a loaded Context: the request that carries the change also
+carries the current copy, so there is no older version left to warn about and
+nothing to ask the model to fetch.
 
 `unload_context` deletes the row and nothing else. The copy already in the
 conversation stays until the next checkpoint — the Thread declared that it no
@@ -202,73 +208,30 @@ Unloading a Context the Thread does not hold changes nothing and answers
 `unloaded: false`.
 
 A Thread holds at most eight loaded Contexts; a further load is refused with the
-way out — unload one first — rather than truncated. The read-context row reports
-the loaded set beside the reads, and a Context the Thread read while it was
-loaded is `current`: what the Thread holds is the copy the Controller delivered,
-not the older tool output.
+way out — unload one first — rather than truncated. The loaded-context row
+reports the set beside the record range (see below), one chip per bound Context,
+not one per delivery.
 
-## Read-context indicator
+## Loaded-context indicator
 
-The end of the conversation shows which Contexts the Thread has read **and
-still holds**, and whether the copy it read is still the current one. The row is
-the last row of the transcript rather than header chrome, so a Thread that reads
-many Contexts scrolls its list out of the way instead of holding screen height.
-`GET /api/threads/{id}/history/reads` answers with the current `head` and `tail`
-plus the `read_context` calls inside that range, each carrying its record and the
-`state` the controller judged: `current`, `changed`, `unanswered` (the answer
-carried no Context body) or `missing` (the Context no longer resolves). Calls
-before the head are not in the answer, so when a compaction appends its
-checkpoint the reads it summarized leave the list and only the reads made after
-the checkpoint stay. This is the same `[idx_head, idx_tail]` the compiler
-replays, not a separate stored state.
+The end of the conversation shows which Contexts the Thread keeps loaded. The row
+is the last row of the transcript rather than header chrome, so a Thread that
+loads many Contexts scrolls its list out of the way instead of holding screen
+height. `GET /api/threads/{id}/history/loaded` answers with the current `head`
+and `tail` plus the bound `context_id`s in load order. This is the same
+`[idx_head, idx_tail]` the compiler replays, not a separate stored state, so a
+binding whose copy sits behind the head is visible as the range narrows after a
+checkpoint.
 
-The verdict compares two fingerprints of the Context's own content — its title,
-Use When description, and body — and nothing around it: moving a Context,
-reordering its siblings, or editing a child leaves the fingerprint alone, because
-a read registers content rather than the tree. The read fingerprint comes from
-the stored tool output, so it is the version the model actually received; the
-current one resolves the same id the way `read_context` resolves it — local
-Contexts first, then the compiled common tree in its source language.
+Each chip shows the Context's name — resolved through the same caches the
+Contexts page fills — links to that Context on the Contexts page, and carries the
+full id in its tooltip. No identifier is printed on the chip: a UUID means
+nothing to a reader, and the binding is already in the activity record behind it.
 
-Each Context appears once, in the order the Thread first read it, with the newest
-read deciding its state: a Thread that read a Context before and after an edit
-holds the edit. The chip shows the Context's name, a link to it, and only the
-states worth noticing — edited, never answered, gone. A current Context is not
-marked, a repeat read shows its count, and the tooltip carries the full id and
-the record that read it. No identifier or fingerprint is printed on the chip: a
-UUID means nothing to a reader, and both are already in the activity record and
-the tool output behind it.
-
-The row also shows the record range it was computed from, so a head that moved to
-a checkpoint is visible. A Thread with no protocol record yet reports `head` and
-`tail` as `null` and the row stays hidden. A range without a `read_context` call
-renders the row with a count of zero, which is the signal that the Thread has not
-read any Context in this window.
-
-### Changed Contexts are announced
-
-Before an inference request compiles, the controller compares every Context the
-Thread read inside that window against what the same read returns now. When one
-changed, it appends a `context_dirty` activity record naming the Context, the
-record that read it, and the current fingerprint, and the compiler replays that
-record as a developer message. The message is a requirement rather than a hint:
-it declares the copies in the conversation stale and unusable, requires one
-`read_context` call per Context before the next tool call or answer, and forbids
-falling back to the old copy when a read fails. The notice is durable — it stays in the
-transcript, and in every later replay of the range, until a checkpoint replaces
-it — and the record is also what keeps a Thread from being told the same change
-on every attempt: a Context is announced once per `(read record, current
-fingerprint)` pair, so a further change is a new pair and is announced again,
-while a notice already made is not repeated.
-
-The announcement runs in the transaction that compiles the request, after the
-request boundary and the Thread's status are confirmed, so it belongs to the
-range that request replays and cannot race a newer input. A Context the Thread
-re-read after the change is current again and is not announced. A Context that is
-no longer readable — deleted, or hidden by the trash — is not announced, because
-there is nothing left to re-read; the read-context row marks it instead. The notice names
-ids rather than titles: the ids are what `read_context` takes, and a title may
-itself have changed.
+A Thread with no binding and no protocol record reports `head` and `tail` as
+`null` and the row stays hidden. A Thread that holds bindings always renders the
+count, because those copies travel in every request whether or not the Thread
+did anything else in the window.
 
 ## Cybion Common Context
 
@@ -283,8 +246,8 @@ never stored, mutated, or synthesized at runtime; changes ship with releases.
 language — to the browser so Configuration → Contexts shows users exactly what
 Threads can read. Language selection: the browser reads (`GET
 /api/common-contexts`, `GET /api/contexts/{id}`) take an optional
-`lang=zh|en` and fall back to the source language `zh`, which is also what
-model-side tool reads (`cybion_list_contexts`, `read_context`) use.
+`lang=zh|en` and fall back to the source language `zh`, which is also what the
+model-side Context tools (`cybion_list_contexts`, `load_context`) use.
 
 ## Replay cleanup
 

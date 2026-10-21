@@ -42,10 +42,10 @@ messages, reasoning summaries, tool results, checkpoints, and runtime activity
 directly from `kind` and `payload`. Every built-in tool call renders through
 its own card: `bash` commands, `browser_control` actions, `computer_use`
 actions, `view_image` pictures, `normai_web_search` queries,
-`normai_image_generation` prompts, and the seven controller-side context and
-machine tools. A `read_context` card
-resolves the context title and its Use When description through the same caches
-the Contexts page fills and links to that context, and a `write_context` card
+`normai_image_generation` prompts, and the controller-side context and machine
+tools. A `load_context`/`unload_context` card resolves the Context title and its
+Use When description through the same caches the Contexts page fills and links to
+that Context, and a `write_context` card
 resolves the same way, notes a move into the trash, and shows a create call's
 title and parent; an id that does not resolve keeps the monospace id. A call whose arguments are incomplete or whose action
 is unknown keeps the generic protocol rendering, and every card keeps its raw
@@ -81,14 +81,11 @@ input record — not produced by the current protocol — returns every record
 with `has_older` false instead of hiding rows, and a page that finds no older
 `input` returns everything older than its cursor with `has_older` false.
 
-`GET /api/threads/{id}/history/reads` serves the header's read-context
+`GET /api/threads/{id}/history/loaded` serves the header's loaded-context
 indicator: the `head` and `tail` of the context the Thread replays now, plus the
-`read_context` function calls in that inclusive range in the same record shape as
-the history endpoints, oldest first. Each call adds the `state` the controller
-judged — `current`, `changed`, `unanswered` or `missing` — so the browser prints
-no identifier or fingerprint. Records outside `[head, tail]` are never returned,
-so a compaction empties the answer down to the calls made after its checkpoint.
-See [Thread context replay](context.md).
+`context_id`s the Thread keeps loaded in the order it loaded them. The row names
+each Context without printing an id, so the browser needs no fingerprint. See
+[Thread context replay](context.md).
 
 ## Conversation process groups
 

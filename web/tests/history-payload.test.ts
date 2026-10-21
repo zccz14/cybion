@@ -156,7 +156,8 @@ test("incomplete or unknown worker actions retain the generic protocol renderer"
 
 test("cybion tool calls expose context and machine arguments", () => {
   const call = (name: string, args: unknown) => ({ type: "function_call", name, arguments: JSON.stringify(args) })
-  assert.deepEqual(cybionToolFunctionCall(call("read_context", { context_id: "  ctx-1  " })), { tool: "read_context", contextId: "ctx-1" })
+  assert.deepEqual(cybionToolFunctionCall(call("load_context", { context_id: "  ctx-1  " })), { tool: "load_context", contextId: "ctx-1" })
+  assert.deepEqual(cybionToolFunctionCall(call("unload_context", { context_id: "ctx-1" })), { tool: "unload_context", contextId: "ctx-1" })
   assert.deepEqual(cybionToolFunctionCall(call("cybion_list_contexts", {})), { tool: "cybion_list_contexts" })
   assert.deepEqual(cybionToolFunctionCall(call("cybion_list_workers", {})), { tool: "cybion_list_workers" })
   assert.deepEqual(cybionToolFunctionCall(call("cybion_list_ultimate_machines", {})), { tool: "cybion_list_ultimate_machines" })
@@ -176,14 +177,14 @@ test("incomplete or unknown cybion tool arguments retain the generic protocol re
   const call = (name: string, argumentsValue: unknown) => ({ type: "function_call", name, arguments: argumentsValue })
   for (const payload of [
     null, [], "text", {},
-    call("read_context", "{}"),
-    call("read_context", '{"context_id":""}'),
+    call("load_context", "{}"),
+    call("load_context", '{"context_id":""}'),
     call("cybion_get_ultimate_machine", "{}"),
     call("cybion_delete_ultimate_machine", "{}"),
     call("cybion_set_ultimate_machine", "{}"),
     call("cybion_set_ultimate_machine", '{"enabled":"yes"}'),
     call("cybion_list_contexts", "not json"),
-    { type: "function_call_output", name: "read_context", arguments: "{}" },
+    { type: "function_call_output", name: "load_context", arguments: "{}" },
     call("bash", '{"worker_id":"worker-1","command":"pwd"}'),
   ] as const) {
     assert.equal(cybionToolFunctionCall(payload), null, JSON.stringify(payload))

@@ -18,18 +18,15 @@ explicit governed contexts and a replayable archive.
 write — a title, a "use when" description, a body, and a place in a tree —
 created, edited, and trashed from the Contexts page or with `write_context`,
 and lockable there so a hand-written manual stays out of the Thread's reach.
-Threads discover Contexts on demand (`cybion_list_contexts`, `read_context`)
-and read only what a task cites; source material stays on your devices and
-network services. A Thread that must keep working from a Context says so with
+Threads find Contexts on demand with `cybion_list_contexts` and load only what
+a task cites; source material stays on your devices and network services. A Thread that must keep working from a Context says so with
 `load_context`, and the controller then delivers its current copy into every
 request — refreshed by itself when the Context changes and restored after a
 compaction — until the Thread releases it with `unload_context`. Sticky notes are the opposite kind of context: short items a
 Thread must visibly cross out, so "finished" and "dropped" never look alike. Conversations replay from an append-only history, the
 conversation header shows the live context size against its budget and the
-Contexts the Thread has read in that window, marked when the copy it read has
-since been edited — a change the controller also announces to the model, asking
-it to read the Context again — and long Threads compact into checkpoints instead
-of overflowing.
+Contexts the Thread keeps loaded, each refreshed by the controller as soon as it
+is edited, and long Threads compact into checkpoints instead of overflowing.
 
 **Cloud-hosted inference.** Inference runs in the hosted controller, not on
 your devices. It holds the upstream connection, retries transient model

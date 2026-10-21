@@ -411,12 +411,22 @@ async fn tool_output(
     serde_json::from_str(output.payload["output"].as_str().unwrap()).unwrap()
 }
 
+/// The Context tree the way the browser route serves it: the same resolution the
+/// Controller uses before it binds a Context to a Thread.
+async fn context_tree(state: &AppState, user: &User, id: &str) -> Value {
+    let view = read_context_for(state, user, id.to_owned(), common_contexts::SOURCE_LANGUAGE)
+        .await
+        .unwrap();
+    serde_json::to_value(view).unwrap()
+}
+
 #[tokio::test]
-async fn read_context_discovers_direct_children_and_reads_further_levels_without_workers() {
+async fn a_context_tree_lists_direct_children_and_reaches_further_levels_without_workers() {
     let (_root, state) = test_state();
-    let user = user_for_subject(&state, "read-context-user").unwrap();
-    let thread = create_test_thread(&state, &user).await;
-    let input = input_record(&state, &user, &thread).await;
+    let user = user_for_subject(&state, "context-tree-user").unwrap();
+    // The inserts below open the user database without creating it, so the
+    // Thread that materializes it comes first.
+    let _thread = create_test_thread(&state, &user).await;
     let parent = "00000000-0000-4000-8000-000000000099";
     let child_z = "00000000-0000-4000-8000-000000000100";
     let child_a = "00000000-0000-4000-8000-000000000101";
@@ -451,16 +461,7 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
     })
     .await
     .unwrap();
-    let content = tool_output(
-        &state,
-        &user,
-        &thread,
-        input,
-        "read-root",
-        "read_context",
-        json!({"context_id": parent}),
-    )
-    .await;
+    let content = context_tree(&state, &user, parent).await;
     assert_eq!(
         content,
         json!({
@@ -490,14 +491,10 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
     .await
     .unwrap();
     assert_eq!(serde_json::to_value(api_content).unwrap(), content);
-    let child = tool_output(
+    let child = context_tree(
         &state,
         &user,
-        &thread,
-        input,
-        "read-child",
-        "read_context",
-        json!({"context_id": content["children"][0]["context_id"].as_str().unwrap()}),
+        content["children"][0]["context_id"].as_str().unwrap(),
     )
     .await;
     assert_eq!(child["id"], child_a);
@@ -509,14 +506,10 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
             {"context_id":grandchild,"name":"Grandchild","description":"Metadata for Grandchild"}
         ])
     );
-    let leaf = tool_output(
+    let leaf = context_tree(
         &state,
         &user,
-        &thread,
-        input,
-        "read-leaf",
-        "read_context",
-        json!({"context_id": child["children"][0]["context_id"].as_str().unwrap()}),
+        child["children"][0]["context_id"].as_str().unwrap(),
     )
     .await;
     assert_eq!(leaf["id"], grandchild);
@@ -533,12 +526,10 @@ async fn read_context_discovers_direct_children_and_reads_further_levels_without
 }
 
 #[tokio::test]
-async fn read_context_cannot_disclose_another_users_nodes() {
+async fn a_context_tree_cannot_disclose_another_users_nodes() {
     let (_root, state) = test_state();
     let owner = user_for_subject(&state, "context-owner").unwrap();
     let other = user_for_subject(&state, "context-other").unwrap();
-    let thread = create_test_thread(&state, &other).await;
-    let input = input_record(&state, &other, &thread).await;
     let foreign = "00000000-0000-4000-8000-000000000099";
     user_db(&state, &owner, true, move |connection| {
         connection.execute(
@@ -548,30 +539,25 @@ async fn read_context_cannot_disclose_another_users_nodes() {
         Ok(())
     }).await.unwrap();
     for id in [foreign, "00000000-0000-4000-8000-000000000098"] {
-        let output = tool_output(
+        let error = read_context_for(
             &state,
             &other,
-            &thread,
-            input,
-            &format!("read-{id}"),
-            "read_context",
-            json!({"context_id": id}),
+            id.to_owned(),
+            common_contexts::SOURCE_LANGUAGE,
         )
-        .await;
-        assert_eq!(output, json!({"error":"context not found"}));
+        .await
+        .expect_err("another user's Context must not resolve");
+        assert_eq!(error.status, axum::http::StatusCode::NOT_FOUND);
     }
-    let output = tool_output(
+    let error = read_context_for(
         &state,
         &other,
-        &thread,
-        input,
-        "read-invalid",
-        "read_context",
-        json!({"context_id": "invalid-id"}),
+        "invalid-id".to_owned(),
+        common_contexts::SOURCE_LANGUAGE,
     )
-    .await;
-    assert!(output["error"].is_string());
-    assert!(output.get("children").is_none());
+    .await
+    .expect_err("a malformed id is refused");
+    assert!(error.status.is_client_error());
 }
 
 async fn context_place(state: &AppState, user: &User, id: &str) -> (Option<String>, String) {
@@ -760,17 +746,15 @@ async fn write_context_trash_hides_the_context_and_its_subtree_from_the_tools() 
     assert!(!names.contains(&"Trashed child"));
 
     for id in [parent, child] {
-        let output = tool_output(
+        let error = read_context_for(
             &state,
             &user,
-            &thread,
-            input,
-            &format!("trash-read-{id}"),
-            "read_context",
-            json!({"context_id": id}),
+            id.to_owned(),
+            common_contexts::SOURCE_LANGUAGE,
         )
-        .await;
-        assert_eq!(output, json!({"error": "context not found"}));
+        .await
+        .expect_err("a trashed Context stays hidden");
+        assert_eq!(error.status, axum::http::status::StatusCode::NOT_FOUND);
     }
     let write_again = tool_output(
         &state,
@@ -839,16 +823,7 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
     .await;
     assert_eq!(trashed["trashed"], json!(true));
     assert_eq!(context_place(&state, &user, child).await, before);
-    let children = tool_output(
-        &state,
-        &user,
-        &thread,
-        input,
-        "restore-read",
-        "read_context",
-        json!({"context_id": parent}),
-    )
-    .await;
+    let children = context_tree(&state, &user, parent).await;
     assert_eq!(children["children"], json!([]));
     let Json(views) = list_contexts(
         State(state.clone()),
@@ -889,16 +864,7 @@ async fn write_context_trash_keeps_the_original_place_for_restore() {
     assert_eq!(restored.parent_id, Some(parent.to_owned()));
     assert_eq!(restored.trashed_at, None);
     assert_eq!(context_place(&state, &user, child).await, before);
-    let children = tool_output(
-        &state,
-        &user,
-        &thread,
-        input,
-        "restore-read-again",
-        "read_context",
-        json!({"context_id": parent}),
-    )
-    .await;
+    let children = context_tree(&state, &user, parent).await;
     assert_eq!(children["children"][0]["context_id"], json!(child));
     let error = restore_context(
         State(state.clone()),
@@ -952,16 +918,7 @@ async fn write_context_creates_new_contexts() {
     assert_eq!(created["trashed"], json!(false));
     let created_id = created["id"].as_str().unwrap().to_owned();
     assert!(Uuid::parse_str(&created_id).is_ok());
-    let read = tool_output(
-        &state,
-        &user,
-        &thread,
-        input,
-        "write-create-read",
-        "read_context",
-        json!({"context_id": parent}),
-    )
-    .await;
+    let read = context_tree(&state, &user, parent).await;
     assert_eq!(
         read["children"],
         json!([{
@@ -1103,7 +1060,7 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
         assert!(message.contains(manual), "unexpected output: {refused}");
         assert!(message.contains("locked"), "unexpected output: {refused}");
         assert!(
-            message.contains(&format!("read_context {manual}")),
+            message.contains(&format!("load_context {manual}")),
             "unexpected output: {refused}"
         );
         assert!(
@@ -1133,17 +1090,8 @@ async fn write_context_refuses_a_locked_context_and_points_at_its_children() {
         ("Handbook".to_owned(), "handbook body".to_owned(), None)
     );
 
-    // A read reports the lock, so the next attempt starts from the children.
-    let read = tool_output(
-        &state,
-        &user,
-        &thread,
-        input,
-        "read-locked",
-        "read_context",
-        json!({"context_id": manual}),
-    )
-    .await;
+    // Reading it reports the lock, so the next attempt starts from the children.
+    let read = context_tree(&state, &user, manual).await;
     assert_eq!(read["locked"], json!(true));
     assert_eq!(read["children"][0]["context_id"], appendix);
 
@@ -1712,7 +1660,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 17);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 16);
     let names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -1791,7 +1739,6 @@ async fn inference_injects_web_search_and_the_configured_image_tool() {
         [
             "cybion_list_contexts",
             "cybion_list_workers",
-            "read_context",
             "load_context",
             "unload_context",
             "write_context",

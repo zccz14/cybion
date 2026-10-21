@@ -10,7 +10,6 @@ const samples: Record<string, unknown> = {
   browser_control: { type: "function_call", name: "browser_control", arguments: '{"action":"screenshot"}' },
   computer_use: { type: "function_call", name: "computer_use", arguments: '{"action":"screenshot"}' },
   view_image: { type: "function_call", name: "view_image", arguments: '{"worker_id":"worker-1","path":"/tmp/photo.png"}' },
-  read_context: { type: "function_call", name: "read_context", arguments: '{"context_id":"ctx-1"}' },
   load_context: { type: "function_call", name: "load_context", arguments: '{"context_id":"ctx-1"}' },
   unload_context: { type: "function_call", name: "unload_context", arguments: '{"context_id":"ctx-1"}' },
   write_context: { type: "function_call", name: "write_context", arguments: '{"name":"Notes","parent_id":"ctx-1"}' },

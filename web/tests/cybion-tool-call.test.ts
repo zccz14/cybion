@@ -20,9 +20,9 @@ test("cybion tool calls render context and machine details with escaped text in 
       intervalSeconds: 600, enabled: true, command: 'echo "<script>alert(1)</script>"', intent: "确保根分区低于 90%",
     }
     for (const language of ["en", "zh"]) {
-      const read = render(language, { tool: "read_context", contextId: "ctx-1" }, undefined)
-      assert.ok(read.includes(language === "zh" ? "读取上下文" : "Read context"))
-      assert.ok(read.includes("ctx-1"))
+      const load = render(language, { tool: "load_context", contextId: "ctx-1" }, undefined)
+      assert.ok(load.includes(language === "zh" ? "加载上下文" : "Load context"))
+      assert.ok(load.includes("ctx-1"))
       const getMachine = render(language, { tool: "cybion_get_ultimate_machine", machineId: "machine-1" }, undefined)
       assert.ok(getMachine.includes(language === "zh" ? "读取终极机器" : "Read Ultimate Machine"))
       assert.ok(getMachine.includes("machine-1"))
@@ -56,12 +56,12 @@ test("cybion tool calls render context and machine details with escaped text in 
   }
 })
 
-test("read context calls link to the context page with the title and Use When", async () => {
+test("context calls link to the context page with the title and Use When", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
     const render = (contextId: string, contexts: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
-      language: "zh", call: { tool: "read_context", contextId }, workers: undefined, contexts, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+      language: "zh", call: { tool: "load_context", contextId }, workers: undefined, contexts, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
     const contexts = new Map([["ctx-1", { name: "个人简介 <script>alert(1)</script>", description: "了解 CZ 背景时使用 & 引用" }]])
     const resolved = render("ctx-1", contexts)
@@ -124,10 +124,10 @@ test("thread view renders cybion tool calls before the generic protocol renderer
   assert.match(source, /<CybionToolCall language=\{language\} call=\{cybionCall\} workers=\{workers\} contexts=\{contexts\} time=\{time\}>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/CybionToolCall>/)
 })
 
-test("read context titles resolve through gated context caches", () => {
+test("loaded context titles resolve through gated context caches", () => {
   const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   for (const needle of [
-    "const readsContexts = useMemo",
+    "const loadsContexts = useMemo",
     'queryKey: ["contexts"]',
     'queryKey: ["common-contexts", language]',
     "contexts={contextLookup} />",
@@ -136,5 +136,5 @@ test("read context titles resolve through gated context caches", () => {
   ]) {
     assert.ok(source.includes(needle), needle)
   }
-  assert.equal(source.match(/enabled: readsContexts/g)?.length, 2)
+  assert.equal(source.match(/enabled: loadsContexts/g)?.length, 2)
 })
