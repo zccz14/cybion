@@ -1,11 +1,28 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id, screenshot = false): HistoryRecord {
   return { id, thread_id: "thread-a", kind, payload, created_at, ...(screenshot ? { screenshot: true } : {}) }
 }
+
+test("a Worker call stays in flight until its own output record lands", () => {
+  const call = (id: number, callId: string) => record(id, "response_output", { type: "function_call", call_id: callId })
+  const history = [record(1, "input"), call(2, "call-a"), record(3, "tool_output", { type: "function_call_output", call_id: "call-a" }), call(4, "call-b"), record(5, "response_output", { type: "message" })]
+  assert.deepEqual([...inFlightCallIds(history)], ["call-b"])
+  assert.equal(recordInFlight(history[3], inFlightCallIds(history)), true)
+  assert.equal(recordInFlight(history[1], inFlightCallIds(history)), false)
+  // Records outside the call/output pairing never claim a call is running.
+  const settled = [record(1, "input"), call(2, "call-c"), record(3, "tool_output", { type: "function_call_output", call_id: "call-c" })]
+  assert.deepEqual([...inFlightCallIds([...settled, record(4, "activity", { role: "system", content: "failed" })])], [])
+  assert.equal(recordInFlight(settled[1], inFlightCallIds(settled)), false)
+  // A stopped turn leaves its call unanswered; the next input ends it, because a
+  // Thread settles only the newest turn's calls.
+  const stopped = [record(1, "input"), call(2, "call-stopped"), record(3, "input"), call(4, "call-next")]
+  assert.deepEqual([...inFlightCallIds(stopped)], ["call-next"])
+  assert.deepEqual([...inFlightCallIds(stopped.slice(0, 2))], ["call-stopped"])
+})
 
 test("empty histories and histories containing only standalone messages do not create process groups", () => {
   assert.deepEqual(groupThreadHistory([]), [])

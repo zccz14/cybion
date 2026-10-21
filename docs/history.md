@@ -43,7 +43,14 @@ directly from `kind` and `payload`. Every built-in tool call renders through
 its own card: `bash` commands, `browser_control` actions, `computer_use`
 actions, `view_image` pictures, `normai_web_search` queries,
 `normai_image_generation` prompts, and the controller-side context and machine
-tools. A `load_manual`/`unload_manual` card resolves the Manual title and its
+tools. A `bash` card counts its own clocks down while its call is in flight: the
+controller-served `delay_seconds` while the call waits, then the Worker's
+`timeout_seconds` (600 when the call names none) once it runs, both anchored at
+the call record's own timestamp because the browser sees no other clock for a
+call. The countdown shows only for a call in the newest turn whose output record
+has not landed yet, in a Thread that is still running, and it disappears the
+moment that record arrives, so a stopped Thread never leaves a countdown behind. A
+`load_manual`/`unload_manual` card resolves the Manual title and its
 Use When description through the same caches the Manuals page fills and links to
 that Manual, and a `write_manual` card
 resolves the same way, notes a move into the trash, and shows a create call's

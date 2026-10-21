@@ -46,14 +46,67 @@ export function userInputView(payload: unknown): UserInputView {
   return { text: text.join(""), images }
 }
 
-export type BashFunctionCall = { workerId: string; command: string }
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null
+}
+
+function integerNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null
+}
+
+// The `bash` call as stored in the Responses item: the Worker, the command and
+// the two clocks the card can count down. `delay_seconds` waits in the controller
+// before the call starts; `timeout_seconds` counts from execution start and the
+// tool documents 600 when the call omits it.
+export type BashFunctionCall = {
+  callId: string | null
+  workerId: string
+  command: string
+  delaySeconds: number | null
+  timeoutSeconds: number | null
+}
 
 export function bashFunctionCall(payload: unknown): BashFunctionCall | null {
   const object = historyPayloadObject(payload)
   if (object?.type !== "function_call" || object.name !== "bash" || typeof object.arguments !== "string") return null
   const args = parseFunctionArguments(object.arguments)
   if (typeof args?.worker_id !== "string" || typeof args.command !== "string") return null
-  return { workerId: args.worker_id, command: args.command }
+  return {
+    callId: nonEmptyString(object.call_id),
+    workerId: args.worker_id,
+    command: args.command,
+    delaySeconds: secondsArgument(args.delay_seconds),
+    timeoutSeconds: secondsArgument(args.timeout_seconds),
+  }
+}
+
+// Both clocks accept whole seconds of at least 1; anything else is no wait at all.
+function secondsArgument(value: unknown): number | null {
+  const seconds = integerNumber(value)
+  return seconds !== null && seconds >= 1 ? seconds : null
+}
+
+// The timeout the `bash` tool applies to a call that names none.
+const DEFAULT_BASH_TIMEOUT_SECONDS = 600
+
+export type BashCallCountdown = { phase: "delayed" | "running"; seconds: number } | { phase: "expired" }
+
+// The controller serves the delay first and the Worker's timeout clock starts where
+// it ends, so both countdowns chain from the moment the call record landed.
+//
+// ASSUMPTION: that record's timestamp stands in for the start of the wait, because
+// the browser has no other clock for a call in flight. If the countdown runs early
+// the card reports the deadline shortly before the Worker kills the command; if it
+// runs late the card keeps counting past the kill, which is also what a call still
+// waiting for its Worker does. Only the display is wrong: the deadline is the
+// controller's, the kill is the Worker's, and the output record replaces the card
+// the moment the call settles.
+export function bashCallCountdown(call: BashFunctionCall, startedAt: number, now: number): BashCallCountdown {
+  const elapsed = Math.max(0, now - startedAt)
+  const delay = call.delaySeconds ?? 0
+  if (elapsed < delay) return { phase: "delayed", seconds: delay - elapsed }
+  const remaining = (call.timeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS) - (elapsed - delay)
+  return remaining > 0 ? { phase: "running", seconds: remaining } : { phase: "expired" }
 }
 
 // The `view_image` call as stored in the Responses item: the Worker and the
@@ -142,14 +195,6 @@ export function viewedImageSource(payload: unknown): string | null {
     if (object?.type === "input_image" && typeof object.image_url === "string" && object.image_url !== "") return object.image_url
   }
   return null
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() !== "" ? value.trim() : null
-}
-
-function integerNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) ? value : null
 }
 
 // The `browser_control` call as stored in the Responses item: the action plus
