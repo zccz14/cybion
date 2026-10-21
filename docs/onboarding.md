@@ -26,13 +26,15 @@ connection. Contextual, keyboard-operable help dialogs use the same copy as that
 page. No forced tour, onboarding-complete flag or sample records are created.
 
 On narrow screens the default view is still a conversation list. A confirmed
-empty workspace opens the existing composer instead. A separate unfiltered
-`GET /api/threads?limit=1` checks the total only when the unsearched Web/All view
-and the archived list have both reported zero. API-only workspaces, search/status
-filters, archived conversations and unknown totals must not be mistaken for first
-use. Background polling keeps the last observed totals rather than temporarily
-removing the composer while a request is in flight. Counts only select a view;
-no data or permissions are changed by this decision.
+empty workspace opens the existing composer instead. The check runs on that
+screen only, from an unsearched Web/All entry view, and costs the Thread List
+nothing: an unfiltered `GET /api/threads?limit=1` asks for the active total, and
+only when that is zero does a second `GET /api/threads?archived=true&limit=1`
+check for archived Threads. API-only workspaces, search/status filters, archived
+conversations and unknown totals must not be mistaken for first use. Both
+answers are cached, and the composer waits for them rather than appearing and
+being withdrawn while a request is in flight. Counts only select a view; no data
+or permissions are changed by this decision.
 
 Examples fill an empty draft. Manual examples fill an editable form and require
 an explicit save. “Use in a conversation” uses the saved reference ID/name and

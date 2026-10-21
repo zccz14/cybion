@@ -25,7 +25,7 @@ test("actual composers bind drafts to verified ownership and clear only after ac
   const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   assert.match(main, /currentUser.isPending \? <LoadingScreen/)
   assert.match(main, /key=\{currentUser.data.user_id\}/)
-  assert.match(main, /<ThreadConversation key=\{location.pathname\}/)
+  assert.match(main, /<ThreadConversation key=\{threadId\}/)
   assert.match(main, /useComposerDraft\(userId, null\)/)
   assert.match(main, /useComposerDraft\(userId, threadId\)/)
   assert.match(main, /clearSubmitted\(payload.input\)/)

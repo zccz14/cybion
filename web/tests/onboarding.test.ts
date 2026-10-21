@@ -7,17 +7,18 @@ const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const onboarding = readFileSync(new URL("../src/lib/onboarding.ts", import.meta.url), "utf8")
 
 test("only an unsearched empty entry view may check whether the whole workspace is new", () => {
-  for (const view of ["mine", "all"] as const) assert.equal(needsFirstConversationCheck({ view, q: "" }, 0, 0), true)
-  for (const view of ["running", "failed", "api"] as const) assert.equal(needsFirstConversationCheck({ view, q: "" }, 0, 0), false)
-  assert.equal(needsFirstConversationCheck({ view: "mine", q: "project" }, 0, 0), false)
-  for (const [visible, archived] of [[undefined, 0], [0, undefined], [undefined, undefined], [1, 0], [0, 1], [0, 100]]) {
-    assert.equal(needsFirstConversationCheck({ view: "mine", q: "" }, visible, archived), false)
-  }
+  for (const view of ["mine", "all"] as const) assert.equal(needsFirstConversationCheck({ view, q: "" }), true)
+  for (const view of ["running", "failed", "api"] as const) assert.equal(needsFirstConversationCheck({ view, q: "" }), false)
+  assert.equal(needsFirstConversationCheck({ view: "mine", q: "project" }), false)
+  // The count check runs before any Thread List exists, so it cannot wait for the list's own
+  // totals; the entry-view gate is the whole precondition. The answer is cached, and only the
+  // narrow layout — the only one that can open the composer instead of the list — asks.
 })
 
 test("the first composer requires a positive unfiltered zero count and retains the standard route", () => {
   assert.match(main, /queryKey: \["threads", sdk\.session\.getState\(\)\.sessionId, "first-conversation"\]/)
   assert.match(main, /api<ThreadPage>\(sdk, "\/api\/threads\?limit=1", \{ signal \}\)/)
+  assert.match(main, /const checkFirstConversation = !desktop && needsFirstConversationCheck\(filters\)/)
   assert.match(main, /enabled: checkFirstConversation/)
   assert.match(main, /emptyWorkspace = checkFirstConversation && firstConversation\.data\?\.total === 0/)
   assert.match(main, /if \(desktop \|\| emptyWorkspace\) return <NewThreadPage/)

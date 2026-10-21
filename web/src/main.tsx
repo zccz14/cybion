@@ -14,8 +14,6 @@ import {
 import {
   QueryClient,
   QueryClientProvider,
-  keepPreviousData,
-  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -74,7 +72,7 @@ import { onboardingCopy, needsFirstConversationCheck } from "@/lib/onboarding"
 import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } from "@/components/onboarding"
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
-import { allThreadListFilters, mergeThreadPages, parseThreadListFilters, serializeThreadListFilters, threadListUrl, type ThreadListFilters } from "@/lib/thread-search"
+import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
@@ -125,14 +123,14 @@ import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDr
 import { collectSubtreeIds, commonAncestorIds, manualAncestorIds, manualCurrentPlacement, manualPlacementFor, manualTreeIndex, flattenTree, trashedRoots, visibleManuals, type ManualDropZone } from "@/lib/manuals-tree"
 import { manualDraft, draftsMatch, shouldAutosave, type ManualDraft } from "@/lib/manual-drafts"
 import { ThreadHistory } from "@/components/thread-history"
-import { ArchivedThreadGroup, ThreadList } from "@/components/thread-list"
-import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
+import { ThreadListPane } from "@/components/thread-list"
 import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
-import { ThreadLink, ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
+import { ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
 import { ManualLoadNotice } from "@/components/manual-load-notice"
 import { ThreadManualLoads } from "@/components/thread-manual-loads"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
+import { errorMessage } from "@/lib/utils"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
 import {
   Dialog,
@@ -1127,8 +1125,10 @@ const AUTH_AUDIENCES = Array.from(
   new Set(["cybion.ntnl.io", "linkit.ntnl.io", "openai.ntnl.io", "ctx.ntnl.io", "normai.ntnl.io", window.location.hostname]),
 )
 
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Request failed"
+// Components that fetch for themselves — the Thread List, for one — receive this request
+// instead of the SDK, so they never reach into the shell for a token.
+function useApiRequest(sdk: AuthMiniApi) {
+  return useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
 }
 
 function callbackUrl() {
@@ -1315,55 +1315,6 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
     queryFn: ({ signal }) => api<CurrentUser>(sdk, "/api/me", { signal }),
     staleTime: 60_000,
   })
-  const threadsRequest = threadListUrl(threadListFilters)
-  const threads = useInfiniteQuery({
-    queryKey: ["threads", sdk.session.getState().sessionId, threadsRequest],
-    queryFn: ({ pageParam }) => api<ThreadPage>(sdk, threadListUrl(threadListFilters, pageParam)),
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
-    refetchInterval: 2000,
-    placeholderData: keepPreviousData,
-  })
-  const archivedThreads = useInfiniteQuery({
-    queryKey: ["threads", sdk.session.getState().sessionId, "archived"],
-    queryFn: ({ pageParam }) => api<ThreadPage>(sdk, threadListUrl(allThreadListFilters, pageParam, true)),
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
-    refetchInterval: 2000,
-  })
-  const threadItems = useMemo(() => mergeThreadPages(threads.data?.pages.map((page) => page.items) ?? []), [threads.data])
-  const archivedItems = useMemo(() => mergeThreadPages(archivedThreads.data?.pages.map((page) => page.items) ?? []), [archivedThreads.data])
-  const archivedTotal = archivedThreads.data?.pages[0]?.total ?? 0
-  const checkFirstConversation = needsFirstConversationCheck(
-    threadListFilters,
-    threads.isPlaceholderData ? undefined : threads.data?.pages[0]?.total,
-    archivedThreads.data?.pages[0]?.total,
-  )
-  const firstConversation = useQuery({
-    queryKey: ["threads", sdk.session.getState().sessionId, "first-conversation"],
-    queryFn: ({ signal }) => api<ThreadPage>(sdk, "/api/threads?limit=1", { signal }),
-    enabled: checkFirstConversation,
-    retry: false,
-  })
-  const emptyWorkspace = checkFirstConversation && firstConversation.data?.total === 0
-  const threadsPagination: ThreadListPagination = {
-    hasMore: threads.hasNextPage,
-    loadingMore: threads.isFetchingNextPage,
-    onLoadMore: () => { void threads.fetchNextPage() },
-  }
-  const archivedPagination: ThreadListPagination = {
-    hasMore: archivedThreads.hasNextPage,
-    loadingMore: archivedThreads.isFetchingNextPage,
-    onLoadMore: () => { void archivedThreads.fetchNextPage() },
-  }
-  const client = useQueryClient()
-  const restoreThread = useMutation({
-    mutationFn: (threadId: string) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify({ archived: false }) }),
-    onSuccess: (thread) => {
-      void client.invalidateQueries({ queryKey: ["threads"] })
-      void client.invalidateQueries({ queryKey: ["thread", thread.id] })
-    },
-  })
   useEffect(() => {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en"
     localStorage.setItem("cybion.language", language)
@@ -1392,16 +1343,6 @@ function Workspace({ sdk }: { sdk: AuthMiniApi }) {
           sdk={sdk}
           userId={currentUser.data.user_id}
           isAdmin={currentUser.data.is_admin}
-          emptyWorkspace={emptyWorkspace}
-          threads={threadItems}
-          threadsLoading={threads.isLoading}
-          threadsError={threads.error}
-          threadsPagination={threadsPagination}
-          archivedThreads={archivedItems}
-          archivedTotal={archivedTotal}
-          archivedPagination={archivedPagination}
-          onRestoreThread={restoreThread.mutate}
-          restoringThreadId={restoreThread.isPending ? restoreThread.variables ?? null : null}
           filters={threadListFilters}
           onFiltersChange={setThreadListFilters}
         />}
@@ -1432,32 +1373,12 @@ function WorkspaceShell({
   sdk,
   userId,
   isAdmin,
-  emptyWorkspace,
-  threads,
-  threadsLoading,
-  threadsError,
-  threadsPagination,
-  archivedThreads,
-  archivedTotal,
-  archivedPagination,
-  onRestoreThread,
-  restoringThreadId,
   filters,
   onFiltersChange,
 }: {
   sdk: AuthMiniApi
   userId: string
   isAdmin: boolean
-  emptyWorkspace: boolean
-  threads: Thread[]
-  threadsLoading: boolean
-  threadsError: unknown
-  threadsPagination: ThreadListPagination
-  archivedThreads: Thread[]
-  archivedTotal: number
-  archivedPagination: ThreadListPagination
-  onRestoreThread: (threadId: string) => void
-  restoringThreadId: string | null
   filters: ThreadListFilters
   onFiltersChange: (filters: ThreadListFilters) => void
 }) {
@@ -1515,8 +1436,6 @@ function WorkspaceShell({
     pageTitle={routeTitle}
     headerSlot={<span className="flex items-center gap-2 text-xs text-muted-foreground"><span className="size-2 rounded-full bg-emerald-500" aria-hidden="true" /><span className="hidden sm:inline">{t("hosted")}</span></span>}
   >
-    {threadsLoading && <p className="sr-only">{t("threads")}</p>}
-    {Boolean(threadsError) && location.pathname.startsWith("/threads") && <div className="p-4"><RequestError error={threadsError} /></div>}
         <ErrorBoundary
           resetKeys={[location.pathname]}
           fallback={({ error, reset }) => <ErrorBoundaryFallback
@@ -1530,9 +1449,9 @@ function WorkspaceShell({
           />}
         >
           <Routes>
-            <Route path="/threads" element={<ThreadsHomePage emptyWorkspace={emptyWorkspace} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
-            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
-            <Route path="/threads/:threadId" element={<ThreadConversation key={location.pathname} sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} archivedThreads={archivedThreads} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} onCreate={() => navigate({ pathname: "/threads", search: location.search })} filters={filters} onFiltersChange={onFiltersChange} threadsPagination={threadsPagination} archivedTotal={archivedTotal} archivedPagination={archivedPagination} />} />
+            <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
+            <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
+            <Route path="/threads/:threadId" element={<ThreadConversationPage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
             <Route path="/shared-threads" element={<SharedThreadsPage language={language} userId={userId} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />} />
             <Route path="/shared-threads/:ownerId/:threadId" element={<SharedThreadRoute sdk={sdk} userId={userId} />} />
             <Route path="/notes" element={<NotesPage sdk={sdk} />} />
@@ -1578,22 +1497,47 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   return t("threads")
 }
 
-function ThreadsHomePage({ emptyWorkspace, sdk, userId, threads, threadsLoading, threadsError, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { emptyWorkspace: boolean; sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+// The routes that carry the Thread List hand it nothing but the filter selection: the list
+// fetches, polls and paginates its own rows.
+type ThreadListRouteProps = { sdk: AuthMiniApi; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }
+
+function ThreadsHomePage({ sdk, userId, filters, onFiltersChange }: ThreadListRouteProps & { userId: string }) {
   const desktop = useIsDesktopLayout()
-  if (desktop || emptyWorkspace) return <NewThreadPage sdk={sdk} userId={userId} threads={threads} threadsLoading={threadsLoading} threadsError={threadsError} threadsPagination={threadsPagination} archivedThreads={archivedThreads} archivedTotal={archivedTotal} archivedPagination={archivedPagination} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
-  return <ThreadListPage threads={threads} threadsLoading={threadsLoading} threadsPagination={threadsPagination} archivedThreads={archivedThreads} archivedTotal={archivedTotal} archivedPagination={archivedPagination} onRestoreThread={onRestoreThread} restoringThreadId={restoringThreadId} filters={filters} onFiltersChange={onFiltersChange} />
+  // A confirmed empty workspace opens the composer directly, including on a phone. The count
+  // check belongs to the screen that acts on it, so no Thread List has to exist first: it asks
+  // for the active rows, then — only when there are none — for the archived ones, because an
+  // archived Thread still means this workspace is not new.
+  const checkFirstConversation = !desktop && needsFirstConversationCheck(filters)
+  const firstConversation = useQuery({
+    queryKey: ["threads", sdk.session.getState().sessionId, "first-conversation"],
+    queryFn: ({ signal }) => api<ThreadPage>(sdk, "/api/threads?limit=1", { signal }),
+    enabled: checkFirstConversation,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const firstArchivedConversation = useQuery({
+    queryKey: ["threads", sdk.session.getState().sessionId, "first-conversation-archived"],
+    queryFn: ({ signal }) => api<ThreadPage>(sdk, "/api/threads?archived=true&limit=1", { signal }),
+    enabled: checkFirstConversation && firstConversation.data?.total === 0,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const emptyWorkspace = checkFirstConversation && firstConversation.data?.total === 0 && firstArchivedConversation.data?.total === 0
+  if (desktop || emptyWorkspace) return <NewThreadPage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />
+  return <ThreadListPage sdk={sdk} filters={filters} onFiltersChange={onFiltersChange} />
 }
 
-function ThreadListPage({ threads, threadsLoading, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { threads: Thread[]; threadsLoading: boolean; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function ThreadListPage({ sdk, filters, onFiltersChange }: ThreadListRouteProps) {
   const { language } = useUi()
   const location = useLocation()
   const navigate = useNavigate()
+  const request = useApiRequest(sdk)
   return <main className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-    <ThreadList threads={threads} archivedThreads={archivedThreads} archivedTotal={archivedTotal} loading={threadsLoading} language={language} filters={filters} onFiltersChange={onFiltersChange} pagination={threadsPagination} archivedPagination={archivedPagination} onCreate={() => navigate({ pathname: "/threads/new", search: location.search })} onRestore={onRestoreThread} restoringId={restoringThreadId} />
+    <ThreadListPane sessionId={sdk.session.getState().sessionId} request={request} language={language} filters={filters} onFiltersChange={onFiltersChange} onCreate={() => navigate({ pathname: "/threads/new", search: location.search })} />
   </main>
 }
 
-function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsError: unknown; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRouteProps & { userId: string }) {
   const { t, language } = useUi()
   const help = onboardingCopy[language]
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -1605,6 +1549,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, thr
   const models = useUpstreamModels(sdk)
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   const location = useLocation()
+  const request = useApiRequest(sdk)
   const composer = useComposerDraft(userId, null)
   const { input, setInput, seed, clearSubmitted } = composer
   const attachments = useComposerImages()
@@ -1633,17 +1578,7 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, thr
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
-      <div className="pb-2">
-        <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={() => navigate({ pathname: "/threads", search: location.search })} />
-      </div>
-      <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-12rem)]" aria-label={t("threads")}>
-        {threadsLoading && <div className="flex flex-col gap-2 px-2 py-1"><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>}
-        {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(allThreadListFilters)} />}
-        {!threadsLoading && threads.map((thread) => <ThreadLink key={thread.id} thread={thread} language={language} />)}
-        <ThreadListMore pagination={threadsPagination} language={language} />
-        <ArchivedThreadGroup threads={archivedThreads} total={archivedTotal} pagination={archivedPagination} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
-        {Boolean(threadsError) && <p className="px-3 py-2 text-xs text-destructive">{errorMessage(threadsError)}</p>}
-      </nav>
+      <ThreadListPane layout="sidebar" sessionId={sdk.session.getState().sessionId} request={request} language={language} filters={filters} onFiltersChange={onFiltersChange} onCreate={() => navigate({ pathname: "/threads", search: location.search })} />
     </aside>}
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="shrink-0 border-b px-4 py-4 sm:px-6">
@@ -1669,16 +1604,24 @@ function NewThreadPage({ sdk, userId, threads, threadsLoading, threadsError, thr
   </main>
 }
 
-function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagination, archivedThreads, archivedTotal, archivedPagination, onRestoreThread, restoringThreadId, onCreate, filters, onFiltersChange }: { sdk: AuthMiniApi; userId: string; threads: Thread[]; threadsLoading: boolean; threadsPagination: ThreadListPagination; archivedThreads: Thread[]; archivedTotal: number; archivedPagination: ThreadListPagination; onRestoreThread: (threadId: string) => void; restoringThreadId: string | null; onCreate: () => void; filters: ThreadListFilters; onFiltersChange: (filters: ThreadListFilters) => void }) {
+function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: AuthMiniApi; userId: string; olderPages: ThreadHistoryWindow[]; onOlderPage: (threadId: string, page: ThreadHistoryWindow) => void }) {
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
   const location = useLocation()
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
+  // The list already holds this Thread's row — the server sends whole Threads, not summaries —
+  // so the header and the composer render from it while the detail read is still in flight, and
+  // only the transcript waits.
+  const listedThread = useCallback(() => client
+    .getQueriesData<ThreadPage>({ queryKey: ["threads", sdk.session.getState().sessionId] })
+    .flatMap(([, page]) => page?.items ?? [])
+    .find((item) => item.id === threadId), [client, sdk, threadId])
   const thread = useQuery({
     queryKey: ["thread", threadId, userId],
     queryFn: () => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`),
+    placeholderData: listedThread,
     refetchInterval: 1500,
     enabled: Boolean(threadId),
   })
@@ -1713,8 +1656,6 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
     refetchInterval: thread.data?.status === "running" ? 750 : false,
     enabled: Boolean(threadId),
   })
-  const [olderPagesByThread, setOlderPagesByThread] = useState<Record<string, ThreadHistoryWindow[]>>({})
-  const olderPages = useMemo(() => olderPagesByThread[threadId] ?? [], [olderPagesByThread, threadId])
   const durableRecords = useMemo(() => loadedThreadRecords(olderPages, history.data), [olderPages, history.data])
   const records = useMemo(() => [
     ...durableRecords,
@@ -1754,11 +1695,7 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
       return { threadId, page: await fetchHistoryWindow(before) }
     },
     onSuccess: (loaded) => {
-      if (!loaded) return
-      setOlderPagesByThread((current) => ({
-        ...current,
-        [loaded.threadId]: [loaded.page, ...(current[loaded.threadId] ?? [])],
-      }))
+      if (loaded) onOlderPage(loaded.threadId, loaded.page)
     },
   })
   const composer = useComposerDraft(userId, threadId)
@@ -1845,8 +1782,11 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
       if (archived) navigate({ pathname: "/threads", search: location.search })
     },
   })
-  if (thread.isLoading) return <Page title={t("chat")} description=""><div className="flex flex-col gap-3"><Skeleton className="h-8 w-56" /><Skeleton className="h-20" /><Skeleton className="h-20" /></div></Page>
-  if (thread.isError || !thread.data) return <Page title={t("chat")} description=""><RequestError error={thread.error} /></Page>
+  const backToThreads = () => navigate({ pathname: "/threads", search: location.search })
+  // Only this column settles into a placeholder; the Thread List is a sibling that already
+  // rendered, so opening a Thread never blanks the layout around it.
+  if (thread.isLoading) return <ThreadPending desktop={desktop} onBack={backToThreads} />
+  if (thread.isError || !thread.data) return <ThreadUnavailable error={thread.error} desktop={desktop} onBack={backToThreads} onRetry={() => void thread.refetch()} />
   const current = thread.data
   const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
   const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
@@ -1858,94 +1798,129 @@ function ThreadConversation({ sdk, userId, threads, threadsLoading, threadsPagin
   const busy = submit.isPending || control.isPending
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
   const action = composerAction(input, attachments.images.length, running)
+  return <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
+    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
+      {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={backToThreads}><ArrowLeftIcon /></Button>}
+      {editing ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
+        <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
+        <Button size="sm" disabled={rename.isPending || generateTitle.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
+      </form> : <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex min-w-0 items-center gap-1">
+          <h1 className="min-w-0 truncate text-base font-semibold">{current.title}</h1>
+          {archived && <Badge variant="outline" className="shrink-0 text-muted-foreground">{t("archived")}</Badge>}
+          {current.created_by === "api" && <Badge variant="outline" className="shrink-0 text-muted-foreground" title={current.external_ref ? `${t("apiOriginHint")} · ${current.external_ref}` : t("apiOriginHint")}>{t("apiOrigin")}</Badge>}
+          <Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
+          <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button>
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
+          <ThreadStatusSummary status={current.display_status} language={language} />
+          {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
+        </div>
+      </div>}
+      <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
+      <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
+      <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
+    </div>
+    <ThreadUsagePanel usage={current.usage} language={language} />
+    {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || attachments.images.length > 0) && submit.mutate({ input, images: attachments.images })} /></div>}
+    {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
+    {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
+    <MessageScrollerProvider autoScroll defaultScrollPosition="end">
+      <MessageScroller className="min-h-0 flex-1">
+        {/* The load-earlier control floats over the viewport instead of rendering as a transcript row:
+            the scroller preserves the visible row on prepend only while the previous first content
+            child moves down, and a control row kept at index 0 would defeat that detection. */}
+        <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex flex-col items-center gap-2 px-6">
+          {hasOlder && <Button className="pointer-events-auto shadow-sm" type="button" size="sm" variant="outline" disabled={loadEarlier.isPending} onClick={() => loadEarlier.mutate()}>
+            {loadEarlier.isPending && <Spinner data-icon="inline-start" />}
+            {loadEarlier.isPending ? t("loadingEarlierMessages") : t("loadEarlierMessages")}
+          </Button>}
+          {loadEarlier.error && <div className="pointer-events-auto w-full max-w-lg"><RequestError error={loadEarlier.error} onRetry={() => loadEarlier.mutate()} /></div>}
+        </div>
+        <MessageScrollerViewport>
+          <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
+            {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
+            {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
+            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} />} />
+            {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
+            {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
+            {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
+            {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
+          </MessageScrollerContent>
+        </MessageScrollerViewport>
+        <MessageScrollerButton behavior="auto" />
+      </MessageScroller>
+    </MessageScrollerProvider>
+    <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || attachments.images.length > 0) && !busy) submit.mutate({ input, images: attachments.images }) }}>
+      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
+            {action === "send"
+              ? <Button disabled={busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
+              : action === "stop"
+                ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
+                : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
+          </div>
+        </div>
+      </FieldGroup>
+    </form>
+    <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>
+      {openThreadNotes.length > 0 && <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+        <p className="font-medium">{t("deleteThreadNotes")}</p>
+        <ul className="mt-1 list-disc space-y-1 pl-4">{openThreadNotes.map((note) => <li key={note.id} className="break-words">{note.text}</li>)}</ul>
+      </div>}
+      {remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
+  </section>
+}
+
+// The shell keeps the two columns apart: the Thread List is the conversation's sibling, so
+// the list renders from its own cached rows, polls on its own, and never unmounts when the
+// conversation it sits beside switches to another Thread.
+function ThreadConversationPage({ sdk, userId, filters, onFiltersChange }: ThreadListRouteProps & { userId: string }) {
+  const { threadId = "" } = useParams()
+  const { language } = useUi()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const desktop = useIsDesktopLayout()
+  const request = useApiRequest(sdk)
+  // Older history pages outlive a Thread switch, so coming back to a Thread still shows the
+  // pages it had already loaded instead of paging them in again.
+  const [olderPagesByThread, setOlderPagesByThread] = useState<Record<string, ThreadHistoryWindow[]>>({})
+  const olderPages = useMemo(() => olderPagesByThread[threadId] ?? [], [olderPagesByThread, threadId])
+  const rememberOlderPage = useCallback((id: string, page: ThreadHistoryWindow) => {
+    setOlderPagesByThread((current) => ({ ...current, [id]: [page, ...(current[id] ?? [])] }))
+  }, [])
   return <main className="flex h-full flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
-      <div className="pb-2">
-        <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={onCreate} />
-      </div>
-      <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-12rem)]" aria-label={t("threads")}>
-        {!threadsLoading && threads.length === 0 && <ThreadListEmptyState filters={filters} language={language} onReset={() => onFiltersChange(allThreadListFilters)} />}
-        {threads.map((item) => <ThreadLink key={item.id} thread={item.id === current.id ? current : item} language={language} />)}
-        <ThreadListMore pagination={threadsPagination} language={language} />
-        <ArchivedThreadGroup threads={archivedThreads} total={archivedTotal} pagination={archivedPagination} language={language} onRestore={onRestoreThread} restoringId={restoringThreadId} />
-      </nav>
+      <ThreadListPane layout="sidebar" sessionId={sdk.session.getState().sessionId} request={request} language={language} filters={filters} onFiltersChange={onFiltersChange} onCreate={() => navigate({ pathname: "/threads", search: location.search })} />
     </aside>}
-    <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
-        {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={() => navigate({ pathname: "/threads", search: location.search })}><ArrowLeftIcon /></Button>}
-        {editing ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
-          <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
-          <Button size="sm" disabled={rename.isPending || generateTitle.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
-        </form> : <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <div className="flex min-w-0 items-center gap-1">
-            <h1 className="min-w-0 truncate text-base font-semibold">{current.title}</h1>
-            {archived && <Badge variant="outline" className="shrink-0 text-muted-foreground">{t("archived")}</Badge>}
-            {current.created_by === "api" && <Badge variant="outline" className="shrink-0 text-muted-foreground" title={current.external_ref ? `${t("apiOriginHint")} · ${current.external_ref}` : t("apiOriginHint")}>{t("apiOrigin")}</Badge>}
-            <Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
-            <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
-            <ThreadStatusSummary status={current.display_status} language={language} />
-            {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
-          </div>
-        </div>}
-        <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
-        <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
-        <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
-      </div>
-      <ThreadUsagePanel usage={current.usage} language={language} />
-      {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || attachments.images.length > 0) && submit.mutate({ input, images: attachments.images })} /></div>}
-      {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
-      {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
-      <MessageScrollerProvider autoScroll defaultScrollPosition="end">
-        <MessageScroller className="min-h-0 flex-1">
-          {/* The load-earlier control floats over the viewport instead of rendering as a transcript row:
-              the scroller preserves the visible row on prepend only while the previous first content
-              child moves down, and a control row kept at index 0 would defeat that detection. */}
-          <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex flex-col items-center gap-2 px-6">
-            {hasOlder && <Button className="pointer-events-auto shadow-sm" type="button" size="sm" variant="outline" disabled={loadEarlier.isPending} onClick={() => loadEarlier.mutate()}>
-              {loadEarlier.isPending && <Spinner data-icon="inline-start" />}
-              {loadEarlier.isPending ? t("loadingEarlierMessages") : t("loadEarlierMessages")}
-            </Button>}
-            {loadEarlier.error && <div className="pointer-events-auto w-full max-w-lg"><RequestError error={loadEarlier.error} onRetry={() => loadEarlier.mutate()} /></div>}
-          </div>
-          <MessageScrollerViewport>
-            <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
-              {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
-              {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-              <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} />} />
-              {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
-              {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
-              {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
-              {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
-            </MessageScrollerContent>
-          </MessageScrollerViewport>
-          <MessageScrollerButton behavior="auto" />
-        </MessageScroller>
-      </MessageScrollerProvider>
-      <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || attachments.images.length > 0) && !busy) submit.mutate({ input, images: attachments.images }) }}>
-        <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} />
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
-              {action === "send"
-                ? <Button disabled={busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
-                : action === "stop"
-                  ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
-                  : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
-            </div>
-          </div>
-        </FieldGroup>
-      </form>
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>
-        {openThreadNotes.length > 0 && <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
-          <p className="font-medium">{t("deleteThreadNotes")}</p>
-          <ul className="mt-1 list-disc space-y-1 pl-4">{openThreadNotes.map((note) => <li key={note.id} className="break-words">{note.text}</li>)}</ul>
-        </div>}
-        {remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
-    </section>
+    <ThreadConversation key={threadId} sdk={sdk} userId={userId} olderPages={olderPages} onOlderPage={rememberOlderPage} />
   </main>
+}
+
+// The conversation column alone while the Thread record is still on its way: the header keeps
+// its place and the transcript fills in, without a page-sized skeleton.
+function ThreadPending({ desktop, onBack }: { desktop: boolean; onBack: () => void }) {
+  const { t } = useUi()
+  return <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
+    <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
+      {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={onBack}><ArrowLeftIcon /></Button>}
+      <Skeleton className="h-5 w-56" />
+    </div>
+    <div className="flex flex-col gap-3 px-4 py-5"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>
+  </section>
+}
+
+function ThreadUnavailable({ error, desktop, onBack, onRetry }: { error: unknown; desktop: boolean; onBack: () => void; onRetry: () => void }) {
+  const { t } = useUi()
+  return <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
+    <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
+      {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={onBack}><ArrowLeftIcon /></Button>}
+    </div>
+    <div className="p-4"><RequestError error={error} onRetry={onRetry} /></div>
+  </section>
 }
 
 function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
