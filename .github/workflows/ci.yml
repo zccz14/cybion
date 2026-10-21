@@ -37,10 +37,10 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
       - name: Install Playwright system dependencies
-        run: pnpm dlx --dir web playwright install-deps chromium
+        run: pnpm --dir web exec playwright install-deps chromium
       - name: Install Playwright browser
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: pnpm dlx --dir web playwright install chromium
+        run: pnpm --dir web exec playwright install chromium
       - run: pnpm --dir web run test:e2e
       - uses: actions/upload-artifact@v4
         if: failure()
