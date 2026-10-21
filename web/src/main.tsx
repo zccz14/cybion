@@ -89,7 +89,7 @@ import { UserInputMessage } from "@/components/user-input-message"
 import { ScreenshotOutput } from "@/components/screenshot-output"
 import { ViewedOutput } from "@/components/viewed-output"
 import { ViewImageCall } from "@/components/view-image-call"
-import { auditCacheRate, openaiAuditUrl } from "@/lib/reasoning-audit"
+import { auditCacheRate, gatewayAuditUrl } from "@/lib/reasoning-audit"
 
 import "./styles.css"
 import "linkit-react-components/styles.css"
@@ -242,7 +242,8 @@ type ReasoningAudit = {
   input_tokens: number | null
   output_tokens: number | null
   cached_tokens: number | null
-  openai_lb_request_id: string | null
+  request_id: string | null
+  upstream_base_url: string
   idx_head: number | null
   idx_tail: number | null
   error: string | null
@@ -532,8 +533,8 @@ const copy = {
     auditStarted: "Started",
     auditFinished: "Finished",
     auditUsage: "Usage",
-    auditLink: "OpenAI Request ID",
-    auditOpenLink: "Open audit in OpenAI-LB (new tab)",
+    auditLink: "Request ID",
+    auditOpenLink: "Open the audit in the gateway that billed it (new tab)",
     auditCacheRateDescription: "Cached input tokens ÷ input tokens. — when usage is unavailable or input is zero.",
     auditEmpty: "No reasoning requests yet.",
     workerAudit: "Worker call audit",
@@ -894,8 +895,8 @@ const copy = {
     auditStarted: "发起时间",
     auditFinished: "结束时间",
     auditUsage: "用量",
-    auditLink: "OpenAI Request ID",
-    auditOpenLink: "在 OpenAI-LB 中查看审计（新标签页）",
+    auditLink: "请求 ID",
+    auditOpenLink: "在结算这次调用的网关中查看审计（新标签页）",
     auditCacheRateDescription: "缓存输入 Token ÷ 输入 Token。用量尚未上报或输入为零时显示 —。",
     auditEmpty: "尚无推理请求。",
     workerAudit: "Worker 调用审计",
@@ -3146,6 +3147,13 @@ function DailyActivityCard({
   </Card>
 }
 
+/** The gateway's request ID, linked to its console when the audit row names one. */
+function RequestIdCell({ requestId, upstreamBaseUrl, label }: { requestId: string; upstreamBaseUrl: string; label: string }) {
+  const url = gatewayAuditUrl(upstreamBaseUrl, requestId)
+  if (!url) return <code className="break-all text-xs">{requestId}</code>
+  return <a href={url} target="_blank" rel="noopener noreferrer" title={label} className="inline-flex max-w-full items-start gap-1 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><code className="break-all text-xs">{requestId}</code><ExternalLinkIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="sr-only">{label}</span></a>
+}
+
 function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const [filters, setFilters] = useSearchParams()
@@ -3175,7 +3183,7 @@ function ReasoningAuditPage({ sdk }: { sdk: AuthMiniApi }) {
       {query.error && <RequestError error={query.error} onRetry={() => void query.refetch()} />}
       {!query.data && !query.error && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{t("audit")}</div>}
       {query.data && query.data.items.length === 0 && <p className="py-8 text-sm text-muted-foreground">{t("auditEmpty")}</p>}
-      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[60rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("reasoningEffort")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium" title={t("auditCacheRateDescription")}>{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">#{item.id} · {item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><code>{item.reasoning_effort ?? "—"}</code></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{auditCacheRate(item.input_tokens, item.cached_tokens, language)}</td><td className="max-w-40 px-3 py-3">{item.openai_lb_request_id ? <a href={openaiAuditUrl(item.openai_lb_request_id)} target="_blank" rel="noopener noreferrer" title={t("auditOpenLink")} className="inline-flex max-w-full items-start gap-1 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><code className="break-all text-xs">{item.openai_lb_request_id}</code><ExternalLinkIcon className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="sr-only">{t("auditOpenLink")}</span></a> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
+      {query.data && query.data.items.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[60rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("auditThread")}</th><th className="px-3 py-2 font-medium">{t("auditRequest")}</th><th className="px-3 py-2 font-medium">{t("reasoningEffort")}</th><th className="px-3 py-2 font-medium">{t("auditStatus")}</th><th className="px-3 py-2 font-medium">{t("auditStarted")}</th><th className="px-3 py-2 font-medium">{t("auditFinished")}</th><th className="px-3 py-2 font-medium">{t("auditUsage")}</th><th className="px-3 py-2 font-medium" title={t("auditCacheRateDescription")}>{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("auditLink")}</th></tr></thead><tbody className="divide-y">{query.data.items.map((item) => <tr key={item.id} className="align-top"><td className="max-w-56 px-3 py-3"><Link className="font-medium hover:underline" to={`/threads/${item.thread_id}`}>{item.thread_title || item.thread_id}</Link><p className="mt-1 truncate font-mono text-[0.7rem] text-muted-foreground">{item.thread_id}</p></td><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">#{item.id} · {item.request_kind}</p><p className="mt-1 font-mono text-[0.7rem] text-muted-foreground">{item.idx_head === null || item.idx_tail === null ? "idx —" : `idx #${item.idx_head}–#${item.idx_tail}`}</p></td><td className="px-3 py-3"><code>{item.reasoning_effort ?? "—"}</code></td><td className="px-3 py-3"><Badge variant={item.status === "failed" ? "destructive" : item.status === "in_flight" ? "secondary" : "outline"}>{auditStatusLabel(item.status, t)}</Badge>{item.error && <p className="mt-2 max-w-64 break-words text-xs text-destructive">{item.error}</p>}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.started_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formattedTime(language, item.finished_at)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{usageLabel(item)}</td><td className="whitespace-nowrap px-3 py-3 text-xs tabular-nums">{auditCacheRate(item.input_tokens, item.cached_tokens, language)}</td><td className="max-w-40 px-3 py-3">{item.request_id ? <RequestIdCell requestId={item.request_id} upstreamBaseUrl={item.upstream_base_url} label={t("auditOpenLink")} /> : <span className="text-xs text-muted-foreground">—</span>}</td></tr>)}</tbody></table></div>}
       {query.data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-sm text-muted-foreground">{range}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</Button><Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>{t("next")}</Button></div></div>}
     </CardContent></Card>
   </Page>

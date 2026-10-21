@@ -83,8 +83,8 @@ async fn settle_user(state: &AppState, user: &User) -> Result<(), ApiError> {
             .map(|upstream| (upstream.id.clone(), upstream))
             .collect::<HashMap<_, _>>();
         let mut statement = connection.prepare(
-            "SELECT id,openai_lb_request_id,upstream_id FROM reasoning_audits
-              WHERE cost_usd_nanos IS NULL AND openai_lb_request_id IS NOT NULL
+            "SELECT id,request_id,upstream_id FROM reasoning_audits
+              WHERE cost_usd_nanos IS NULL AND request_id IS NOT NULL
                 AND upstream_id IS NOT NULL AND status <> 'in_flight'
                 AND finished_at IS NOT NULL AND finished_at > ? AND cost_attempts < ?
               ORDER BY id DESC LIMIT ?",
