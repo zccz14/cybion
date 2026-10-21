@@ -75,7 +75,7 @@ import { generatedImageSource, pendingResponseRecords, threadControlAction, type
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
-import { loadedThreadRecords, oldestRecordId, pollThreadHistory, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
+import { inFlightCallIds, loadedThreadRecords, oldestRecordId, pollThreadHistory, recordInFlight, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { manualLoadNotice, type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
@@ -1792,6 +1792,9 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
   const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
   const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
   const running = current.status === "running"
+  // Only stored records prove a call is still on the device: a streamed item the
+  // preview renders carries the request's start time, not the call's own.
+  const inFlightCalls = useMemo(() => inFlightCallIds(running ? durableRecords : []), [durableRecords, running])
   const archived = current.archived_at !== null
   const archiveAction = archived
     ? { label: t("restoreThread"), icon: <ArchiveRestoreIcon className="size-4" />, next: false }
@@ -1842,7 +1845,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
             {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
             {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} />} />
+            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} inFlight={recordInFlight(record, inFlightCalls)} />} />
             {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
             {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
             {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
@@ -1929,7 +1932,7 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   const { language } = useUi()
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
-  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} />} />
+  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} />} />
 }
 
 function SafetyBufferingAlert({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
@@ -1939,7 +1942,7 @@ function SafetyBufferingAlert({ language, view, running }: { language: Language;
   return <MessageScrollerItem><Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{buffering.reasons.join(" · ")}</AlertDescription></Alert></MessageScrollerItem>
 }
 
-const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; manuals: ReadonlyMap<string, ManualSummary> | undefined }) {
+const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals, inFlight }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; manuals: ReadonlyMap<string, ManualSummary> | undefined; inFlight: boolean }) {
   const { t } = useUi()
   const time = formattedTime(language, record.created_at)
   const action = threadControlAction(record)
@@ -2034,7 +2037,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
 
   const bashCall = bashFunctionCall(payload)
   if (bashCall) {
-    return <BashCommand language={language} call={bashCall} workers={workers} time={time}>
+    return <BashCommand language={language} call={bashCall} workers={workers} time={time} startedAt={record.created_at} inFlight={inFlight}>
       <details className="group mt-2">
         <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
           <span>{t("recordPayload")}</span>
@@ -2166,7 +2169,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
       </div>
     </div>
   </div>
-}, (previous, next) => previous.workers === next.workers && previous.manuals === next.manuals && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
+}, (previous, next) => previous.workers === next.workers && previous.manuals === next.manuals && previous.inFlight === next.inFlight && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")

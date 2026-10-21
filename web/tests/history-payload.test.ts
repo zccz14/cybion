@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, webSearchFunctionCall } from "../src/lib/history-payload.ts"
+import { bashCallCountdown, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, webSearchFunctionCall } from "../src/lib/history-payload.ts"
 
 test("conversation text is derived from stored protocol payloads", () => {
   for (const [payload, expected] of [
@@ -18,10 +18,34 @@ test("conversation text is derived from stored protocol payloads", () => {
   assert.equal(historyPayloadText(protocol), JSON.stringify(protocol, null, 2))
 })
 
-test("bash function calls preserve multiline commands and exact Worker IDs", () => {
+test("bash function calls preserve multiline commands, the call id and both clocks", () => {
   const command = 'cd ~/Projects/cybion\nprintf "你好\\n"'
-  const payload = { type: "function_call", name: "bash", arguments: JSON.stringify({ worker_id: "worker-1", command }) }
-  assert.deepEqual(bashFunctionCall(payload), { workerId: "worker-1", command })
+  const payload = { type: "function_call", id: "fc-1", call_id: "call-1", name: "bash", arguments: JSON.stringify({ worker_id: "worker-1", command, delay_seconds: 30, timeout_seconds: 900 }) }
+  assert.deepEqual(bashFunctionCall(payload), { callId: "call-1", workerId: "worker-1", command, delaySeconds: 30, timeoutSeconds: 900 })
+  const bare = { type: "function_call", name: "bash", arguments: JSON.stringify({ worker_id: "worker-1", command }) }
+  assert.deepEqual(bashFunctionCall(bare), { callId: null, workerId: "worker-1", command, delaySeconds: null, timeoutSeconds: null })
+  // The tool accepts whole seconds of at least 1; anything else is no clock at all.
+  for (const value of [0, -5, 1.5, "60", null, true]) {
+    const arguments_ = JSON.stringify({ worker_id: "worker-1", command, delay_seconds: value, timeout_seconds: value })
+    assert.deepEqual(bashFunctionCall({ ...bare, arguments: arguments_ }), { callId: null, workerId: "worker-1", command, delaySeconds: null, timeoutSeconds: null }, String(value))
+  }
+})
+
+test("bash countdowns chain the controller delay into the Worker timeout", () => {
+  const call = { callId: "call-1", workerId: "worker-1", command: "pwd", delaySeconds: 60, timeoutSeconds: 300 }
+  const startedAt = 1_000
+  // The delay is served in the controller and the timeout clock starts where it ends.
+  assert.deepEqual(bashCallCountdown(call, startedAt, startedAt), { phase: "delayed", seconds: 60 })
+  assert.deepEqual(bashCallCountdown(call, startedAt, startedAt + 59), { phase: "delayed", seconds: 1 })
+  assert.deepEqual(bashCallCountdown(call, startedAt, startedAt + 60), { phase: "running", seconds: 300 })
+  assert.deepEqual(bashCallCountdown(call, startedAt, startedAt + 359), { phase: "running", seconds: 1 })
+  assert.deepEqual(bashCallCountdown(call, startedAt, startedAt + 360), { phase: "expired" })
+  // A call that names no timeout runs against the tool's documented default.
+  const undelayed = { ...call, delaySeconds: null, timeoutSeconds: null }
+  assert.deepEqual(bashCallCountdown(undelayed, startedAt, startedAt + 599), { phase: "running", seconds: 1 })
+  assert.deepEqual(bashCallCountdown(undelayed, startedAt, startedAt + 600), { phase: "expired" })
+  // A browser clock behind the server never inflates either countdown.
+  assert.deepEqual(bashCallCountdown(call, startedAt, startedAt - 30), { phase: "delayed", seconds: 60 })
 })
 
 test("unrelated events and incomplete or malformed bash arguments retain the generic protocol renderer", () => {

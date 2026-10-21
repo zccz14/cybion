@@ -130,8 +130,8 @@ test("loaded manual titles resolve through gated manual caches", () => {
     "const loadsManuals = useMemo",
     'queryKey: ["manuals"]',
     'queryKey: ["common-manuals", language]',
-    "manuals={manualLookup} />",
-    "manuals={undefined} />",
+    "manuals={manualLookup}",
+    "manuals={undefined}",
     "previous.manuals === next.manuals",
   ]) {
     assert.ok(source.includes(needle), needle)

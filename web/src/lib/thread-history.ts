@@ -1,4 +1,4 @@
-import { screenshotImageSource, viewedImageSource } from "./history-payload.ts"
+import { historyPayloadObject, screenshotImageSource, viewedImageSource } from "./history-payload.ts"
 import { generatedImageSource } from "./thread-response.ts"
 
 export type HistoryRecord = {
@@ -48,6 +48,27 @@ export function threadHistoryRecordKey(record: HistoryRecord) {
   if (record.kind === "response_output" && payload !== null && typeof payload === "object"
     && "id" in payload && typeof payload.id === "string") return `${record.thread_id}:output:${payload.id}`
   return `${record.thread_id}:record:${record.id}:${record.created_at}`
+}
+
+// INVARIANT: a Worker call is answered by a tool output that repeats its call_id,
+// and history is append-only, so the calls still owed an answer are the ones the
+// device is working on right now. A Thread settles only the newest turn's calls, so
+// an input boundary drops any call an earlier turn left unanswered.
+export function inFlightCallIds(records: readonly { kind: string; payload: unknown }[]): ReadonlySet<string> {
+  const inFlight = new Set<string>()
+  for (const record of records) {
+    if (record.kind === "input") inFlight.clear()
+    const callId = historyPayloadObject(record.payload)?.call_id
+    if (typeof callId !== "string") continue
+    if (record.kind === "response_output") inFlight.add(callId)
+    if (record.kind === "tool_output") inFlight.delete(callId)
+  }
+  return inFlight
+}
+
+export function recordInFlight(record: { kind: string; payload: unknown }, inFlight: ReadonlySet<string>) {
+  const callId = historyPayloadObject(record.payload)?.call_id
+  return record.kind === "response_output" && typeof callId === "string" && inFlight.has(callId)
 }
 
 export type ThreadHistoryWindow = {
