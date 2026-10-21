@@ -222,9 +222,9 @@ session check passes where `crypto.subtle` lacks Ed25519. See
 ## Development and release
 
 ```sh
-npm --prefix web ci
-npm --prefix web run check
-npm --prefix web run build
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web run check
+pnpm --dir web run build
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked

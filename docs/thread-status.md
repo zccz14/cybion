@@ -81,9 +81,9 @@ record. The result is read in the same SQLite statement as Thread metadata.
 Commands:
 
 ```sh
-npm --prefix web run check
-npm --prefix web run test:e2e
-npm --prefix web run build
+pnpm --dir web run check
+pnpm --dir web run test:e2e
+pnpm --dir web run build
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked

@@ -16,36 +16,39 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: npm --prefix web ci
-      - run: npm --prefix web run check
+      - run: pnpm --dir web install --frozen-lockfile
+      - run: pnpm --dir web run check
       - name: Restore Playwright browser cache
         id: playwright-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('web/package-lock.json') }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
       - name: Install Playwright system dependencies
-        run: npx --prefix web playwright install-deps chromium
+        run: pnpm --dir web exec playwright install-deps chromium
       - name: Install Playwright browser
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx --prefix web playwright install chromium
-      - run: npm --prefix web run test:e2e
+        run: pnpm --dir web exec playwright install chromium
+      - run: pnpm --dir web run test:e2e
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: web-e2e-results
           path: web/test-results
           if-no-files-found: ignore
-      - run: npm --prefix web run build
+      - run: pnpm --dir web run build
       - run: python3 scripts/check-responses-parity.py
       - run: python3 scripts/test-smoke-worker-onboarding.py
       - run: bash -n .github/scripts/send-deploy.sh deploy/deploy-release.sh
