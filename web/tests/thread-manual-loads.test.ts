@@ -46,6 +46,8 @@ test("the transcript row reads the loaded bindings and nothing re-reads them", (
   // The row counts against the cap the controller reports, so a Thread that is
   // full reads as full instead of merely long.
   assert.match(indicator, /view\.limit/)
-  assert.match(indicator, /text\.loadedLabel/)
+  // The row label already says 已加载手册, so a chip carrying the same badge again is noise.
+  assert.doesNotMatch(indicator, /loadedLabel/)
+  assert.match(indicator, /text\.unknown/)
   assert.doesNotMatch(indicator, /state\[|fingerprint/)
 })
