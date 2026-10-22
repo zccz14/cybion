@@ -6,7 +6,6 @@ const copy = {
   zh: {
     label: "已加载手册",
     empty: "本线程没有加载手册",
-    loadedLabel: "已加载",
     scope: "本线程用 load_manual 加载的手册：控制器在每个请求里都带上它的最新副本，压缩之后也会重新送达，卸载之后就不再刷新。上限由本线程设置或账号默认决定。",
     hint: "控制器会持续把它的最新副本送进请求，不需要模型重新读取。",
     unknown: "未知手册",
@@ -14,7 +13,6 @@ const copy = {
   en: {
     label: "Loaded manuals",
     empty: "no manual loaded in this thread",
-    loadedLabel: "loaded",
     scope: "Manuals this Thread loaded with load_manual. The controller carries each current copy in every request — including after a compaction — and stops refreshing it once it is unloaded. The cap comes from this Thread's setting or the account default.",
     hint: "The controller keeps delivering its current copy, so nothing re-reads it.",
     unknown: "Unknown manual",
@@ -38,10 +36,9 @@ export function ThreadManualLoads({ view, lookup, language }: {
         key={id}
         to={`/manuals?manual=${encodeURIComponent(id)}`}
         title={[id, text.hint].join("\n")}
-        className="flex min-w-0 max-w-48 items-center gap-1 rounded-full border bg-card px-2 py-0.5 hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-w-0 max-w-48 items-center rounded-full border bg-card px-2 py-0.5 hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="truncate font-medium">{lookup?.get(id)?.name ?? text.unknown}</span>
-        <span className="shrink-0 text-sky-600 dark:text-sky-400">{text.loadedLabel}</span>
       </Link>)}
   </div>
 }
