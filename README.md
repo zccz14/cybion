@@ -3,30 +3,41 @@
 **A hosted control surface for AI work that reaches real machines.**
 
 Cybion is the hosted AI execution service at
-[`cybion.ntnl.io`](https://cybion.ntnl.io): an operational harness that turns
-OpenAI-compatible models into work on the machines you own. Sign in, pair each
-device as a lightweight Worker, and run Threads that execute real work — Bash,
-Browser Control, and Computer Use on the machine you choose — guided by
-explicit governed contexts and a replayable archive.
+[`cybion.ntnl.io`](https://cybion.ntnl.io) — with a mainland-China entry at
+[`cybion.ntnl.top`](https://cybion.ntnl.top) — an operational harness that
+turns OpenAI-compatible models into work on the machines you own. Sign in, pair
+each device as a lightweight Worker, and run Threads that execute real work —
+Bash, Browser Control, and Computer Use on the machine you choose — from
+context you control explicitly and a replayable archive.
 
-[Open Cybion](https://cybion.ntnl.io) · [Quick start](#quick-start) ·
-[Ultimate Machines](#ultimate-machines) · [Integration API](#integration-api)
+[Open Cybion](https://cybion.ntnl.io) ·
+[Mainland China](https://cybion.ntnl.top) · [Quick start](#quick-start) ·
+[Context](#context-four-kinds-three-you-control) ·
+[Ultimate Machines](#ultimate-machines) ·
+[Integration API](#integration-api)
 
 ## Why Cybion
 
-**Explicit context, not hidden memory.** Durable knowledge is a Manual you
-write — a title, a "use when" description, a body, and a place in a tree —
-created, edited, and trashed from the Manuals page or with `write_manual`,
-and lockable there so a hand-written manual stays out of the Thread's reach.
-Threads find Manuals on demand with `list_manuals` and load only what
-a task cites; source material stays on your devices and network services. A Thread that must keep working from a Manual says so with
+**Explicit context, not hidden memory.** A Thread works from exactly four
+kinds of context — Notes (便签), Manuals (手册), the Archive (档案), and the
+World (世界) — and Cybion stores the first three so a Thread can read them
+whole and you can audit them (see
+[Context](#context-four-kinds-three-you-control)). Durable knowledge is a
+Manual you write — a title, a "use when" description, a body, and a place in a
+tree — created, edited, and trashed from the Manuals page or with
+`write_manual`, and lockable there so a hand-written manual stays out of the
+Thread's reach. Threads find Manuals on demand with `list_manuals` and load
+only what a task cites; source material stays on your devices and network
+services. A Thread that must keep working from a Manual says so with
 `load_manual`, and the controller then delivers its current copy into every
 request — refreshed by itself when the Manual changes and restored after a
-compaction — until the Thread releases it with `unload_manual`. Sticky notes are the opposite kind of context: short items a
-Thread must visibly cross out, so "finished" and "dropped" never look alike. Conversations replay from an append-only history, the
-conversation header shows the live context size against its budget and the
-Manuals the Thread keeps loaded, each refreshed by the controller as soon as it
-is edited, and long Threads compact into checkpoints instead of overflowing.
+compaction — until the Thread releases it with `unload_manual`. Sticky notes
+are the opposite kind of context: short items a Thread must visibly cross out,
+so "finished" and "dropped" never look alike. Conversations replay from an
+append-only history, the conversation header shows the live context size
+against its budget and the Manuals the Thread keeps loaded, each refreshed by
+the controller as soon as it is edited, and long Threads compact into
+checkpoints instead of overflowing.
 
 **Cloud-hosted inference.** Inference runs in the hosted controller, not on
 your devices. It holds the upstream connection, retries transient model
@@ -44,16 +55,62 @@ footprint ~5–7 MB) and stays flat while executing tasks — [see the
 measurements](#device-footprint). Pairing is an in-browser authorization with
 a short code, configuration is written on the device, and upgrades ship
 through the controller's download mirror for networks that cannot reach
-GitHub. Builds cover macOS (Apple Silicon / Intel), Linux (x86_64 / ARM64),
-Windows, and Android (early development) — iOS is coming soon. Bash, Browser
-Control, and Computer Use run on the machine you pick, every call shows which
-one, and Workers can be shared with other Cybion users without exchanging
-credentials. See [Worker onboarding](docs/worker-onboarding.md).
+GitHub. Builds cover macOS (Apple Silicon / Intel), Linux (x86_64 / ARM64)
+and Windows, plus Android and
+[iOS](https://github.com/zccz14/cybion-worker-for-ios) apps that are both in
+early development. Bash, Browser Control, and Computer Use run on the machine
+you pick, every call shows which one, and Workers can be shared with other
+Cybion users without exchanging credentials. See
+[Worker onboarding](docs/worker-onboarding.md).
 
 **Ultimate Machines that keep watch.** Give Cybion a check command and an
 interval: the machine stays silent while the check returns 0, and when it
 fails, its dedicated Thread is asked to make it pass again. No dashboard to
 watch, no alerts to triage. More below.
+
+## Context: four kinds, three you control
+
+Cybion's premise is that a Thread's working material can be named, and that
+naming it is what makes it governable. Every piece of that material is exactly
+one of four kinds:
+
+| Kind | 中文 | Surface | Lifetime | Stored | Under your control |
+| --- | --- | --- | --- | --- | --- |
+| Note | 便签 | `#/notes`, `add_notes` / `cross_out_notes` | clears to zero | yes, per Thread | yes |
+| Manual | 手册 | `#/manuals`, `write_manual` / `load_manual` | converges | yes, revisions | yes |
+| Archive | 档案 | `#/archive` | only grows | yes, append-only | yes |
+| World | 世界 | none | unbounded | **no** | **no** |
+
+The first three kinds are the context you control explicitly: they are stored
+rather than inferred, they survive compaction, and a Thread reads them whole
+instead of guessing at them. They are ordered by lifetime — a Note should
+reach zero, a Manual converges and then stays put, and the Archive only
+grows.
+
+The fourth is the World: **Universe − Notes − Manuals − Archive**. Everything
+outside those three — your servers and their live state, the network,
+third-party pages, a file that changed under you — is World. It cannot be
+stored whole, cannot be modelled, and changes without asking you. A Thread
+reaches it only by sampling: `bash`, `browser_control`, `computer_use`,
+`view_image`, `normai_web_search`. What comes back is evidence, and evidence
+lands in the Archive; it is never a copy of the World. There is no World page,
+no World tool group, and deliberately no `world_id` anywhere in the product.
+
+The model explains the design. A Manual that says where the World is reachable
+— an SSH host, a NAS, a credential, a server inventory — is a claim, not the
+World itself; a claim can go stale, so it carries a `Use When` condition that
+decides when it is worth reading, and can be locked so it is not rewritten
+carelessly. Notes are short-lived because they are a debt, not knowledge. The
+Archive is append-only because a record that can be edited cannot settle an
+argument about what happened.
+
+The four kinds are also a completeness rule: anything that seems to fit none
+of them is a gap in the model, not an exception — either it is one of the four
+named badly, or the model has to change. There is no fifth kind and no "other"
+bucket. The classifier and naming rules are in the
+[glossary](docs/glossary.md); storage and replay are in
+[context](docs/context.md), and the short-lived kind is in
+[sticky notes](docs/notes.md).
 
 ## Ultimate Machines
 
@@ -110,7 +167,9 @@ Chrome instance that Browser Control launches, are counted separately.
 
 ## Quick start
 
-1. **Sign in** at [cybion.ntnl.io](https://cybion.ntnl.io).
+1. **Sign in** at [cybion.ntnl.io](https://cybion.ntnl.io) — or, from
+   mainland China, at [cybion.ntnl.top](https://cybion.ntnl.top): the same
+   workspace through a reverse-proxied entry, with no separate account.
 2. **Connect a device** — open **Workers → Connect a device**, choose the
    target, download, and start it:
 
@@ -135,7 +194,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | Threads | Durable conversations with full execution history; server-side filters and search; archive, restore, and delete; read-only sharing with other Cybion users. | [Threads](docs/threads.md) · [Sharing](docs/thread-sharing.md) · [Recovery](docs/thread-recovery.md) |
 | Manuals | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_manual`, and lock from the UI so a Thread cannot rewrite a hand-written manual; ships with a read-only Common Manual. | [Manuals](docs/context.md) · [Compaction](docs/context_compacting.md) |
 | Notes | Short items that clear to zero: written by a Thread and visible only there, injected into every request it runs, crossed out by that Thread and torn off only by you. | [Sticky notes](docs/notes.md) |
-| Workers | Bash, Browser Control, and Computer Use on macOS, Linux, Windows, and Android (early development); pairing, remote upgrades, and worker sharing; iOS coming soon. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
+| Workers | Bash, Browser Control, and Computer Use on macOS, Linux, and Windows, with Android and iOS apps in early development; pairing, remote upgrades, and worker sharing. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
 | Models & tools | NormAI upstream out of the box; fallback upstreams with per-upstream model catalogs; web search and image generation tools; per-thread model, reasoning effort, and context budget. | [Service overview](docs/introduction.md) |
 | Integration API | Per-user API keys; create Threads, append inputs, and read history; `external_ref` mapping for integrations. | [Integration API](#integration-api) |
@@ -160,7 +219,9 @@ store under `~/.cybion/objects/`, and records reference it; see
 ## Integration API
 
 Create an API key in the Cybion UI. The key is scoped to one Auth Mini user and
-is shown only once:
+is shown only once. Both web entries serve the same API: from mainland China,
+put `https://cybion.ntnl.top` where the commands below use
+`https://cybion.ntnl.io`.
 
 ```sh
 export CYBION_API_KEY='cyb_<user-id>_<secret>'
@@ -185,11 +246,13 @@ base64 data URL. Poll the thread and history endpoints for the result.
 ## Documentation
 
 - [First-use guidance](docs/onboarding.md) — Threads, Manuals, and Workers.
+- [Glossary](docs/glossary.md) — Context and its four kinds, plus the
+  naming rules.
 - [Threads](docs/threads.md), [thread statuses](docs/thread-status.md),
   [usage and drafts](docs/thread-usage-and-drafts.md),
   [recovery](docs/thread-recovery.md), [sharing](docs/thread-sharing.md).
 - [Manuals](docs/context.md) and [context compaction](docs/context_compacting.md).
-- [Sticky notes](docs/notes.md) — the zero-target kind of governed context.
+- [Sticky notes](docs/notes.md) — the zero-target kind of context.
 - [Worker onboarding](docs/worker-onboarding.md) and [worker sharing](docs/worker-sharing.md).
 - [Ultimate machines](docs/machines.md).
 - [History table](docs/history.md) and [usage statistics](docs/usage-statistics.md).
@@ -202,10 +265,11 @@ In the app: **Using Cybion** (`/#/help`), **History** (`/#/archive`),
 
 ## Viewer clients
 
-The hosted web app at [`cybion.ntnl.io`](https://cybion.ntnl.io) is the control
-surface, and a modern browser runs it directly. Some platforms cannot use the
-browser they have — an Android WebView too old for the session check, or a
-desktop where the user wants an app icon and a real window. [`clients/`](clients/)
+The hosted web app at [`cybion.ntnl.io`](https://cybion.ntnl.io) — or its
+mainland-China entry, [`cybion.ntnl.top`](https://cybion.ntnl.top) — is the
+control surface, and a modern browser runs it directly. Some platforms cannot
+use the browser they have — an Android WebView too old for the session check, or
+a desktop where the user wants an app icon and a real window. [`clients/`](clients/)
 packages the web app into small native **viewer** shells that render it and
 nothing else:
 
@@ -213,7 +277,7 @@ nothing else:
 - [`clients/macos/`](clients/macos/) — a minimal Swift `WKWebView` app bundle.
 
 A shell holds no model, no Worker, and no credentials: execution still happens
-on a paired [Worker](#cybion-worker). Both shells inject a shared
+on a paired [Worker](docs/worker-onboarding.md). Both shells inject a shared
 [Ed25519 shim](clients/shell/ed25519-polyfill.js) before any page script so the
 session check passes where `crypto.subtle` lacks Ed25519. See
 [clients/README.md](clients/README.md) and
@@ -239,9 +303,13 @@ New user databases are created on first use. CI runs the full check set
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 Related repositories: [`cybion-worker`](https://github.com/zccz14/cybion-worker)
-for desktop and headless Workers, and
+for desktop and headless Workers,
 [`cybion-worker-for-android`](https://github.com/zccz14/cybion-worker-for-android)
-for the Android app.
+for the Android app, and
+[`cybion-worker-for-ios`](https://github.com/zccz14/cybion-worker-for-ios) for
+the iPhone app — a Rust core with an in-process command engine, installed from
+Xcode or an unsigned IPA rather than the App Store. The iOS app is not part of
+the controller's download mirror yet.
 
 Pushing a `v*` tag publishes the binary and invokes the AWS Systems Manager
 deployment job. The repository variables are `AWS_DEPLOY_ROLE_ARN`,
