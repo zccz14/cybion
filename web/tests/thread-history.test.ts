@@ -61,6 +61,37 @@ test("all other record types form adjacent groups, including singletons at both 
   ])
 })
 
+test("a Manual load or unload is controller bookkeeping, so it folds into the process group around it", () => {
+  const notice = (id: number, type: string, payload: Record<string, unknown> = {}) => record(id, "activity", { type, manual_id: "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f", ...payload })
+  const records = [
+    record(1, "input"),
+    notice(2, "manual_loaded"),
+    record(3, "response_output", { type: "reasoning" }),
+    record(4, "tool_output"),
+    notice(5, "manual_unloaded"),
+    record(6, "response_output", { type: "message", content: [] }),
+    // A notice this browser cannot name is still the controller's record, so it folds too.
+    record(7, "activity", { type: "manual_loaded" }),
+    record(8, "tool_output"),
+    // Every other activity is a status the turn produced and stays in the conversation.
+    record(9, "activity", { role: "system", content: "Request failed: tls" }),
+  ]
+  const shape = (entries: ReturnType<typeof groupThreadHistory>) => entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id)
+  assert.deepEqual(shape(groupThreadHistory(records)), [1, [2, 3, 4, 5], 6, [7, 8], 9])
+  // The group still measures the whole span it now holds.
+  const first = groupThreadHistory(records)[1]
+  assert.equal(first.type, "process")
+  if (first.type === "process") assert.deepEqual([first.startedAt, first.finishedAt], [2, 5])
+  // Minimal mode never keeps a notice as the turn's outcome: it folds with the process either way.
+  assert.deepEqual(shape(groupThreadHistoryMinimal([
+    record(1, "input"),
+    record(2, "response_output", { type: "message", content: [] }),
+    notice(3, "manual_loaded"),
+    record(4, "tool_output"),
+  ])), [1, 2, [3, 4]])
+  assert.deepEqual(shape(groupThreadHistoryMinimal([record(1, "input"), notice(2, "manual_loaded")])), [1, [2]])
+})
+
 test("a checkpoint is a compression boundary: it stays in the conversation and splits the groups around it", () => {
   const entries = groupThreadHistory([
     record(1, "input"),

@@ -56,3 +56,24 @@ test("the row speaks both languages and keeps its layout in either theme", async
   await expect(page.locator("#load-notice")).toContainText("Manual loaded — its JSON is in the request")
   await expect(page.locator("#unload-notice")).toContainText("Manual unloaded")
 })
+
+test("a Manual notice folds into the process group instead of opening a card of its own", async ({ page }) => {
+  await page.goto("/e2e/thread-manual-loads.html")
+  const transcript = page.locator("#transcript")
+  const group = transcript.locator('[data-slot="thread-process-group"]')
+  // The turn loaded a Manual, worked, and released another one: one group, closed on arrival.
+  await expect(group).toHaveCount(1)
+  await expect(group).not.toHaveAttribute("open")
+  await expect(group.locator(":scope > summary")).toContainText("过程消息")
+  await expect(group.locator(":scope > summary")).toContainText("4 条")
+  // The reply is the turn's outcome and stays visible; neither notice is on screen.
+  await expect(transcript.getByText("手册已读完。", { exact: true })).toBeVisible()
+  await expect(transcript.locator('[data-slot="manual-load-notice"]')).toHaveCount(2)
+  await expect(transcript.getByText("已加载手册，完整 JSON 已注入请求")).toBeHidden()
+  await expect(transcript.getByText("已卸载手册")).toBeHidden()
+  // Opening the group still shows both notices, in record order.
+  await group.locator(":scope > summary").click()
+  await expect(transcript.getByText("已加载手册，完整 JSON 已注入请求")).toBeVisible()
+  await expect(transcript.getByText("已卸载手册")).toBeVisible()
+  await expect(transcript.getByRole("link", { name: "必读手册" })).toBeVisible()
+})
