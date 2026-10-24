@@ -1,4 +1,5 @@
 import { historyPayloadObject, screenshotImageSource, viewedImageSource } from "./history-payload.ts"
+import { isManualNotice } from "./thread-manual-loads.ts"
 import { generatedImageSource } from "./thread-response.ts"
 
 export type HistoryRecord = {
@@ -31,7 +32,11 @@ export function threadImage(record: HistoryRecord): ThreadImage | null {
 }
 
 function isStandaloneRecord(record: HistoryRecord) {
-  if (record.kind === "input" || record.kind === "activity") return true
+  if (record.kind === "input") return true
+  // Every other activity is a status the turn itself produced. A Manual load or
+  // unload is the controller's own bookkeeping between requests, so it belongs to
+  // the process around it and stays folded with the request that carried it.
+  if (record.kind === "activity") return !isManualNotice(record)
   // A checkpoint is a compression boundary, not process: it stays in the conversation like a
   // reply, ends the group before it, and starts none.
   if (record.kind === "checkpoint") return true
@@ -127,10 +132,12 @@ export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHis
 // Minimal mode keeps one tail candidate per turn: the last activity or message record.
 // Earlier activities, earlier replies, tool turns, and checkpoints all fold around it: a
 // checkpoint keeps its own card only where the turn shows it, so minimal mode still folds it.
+// A Manual notice is never a candidate: it reports controller bookkeeping, not the turn's outcome.
 function threadHistoryTailCandidate(record: HistoryRecord) {
-  return record.kind === "activity" || (record.kind === "response_output"
+  if (record.kind === "activity") return !isManualNotice(record)
+  return record.kind === "response_output"
     && record.payload !== null && typeof record.payload === "object"
-    && "type" in record.payload && record.payload.type === "message")
+    && "type" in record.payload && record.payload.type === "message"
 }
 
 // INVARIANT: a turn is the span from an input record to the next input; only its tail

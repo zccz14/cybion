@@ -21,11 +21,20 @@ export type ThreadManualLoadsView = {
 // and the compiler replays the same record upstream.
 export type ManualLoadNotice = { manual_id: string; loaded: boolean }
 
+// The controller's own Manual bookkeeping, not something the turn produced:
+// the fact travels inside the request that follows it, so the conversation
+// folds it into the process group instead of opening a card of its own. A
+// notice whose payload this browser cannot read is still a notice.
+export function isManualNotice(record: HistoryRecord) {
+  if (record.kind !== "activity") return false
+  const type = historyPayloadObject(record.payload)?.type
+  return type === "manual_loaded" || type === "manual_unloaded"
+}
+
 export function manualLoadNotice(record: HistoryRecord): ManualLoadNotice | null {
-  if (record.kind !== "activity") return null
+  if (!isManualNotice(record)) return null
   const payload = historyPayloadObject(record.payload)
-  if (payload?.type !== "manual_loaded" && payload?.type !== "manual_unloaded") return null
-  return typeof payload.manual_id === "string"
+  return typeof payload?.manual_id === "string"
     ? { manual_id: payload.manual_id.toLowerCase(), loaded: payload.type === "manual_loaded" }
     : null
 }

@@ -203,6 +203,11 @@ Nothing else announces a loaded Manual: the request that carries the change also
 carries the current copy, so there is no older version left to warn about and
 nothing to ask the model to fetch.
 
+The notice is evidence, not a message of the turn: the conversation folds a
+`manual_loaded`/`manual_unloaded` activity into the process group around it
+instead of opening a card of its own, so a turn whose only other records are
+tool work shows its reply and nothing else until the reader opens the group.
+
 `unload_manual` deletes the row and nothing else. The copy already in the
 conversation stays until the next checkpoint — the Thread declared that it no
 longer needs the Manual kept current, not that it never saw it — and the next

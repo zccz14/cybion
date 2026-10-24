@@ -98,12 +98,21 @@ each Manual without printing an id, so the browser needs no fingerprint. See
 
 The conversation derives its display from the combined durable history and
 pending response items. Inputs, assistant `response_output` items of type
-`message`, every `activity` record, `checkpoint` records, and image records — a
-generated image, a viewed image, or a ledger-marked screenshot with PNG data —
-stay outside process groups and end the preceding group. All other consecutive
-records form a `ThreadProcessGroup`, including a single record. Expanding the
-group renders the original records in their original order, with their existing
-payload inspection controls.
+`message`, `activity` records other than the controller's Manual notices,
+`checkpoint` records, and image records — a generated image, a viewed image, or
+a ledger-marked screenshot with PNG data — stay outside process groups and end
+the preceding group. All other consecutive records form a `ThreadProcessGroup`,
+including a single record. Expanding the group renders the original records in
+their original order, with their existing payload inspection controls.
+
+A `manual_loaded`/`manual_unloaded` activity is the controller's own bookkeeping
+between requests rather than something the turn produced, so it folds into the
+process group around it instead of opening a card of its own: the fact it
+reports travels inside the request that follows it, and the Thread header
+already names the Manuals the Thread keeps loaded (see
+[Loaded Manuals](context.md#loaded-manuals)). Folded into the group it keeps
+everything it showed before — name, timestamp, record id — so the evidence is
+still one disclosure away.
 
 A `checkpoint` is a compression boundary, so it ends the group before it and
 starts none: the Markdown it stores never hides behind a group the reader must
@@ -137,13 +146,15 @@ timestamp (`started_at`) until durable timestamps become available.
 
 Minimal mode never folds image content away. Each turn's image records collect
 into one image group rendered with the turn's tail item — its last reply or
-activity line — in record order. A turn with several images browses them in a
-single-row carousel with previous/next controls; a single image renders without
-controls. Each image opens the zoom dialog. An image record that is itself the
-tail item stays the tail item, and only the turn's other images join the group;
-a folded turn without a tail item still shows its images as one image group.
-The image records are removed from the folded remainder, so expanding the
-process group never duplicates them.
+activity line; a Manual notice is never the tail item, because it reports the
+controller's bookkeeping rather than the turn's outcome — in record order. A
+turn with several images browses them in a single-row carousel with
+previous/next controls; a single image renders without controls. Each image
+opens the zoom dialog. An image record that is itself the tail item stays the
+tail item, and only the turn's other images join the group; a folded turn
+without a tail item still shows its images as one image group. The image
+records are removed from the folded remainder, so expanding the process group
+never duplicates them.
 
 Grouping and disclosure state exist only in the browser. They do not change
 stored rows, API payloads, or model context. Stable group keys keep disclosures
