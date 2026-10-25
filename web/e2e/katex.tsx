@@ -8,6 +8,8 @@ const display = "高斯积分的结果：\n\n$$\n\\int_{-\\infty}^{+\\infty} e^{
 const wide = "$$\nf(x) = a_0 + \\sum_{n=1}^{\\infty} \\left( a_n \\cos\\frac{n\\pi x}{L} + b_n \\sin\\frac{n\\pi x}{L} \\right) = \\frac{\\Gamma(\\alpha+\\beta)}{\\Gamma(\\alpha)\\Gamma(\\beta)} x^{\\alpha-1} (1-x)^{\\beta-1}\n$$"
 const broken = "被截断的公式 $\\frac{1}{$ 仍然要作为文本出现，后面的句子照常可读。"
 const escaped = "预算 \\$5 与 \\$10 两个价位用反斜杠转义，不会被当成公式。"
+// 模型最常写的形态：展示公式用 \\[...\\]，行内公式用 \\(...\\)。
+const backslash = "可以先检验状态依赖的概率收缩：\n\n\\[ p=\\sigma\\left(\\frac{\\operatorname{logit}(\\mu)}{T(s)}\\right) \\]\n\n其中 \\(T(s)\\) 是温度系数，\\(\\mu\\) 是均值。"
 
 function Message({ slot, children }: { slot: string; children: ReactNode }) {
   return <article data-message={slot} className="prose prose-sm max-w-[75ch] break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">{children}</article>
@@ -25,6 +27,7 @@ function Fixture() {
     <Message slot="wide"><Markdown>{wide}</Markdown></Message>
     <Message slot="broken"><Markdown>{broken}</Markdown></Message>
     <Message slot="escaped"><Markdown>{escaped}</Markdown></Message>
+    <Message slot="backslash"><Markdown>{backslash}</Markdown></Message>
   </main>
 }
 

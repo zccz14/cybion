@@ -3,7 +3,7 @@ import { ExternalLinkIcon } from "lucide-react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import rehypeKatex from "rehype-katex"
 import remarkGfm from "remark-gfm"
-import remarkMath from "remark-math"
+import remarkMath from "remark-math-extended"
 import { Mermaid } from "@/components/mermaid"
 
 // 公式排版依赖 KaTeX 自带的样式与字体，随渲染组件一起引入，
@@ -32,6 +32,11 @@ const components: Components = {
   },
 }
 
+// 公式同时接受美元与 LaTeX 两套分隔符：remark-math-extended 在上游
+// remark-math 的 `$` / `$$` 之外补上了模型最常写的 `\(...\)` 与 `\[...\]`，
+// 且 `\\[2pt]` 这类公式内的换行命令仍是公式内容，不会被当成新的展示公式。
+const remarkPlugins = [remarkGfm, remarkMath]
+
 // 模型输出的公式常见宽松写法（Unicode 符号、全角字符、\text 里的中文），
 // 严格模式只会把这些记成警告而不改变渲染结果，因此这里直接忽略，保持转录干净。
 // 语法错误仍由 KaTeX 自己兜底：渲染成带 title 的错误片段，不会抛到页面。
@@ -40,7 +45,7 @@ const katexOptions = { strict: "ignore", errorColor: "var(--destructive)" } as c
 export function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
+      remarkPlugins={remarkPlugins}
       rehypePlugins={[[rehypeKatex, katexOptions]]}
       components={components}
     >

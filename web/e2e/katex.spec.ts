@@ -64,3 +64,28 @@ test("broken math degrades to a titled error span and escapes keep dollars liter
   expect(await error.evaluate((node) => getComputedStyle(node).color)).toBe("oklch(0.704 0.191 22.216)")
   expect(errors).toEqual([])
 })
+
+test("model-style backslash delimiters render as math in both kinds", async ({ page }) => {
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.stack ?? error.message))
+  await page.goto("/e2e/katex.html")
+
+  const message = page.locator("[data-message='backslash']")
+  await expect(message).toContainText("可以先检验状态依赖的概率收缩")
+  const display = message.locator(".katex-display")
+  await expect(display).toHaveCount(1)
+  await expect(display.locator(".katex-mathml math[display='block']")).toHaveCount(1)
+  await expect(display).toHaveCSS("display", "block")
+  // 行内 \(T(s)\) 与 \(\mu\) 各自渲染，说明文本里不再残留反斜杠分隔符。
+  await expect(message.locator("p .katex")).toHaveCount(2)
+  await expect(message.locator(".katex-error")).toHaveCount(0)
+  await expect(message).not.toContainText("[ p=")
+  await expect(message).not.toContainText("\\(")
+  expect(errors).toEqual([])
+
+  for (const width of [1280, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 })
+    await display.scrollIntoViewIfNeeded()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+})
