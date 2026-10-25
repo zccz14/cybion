@@ -57,3 +57,37 @@ test("mermaid rendering stays lazily loaded through the shared markdown renderer
   assert.match(markdown, /from "@\/components\/mermaid"/)
   assert.doesNotMatch(markdown, /from "mermaid"/)
 })
+
+test("math renders through KaTeX for inline, display, fenced, and broken input", async () => {
+  const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
+  try {
+    const { Markdown } = await server.ssrLoadModule("/src/components/markdown.tsx")
+    const render = (markdown: string) => renderToStaticMarkup(createElement(Markdown, null, markdown))
+    const inline = render("质能方程 $E=mc^2$ 把质量与能量联系起来。")
+    assert.match(inline, /<span class="katex">/)
+    assert.ok(inline.includes('<span class="katex-mathml">'))
+    assert.ok(inline.includes('class="katex-html" aria-hidden="true"'))
+    assert.ok(inline.includes("质能方程"))
+    const display = render("求和公式：\n\n$$\n\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}\n$$\n")
+    assert.match(display, /class="katex-display"/)
+    assert.ok(display.includes("katex-mathml"))
+    const fenced = render("```math\na^2 + b^2 = c^2\n```\n\n```ts\nconst answer = 42\n```\n")
+    assert.match(fenced, /class="katex-display"/)
+    assert.match(fenced, /<pre><code class="language-ts">const answer = 42/)
+    const broken = render("坏掉的公式 $\\frac{$ 不应打断渲染")
+    assert.match(broken, /<span class="katex-error" title="/)
+    assert.ok(broken.includes('style="color:var(--destructive)"'))
+    assert.ok(broken.includes("不应打断渲染"))
+  } finally {
+    await server.close()
+  }
+})
+
+test("the shared markdown renderer wires math and KaTeX styles once for every surface", () => {
+  const markdown = readFileSync(new URL("../src/components/markdown.tsx", import.meta.url), "utf8")
+  assert.match(markdown, /from "remark-math"/)
+  assert.match(markdown, /from "rehype-katex"/)
+  assert.match(markdown, /import "katex\/dist\/katex\.min\.css"/)
+  assert.equal(markdown.match(/remarkPlugins=/g)?.length, 1)
+  assert.equal(markdown.match(/rehypePlugins=/g)?.length, 1)
+})
