@@ -132,3 +132,47 @@ test("minimal mode folds a turn down to its input and last tail candidate", asyn
   await expect(page.getByText("Activity：已完成第一阶段检查。", { exact: true })).toBeVisible()
   await expect(page.getByText("AI 回复：部署检查通过，正在检查服务。", { exact: true })).toBeVisible()
 })
+
+test("a wide Markdown table scrolls inside itself, the Thread view never scrolls sideways", async ({ page }) => {
+  await page.goto("/e2e/thread-history.html")
+  const viewport = page.locator('[data-slot="message-scroller-viewport"]')
+  const table = page.locator('[data-slot="markdown-table"]').first()
+  await expect(table.locator("table")).toBeVisible()
+  for (const theme of ["light", "dark"]) {
+    if (theme === "dark") await page.getByRole("button", { name: "Theme", exact: true }).click()
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 })
+      await table.scrollIntoViewIfNeeded()
+      const before = await table.evaluate((node) => {
+        node.scrollLeft = 0
+        const box = node.getBoundingClientRect()
+        const heads = node.querySelectorAll("th")
+        const last = heads[heads.length - 1].getBoundingClientRect()
+        return { overflow: node.scrollWidth - node.clientWidth, clipped: last.right > box.right + 1, contentWidth: node.parentElement!.clientWidth, width: node.clientWidth }
+      })
+      expect(before.overflow).toBeGreaterThan(0)
+      expect(before.width).toBeLessThanOrEqual(before.contentWidth)
+      expect(before.clipped).toBe(true)
+      // 只有表格横向滚动：消息滚动区和整个页面都没有横向滚动
+      expect(await viewport.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+      const after = await table.evaluate((node) => {
+        node.scrollLeft = node.scrollWidth
+        const box = node.getBoundingClientRect()
+        const heads = node.querySelectorAll("th")
+        const last = heads[heads.length - 1].getBoundingClientRect()
+        const grid = node.querySelector("table")!.getBoundingClientRect()
+        return {
+          atEnd: Math.abs(node.scrollLeft - (node.scrollWidth - node.clientWidth)) <= 1,
+          tableInside: grid.right <= box.right + 1,
+          lastReachable: last.right <= box.right + 1 && last.right > box.left,
+        }
+      })
+      expect(after.atEnd).toBe(true)
+      expect(after.tableInside).toBe(true)
+      expect(after.lastReachable).toBe(true)
+      await page.screenshot({ path: `test-results/thread-history-table-${theme}-${width}.png` })
+    }
+    await page.getByRole("button", { name: "Theme", exact: true }).click()
+  }
+})
