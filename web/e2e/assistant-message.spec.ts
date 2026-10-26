@@ -10,7 +10,7 @@ test("Cybion output renders flat Markdown with the copy control and time below",
   await expect(message.getByRole("heading", { name: "部署状态", level: 2 })).toBeVisible()
   await expect(message.locator("strong", { hasText: "检查通过" })).toBeVisible()
   await expect(message.locator("pre code", { hasText: "git status" })).toBeVisible()
-  await expect(message.locator("table")).toBeVisible()
+  await expect(message.locator("table").first()).toBeVisible()
   const link = message.getByRole("link", { name: /文档/ })
   await expect(link).toHaveAttribute("href", "https://example.com/docs")
   await expect(link).toHaveAttribute("target", "_blank")
@@ -38,4 +38,35 @@ test("Cybion output reflows without horizontal overflow in both themes", async (
     }
   }
   await expect(message.locator("pre code", { hasText: "git status" })).toBeVisible()
+})
+
+test("a table wider than the reply scrolls inside the table, not the page", async ({ page }) => {
+  await page.goto("/e2e/assistant-message.html")
+  await page.setViewportSize({ width: 390, height: 844 })
+  const message = page.locator(messageSelector)
+  const table = message.locator('[data-slot="markdown-table"]').last()
+  await expect(table.locator("table")).toBeVisible()
+  const before = await table.evaluate((node) => {
+    node.scrollLeft = 0
+    const box = node.getBoundingClientRect()
+    const heads = node.querySelectorAll("th")
+    const last = heads[heads.length - 1].getBoundingClientRect()
+    return { overflow: node.scrollWidth - node.clientWidth, clipped: last.right > box.right + 1, contentWidth: node.parentElement!.clientWidth, width: node.clientWidth }
+  })
+  // 表格自己横向溢出，并且被自己的容器裁住，而不是把回复撑宽
+  expect(before.overflow).toBeGreaterThan(0)
+  expect(before.width).toBeLessThanOrEqual(before.contentWidth)
+  expect(before.clipped).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  const after = await table.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth
+    const box = node.getBoundingClientRect()
+    const heads = node.querySelectorAll("th")
+    const last = heads[heads.length - 1].getBoundingClientRect()
+    return { scrolled: node.scrollLeft, inside: last.right <= box.right + 1 && last.left >= box.left - 1, label: heads[heads.length - 1].textContent }
+  })
+  // 最后一列滚动之后完整可见
+  expect(after.scrolled).toBeGreaterThan(0)
+  expect(after.inside).toBe(true)
+  expect(after.label).toBe("备注")
 })

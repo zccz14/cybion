@@ -30,6 +30,14 @@ const components: Components = {
     const source = mermaidSource(node)
     return source === null ? <pre {...props}>{children}</pre> : <Mermaid source={source} />
   },
+  // 列多或单元格很长的表格比对话栏更宽，父级（消息滚动区、检查点卡片）会把它裁掉，
+  // 超出的列就再也看不到。给每张表格自带横向滚动条：只有表格自己横滚，
+  // Thread View 整体不会出现横向滚动。
+  table: ({ node: _node, children, ...props }) => (
+    <div data-slot="markdown-table" className="max-w-full overflow-x-auto overscroll-x-contain">
+      <table {...props}>{children}</table>
+    </div>
+  ),
 }
 
 // 公式同时接受美元与 LaTeX 两套分隔符：remark-math-extended 在上游
