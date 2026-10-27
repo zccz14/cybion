@@ -90,6 +90,9 @@ must add `sst` rows to an upstream before voice input can be switched on.
 - The composer owns the recording and upload controls; each attachment shows as
   a size chip and can be removed before sending. The input reaches the server as
   `audios` data URLs next to `images`.
+- A sent voice clip renders as a playable bar with the first-pass transcript
+  underneath as its subtitle, so the words are readable without pressing play;
+  the transcript is never drawn as a message of its own.
 - A `normai_audio_transcription` call renders as its own card (model, prompt,
   keywords and the reference it re-read; the payload disclosure keeps the rest).
 - The speech-to-text model is picked in the settings card (account default) and

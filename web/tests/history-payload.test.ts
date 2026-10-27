@@ -68,6 +68,7 @@ test("user input splits typed text from pasted images and voice clips", () => {
   const png = "data:image/png;base64,AAAA"
   const jpeg = "data:image/jpeg;base64,BBBB"
   const voice = "data:audio/webm;base64,CCCC"
+  const silent = { transcript: null, transcriptModel: null }
   assert.deepEqual(
     userInputView({ role: "user", content: [{ type: "input_text", text: "这个报错怎么回事？" }, { type: "input_image", image_url: png }, { type: "input_image", image_url: jpeg }] }),
     { text: "这个报错怎么回事？", images: [png, jpeg], audios: [] },
@@ -76,24 +77,37 @@ test("user input splits typed text from pasted images and voice clips", () => {
   // A voice message carries no text: it must survive as its own kind of input.
   assert.deepEqual(
     userInputView({ role: "user", content: [{ type: "input_audio", audio_url: voice }] }),
-    { text: "", images: [], audios: [{ audioUrl: voice, audioRef: null, mediaType: null }] },
+    { text: "", images: [], audios: [{ audioUrl: voice, audioRef: null, mediaType: null, ...silent }] },
   )
   assert.deepEqual(
     userInputView({ role: "user", content: [{ type: "input_text", text: "听一下" }, { type: "input_audio", audio_url: voice }] }),
-    { text: "听一下", images: [], audios: [{ audioUrl: voice, audioRef: null, mediaType: null }] },
+    { text: "听一下", images: [], audios: [{ audioUrl: voice, audioRef: null, mediaType: null, ...silent }] },
   )
-  // Records written before the note moved onto the audio part still carry the
-  // provisional transcript as text; it must not render as the user's words.
+  // The first-pass transcript is bookkeeping, not typed text: it becomes the
+  // voice bar's subtitle. v0.6.23 keeps that note on the audio part...
+  const reference = "c".repeat(64)
+  const model = "qwen-audio-3.0-asr-flash"
+  const note = `[audio attachment ref=${reference} type=audio/webm] provisional transcript (${model}):\n你好，听得到吗\nCall normai_audio_transcription with this ref and prompt/keywords to re-extract terms the first pass missed.`
   assert.deepEqual(
-    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: "c".repeat(64), media_type: "audio/webm" }, { type: "input_text", text: "[audio attachment ref=" + "c".repeat(64) + " type=audio/webm] provisional transcript (m):\n你好" }] }),
-    { text: "", images: [], audios: [{ audioUrl: null, audioRef: "c".repeat(64), mediaType: "audio/webm" }] },
+    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: reference, media_type: "audio/webm", provisional_note: note }] }),
+    { text: "", images: [], audios: [{ audioUrl: null, audioRef: reference, mediaType: "audio/webm", transcript: "你好，听得到吗", transcriptModel: model }] },
+  )
+  // ...and older records keep the same note as its own text part.
+  assert.deepEqual(
+    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: reference, media_type: "audio/webm" }, { type: "input_text", text: note }] }),
+    { text: "", images: [], audios: [{ audioUrl: null, audioRef: reference, mediaType: "audio/webm", transcript: "你好，听得到吗", transcriptModel: model }] },
   )
   // Stored history externalises the bytes: what comes back is a reference, and
   // the voice bar has to fetch the clip before it can play it.
-  const reference = "a".repeat(64)
+  const stored = "a".repeat(64)
   assert.deepEqual(
-    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: reference, media_type: "audio/webm" }] }),
-    { text: "", images: [], audios: [{ audioUrl: null, audioRef: reference, mediaType: "audio/webm" }] },
+    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: stored, media_type: "audio/webm" }] }),
+    { text: "", images: [], audios: [{ audioUrl: null, audioRef: stored, mediaType: "audio/webm", ...silent }] },
+  )
+  // A failed first pass leaves no subtitle behind.
+  assert.deepEqual(
+    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: stored, media_type: "audio/webm", provisional_note: `[audio attachment ref=${stored} type=audio/webm] the provisional transcript failed (HTTP 500); call normai_audio_transcription with this ref and prompt/keywords to transcribe it.` }] }),
+    { text: "", images: [], audios: [{ audioUrl: null, audioRef: stored, mediaType: "audio/webm", ...silent }] },
   )
   assert.deepEqual(userInputView(null), { text: "", images: [], audios: [] })
 })

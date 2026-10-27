@@ -31,8 +31,27 @@ export function historyPayloadText(payload: unknown): string {
 /// One voice clip in a user input. A fresh input still carries its bytes as a
 /// data URL, but the Controller externalises them on the way in: what history
 /// replays is `audio_ref` plus `media_type`, and the bytes come back from
-/// `GET /api/objects/{id}`.
-export type UserInputAudio = { audioUrl: string | null; audioRef: string | null; mediaType: string | null }
+/// `GET /api/objects/{id}`. The first-pass transcript rides along so the bar can
+/// show it as a subtitle.
+export type UserInputAudio = {
+  audioUrl: string | null
+  audioRef: string | null
+  mediaType: string | null
+  transcript: string | null
+  transcriptModel: string | null
+}
+
+export type AudioTranscriptNote = { reference: string; transcript: string; model: string }
+
+/// The Controller writes the first-pass transcript as one note. v0.6.23 keeps it
+/// on the audio part (`provisional_note`); older records store the same text as
+/// an `input_text` part. Either way it is bookkeeping rather than something the
+/// user typed, so it only feeds the subtitle.
+export function audioTranscriptNote(note: string): AudioTranscriptNote | null {
+  const match = /^\[audio attachment ref=([0-9a-f]{64}) type=[^\]]+\] provisional transcript \((.+?)\):\n([\s\S]*?)\nCall normai_audio_transcription/.exec(note)
+  if (!match) return null
+  return { reference: match[1], model: match[2], transcript: match[3].trim() }
+}
 
 export type UserInputView = { text: string; images: string[]; audios: UserInputAudio[] }
 
@@ -46,21 +65,31 @@ export function userInputView(payload: unknown): UserInputView {
   const text: string[] = []
   const images: string[] = []
   const audios: UserInputAudio[] = []
+  const legacyNotes: AudioTranscriptNote[] = []
   for (const part of parts) {
     const partObject = historyPayloadObject(part)
     if (partObject?.type === "input_text" && typeof partObject.text === "string") {
-      // Inputs stored before the provisional transcript moved onto the audio
-      // part carry it as a text part; it is Controller bookkeeping, not
-      // something the user typed.
-      if (!partObject.text.startsWith("[audio attachment ref=")) text.push(partObject.text)
+      const note = audioTranscriptNote(partObject.text)
+      if (note) legacyNotes.push(note)
+      else text.push(partObject.text)
     }
     if (partObject?.type === "input_image" && typeof partObject.image_url === "string") images.push(partObject.image_url)
     if (partObject?.type !== "input_audio") continue
-    if (typeof partObject.audio_url === "string") {
-      audios.push({ audioUrl: partObject.audio_url, audioRef: null, mediaType: null })
-    } else if (typeof partObject.audio_ref === "string") {
-      audios.push({ audioUrl: null, audioRef: partObject.audio_ref, mediaType: typeof partObject.media_type === "string" ? partObject.media_type : null })
-    }
+    const note = typeof partObject.provisional_note === "string" ? audioTranscriptNote(partObject.provisional_note) : null
+    audios.push({
+      audioUrl: typeof partObject.audio_url === "string" ? partObject.audio_url : null,
+      audioRef: typeof partObject.audio_ref === "string" ? partObject.audio_ref : null,
+      mediaType: typeof partObject.media_type === "string" ? partObject.media_type : null,
+      transcript: note?.transcript ?? null,
+      transcriptModel: note?.model ?? null,
+    })
+  }
+  // Older records kept the note as its own text part next to the clip.
+  for (const note of legacyNotes) {
+    const audio = audios.find((item) => item.audioRef === note.reference)
+    if (!audio || audio.transcript !== null) continue
+    audio.transcript = note.transcript
+    audio.transcriptModel = note.model
   }
   return { text: text.join(""), images, audios }
 }
