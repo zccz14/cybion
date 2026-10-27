@@ -151,8 +151,13 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // never runs for one left at the old number. Adding a column therefore means
 // adding it to that loop *and* raising this constant; a missed bump fails every
 // query over the missing column, on every request of every existing user. The
-// guard is `a_previous_version_database_receives_the_audit_columns`.
-const USER_SCHEMA_VERSION: i64 = 51;
+// guards are `a_previous_version_database_receives_the_audit_columns` and
+// `a_previous_version_database_receives_the_audio_columns`.
+//
+// History: 51 shipped `max_loaded_manuals`; the audio input columns were added
+// without a bump, so hosted databases at 51 never gained them and every thread
+// query failed with `no such column: t.audio_transcription_model` until 52.
+const USER_SCHEMA_VERSION: i64 = 52;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -12015,6 +12020,48 @@ mod tests {
             assert!(
                 columns.iter().any(|present| present == column),
                 "the schema version must admit every pending column migration: {column}"
+            );
+        }
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, USER_SCHEMA_VERSION);
+    }
+
+    /// The audio input columns were added while 51 already shipped, so hosted
+    /// databases at 51 took the early return and every thread query failed on
+    /// the missing column. The bump to 52 has to admit this migration.
+    #[test]
+    fn a_previous_version_database_receives_the_audio_columns() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("previous.sqlite3");
+        let connection = open_user(&path, true).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE threads DROP COLUMN audio_transcription_model;
+                 ALTER TABLE thread_defaults DROP COLUMN audio_transcription_model;
+                 PRAGMA user_version = 51;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        for (table, column) in [
+            ("threads", "audio_transcription_model"),
+            ("thread_defaults", "audio_transcription_model"),
+        ] {
+            let present: bool = connection
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?)"
+                    ),
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                present,
+                "the schema version must admit every pending column migration: {table}.{column}"
             );
         }
         let version: i64 = connection
