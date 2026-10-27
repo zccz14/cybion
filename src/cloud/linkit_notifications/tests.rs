@@ -528,7 +528,7 @@ async fn completed_thread_stays_successful_when_notification_delivery_fails() {
         f.state.clone(),
         f.user.clone(),
         t.id.clone(),
-        input_message("finish the fixture".to_owned(), Vec::new()).unwrap(),
+        input_message("finish the fixture".to_owned(), Vec::new(), Vec::new()).unwrap(),
     )
     .await
     .unwrap();
@@ -555,7 +555,7 @@ async fn failed_model_inference_still_notifies_without_touching_delivery_setting
         f.state.clone(),
         f.user.clone(),
         t.id.clone(),
-        input_message("fail the fixture".to_owned(), Vec::new()).unwrap(),
+        input_message("fail the fixture".to_owned(), Vec::new(), Vec::new()).unwrap(),
     )
     .await
     .unwrap();

@@ -103,7 +103,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
     assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","max_loaded_manuals":12});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","audio_transcription_model":null,"max_loaded_manuals":12});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -495,6 +495,7 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
     assert!(head.contains("session-id: "));
 
     let defaults = ThreadDefaults {
+        audio_transcription_model: None,
         model: "meta-llama/Llama-3.1-8B-Instruct".to_owned(),
         upstream_id: Some(created.id),
         reasoning_effort: "high".to_owned(),
@@ -653,6 +654,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     .unwrap()
     .0;
     let defaults = ThreadDefaults {
+        audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
         upstream_id: Some(upstream.id.clone()),
         reasoning_effort: "max".to_owned(),
@@ -734,6 +736,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     );
 
     let reset = ThreadDefaults {
+        audio_transcription_model: None,
         model: initial.model.clone(),
         upstream_id: Some(upstream.id.clone()),
         reasoning_effort: initial.reasoning_effort.clone(),
@@ -781,6 +784,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
     let user = user_for_subject(&state, "validation-owner").unwrap();
     let upstream = insert_upstream(&state, &user, "validation", "http://127.0.0.1:9/v1").await;
     let saved = ThreadDefaults {
+        audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
         upstream_id: Some(upstream.id.clone()),
         reasoning_effort: "high".to_owned(),
@@ -806,6 +810,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             State(state.clone()),
             browser_identity_for(&user),
             Json(ThreadDefaults {
+                audio_transcription_model: None,
                 model: model.to_owned(),
                 upstream_id: Some(upstream.id.clone()),
                 reasoning_effort: effort.to_owned(),
@@ -824,6 +829,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         State(state.clone()),
         browser_identity_for(&user),
         Json(ThreadDefaults {
+            audio_transcription_model: None,
             model: "gpt-6-astra".to_owned(),
             upstream_id: Some(upstream.id.clone()),
             reasoning_effort: "high".to_owned(),
@@ -857,6 +863,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             State(state.clone()),
             browser_identity_for(&user),
             Json(ThreadDefaults {
+                audio_transcription_model: None,
                 model: "gpt-6-astra".to_owned(),
                 upstream_id: Some(upstream.id.clone()),
                 reasoning_effort: "high".to_owned(),
@@ -878,6 +885,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             State(state.clone()),
             browser_identity_for(&user),
             Json(ThreadDefaults {
+                audio_transcription_model: None,
                 model: "gpt-6-astra".to_owned(),
                 upstream_id: Some(upstream.id.clone()),
                 reasoning_effort: "high".to_owned(),
@@ -896,6 +904,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         State(state.clone()),
         browser_identity_for(&user),
         Json(ThreadDefaults {
+            audio_transcription_model: None,
             model: "gpt-6-astra".to_owned(),
             upstream_id: Some("00000000-0000-4000-8000-000000000001".to_owned()),
             reasoning_effort: "high".to_owned(),
@@ -967,6 +976,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
         assert_eq!(
             load_thread_defaults(&connection).unwrap(),
             ThreadDefaults {
+                audio_transcription_model: None,
                 model: "gpt-6-astra".to_owned(),
                 upstream_id: None,
                 reasoning_effort: "max".to_owned(),
@@ -1112,6 +1122,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                audio_transcription_model: None,
                 title: None,
                 model: None,
                 upstream_id: None,
@@ -1130,6 +1141,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
         assert_eq!(patched.minimal_mode, expected);
     }
     let defaults = ThreadDefaults {
+        audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
         upstream_id: Some(upstream.id.clone()),
         reasoning_effort: "high".to_owned(),
@@ -1194,6 +1206,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                audio_transcription_model: None,
                 title: None,
                 model: None,
                 upstream_id: None,
@@ -1216,6 +1229,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
         browser_identity_for(&user),
         AxumPath(thread.id.clone()),
         Json(UpdateThreadInput {
+            audio_transcription_model: None,
             title: None,
             model: None,
             upstream_id: None,
@@ -1232,6 +1246,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
     .unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     let defaults = ThreadDefaults {
+        audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
         upstream_id: Some(upstream.id.clone()),
         reasoning_effort: "high".to_owned(),
@@ -1289,6 +1304,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                audio_transcription_model: None,
                 title: None,
                 model: None,
                 upstream_id: None,
@@ -1312,6 +1328,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                audio_transcription_model: None,
                 title: None,
                 model: None,
                 upstream_id: None,
@@ -1329,6 +1346,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
     let defaults = ThreadDefaults {
+        audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
         upstream_id: Some(upstream.id.clone()),
         reasoning_effort: "high".to_owned(),

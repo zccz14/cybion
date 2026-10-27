@@ -508,6 +508,416 @@ fn recover_user_requests(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Speech-to-text attachments: the audio endpoints on the Thread's upstream,
+/// the per-input caps, and the media types the console records or accepts.
+const AUDIO_TRANSCRIPTION_SUFFIX: &str = "/audio/transcriptions";
+const MAX_INPUT_AUDIOS: usize = 4;
+const MAX_INPUT_AUDIO_CHARS: usize = 28 * 1024 * 1024;
+const AUDIO_MEDIA_TYPES: [&str; 7] = [
+    "audio/webm",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/ogg",
+    "audio/flac",
+    "audio/aac",
+];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioObjectQuery {
+    #[serde(default)]
+    media_type: Option<String>,
+}
+
+/// Serves one stored audio object for playback. Audio bytes never enter an
+/// inference request (the model reads the transcript instead), so the console
+/// fetches them here on demand; only the owner's own database is reachable
+/// because the reference is a content hash in their store.
+async fn read_audio_object(
+    State(state): State<AppState>,
+    axum::Extension(_identity): axum::Extension<BrowserIdentity>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<AudioObjectQuery>,
+) -> Result<([(axum::http::HeaderName, String); 1], Vec<u8>), ApiError> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request("object id must be a content hash"));
+    }
+    let requested = query.media_type.unwrap_or_default();
+    let media_type = AUDIO_MEDIA_TYPES
+        .iter()
+        .copied()
+        .find(|value| *value == requested)
+        .unwrap_or("audio/webm");
+    let bytes = objects::read(state.data_dir.as_path(), &id)?;
+    Ok((
+        [(
+            axum::http::HeaderName::from_static("content-type"),
+            media_type.to_owned(),
+        )],
+        bytes,
+    ))
+}
+
+/// Validates one recorded or uploaded audio data URL and splits it into its
+/// media type and base64 characters. The browser's `MediaRecorder` labels its
+/// blob `audio/webm;codecs=opus`, so the codec parameter is dropped.
+fn input_audio_data(audio: &str) -> Result<(&'static str, &str), ApiError> {
+    let invalid = || {
+        ApiError::bad_request(
+            "audio must be a base64 data URL of type webm, mp4, mpeg, wav, ogg, flac, or aac",
+        )
+    };
+    let rest = audio.strip_prefix("data:").ok_or_else(invalid)?;
+    let (meta, data) = rest.split_once(";base64,").ok_or_else(invalid)?;
+    let media_type = meta.split(';').next().unwrap_or_default().trim();
+    let media_type = AUDIO_MEDIA_TYPES
+        .iter()
+        .copied()
+        .find(|value| *value == media_type)
+        .ok_or_else(invalid)?;
+    if audio.len() > MAX_INPUT_AUDIO_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "each audio must contain at most {MAX_INPUT_AUDIO_CHARS} data URL characters"
+        )));
+    }
+    Ok((media_type, data))
+}
+
+/// Moves a fresh input item's audio attachments into the object store, leaving
+/// `audio_ref` parts behind, and returns what was stored - reference, media
+/// type and bytes - so the caller can run the first transcription pass.
+fn externalize_input_audio(
+    data_dir: &Path,
+    input: &mut Value,
+) -> Result<Vec<(String, String, Vec<u8>)>, ApiError> {
+    let Some(content) = input.get_mut("content").and_then(Value::as_array_mut) else {
+        return Ok(Vec::new());
+    };
+    let mut stored = Vec::new();
+    for part in content.iter_mut() {
+        if part.get("type").and_then(Value::as_str) != Some("input_audio") {
+            continue;
+        }
+        let Some(audio) = part.get("audio_url").and_then(Value::as_str) else {
+            continue;
+        };
+        let (media_type, encoded) = input_audio_data(audio)?;
+        let bytes = decode_base64(encoded)
+            .ok_or_else(|| ApiError::bad_request("audio must contain valid base64 data"))?;
+        let object = objects::put(data_dir, &bytes)?;
+        *part = json!({
+            "type": "input_audio",
+            "audio_ref": object,
+            "media_type": media_type,
+        });
+        stored.push((object, media_type.to_owned(), bytes));
+    }
+    Ok(stored)
+}
+
+/// The speech-to-text model a call runs with: the per-thread override wins,
+/// otherwise the account default. Null at both levels keeps audio input off.
+fn effective_audio_transcription_model(
+    thread: Option<&ThreadView>,
+    defaults: &ThreadDefaults,
+) -> Option<String> {
+    thread
+        .and_then(|thread| thread.audio_transcription_model.clone())
+        .or_else(|| defaults.audio_transcription_model.clone())
+}
+
+/// Posts one multipart transcription request to the Thread's upstream and
+/// returns the transcript text plus the gateway request id when it echoes one.
+async fn transcribe_audio(
+    state: &AppState,
+    upstream: &Upstream,
+    bytes: Vec<u8>,
+    media_type: &str,
+    model: &str,
+    language: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<(String, Option<String>), ApiError> {
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name("audio")
+        .mime_str(media_type)
+        .map_err(ApiError::internal)?;
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", model.to_owned());
+    if let Some(language) = language.filter(|value| !value.is_empty()) {
+        form = form.text("language", language.to_owned());
+    }
+    if let Some(prompt) = prompt.filter(|value| !value.is_empty()) {
+        form = form.text("prompt", prompt.to_owned());
+    }
+    let response = state
+        .client
+        .post(format!(
+            "{}{}",
+            upstream.base_url.trim_end_matches('/'),
+            AUDIO_TRANSCRIPTION_SUFFIX
+        ))
+        .bearer_auth(upstream.api_key.as_str())
+        .header("originator", CYBION_ORIGINATOR)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|_| ApiError::unavailable("speech-to-text is temporarily unavailable"))?;
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-normai-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if !status.is_success() {
+        return Err(ApiError::unavailable(format!(
+            "speech-to-text was rejected (HTTP {})",
+            status.as_u16()
+        )));
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|_| ApiError::unavailable("speech-to-text returned an invalid response"))?;
+    let text = body
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if text.is_empty() {
+        return Err(ApiError::unavailable("speech-to-text returned no text"));
+    }
+    Ok((text, request_id))
+}
+
+/// Stores the audio attachments of one fresh input item and runs the first
+/// transcription pass with the effective model, appending one text part per
+/// attachment that carries the reference and the provisional transcript. A
+/// failed first pass still names the reference, so the model can retry through
+/// `normai_audio_transcription` with vocabulary hints.
+async fn prepare_input_audio(
+    state: &AppState,
+    user: &User,
+    thread: Option<&ThreadView>,
+    upstream_id: Option<&str>,
+    item: &mut Value,
+) -> Result<(), ApiError> {
+    let defaults = user_db(state, user, false, |connection| {
+        load_thread_defaults(connection)
+    })
+    .await?;
+    let stored = externalize_input_audio(state.data_dir.as_path(), item)?;
+    if stored.is_empty() {
+        return Ok(());
+    }
+    let Some(model) = effective_audio_transcription_model(thread, &defaults) else {
+        return Err(ApiError::bad_request(
+            "audio input needs a speech-to-text model: pick one from GET {upstream}/models?kind=sst in the settings first",
+        ));
+    };
+    let upstream = match thread {
+        Some(thread) => load_thread_upstream(state, user, thread).await?,
+        None => {
+            let upstream_id = upstream_id.map(str::to_owned);
+            user_db(state, user, false, move |connection| {
+                upstreams::for_thread_id(connection, upstream_id.as_deref())
+            })
+            .await?
+            .ok_or_else(|| ApiError::conflict("configure an upstream for this thread"))?
+        }
+    };
+    let mut notes = Vec::with_capacity(stored.len());
+    for (object, media_type, bytes) in stored {
+        let note = match transcribe_audio(state, &upstream, bytes, &media_type, &model, None, None)
+            .await
+        {
+            Ok((text, _)) => format!(
+                "[audio attachment ref={object} type={media_type}] provisional transcript ({model}):\n{text}\nCall normai_audio_transcription with this ref and prompt/keywords to re-extract terms the first pass missed."
+            ),
+            Err(error) => format!(
+                "[audio attachment ref={object} type={media_type}] the provisional transcript failed ({}); call normai_audio_transcription with this ref and prompt/keywords to transcribe it.",
+                error.message
+            ),
+        };
+        notes.push(note);
+    }
+    if let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) {
+        for note in notes {
+            content.push(json!({"type":"input_text","text":note}));
+        }
+    }
+    Ok(())
+}
+
+/// Rewrites audio attachment parts for the request: upstream models take no
+/// audio, so the part becomes a text note naming the reference (the
+/// provisional transcript is a separate part) and the bytes stay cold.
+fn audio_protocol_item(item: &mut Value) {
+    let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for part in parts.iter_mut() {
+        let Some(object) = part.as_object() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) != Some("input_audio") {
+            continue;
+        }
+        let Some(reference) = object
+            .get("audio_ref")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let media_type = object
+            .get("media_type")
+            .and_then(Value::as_str)
+            .unwrap_or("audio")
+            .to_owned();
+        *part = json!({"type":"input_text","text":format!("[audio attachment ref={reference} type={media_type}]")});
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioTranscriptionArguments {
+    audio_ref: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    keywords: Option<Vec<String>>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// The media type a stored audio object was attached with, read back from the
+/// Thread's own input record so the model never has to repeat it.
+fn stored_audio_media_type(
+    connection: &Connection,
+    thread_id: &str,
+    reference: &str,
+) -> Result<Option<String>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT payload FROM history_records WHERE thread_id=? AND kind='input' ORDER BY id DESC",
+    )?;
+    let rows = statement
+        .query_map([thread_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for payload in rows {
+        let Ok(item) = serde_json::from_str::<Value>(&payload) else {
+            continue;
+        };
+        let Some(parts) = item.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for part in parts {
+            if part.get("audio_ref").and_then(Value::as_str) != Some(reference) {
+                continue;
+            }
+            if let Some(media_type) = part.get("media_type").and_then(Value::as_str) {
+                return Ok(Some(media_type.to_owned()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Executes one intercepted `normai_audio_transcription` call: the Controller
+/// re-reads the stored audio, posts it back to the Thread's upstream with the
+/// caller's vocabulary hints, and answers with the transcript. Argument
+/// problems are answered to the model instead of failing the turn.
+async fn audio_transcription_tool_output(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    input: &str,
+) -> Result<Value, ApiError> {
+    let arguments: AudioTranscriptionArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!(
+            "normai_audio_transcription arguments must contain an audio_ref: {error}"
+        ))
+    })?;
+    let reference = arguments.audio_ref.trim().to_owned();
+    if reference.len() != 64 || !reference.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request(
+            "normai_audio_transcription audio_ref must be a stored object reference",
+        ));
+    }
+    let defaults = user_db(state, user, false, |connection| {
+        load_thread_defaults(connection)
+    })
+    .await?;
+    let model = arguments
+        .model
+        .clone()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| effective_audio_transcription_model(Some(thread), &defaults));
+    let Some(model) = model else {
+        return Ok(json!({"error":"audio input is disabled for this thread"}));
+    };
+    let thread_id = thread.id.clone();
+    let lookup = reference.clone();
+    let media_type = user_db(state, user, false, move |connection| {
+        stored_audio_media_type(connection, &thread_id, &lookup)
+    })
+    .await?;
+    let Some(media_type) = media_type else {
+        return Ok(json!({"error":"audio attachment not found in this thread"}));
+    };
+    let bytes = match objects::read(state.data_dir.as_path(), &reference) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(json!({"error":"audio attachment not found"})),
+    };
+    let keywords = arguments
+        .keywords
+        .unwrap_or_default()
+        .into_iter()
+        .map(|keyword| keyword.trim().to_owned())
+        .filter(|keyword| !keyword.is_empty())
+        .collect::<Vec<_>>();
+    let mut prompt_used = arguments.prompt.unwrap_or_default().trim().to_owned();
+    if !keywords.is_empty() {
+        if !prompt_used.is_empty() {
+            prompt_used.push(' ');
+        }
+        prompt_used.push_str(&format!(
+            "Terms that must appear verbatim: {}.",
+            keywords.join(", ")
+        ));
+    }
+    let upstream = match load_thread_upstream(state, user, thread).await {
+        Ok(upstream) => upstream,
+        Err(_) => return Ok(json!({"error":"configure an upstream for this thread"})),
+    };
+    let (text, request_id) = match transcribe_audio(
+        state,
+        &upstream,
+        bytes,
+        &media_type,
+        &model,
+        arguments.language.as_deref(),
+        Some(prompt_used.as_str()),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => return Ok(json!({"error": error.message})),
+    };
+    Ok(json!({
+        "status": "completed",
+        "text": text,
+        "model": model,
+        "prompt_used": prompt_used,
+        "request_id": request_id,
+    }))
+}
+
 fn app(state: AppState) -> Router {
     let browser_api = Router::new()
         .merge(thread_sharing::routes())
@@ -539,6 +949,7 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/compact", post(thread_controls::compact))
         .route("/api/threads/{id}/title", post(generate_thread_title))
         .route("/api/insights", get(insights))
+        .route("/api/objects/{id}", get(read_audio_object))
         .route("/api/history", get(history::list))
         .route("/api/history/{id}", get(history::read))
         .route("/api/reasoning-audits", get(reasoning_audits))
@@ -1098,6 +1509,7 @@ CREATE TABLE IF NOT EXISTS threads (
   minimal_mode INTEGER,
   image_generation_model TEXT,
   max_loaded_manuals INTEGER,
+  audio_transcription_model TEXT,
   archived_at INTEGER,
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
@@ -1115,7 +1527,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   context_budget_tokens INTEGER NOT NULL DEFAULT 200000,
   minimal_mode INTEGER NOT NULL DEFAULT 0,
   image_generation_model TEXT NOT NULL DEFAULT '',
-  max_loaded_manuals INTEGER NOT NULL DEFAULT 12
+  max_loaded_manuals INTEGER NOT NULL DEFAULT 12,
+  audio_transcription_model TEXT
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1866,6 +2279,8 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             "TEXT NOT NULL DEFAULT ''",
         ),
         ("threads", "max_loaded_manuals", "INTEGER"),
+        ("threads", "audio_transcription_model", "TEXT"),
+        ("thread_defaults", "audio_transcription_model", "TEXT"),
         (
             "thread_defaults",
             "max_loaded_manuals",
@@ -2142,6 +2557,9 @@ struct ThreadView {
     /// Per-thread cap on the Manuals this Thread keeps loaded; `None` follows
     /// the user default.
     max_loaded_manuals: Option<i64>,
+    /// Per-thread speech-to-text model override; `None` follows the user
+    /// default and null at both levels keeps audio input disabled.
+    audio_transcription_model: Option<String>,
     /// When the thread was archived; `None` keeps it in the thread list.
     archived_at: Option<i64>,
     /// Input tokens of the most recent inference request, for the context display.
@@ -2435,6 +2853,8 @@ struct StartThreadInput {
     input: String,
     #[serde(default)]
     images: Vec<String>,
+    #[serde(default)]
+    audios: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -2458,6 +2878,10 @@ struct ThreadDefaults {
     /// its own. A load past the cap is refused, never truncated.
     #[serde(default = "default_max_loaded_manuals")]
     max_loaded_manuals: i64,
+    /// Speech-to-text model for threads without an override; null keeps audio
+    /// input disabled until an `sst` model is picked.
+    #[serde(default)]
+    audio_transcription_model: Option<String>,
 }
 
 fn default_context_budget_tokens() -> i64 {
@@ -2479,6 +2903,7 @@ impl Default for ThreadDefaults {
             minimal_mode: false,
             image_generation_model: String::new(),
             max_loaded_manuals: manual_loads::DEFAULT_MAX_LOADED_MANUALS,
+            audio_transcription_model: None,
         }
     }
 }
@@ -2510,6 +2935,10 @@ struct UpdateThreadInput {
     // cap on Manuals this Thread keeps loaded.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     max_loaded_manuals: Option<Option<i64>>,
+    // `null` clears the override back to the user default; an empty string
+    // disables audio input for the thread; a model name enables it.
+    #[serde(default, deserialize_with = "deserialize_double_option_string")]
+    audio_transcription_model: Option<Option<String>>,
     /// `true` archives the thread and hides it from the thread list; `false`
     /// restores it. Omitted keeps the current state.
     #[serde(default)]
@@ -2545,6 +2974,8 @@ struct InputRequest {
     input: String,
     #[serde(default)]
     images: Vec<String>,
+    #[serde(default)]
+    audios: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -2759,8 +3190,9 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let cached_tokens: i64 = row.get(12)?;
     let missing_cache_requests: i64 = row.get(13)?;
     let max_loaded_manuals: Option<i64> = row.get(22)?;
-    let cost_usd_nanos: i64 = row.get(23)?;
-    let cost_settled_requests: i64 = row.get(24)?;
+    let audio_transcription_model: Option<String> = row.get(23)?;
+    let cost_usd_nanos: i64 = row.get(24)?;
+    let cost_settled_requests: i64 = row.get(25)?;
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
@@ -2775,12 +3207,13 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         display_status: row.get(9)?,
-        running_summary: row.get(25)?,
+        running_summary: row.get(26)?,
         context_budget_tokens: row.get(14)?,
         context_tokens: row.get(15)?,
         minimal_mode: row.get(16)?,
         image_generation_model: row.get(21)?,
         max_loaded_manuals,
+        audio_transcription_model,
         archived_at: row.get(18)?,
         usage: ThreadUsage {
             input_tokens,
@@ -2902,6 +3335,14 @@ fn model_id(value: String) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+/// Trims an optional model choice; empty or whitespace-only means null, which
+/// keeps the feature it configures switched off.
+fn optional_model(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// Validates an image generation model choice: empty disables image
 /// generation; a name follows the chat-model identifier rules.
 fn image_generation_model(value: String) -> Result<String, ApiError> {
@@ -3009,7 +3450,7 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -3022,6 +3463,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                     minimal_mode: row.get::<_, i64>(5)? != 0,
                     image_generation_model: row.get(6)?,
                     max_loaded_manuals: row.get(7)?,
+                    audio_transcription_model: row.get(8)?,
                 })
             },
         )
@@ -3057,14 +3499,15 @@ async fn update_thread_defaults(
         minimal_mode: input.minimal_mode,
         image_generation_model: image_generation_model(input.image_generation_model)?,
         max_loaded_manuals: manual_loads::max_loaded_manuals(input.max_loaded_manuals)?,
+        audio_transcription_model: optional_model(input.audio_transcription_model),
     };
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = defaults.upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals) VALUES(1,?,?,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model) VALUES(1,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model",
             params![
                 defaults.model,
                 defaults.upstream_id,
@@ -3073,7 +3516,8 @@ async fn update_thread_defaults(
                 defaults.context_budget_tokens,
                 defaults.minimal_mode,
                 defaults.image_generation_model,
-                defaults.max_loaded_manuals
+                defaults.max_loaded_manuals,
+                defaults.audio_transcription_model
             ],
         )?;
         Ok(defaults)
@@ -3082,7 +3526,11 @@ async fn update_thread_defaults(
     .map(Json)
 }
 
-fn input_message(input: String, images: Vec<String>) -> Result<Value, ApiError> {
+fn input_message(
+    input: String,
+    images: Vec<String>,
+    audios: Vec<String>,
+) -> Result<Value, ApiError> {
     let text = input.trim();
     if text.chars().count() > 100_000 {
         return Err(ApiError::bad_request(
@@ -3097,7 +3545,15 @@ fn input_message(input: String, images: Vec<String>) -> Result<Value, ApiError> 
     for image in &images {
         input_image_data(image)?;
     }
-    if images.is_empty() {
+    if audios.len() > MAX_INPUT_AUDIOS {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_INPUT_AUDIOS} audio attachments are supported per input"
+        )));
+    }
+    for audio in &audios {
+        input_audio_data(audio)?;
+    }
+    if images.is_empty() && audios.is_empty() {
         if text.is_empty() {
             return Err(ApiError::bad_request(
                 "input must contain 1-100000 characters",
@@ -3105,12 +3561,15 @@ fn input_message(input: String, images: Vec<String>) -> Result<Value, ApiError> 
         }
         return Ok(json!({"role":"user","content":text}));
     }
-    let mut content = Vec::with_capacity(images.len() + 1);
+    let mut content = Vec::with_capacity(images.len() + audios.len() + 1);
     if !text.is_empty() {
         content.push(json!({"type":"input_text","text":text}));
     }
     for image in images {
         content.push(json!({"type":"input_image","image_url":image}));
+    }
+    for audio in audios {
+        content.push(json!({"type":"input_audio","audio_url":audio}));
     }
     Ok(json!({"role":"user","content":content}))
 }
@@ -3190,6 +3649,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref,
        t.image_generation_model,
        t.max_loaded_manuals,
+       t.audio_transcription_model,
        COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0),
        CASE WHEN t.status='running' THEN (
          SELECT CASE WHEN NOT EXISTS (
@@ -3302,6 +3762,7 @@ async fn create_thread_for(
             minimal_mode: None,
             image_generation_model: None,
             max_loaded_manuals: None,
+            audio_transcription_model: None,
             archived_at: None,
             context_tokens: None,
             status: "idle".to_owned(),
@@ -3762,7 +4223,16 @@ async fn start_thread(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Json(input): Json<StartThreadInput>,
 ) -> Result<Json<RequestView>, ApiError> {
-    let message = input_message(input.input, input.images)?;
+    let upstream_id = input.upstream_id.clone();
+    let mut message = input_message(input.input, input.images, input.audios)?;
+    prepare_input_audio(
+        &state,
+        &identity.user,
+        None,
+        upstream_id.as_deref(),
+        &mut message,
+    )
+    .await?;
     let model = model_id(input.model)?;
     let reasoning_effort = reasoning_effort(input.reasoning_effort)?;
     let thread = create_thread_for(
@@ -3819,6 +4289,7 @@ async fn update_thread(
         .image_generation_model
         .map(|value| value.map(image_generation_model).transpose())
         .transpose()?;
+    let audio_transcription_model = input.audio_transcription_model.clone().map(optional_model);
     let max_loaded_manuals = input
         .max_loaded_manuals
         .map(|value| value.map(manual_loads::max_loaded_manuals).transpose())
@@ -3843,7 +4314,7 @@ async fn update_thread(
             require_upstream(connection, id)?;
         }
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -3858,6 +4329,8 @@ async fn update_thread(
                 image_generation_model.flatten(),
                 max_loaded_manuals.is_some(),
                 max_loaded_manuals.flatten(),
+                audio_transcription_model.is_some(),
+                audio_transcription_model.flatten(),
                 input.archived.is_some(),
                 input.archived.map(|archived| archived.then_some(updated_at)),
                 updated_at,
@@ -3931,6 +4404,7 @@ async fn request_thread_title(
         None,
         thread.service_tier_fast,
         Value::Array(items),
+        false,
         false,
         false,
         false,
@@ -4316,8 +4790,14 @@ async fn thread_input(
     Json(input): Json<InputRequest>,
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
-    let input = input_message(input.input, input.images)?;
+    let mut input = input_message(input.input, input.images, input.audios)?;
     ensure_thread_upstream(&state, &identity.user, &id).await?;
+    let thread = user_db(&state, &identity.user, false, {
+        let id = id.clone();
+        move |connection| load_thread(connection, &id)
+    })
+    .await?;
+    prepare_input_audio(&state, &identity.user, Some(&thread), None, &mut input).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
@@ -5066,6 +5546,7 @@ async fn process_request(
                 minimal_mode: None,
                 image_generation_model: None,
                 max_loaded_manuals: None,
+                audio_transcription_model: None,
                 archived_at: None,
                 context_tokens: None,
                 status: "failed".to_owned(),
@@ -5741,6 +6222,7 @@ fn load_protocol_items(
         } else {
             context_protocol_item(&mut item);
         }
+        audio_protocol_item(&mut item);
         materialize_media(data_dir, &mut item)?;
         records.push((id, created_at, kind, item));
     }
@@ -6249,6 +6731,8 @@ async fn request_agent(
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let has_workers = !workers.is_empty();
         let image_generation = effective_image_generation_model(thread, &defaults).is_some();
+        let audio_transcription =
+            effective_audio_transcription_model(Some(thread), &defaults).is_some();
         let mut request_items = std::mem::take(&mut manual.items);
         if let Some(block) = note_block.as_deref() {
             // The notes block lives only in the request copy: history records
@@ -6275,6 +6759,7 @@ async fn request_agent(
             // model (an empty choice keeps it out of the request).
             true,
             image_generation,
+            audio_transcription,
             Some(cancellation.clone()),
         )
         .await
@@ -6785,6 +7270,7 @@ async fn summarize_context_once(
         false,
         false,
         false,
+        false,
         cancellation,
     )
     .await?;
@@ -7160,6 +7646,7 @@ async fn responses_request(
         include_tools,
         false,
         false,
+        false,
         None,
     )
     .await
@@ -7182,6 +7669,7 @@ async fn responses_request_with_options(
     include_worker_tools: bool,
     web_search: bool,
     image_generation: bool,
+    audio_transcription: bool,
     cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<ResponsesResult, ApiError> {
     let audit = AuditSpec {
@@ -7212,6 +7700,7 @@ async fn responses_request_with_options(
         request_kind == "inference",
         web_search,
         image_generation,
+        audio_transcription,
         Some((audit, cancellation)),
     );
     request.await
@@ -7262,6 +7751,7 @@ async fn send_responses_request(
     include_manual_tools: bool,
     web_search: bool,
     image_generation: bool,
+    audio_transcription: bool,
     audit: Option<(AuditSpec, Option<watch::Receiver<bool>>)>,
 ) -> Result<ResponsesResult, ApiError> {
     let payload = responses_payload_with_options(
@@ -7273,6 +7763,7 @@ async fn send_responses_request(
         include_manual_tools,
         web_search,
         image_generation,
+        audio_transcription,
     );
     let body = serialize_responses_payload(payload)?;
     let mut headers = Vec::new();
@@ -7855,6 +8346,7 @@ fn responses_payload(model: &str, input: Value, include_tools: bool) -> Value {
         include_tools,
         false,
         false,
+        false,
     )
 }
 
@@ -7868,6 +8360,7 @@ fn responses_payload_with_options(
     include_manual_tools: bool,
     web_search: bool,
     image_generation: bool,
+    audio_transcription: bool,
 ) -> Value {
     let mut payload = serde_json::Map::with_capacity(8);
     payload.insert("model".to_owned(), Value::String(model.to_owned()));
@@ -7889,6 +8382,7 @@ fn responses_payload_with_options(
         include_manual_tools,
         web_search,
         image_generation,
+        audio_transcription,
     );
     if matches!(&tools, Value::Array(tools) if !tools.is_empty()) {
         payload["tools"] = tools;
@@ -8060,6 +8554,7 @@ fn responses_tools(
     include_manual_tools: bool,
     web_search: bool,
     image_generation: bool,
+    audio_transcription: bool,
 ) -> Value {
     let mut tools = Vec::new();
     if include_manual_tools {
@@ -8074,6 +8569,9 @@ fn responses_tools(
     }
     if image_generation {
         tools.push(TOOL_CATALOG["native"]["normai_image_generation"].clone());
+    }
+    if audio_transcription {
+        tools.push(TOOL_CATALOG["native"]["normai_audio_transcription"].clone());
     }
     Value::Array(tools)
 }
@@ -8713,6 +9211,31 @@ async fn start_response_tool(
             append_tool_output_item(state, user, thread, input_id, &output).await?,
         )));
     }
+    if name == "normai_audio_transcription" {
+        let output = state
+            .kernel_tool(
+                user,
+                &thread.id,
+                input_id,
+                audio_transcription_tool_output(state, user, thread, input),
+            )
+            .await;
+        let output = match output {
+            Ok(output) => output,
+            Err(error) if error.status.is_client_error() && !error.is_cancelled() => {
+                json!({ "error": error.message })
+            }
+            Err(error) => return Err(error),
+        };
+        let output = json!({
+            "type": output_type,
+            "call_id": call_id,
+            "output": serde_json::to_string(&output).map_err(ApiError::internal)?,
+        });
+        return Ok(Some(PendingToolCall::Answered(
+            append_tool_output_item(state, user, thread, input_id, &output).await?,
+        )));
+    }
     if name == "normai_image_generation" {
         let generated = state
             .kernel_tool(
@@ -9287,8 +9810,14 @@ async fn external_thread_input(
     Json(input): Json<InputRequest>,
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
-    let input = input_message(input.input, input.images)?;
+    let mut input = input_message(input.input, input.images, input.audios)?;
     ensure_thread_upstream(&state, &identity.user, &id).await?;
+    let thread = user_db(&state, &identity.user, false, {
+        let id = id.clone();
+        move |connection| load_thread(connection, &id)
+    })
+    .await?;
+    prepare_input_audio(&state, &identity.user, Some(&thread), None, &mut input).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
@@ -9856,17 +10385,23 @@ mod tests {
     #[test]
     fn thread_input_builds_text_messages_and_image_content_parts() {
         assert_eq!(
-            input_message("  fix the flaky test  ".to_owned(), Vec::new()).unwrap(),
+            input_message("  fix the flaky test  ".to_owned(), Vec::new(), Vec::new()).unwrap(),
             json!({"role":"user","content":"fix the flaky test"})
         );
         assert_eq!(
-            input_message(String::new(), vec!["data:image/png;base64,AAAA".to_owned()]).unwrap(),
+            input_message(
+                String::new(),
+                vec!["data:image/png;base64,AAAA".to_owned()],
+                Vec::new()
+            )
+            .unwrap(),
             json!({"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]})
         );
         assert_eq!(
             input_message(
                 "read this".to_owned(),
-                vec!["data:image/jpeg;base64,BBBB".to_owned()]
+                vec!["data:image/jpeg;base64,BBBB".to_owned()],
+                Vec::new()
             )
             .unwrap(),
             json!({"role":"user","content":[
@@ -9878,8 +10413,8 @@ mod tests {
 
     #[test]
     fn thread_input_rejects_empty_messages_and_unusable_images() {
-        assert!(input_message("   ".to_owned(), Vec::new()).is_err());
-        assert!(input_message("x".repeat(100_001), Vec::new()).is_err());
+        assert!(input_message("   ".to_owned(), Vec::new(), Vec::new()).is_err());
+        assert!(input_message("x".repeat(100_001), Vec::new(), Vec::new()).is_err());
         for image in [
             "https://example.com/screenshot.png".to_owned(),
             "data:image/svg+xml;base64,AAAA".to_owned(),
@@ -9889,12 +10424,19 @@ mod tests {
             ),
         ] {
             assert!(
-                input_message("hello".to_owned(), vec![image]).is_err(),
+                input_message("hello".to_owned(), vec![image], Vec::new()).is_err(),
                 "only bounded base64 image data URLs are accepted"
             );
         }
         let image = "data:image/webp;base64,AAAA".to_owned();
-        assert!(input_message("hello".to_owned(), vec![image; MAX_INPUT_IMAGES + 1]).is_err());
+        assert!(
+            input_message(
+                "hello".to_owned(),
+                vec![image; MAX_INPUT_IMAGES + 1],
+                Vec::new()
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -9911,13 +10453,18 @@ mod tests {
                     connection,
                     &thread_id,
                     "input",
-                    input_message("describe this screenshot".to_owned(), vec![data_url]).unwrap(),
+                    input_message(
+                        "describe this screenshot".to_owned(),
+                        vec![data_url],
+                        Vec::new(),
+                    )
+                    .unwrap(),
                 );
                 let second = insert_record(
                     connection,
                     &thread_id,
                     "input",
-                    input_message("thanks".to_owned(), Vec::new()).unwrap(),
+                    input_message("thanks".to_owned(), Vec::new(), Vec::new()).unwrap(),
                 );
                 let raw: i64 = connection.query_row(
                     "SELECT COALESCE(SUM(length(payload)),0) FROM history_records
@@ -10304,6 +10851,7 @@ mod tests {
             minimal_mode: None,
             image_generation_model: None,
             max_loaded_manuals: None,
+            audio_transcription_model: None,
             archived: Some(archived),
         }
     }
@@ -11513,6 +12061,7 @@ mod tests {
             true,
             true,
             true,
+            false,
         );
         assert_eq!(before["tools"].as_array().unwrap().len(), 17);
         connection.execute(
@@ -11528,6 +12077,7 @@ mod tests {
             true,
             true,
             true,
+            false,
         );
         assert_eq!(
             serde_json::to_vec(&before).unwrap(),
@@ -12078,7 +12628,7 @@ mod tests {
 
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
-        let tools = responses_tools(false, true, true, true);
+        let tools = responses_tools(false, true, true, true, false);
         assert_eq!(tools.as_array().unwrap().len(), 13);
         assert_eq!(tools[0]["name"], "list_manuals");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
@@ -12100,19 +12650,19 @@ mod tests {
         assert_eq!(tools[10]["parameters"]["required"], json!(["note_ids"]));
         assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_web_search"]);
         assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_image_generation"]);
-        let worker_and_native = responses_tools(true, true, true, true);
+        let worker_and_native = responses_tools(true, true, true, true, false);
         assert_eq!(worker_and_native.as_array().unwrap().len(), 17);
         assert_eq!(worker_and_native[11]["name"], "bash");
         assert_eq!(worker_and_native[14]["name"], "view_image");
         assert_eq!(worker_and_native[15]["name"], "normai_web_search");
         assert_eq!(worker_and_native[16]["name"], "normai_image_generation");
-        let web_search_only = responses_tools(false, true, true, false);
+        let web_search_only = responses_tools(false, true, true, false, false);
         assert_eq!(web_search_only.as_array().unwrap().len(), 12);
         assert_eq!(
             web_search_only[11],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
-        let context_only = responses_tools(false, true, false, false);
+        let context_only = responses_tools(false, true, false, false, false);
         assert_eq!(
             context_only
                 .as_array()
@@ -12134,7 +12684,10 @@ mod tests {
                 "cross_out_notes"
             ]
         );
-        assert_eq!(responses_tools(false, false, false, false), json!([]));
+        assert_eq!(
+            responses_tools(false, false, false, false, false),
+            json!([])
+        );
     }
 
     #[test]
@@ -12304,6 +12857,39 @@ mod tests {
                         "required": ["prompt"],
                         "additionalProperties": false
                     }
+                },
+                "normai_audio_transcription": {
+                    "type": "function",
+                    "name": "normai_audio_transcription",
+                    "description": "Transcribe an audio recording attached to this Thread. Pass the audio_ref of the attachment; add prompt (topic, setting, names) and keywords to fix terms and acronyms the provisional transcript got wrong, or pass another model. Call it again with better hints when the transcript looks wrong.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "audio_ref": {
+                                "type": "string",
+                                "description": "The audio_ref of an audio attachment in this Thread's input."
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Free-form context to guide recognition: topic, domain vocabulary, participant names, spelling of terms. Context only, not instructions."
+                            },
+                            "keywords": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Terms and acronyms that must appear verbatim."
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "ISO-639-1 language hint such as zh or en; omit to auto-detect."
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Speech-to-text model override; defaults to the Thread's configured model."
+                            }
+                        },
+                        "required": ["audio_ref"],
+                        "additionalProperties": false
+                    }
                 }
             })
         );
@@ -12375,6 +12961,7 @@ mod tests {
             false,
             true,
             true,
+            false,
             None,
         )
         .await
@@ -12510,6 +13097,7 @@ mod tests {
                         Some(&thread.reasoning_effort),
                         thread.service_tier_fast,
                         json!([{"role":"user","content":"hello"}]),
+                        false,
                         false,
                         false,
                         false,

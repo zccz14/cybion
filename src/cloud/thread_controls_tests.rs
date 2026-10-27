@@ -6,7 +6,7 @@ use crate::cloud::tests::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn user_text(text: &str) -> Value {
-    input_message(text.to_owned(), Vec::new()).unwrap()
+    input_message(text.to_owned(), Vec::new(), Vec::new()).unwrap()
 }
 
 async fn record(state: &AppState, user: &User, thread: &ThreadView, input: RequestInput) -> i64 {
@@ -232,7 +232,12 @@ async fn pasted_image_input_replays_as_an_upstream_input_image_part() {
         user.clone(),
         thread.id.clone(),
         RequestInput::Prompt(
-            input_message("what is wrong".to_owned(), vec![image.to_owned()]).unwrap(),
+            input_message(
+                "what is wrong".to_owned(),
+                vec![image.to_owned()],
+                Vec::new(),
+            )
+            .unwrap(),
         ),
     )
     .await

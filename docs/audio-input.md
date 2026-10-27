@@ -87,11 +87,26 @@ must add `sst` rows to an upstream before voice input can be switched on.
 2. **Composer**: record/upload controls, attachment chips, the in-Thread
    player, and the two model pickers.
 
+## Console
+
+- The composer owns the recording and upload controls; each attachment shows as
+  a size chip and can be removed before sending. The input reaches the server as
+  `audios` data URLs next to `images`.
+- A `normai_audio_transcription` call renders as its own card (model, prompt,
+  keywords and the reference it re-read; the payload disclosure keeps the rest).
+- The speech-to-text model is picked in the settings card (account default) and
+  in the Thread settings popover (override). With no model configured the audio
+  input stays off and the first attachment is refused with a pointer to
+  `models?kind=sst`.
+
 ## Not in this version
 
 - **Span re-transcription** (`start`/`end`, needed for an hour-long meeting
   and for going past the upstream's 25 MiB limit) requires server-side audio
   decoding; it lands with ffmpeg-backed slicing.
+- **In-Thread playback**: the bytes are already served by
+  `GET /api/objects/{ref}?media_type=…`, but the conversation shows the
+  provisional transcript as text without an `<audio>` control yet.
 - **Diarization** (`gpt-4o-transcribe-diarize`, which takes no prompt) and
   speaker labels.
 - **Spend guardrails**: no result cache, no per-turn ceiling, no attempt cap.
