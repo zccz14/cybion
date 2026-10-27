@@ -438,7 +438,7 @@
     "normai_audio_transcription": {
       "type": "function",
       "name": "normai_audio_transcription",
-      "description": "Transcribe an audio recording attached to this Thread. Pass the audio_ref of the attachment; add prompt (topic, setting, names) and keywords to fix terms and acronyms, or pass another model. Call it again with better hints when the transcript looks wrong.",
+      "description": "Transcribe an audio recording attached to this Thread. Pass the audio_ref of the attachment; add prompt (topic, setting, names) and keywords to fix terms and acronyms the provisional transcript got wrong, or pass another model. Call it again with better hints when the transcript looks wrong.",
       "parameters": {
         "type": "object",
         "properties": {
