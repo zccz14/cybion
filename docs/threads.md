@@ -50,7 +50,10 @@ stored image - inline or referenced - at a bounded token cost instead of its
 base64 length.
 
 The UI exposes `idle`, `running`, and `failed` thread states. Failures append
-an activity record and leave the thread ready for a later input.
+an activity record and leave the thread ready for a later input. While a Thread
+runs, its view also carries `running_summary`: the one-sentence intent of the
+newest unanswered Worker call in the current turn, or `null` while it waits on
+the model or has no Worker call in flight.
 
 The composer also offers **Stop**, **Continue**, and **Compact**:
 

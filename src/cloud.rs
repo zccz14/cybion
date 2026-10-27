@@ -2148,6 +2148,10 @@ struct ThreadView {
     context_tokens: Option<i64>,
     status: String,
     display_status: String,
+    /// The one-sentence intent written with the newest Worker call of the
+    /// current turn that has not been answered yet. Derived from history when
+    /// the Thread is read; `None` whenever no Worker call is in flight.
+    running_summary: Option<String>,
     usage: ThreadUsage,
     created_at: i64,
     updated_at: i64,
@@ -2771,6 +2775,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         display_status: row.get(9)?,
+        running_summary: row.get(25)?,
         context_budget_tokens: row.get(14)?,
         context_tokens: row.get(15)?,
         minimal_mode: row.get(16)?,
@@ -3160,6 +3165,11 @@ fn externalize_input_images(data_dir: &Path, input: &mut Value) -> Result<(), Ap
 // INVARIANT: idle is written only on creation, successful finalization, or cancel.
 // The latest input/control boundary distinguishes those outcomes; later tool output,
 // title-generation audits, and superseded-request activity cannot change the result.
+//
+// INVARIANT: Worker calls are persisted and settled in record order, so once the
+// newest Worker call of the current turn has its tool output, no older call in
+// that turn is still running. Running summary therefore reads only the newest
+// call and yields NULL when it is answered.
 const THREAD_VIEW_SELECT: &str = r#"
 SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast,t.status,t.created_at,t.updated_at,
        CASE
@@ -3180,7 +3190,28 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref,
        t.image_generation_model,
        t.max_loaded_manuals,
-       COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0)
+       COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0),
+       CASE WHEN t.status='running' THEN (
+         SELECT CASE WHEN NOT EXISTS (
+             SELECT 1 FROM history_records o INDEXED BY history_records_thread_kind_created
+             WHERE o.thread_id=h.thread_id AND o.kind='tool_output' AND o.id>h.id
+               AND json_valid(o.payload)
+               AND json_extract(o.payload,'$.call_id')=json_extract(h.payload,'$.call_id'))
+           THEN COALESCE(
+             CASE WHEN json_valid(json_extract(h.payload,'$.arguments'))
+                   AND json_type(json_extract(h.payload,'$.arguments'),'$.summary')='text'
+                  THEN NULLIF(TRIM(json_extract(json_extract(h.payload,'$.arguments'),'$.summary')),'') END,
+             CASE WHEN json_valid(json_extract(h.payload,'$.input'))
+                   AND json_type(json_extract(h.payload,'$.input'),'$.summary')='text'
+                  THEN NULLIF(TRIM(json_extract(json_extract(h.payload,'$.input'),'$.summary')),'') END)
+         END
+         FROM history_records h INDEXED BY history_records_thread_kind_created
+         WHERE h.thread_id=t.id AND h.kind='response_output' AND json_valid(h.payload)
+           AND json_extract(h.payload,'$.type') IN ('function_call','custom_tool_call')
+           AND h.id > COALESCE((SELECT MAX(id) FROM history_records INDEXED BY history_records_thread_kind_created
+                                WHERE thread_id=t.id AND kind='input'),0)
+         ORDER BY h.id DESC LIMIT 1
+       ) END AS running_summary
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT MAX(id) FROM (
@@ -3275,6 +3306,7 @@ async fn create_thread_for(
             context_tokens: None,
             status: "idle".to_owned(),
             display_status: "ready".to_owned(),
+            running_summary: None,
             usage: ThreadUsage::default(),
             created_at: now(),
             updated_at: now(),
@@ -5038,6 +5070,7 @@ async fn process_request(
                 context_tokens: None,
                 status: "failed".to_owned(),
                 display_status: "failed".to_owned(),
+                running_summary: None,
                 usage: ThreadUsage::default(),
                 created_at: now(),
                 updated_at: now(),
