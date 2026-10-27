@@ -1180,6 +1180,32 @@ async function accessToken(sdk: AuthMiniApi) {
   return session.accessToken
 }
 
+async function apiBlob(sdk: AuthMiniApi, path: string): Promise<Blob> {
+  const request = async (token: string) => fetch(path, { headers: { Authorization: `Bearer ${token}` } })
+  const first = await request(await accessToken(sdk))
+  const response = first.status === 401 ? await request(await accessToken(sdk)) : first
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText })) as { error?: string }
+    throw Object.assign(new Error(body.error ?? response.statusText), { status: response.status })
+  }
+  return response.blob()
+}
+
+// Stored audio is replayed by content hash: the bytes never change for a
+// reference, so one blob URL serves every message that mentions it and the
+// download runs once per session.
+const audioObjectUrls = new Map<string, Promise<string>>()
+function audioObjectUrl(sdk: AuthMiniApi, reference: string, mediaType: string | null): Promise<string> {
+  const key = `${reference}:${mediaType ?? ""}`
+  const cached = audioObjectUrls.get(key)
+  if (cached) return cached
+  const query = mediaType ? `?media_type=${encodeURIComponent(mediaType)}` : ""
+  const pending = apiBlob(sdk, `/api/objects/${encodeURIComponent(reference)}${query}`).then((blob) => URL.createObjectURL(blob))
+  audioObjectUrls.set(key, pending)
+  pending.catch(() => audioObjectUrls.delete(key))
+  return pending
+}
+
 async function api<T>(sdk: AuthMiniApi, path: string, init?: RequestInit): Promise<T> {
   const request = async (token: string) => fetch(path, {
     ...init,
@@ -1739,6 +1765,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
   const { input, setInput, clearSubmitted } = composer
   const attachments = useComposerImages()
   const audio = useComposerAudio()
+  const loadAudio = useCallback((reference: string, mediaType: string | null) => audioObjectUrl(sdk, reference, mediaType), [sdk])
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -1892,7 +1919,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
             {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
             {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} inFlight={recordInFlight(record, inFlightCalls)} />} />
+            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} inFlight={recordInFlight(record, inFlightCalls)} loadAudio={loadAudio} />} />
             {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
             {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
             {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} runningSummary={current.running_summary} language={language} /></div></MessageScrollerItem>}
@@ -1979,8 +2006,9 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   const { ownerId = "", threadId = "" } = useParams()
   const { language } = useUi()
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
+  const loadAudio = useCallback((reference: string, mediaType: string | null) => audioObjectUrl(sdk, reference, mediaType), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
-  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} />} />
+  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} loadAudio={loadAudio} />} />
 }
 
 function AudioTranscriptionCall({ language, call, time }: { language: Language; call: AudioTranscriptionFunctionCall; time: string }) {
@@ -2005,7 +2033,7 @@ function SafetyBufferingAlert({ language, view, running }: { language: Language;
   return <MessageScrollerItem><Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{buffering.reasons.join(" · ")}</AlertDescription></Alert></MessageScrollerItem>
 }
 
-const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals, inFlight }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; manuals: ReadonlyMap<string, ManualSummary> | undefined; inFlight: boolean }) {
+const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals, inFlight, loadAudio }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; manuals: ReadonlyMap<string, ManualSummary> | undefined; inFlight: boolean; loadAudio?: (reference: string, mediaType: string | null) => Promise<string> }) {
   const { t } = useUi()
   const time = formattedTime(language, record.created_at)
   const action = threadControlAction(record)
@@ -2025,7 +2053,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
   if (record.kind === "input") {
     return <Message align="end">
       <MessageContent>
-        <UserInputMessage language={language} payload={record.payload} footer={`#${record.id} · ${time}`} />
+        <UserInputMessage language={language} payload={record.payload} footer={`#${record.id} · ${time}`} loadAudio={loadAudio} />
       </MessageContent>
     </Message>
   }

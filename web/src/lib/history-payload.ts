@@ -28,7 +28,13 @@ export function historyPayloadText(payload: unknown): string {
   return JSON.stringify(payload, null, 2) ?? String(payload)
 }
 
-export type UserInputView = { text: string; images: string[]; audios: string[] }
+/// One voice clip in a user input. A fresh input still carries its bytes as a
+/// data URL, but the Controller externalises them on the way in: what history
+/// replays is `audio_ref` plus `media_type`, and the bytes come back from
+/// `GET /api/objects/{id}`.
+export type UserInputAudio = { audioUrl: string | null; audioRef: string | null; mediaType: string | null }
+
+export type UserInputView = { text: string; images: string[]; audios: UserInputAudio[] }
 
 // A user input payload is either plain text or Responses content parts:
 // `input_text` carries the typed text, `input_image` each pasted data URL and
@@ -39,12 +45,22 @@ export function userInputView(payload: unknown): UserInputView {
   const parts = Array.isArray(object?.content) ? object.content : []
   const text: string[] = []
   const images: string[] = []
-  const audios: string[] = []
+  const audios: UserInputAudio[] = []
   for (const part of parts) {
     const partObject = historyPayloadObject(part)
-    if (partObject?.type === "input_text" && typeof partObject.text === "string") text.push(partObject.text)
+    if (partObject?.type === "input_text" && typeof partObject.text === "string") {
+      // Inputs stored before the provisional transcript moved onto the audio
+      // part carry it as a text part; it is Controller bookkeeping, not
+      // something the user typed.
+      if (!partObject.text.startsWith("[audio attachment ref=")) text.push(partObject.text)
+    }
     if (partObject?.type === "input_image" && typeof partObject.image_url === "string") images.push(partObject.image_url)
-    if (partObject?.type === "input_audio" && typeof partObject.audio_url === "string") audios.push(partObject.audio_url)
+    if (partObject?.type !== "input_audio") continue
+    if (typeof partObject.audio_url === "string") {
+      audios.push({ audioUrl: partObject.audio_url, audioRef: null, mediaType: null })
+    } else if (typeof partObject.audio_ref === "string") {
+      audios.push({ audioUrl: null, audioRef: partObject.audio_ref, mediaType: typeof partObject.media_type === "string" ? partObject.media_type : null })
+    }
   }
   return { text: text.join(""), images, audios }
 }

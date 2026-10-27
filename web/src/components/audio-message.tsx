@@ -1,11 +1,12 @@
 import { PauseIcon, PlayIcon } from "lucide-react"
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { audioDurationLabel } from "@/lib/composer-audio"
+import type { UserInputAudio } from "@/lib/history-payload"
 
 const copy = {
-  en: { play: "Play voice message", pause: "Pause voice message" },
-  zh: { play: "播放语音", pause: "暂停语音" },
+  en: { play: "Play voice message", pause: "Pause voice message", unavailable: "Voice message unavailable" },
+  zh: { play: "播放语音", pause: "暂停语音", unavailable: "语音无法播放" },
 } as const
 
 // Fixed heights keep the waveform identical between renders; it marks the bubble
@@ -13,12 +14,30 @@ const copy = {
 const bars = [6, 11, 15, 8, 13, 7, 16, 10, 14, 9]
 
 /// One sent audio input, drawn as a voice bar: the whole row is the play/pause
-/// control, the waveform animates while it plays and the label shows its length.
-export function AudioMessage({ language, dataUrl }: { language: "en" | "zh"; dataUrl: string }) {
+/// control, the waveform marks it as audio and the label shows its length.
+///
+/// History replays only an `audio_ref`, so the bytes are fetched once through
+/// `loadAudio` (`GET /api/objects/{id}`); a fresh input that still carries its
+/// data URL plays without any request.
+export function AudioMessage({ language, audio, loadAudio }: {
+  language: "en" | "zh"
+  audio: UserInputAudio
+  loadAudio?: (reference: string, mediaType: string | null) => Promise<string>
+}) {
   const t = copy[language]
   const player = useRef<HTMLAudioElement>(null)
+  const [src, setSrc] = useState(audio.audioUrl)
+  const [failed, setFailed] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [seconds, setSeconds] = useState<number | null>(null)
+  useEffect(() => {
+    if (src || !audio.audioRef || !loadAudio) return
+    let live = true
+    void loadAudio(audio.audioRef, audio.mediaType)
+      .then((url) => { if (live) setSrc(url) })
+      .catch(() => { if (live) setFailed(true) })
+    return () => { live = false }
+  }, [audio.audioRef, audio.mediaType, loadAudio, src])
   const toggle = () => {
     const element = player.current
     if (!element) return
@@ -51,25 +70,29 @@ export function AudioMessage({ language, dataUrl }: { language: "en" | "zh"; dat
     <button
       type="button"
       data-slot="audio-message"
-      aria-label={playing ? t.pause : t.play}
+      data-audio-ref={audio.audioRef ?? undefined}
+      aria-label={failed ? t.unavailable : playing ? t.pause : t.play}
       aria-pressed={playing}
+      disabled={!src}
       onClick={toggle}
-      className="flex items-center gap-2 rounded-lg bg-user-message px-3 py-2 text-user-message-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+      className="flex items-center gap-2 rounded-lg bg-user-message px-3 py-2 text-user-message-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-60"
       style={{ width: seconds === null ? 168 : Math.min(320, 132 + Math.round(seconds) * 6) }}
     >
       {playing ? <PauseIcon className="size-4 shrink-0" /> : <PlayIcon className="size-4 shrink-0" />}
       <span aria-hidden className="flex h-4 items-end gap-0.5 opacity-70">
-        {bars.map((height, index) => <span key={index} className={playing ? "w-0.5 rounded-full bg-current" : "w-0.5 rounded-full bg-current"} style={{ height }} />)}
+        {bars.map((height, index) => <span key={index} className="w-0.5 rounded-full bg-current" style={{ height }} />)}
       </span>
       <span className="ml-auto text-xs tabular-nums opacity-70">{audioDurationLabel(seconds)}</span>
-      <audio
-        ref={player}
-        src={dataUrl}
-        preload="metadata"
-        className="hidden"
-        onLoadedMetadata={(event) => measure(event.currentTarget)}
-        onEnded={() => setPlaying(false)}
-      />
+      {src && (
+        <audio
+          ref={player}
+          src={src}
+          preload="metadata"
+          className="hidden"
+          onLoadedMetadata={(event) => measure(event.currentTarget)}
+          onEnded={() => setPlaying(false)}
+        />
+      )}
     </button>
   )
 }
