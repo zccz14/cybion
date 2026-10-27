@@ -31,12 +31,22 @@ export function threadImage(record: HistoryRecord): ThreadImage | null {
   return viewed !== null ? { source: viewed, kind: "viewed" } : null
 }
 
+// A retry notice is the controller's own recovery bookkeeping too: the Thread scheduled
+// another attempt instead of answering, so the record carries the time of that attempt and
+// no turn output. Folding it into the process group keeps an automatic retry out of the
+// conversation, where it would read as the turn's answer.
+export function isRetryNotice(record: HistoryRecord) {
+  if (record.kind !== "activity") return false
+  return typeof historyPayloadObject(record.payload)?.next_retry_at === "number"
+}
+
 function isStandaloneRecord(record: HistoryRecord) {
   if (record.kind === "input") return true
   // Every other activity is a status the turn itself produced. A Manual load or
-  // unload is the controller's own bookkeeping between requests, so it belongs to
-  // the process around it and stays folded with the request that carried it.
-  if (record.kind === "activity") return !isManualNotice(record)
+  // unload and a scheduled retry are the controller's own bookkeeping between
+  // requests, so they belong to the process around them and stay folded with the
+  // request that carried them.
+  if (record.kind === "activity") return !isManualNotice(record) && !isRetryNotice(record)
   // A checkpoint is a compression boundary, not process: it stays in the conversation like a
   // reply, ends the group before it, and starts none.
   if (record.kind === "checkpoint") return true
@@ -132,9 +142,10 @@ export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHis
 // Minimal mode keeps one tail candidate per turn: the last activity or message record.
 // Earlier activities, earlier replies, tool turns, and checkpoints all fold around it: a
 // checkpoint keeps its own card only where the turn shows it, so minimal mode still folds it.
-// A Manual notice is never a candidate: it reports controller bookkeeping, not the turn's outcome.
+// A Manual or retry notice is never a candidate: it reports controller bookkeeping, not the
+// turn's outcome.
 function threadHistoryTailCandidate(record: HistoryRecord) {
-  if (record.kind === "activity") return !isManualNotice(record)
+  if (record.kind === "activity") return !isManualNotice(record) && !isRetryNotice(record)
   return record.kind === "response_output"
     && record.payload !== null && typeof record.payload === "object"
     && "type" in record.payload && record.payload.type === "message"

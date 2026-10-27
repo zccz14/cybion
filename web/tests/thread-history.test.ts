@@ -1,10 +1,14 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, isRetryNotice, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id, screenshot = false): HistoryRecord {
   return { id, thread_id: "thread-a", kind, payload, created_at, ...(screenshot ? { screenshot: true } : {}) }
+}
+
+function shape(entries: ReturnType<typeof groupThreadHistory>) {
+  return entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id)
 }
 
 test("a Worker call stays in flight until its own output record lands", () => {
@@ -76,7 +80,6 @@ test("a Manual load or unload is controller bookkeeping, so it folds into the pr
     // Every other activity is a status the turn produced and stays in the conversation.
     record(9, "activity", { role: "system", content: "Request failed: tls" }),
   ]
-  const shape = (entries: ReturnType<typeof groupThreadHistory>) => entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id)
   assert.deepEqual(shape(groupThreadHistory(records)), [1, [2, 3, 4, 5], 6, [7, 8], 9])
   // The group still measures the whole span it now holds.
   const first = groupThreadHistory(records)[1]
@@ -90,6 +93,45 @@ test("a Manual load or unload is controller bookkeeping, so it folds into the pr
     record(4, "tool_output"),
   ])), [1, 2, [3, 4]])
   assert.deepEqual(shape(groupThreadHistoryMinimal([record(1, "input"), notice(2, "manual_loaded")])), [1, [2]])
+})
+
+test("a retry the Thread scheduled for itself is bookkeeping, so it folds into the process group", () => {
+  const retry = (id: number) => record(id, "activity", {
+    role: "system",
+    content: "Transient error; retry 1/4 scheduled: upstream Responses stream: Transport error: error decoding response body",
+    next_retry_at: id + 2,
+  })
+  const records = [
+    record(1, "input"),
+    retry(2),
+    record(3, "response_output", { type: "reasoning" }),
+    retry(4),
+    record(5, "tool_output"),
+  ]
+  assert.deepEqual(shape(groupThreadHistory(records)), [1, [2, 3, 4, 5]])
+  // The group spans the attempts it holds, notices included.
+  const group = groupThreadHistory(records)[1]
+  assert.equal(group.type, "process")
+  if (group.type === "process") assert.deepEqual([group.startedAt, group.finishedAt], [2, 5])
+  // A retry the Thread gave up on is the turn's outcome, so it keeps a card of its own.
+  assert.deepEqual(shape(groupThreadHistory([...records, record(6, "activity", { role: "system", content: "Request failed: exhausted" })])), [1, [2, 3, 4, 5], 6])
+  // Minimal mode never keeps a retry notice as the turn's outcome: it folds with the process.
+  assert.deepEqual(shape(groupThreadHistoryMinimal([record(1, "input"), retry(2), record(3, "response_output", { type: "message", content: [] })])), [1, [2], 3])
+  assert.deepEqual(shape(groupThreadHistoryMinimal([record(1, "input"), retry(2)])), [1, [2]])
+})
+
+test("a retry notice is recognised by the attempt it scheduled, not by its wording", () => {
+  const notice = record(2, "activity", { role: "system", content: "Transient error; retry 1/4 scheduled: closed", next_retry_at: 4 })
+  assert.equal(isRetryNotice(notice), true)
+  // Rewording the notice cannot let it escape the fold.
+  assert.equal(isRetryNotice({ ...notice, payload: { role: "system", content: "Retrying in 2s", next_retry_at: 4 } }), true)
+  assert.equal(isRetryNotice({ ...notice, kind: "input" }), false)
+  assert.equal(isRetryNotice({ ...notice, kind: "tool_output" }), false)
+  // A record without a scheduled attempt stays a status card the reader can see.
+  assert.equal(isRetryNotice({ ...notice, payload: { role: "system", content: "Transient error; retry 1/4 scheduled: closed" } }), false)
+  assert.equal(isRetryNotice({ ...notice, payload: { role: "system", content: "Request failed: exhausted" } }), false)
+  assert.equal(isRetryNotice({ ...notice, payload: { next_retry_at: "4" } }), false)
+  assert.equal(isRetryNotice({ ...notice, payload: null }), false)
 })
 
 test("a checkpoint is a compression boundary: it stays in the conversation and splits the groups around it", () => {
