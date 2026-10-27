@@ -8451,9 +8451,7 @@ fn responses_tools(
     if image_generation {
         tools.push(TOOL_CATALOG["native"]["normai_image_generation"].clone());
     }
-    if web_search || image_generation {
-        // The speech-to-text tool rides along with the other NormAI native
-        // tools; the tool itself answers when the Thread has no model.
+    if audio_transcription {
         tools.push(TOOL_CATALOG["native"]["normai_audio_transcription"].clone());
     }
     Value::Array(tools)
