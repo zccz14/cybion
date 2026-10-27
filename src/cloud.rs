@@ -801,9 +801,7 @@ fn audio_protocol_item(item: &mut Value) {
             .get("provisional_note")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!("[audio attachment ref={reference} type={media_type}]")
-            });
+            .unwrap_or_else(|| format!("[audio attachment ref={reference} type={media_type}]"));
         *part = json!({"type":"input_text","text":note});
     }
 }
