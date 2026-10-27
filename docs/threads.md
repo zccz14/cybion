@@ -52,8 +52,9 @@ base64 length.
 The UI exposes `idle`, `running`, and `failed` thread states. Failures append
 an activity record and leave the thread ready for a later input. While a Thread
 runs, its view also carries `running_summary`: the one-sentence intent of the
-newest unanswered Worker call in the current turn, or `null` while it waits on
-the model or has no Worker call in flight.
+newest unanswered Worker call in the current turn, or, with no call in flight,
+the newest reasoning summary recorded after the last input or tool result. It is
+`null` when neither source has anything to say.
 
 The composer also offers **Stop**, **Continue**, and **Compact**:
 
