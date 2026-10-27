@@ -95,11 +95,14 @@ input, assembled into the request copy and never into `history_records`. See
 [Sticky notes](notes.md).
 
 Every Worker tool call must include an exact `worker_id` from
-`cybion_list_workers`; a Worker is never chosen implicitly. Registration does
-not imply availability: inference keeps Worker tool definitions available
-whenever the user has registered Workers, even if all of them are offline, and
-execution checks availability, returning an offline tool error before queueing
-a call.
+`cybion_list_workers`; a Worker is never chosen implicitly. It must also carry
+a non-empty `summary`: one short sentence, in the user's language, saying why
+the model makes the call. The Controller keeps the summary out of the arguments
+the Worker receives and renders it on the call card in the conversation.
+Registration does not imply availability: inference keeps Worker tool
+definitions available whenever the user has registered Workers, even if all of
+them are offline, and execution checks availability, returning an offline tool
+error before queueing a call.
 
 System-authored prompts and tool descriptions use neutral Manual, Worker, and
 conversation terminology. User-authored metadata, content, and conversation

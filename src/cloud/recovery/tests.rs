@@ -137,7 +137,7 @@ async fn restart_resumes_only_running_threads_once_from_latest_committed_history
 async fn restart_waits_for_original_tool_and_replays_its_result_without_creating_another_call() {
     let (_root, state, user, thread, input) = fixture().await;
     let worker = seed_worker(&state, &user).await;
-    let item=ResponseItem::from_value(json!({"type":"function_call","id":"tool","call_id":"original-call","name":"bash","arguments":json!({"worker_id":worker,"command":"echo once"}).to_string()})).unwrap();
+    let item=ResponseItem::from_value(json!({"type":"function_call","id":"tool","call_id":"original-call","name":"bash","arguments":json!({"worker_id":worker,"summary":"inspect the Worker","command":"echo once"}).to_string()})).unwrap();
     append_response_output_items(&state, &user, &thread, input, &[item])
         .await
         .unwrap();
@@ -382,7 +382,7 @@ async fn tool_output_and_queue_creation_roll_back_together_on_storage_failure() 
     let (_root, state, user, thread, input) = fixture().await;
     let worker = seed_worker(&state, &user).await;
     user_db(&state,&user,false,|c|{c.execute_batch("CREATE TRIGGER reject_call BEFORE INSERT ON worker_calls BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END;")?;Ok(())}).await.unwrap();
-    let item=ResponseItem::from_value(json!({"type":"function_call","call_id":"call","name":"bash","arguments":json!({"worker_id":worker,"command":"echo once"}).to_string()})).unwrap();
+    let item=ResponseItem::from_value(json!({"type":"function_call","call_id":"call","name":"bash","arguments":json!({"worker_id":worker,"summary":"inspect the Worker","command":"echo once"}).to_string()})).unwrap();
     assert!(
         append_response_output_items(&state, &user, &thread, input, &[item])
             .await
@@ -438,7 +438,7 @@ async fn serve_smoke_controller() {
 async fn repeated_committed_call_id_is_not_appended_or_enqueued_twice() {
     let (_root, state, user, thread, input) = fixture().await;
     let worker = seed_worker(&state, &user).await;
-    let item=ResponseItem::from_value(json!({"type":"function_call","id":"tool","call_id":"same","name":"bash","arguments":json!({"worker_id":worker,"command":"echo once"}).to_string()})).unwrap();
+    let item=ResponseItem::from_value(json!({"type":"function_call","id":"tool","call_id":"same","name":"bash","arguments":json!({"worker_id":worker,"summary":"inspect the Worker","command":"echo once"}).to_string()})).unwrap();
     let first =
         append_response_output_items(&state, &user, &thread, input, std::slice::from_ref(&item))
             .await
@@ -479,7 +479,7 @@ async fn seed_delivered_call(
     let worker = seed_worker(state, user).await;
     let item = ResponseItem::from_value(json!({
         "type":"function_call","id":"tool","call_id":call_id,"name":"bash",
-        "arguments":json!({"worker_id":worker,"command":command,"timeout_seconds":1}).to_string()
+        "arguments":json!({"worker_id":worker,"summary":"inspect the Worker","command":command,"timeout_seconds":1}).to_string()
     }))
     .unwrap();
     append_response_output_items(state, user, thread, input, &[item])
@@ -828,7 +828,7 @@ fn delayed_call_countdown_runs_from_its_record_not_from_the_restart() {
 async fn restart_dispatches_a_delayed_call_whose_wait_already_elapsed() {
     let (_root, state, user, thread, input) = fixture().await;
     let worker = seed_worker(&state, &user).await;
-    let item=ResponseItem::from_value(json!({"type":"function_call","id":"delayed","call_id":"delayed-call","name":"bash","arguments":json!({"worker_id":worker,"command":"echo after wait","delay_seconds":2100}).to_string()})).unwrap();
+    let item=ResponseItem::from_value(json!({"type":"function_call","id":"delayed","call_id":"delayed-call","name":"bash","arguments":json!({"worker_id":worker,"summary":"inspect the Worker","command":"echo after wait","delay_seconds":2100}).to_string()})).unwrap();
     append_response_output_items(&state, &user, &thread, input, &[item])
         .await
         .unwrap();

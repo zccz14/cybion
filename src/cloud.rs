@@ -7979,6 +7979,7 @@ enum PendingToolCall {
 #[derive(Deserialize)]
 struct WorkerArguments {
     worker_id: String,
+    summary: Option<String>,
     delay_seconds: Option<u64>,
 }
 
@@ -8724,18 +8725,30 @@ fn prepare_worker_arguments(
         return Err(format!("unsupported Worker tool: {name}"));
     }
     let worker: WorkerArguments = serde_json::from_str(input).map_err(|error| {
-        format!("Worker tool arguments must contain an explicit worker_id: {error}")
+        format!("Worker tool arguments must include a worker_id and a summary: {error}")
     })?;
     if worker.worker_id.trim().is_empty() {
         return Err("Worker tool arguments must include worker_id".to_owned());
+    }
+    if worker
+        .summary
+        .as_deref()
+        .is_none_or(|summary| summary.trim().is_empty())
+    {
+        return Err("Worker tool arguments must include a summary of the call's intent".to_owned());
     }
     if let Some(seconds) = worker.delay_seconds
         && seconds < MIN_WAIT_SECONDS
     {
         return Err("Worker delay_seconds must be a positive number of seconds".to_owned());
     }
-    let arguments = serde_json::from_str(input)
+    let mut arguments: Value = serde_json::from_str(input)
         .map_err(|error| format!("invalid Worker arguments: {error}"))?;
+    // The summary is display metadata for the call card; the Worker receives
+    // only the tool's own arguments.
+    if let Some(object) = arguments.as_object_mut() {
+        object.remove("summary");
+    }
     Ok((worker.worker_id, arguments, worker.delay_seconds))
 }
 
@@ -11869,43 +11882,79 @@ mod tests {
     }
 
     #[test]
+    fn worker_tools_require_a_summary_of_the_call_intent() {
+        for tool in worker_tools().as_array().unwrap() {
+            let summary = &tool["parameters"]["properties"]["summary"];
+            assert_eq!(summary["type"], "string");
+            assert!(
+                summary["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("intent summary")
+            );
+            assert!(
+                tool["parameters"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == "summary")
+            );
+        }
+    }
+
+    #[test]
     fn worker_tool_names_match_the_declared_tools() {
         for name in ["bash", "browser_control", "computer_use", "view_image"] {
-            let input = json!({"worker_id": "worker", "action": "inspect"}).to_string();
+            let input = json!({"worker_id": "worker", "summary": "inspect the Worker", "action": "inspect"})
+                .to_string();
             assert!(
                 prepare_worker_arguments(name, None, &input).is_ok(),
                 "{name}"
             );
         }
-        let input = json!({"worker_id": "worker", "action": "inspect"}).to_string();
+        let input =
+            json!({"worker_id": "worker", "summary": "inspect the Worker", "action": "inspect"})
+                .to_string();
         assert!(prepare_worker_arguments("browser", None, &input).is_err());
     }
 
     #[test]
     fn worker_delay_seconds_must_be_positive() {
-        let input = json!({"worker_id": "worker", "command": "true"}).to_string();
+        let input =
+            json!({"worker_id": "worker", "summary": "check", "command": "true"}).to_string();
         assert!(prepare_worker_arguments("bash", None, &input).is_ok());
         for seconds in [1_u64, 600, 86_400] {
-            let input = json!({"worker_id": "worker", "command": "true", "delay_seconds": seconds})
+            let input = json!({"worker_id": "worker", "summary": "check", "command": "true", "delay_seconds": seconds})
                 .to_string();
             assert!(
                 prepare_worker_arguments("bash", None, &input).is_ok(),
                 "delay_seconds: {seconds}"
             );
         }
-        let input =
-            json!({"worker_id": "worker", "command": "true", "delay_seconds": 0}).to_string();
+        let input = json!({"worker_id": "worker", "summary": "check", "command": "true", "delay_seconds": 0})
+            .to_string();
         assert!(prepare_worker_arguments("bash", None, &input).is_err());
     }
 
     #[test]
     fn worker_arguments_forward_tool_specific_fields() {
-        let input =
-            json!({"worker_id": "worker", "command": "true", "timeout_seconds": 42}).to_string();
+        let input = json!({"worker_id": "worker", "summary": "check disk", "command": "true", "timeout_seconds": 42})
+            .to_string();
         let (worker_id, arguments, delay) = prepare_worker_arguments("bash", None, &input).unwrap();
         assert_eq!(worker_id, "worker");
         assert_eq!(arguments["timeout_seconds"], 42);
+        assert!(arguments.get("summary").is_none());
         assert!(delay.is_none());
+    }
+
+    #[test]
+    fn worker_arguments_require_a_non_empty_summary() {
+        for input in [
+            json!({"worker_id": "worker", "command": "true"}).to_string(),
+            json!({"worker_id": "worker", "summary": "   ", "command": "true"}).to_string(),
+        ] {
+            assert!(prepare_worker_arguments("bash", None, &input).is_err());
+        }
     }
 
     #[test]
