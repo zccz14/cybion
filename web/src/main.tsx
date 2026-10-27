@@ -78,6 +78,7 @@ import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { inFlightCallIds, loadedThreadRecords, oldestRecordId, pollThreadHistory, recordInFlight, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { manualLoadNotice, type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
+import { defaultsChanged } from "@/lib/thread-defaults"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useComposerImages } from "@/hooks/use-composer-images"
 import { useComposerAudio } from "@/hooks/use-composer-audio"
@@ -3336,16 +3337,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
     },
   })
   const value = draft ?? defaults.data
-  const changed = value && defaults.data && (
-    value.model !== defaults.data.model ||
-    value.upstream_id !== defaults.data.upstream_id ||
-    value.reasoning_effort !== defaults.data.reasoning_effort ||
-    value.service_tier_fast !== defaults.data.service_tier_fast ||
-    value.context_budget_tokens !== defaults.data.context_budget_tokens ||
-    value.minimal_mode !== defaults.data.minimal_mode ||
-    value.image_generation_model !== defaults.data.image_generation_model ||
-    value.max_loaded_manuals !== defaults.data.max_loaded_manuals
-  )
+  const changed = value && defaults.data && defaultsChanged(value, defaults.data)
   function edit(next: ThreadDefaults) {
     setDraft(next)
     save.reset()
