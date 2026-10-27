@@ -311,6 +311,19 @@ parts. Reasoning text survives because a thinking-mode provider (DeepSeek)
 rejects a replayed tool-call turn whose assistant reasoning is missing, and it
 is plain text the next model reads like any other.
 
+A strict validator can still refuse what the replay carries, and it names one
+`input[...]` parameter per request: `Unknown parameter: 'input[9].status'`,
+`Expected an ID that begins with 'rs'` for an item `id` that came from another
+issuer, and `Expected an array with maximum length 0` for a `reasoning` item's
+`content`. A refusal like that is a verdict about the replay, not about the
+request's own shape — an unknown field outside `input` stays a real error — so
+the turn answers the first refusal inside the same inference and replays the
+same context once in portable form. Portable form drops the issuer-scoped fields
+from every item, `id` and `status`, and reduces a `reasoning` item to the summary
+the next model can read: its raw `content` disappears and, with no summary left,
+so does the item. Every other item keeps its text, and the retry costs one extra
+request per inference.
+
 The barrier itself is never sent upstream. Records appended after it replay
 unchanged, so the switched model's own envelopes survive. A checkpoint compiled
 after the barrier moves `idx_head` past it, and the barrier then has no effect.
