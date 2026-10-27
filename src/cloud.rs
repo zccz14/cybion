@@ -1098,6 +1098,7 @@ CREATE TABLE IF NOT EXISTS threads (
   minimal_mode INTEGER,
   image_generation_model TEXT,
   max_loaded_manuals INTEGER,
+  audio_transcription_model TEXT,
   archived_at INTEGER,
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
@@ -1115,7 +1116,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   context_budget_tokens INTEGER NOT NULL DEFAULT 200000,
   minimal_mode INTEGER NOT NULL DEFAULT 0,
   image_generation_model TEXT NOT NULL DEFAULT '',
-  max_loaded_manuals INTEGER NOT NULL DEFAULT 12
+  max_loaded_manuals INTEGER NOT NULL DEFAULT 12,
+  audio_transcription_model TEXT
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1866,6 +1868,8 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
             "TEXT NOT NULL DEFAULT ''",
         ),
         ("threads", "max_loaded_manuals", "INTEGER"),
+        ("threads", "audio_transcription_model", "TEXT"),
+        ("thread_defaults", "audio_transcription_model", "TEXT"),
         (
             "thread_defaults",
             "max_loaded_manuals",
@@ -2142,6 +2146,9 @@ struct ThreadView {
     /// Per-thread cap on the Manuals this Thread keeps loaded; `None` follows
     /// the user default.
     max_loaded_manuals: Option<i64>,
+    /// Per-thread speech-to-text model override; `None` follows the user
+    /// default and null at both levels keeps audio input disabled.
+    audio_transcription_model: Option<String>,
     /// When the thread was archived; `None` keeps it in the thread list.
     archived_at: Option<i64>,
     /// Input tokens of the most recent inference request, for the context display.
@@ -2454,6 +2461,10 @@ struct ThreadDefaults {
     /// its own. A load past the cap is refused, never truncated.
     #[serde(default = "default_max_loaded_manuals")]
     max_loaded_manuals: i64,
+    /// Speech-to-text model for threads without an override; null keeps audio
+    /// input disabled until an `sst` model is picked.
+    #[serde(default)]
+    audio_transcription_model: Option<String>,
 }
 
 fn default_context_budget_tokens() -> i64 {
@@ -2475,6 +2486,7 @@ impl Default for ThreadDefaults {
             minimal_mode: false,
             image_generation_model: String::new(),
             max_loaded_manuals: manual_loads::DEFAULT_MAX_LOADED_MANUALS,
+            audio_transcription_model: None,
         }
     }
 }
@@ -2506,6 +2518,10 @@ struct UpdateThreadInput {
     // cap on Manuals this Thread keeps loaded.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     max_loaded_manuals: Option<Option<i64>>,
+    // `null` clears the override back to the user default; an empty string
+    // disables audio input for the thread; a model name enables it.
+    #[serde(default, deserialize_with = "deserialize_double_option_string")]
+    audio_transcription_model: Option<Option<String>>,
     /// `true` archives the thread and hides it from the thread list; `false`
     /// restores it. Omitted keeps the current state.
     #[serde(default)]
@@ -2755,6 +2771,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let cached_tokens: i64 = row.get(12)?;
     let missing_cache_requests: i64 = row.get(13)?;
     let max_loaded_manuals: Option<i64> = row.get(22)?;
+    let audio_transcription_model: Option<String> = row.get(23)?;
     let cost_usd_nanos: i64 = row.get(23)?;
     let cost_settled_requests: i64 = row.get(24)?;
     Ok(ThreadView {
@@ -2776,6 +2793,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         minimal_mode: row.get(16)?,
         image_generation_model: row.get(21)?,
         max_loaded_manuals,
+        audio_transcription_model,
         archived_at: row.get(18)?,
         usage: ThreadUsage {
             input_tokens,
@@ -2897,6 +2915,14 @@ fn model_id(value: String) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+/// Trims an optional model choice; empty or whitespace-only means null, which
+/// keeps the feature it configures switched off.
+fn optional_model(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// Validates an image generation model choice: empty disables image
 /// generation; a name follows the chat-model identifier rules.
 fn image_generation_model(value: String) -> Result<String, ApiError> {
@@ -3004,7 +3030,7 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -3017,6 +3043,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                     minimal_mode: row.get::<_, i64>(5)? != 0,
                     image_generation_model: row.get(6)?,
                     max_loaded_manuals: row.get(7)?,
+                    audio_transcription_model: row.get(8)?,
                 })
             },
         )
@@ -3052,14 +3079,15 @@ async fn update_thread_defaults(
         minimal_mode: input.minimal_mode,
         image_generation_model: image_generation_model(input.image_generation_model)?,
         max_loaded_manuals: manual_loads::max_loaded_manuals(input.max_loaded_manuals)?,
+        audio_transcription_model: optional_model(input.audio_transcription_model),
     };
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = defaults.upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals) VALUES(1,?,?,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model) VALUES(1,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model",
             params![
                 defaults.model,
                 defaults.upstream_id,
@@ -3068,7 +3096,8 @@ async fn update_thread_defaults(
                 defaults.context_budget_tokens,
                 defaults.minimal_mode,
                 defaults.image_generation_model,
-                defaults.max_loaded_manuals
+                defaults.max_loaded_manuals,
+                defaults.audio_transcription_model
             ],
         )?;
         Ok(defaults)
@@ -3180,6 +3209,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        t.minimal_mode,t.purpose,t.archived_at,t.created_by,t.external_ref,
        t.image_generation_model,
        t.max_loaded_manuals,
+       t.audio_transcription_model,
        COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0)
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
@@ -3271,6 +3301,7 @@ async fn create_thread_for(
             minimal_mode: None,
             image_generation_model: None,
             max_loaded_manuals: None,
+            audio_transcription_model: None,
             archived_at: None,
             context_tokens: None,
             status: "idle".to_owned(),
@@ -3787,6 +3818,7 @@ async fn update_thread(
         .image_generation_model
         .map(|value| value.map(image_generation_model).transpose())
         .transpose()?;
+    let audio_transcription_model = input.audio_transcription_model.clone().map(optional_model);
     let max_loaded_manuals = input
         .max_loaded_manuals
         .map(|value| value.map(manual_loads::max_loaded_manuals).transpose())
@@ -3811,7 +3843,7 @@ async fn update_thread(
             require_upstream(connection, id)?;
         }
         let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -3826,6 +3858,8 @@ async fn update_thread(
                 image_generation_model.flatten(),
                 max_loaded_manuals.is_some(),
                 max_loaded_manuals.flatten(),
+                audio_transcription_model.is_some(),
+                audio_transcription_model.flatten(),
                 input.archived.is_some(),
                 input.archived.map(|archived| archived.then_some(updated_at)),
                 updated_at,
@@ -5034,6 +5068,7 @@ async fn process_request(
                 minimal_mode: None,
                 image_generation_model: None,
                 max_loaded_manuals: None,
+                audio_transcription_model: None,
                 archived_at: None,
                 context_tokens: None,
                 status: "failed".to_owned(),
@@ -10185,6 +10220,7 @@ mod tests {
             minimal_mode: None,
             image_generation_model: None,
             max_loaded_manuals: None,
+            audio_transcription_model: None,
             archived: Some(archived),
         }
     }
