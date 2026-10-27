@@ -3544,3 +3544,137 @@ async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     .unwrap();
     assert_eq!(stored, 0);
 }
+
+/// A strict Responses validator refuses replayed fields one name per request
+/// (`input[9].status`, then a foreign `id`, then `content`). The turn answers
+/// the first refusal inside the same inference, replaying the same context
+/// without the issuer-scoped fields, so a Thread that switched to a strict model
+/// keeps working instead of recording a failed turn.
+#[tokio::test]
+async fn inference_replays_portably_when_a_strict_validator_refuses_a_replay_field() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "portable-replay-turn-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            json!({
+                "type":"reasoning","id":"0b0a-uuid","status":"completed","summary":[],
+                "content":[{"type":"reasoning_text","text":"private thinking"}],
+                "encrypted_content":"cipher"
+            }),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "response_output",
+            json!({
+                "type":"function_call","id":"fc-uuid","status":"completed",
+                "name":"list_manuals","call_id":"call-a","arguments":"{}"
+            }),
+        );
+        insert_record(
+            connection,
+            &thread_id,
+            "tool_output",
+            json!({"type":"function_call_output","call_id":"call-a","output":"{}"}),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let input = input_record(&state, &user, &thread).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let refused = read_json_request(&mut socket).await;
+        let body = json!({
+            "error":{
+                "message":"Unknown parameter: 'input[1].status'.",
+                "type":"invalid_request_error",
+                "param":"input[1].status",
+                "code":"unknown_parameter"
+            }
+        })
+        .to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let replayed = read_json_request(&mut socket).await;
+        let body = json!({
+            "id":"r1","end_turn":true,
+            "output":[{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"done"}]}]
+        })
+        .to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        (refused, replayed)
+    });
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
+    };
+    let (_tx, mut rx) = watch::channel(false);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (refused, replayed) = server.await.unwrap();
+    let refused_items = refused["input"].as_array().unwrap();
+    assert!(
+        refused_items
+            .iter()
+            .any(|item| item.get("status").is_some()),
+        "the first attempt replays the recorded item verbatim: {refused_items:?}"
+    );
+    let items = replayed["input"].as_array().unwrap();
+    assert!(
+        items
+            .iter()
+            .all(|item| item.get("id").is_none() && item.get("status").is_none()),
+        "the replay drops the ids and statuses of the model that issued them: {items:?}"
+    );
+    assert!(
+        !items.iter().any(|item| item["type"] == "reasoning"),
+        "a reasoning item with nothing but foreign thinking text disappears: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item["call_id"] == "call-a"),
+        "the tool call it belongs to keeps replaying: {items:?}"
+    );
+    let failed: i64 = user_db(&state, &user, false, |connection| {
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM history_records WHERE payload LIKE '%Request failed%'",
+            [],
+            |row| row.get(0),
+        )?)
+    })
+    .await
+    .unwrap();
+    assert_eq!(failed, 0, "the repaired turn never fails the Thread");
+}

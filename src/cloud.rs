@@ -7275,27 +7275,35 @@ async fn send_responses_request(
         image_generation,
     );
     let body = serialize_responses_payload(payload)?;
-    let mut request = state
-        .client
-        .post(format!(
-            "{}/responses",
-            upstream.base_url.trim_end_matches('/')
-        ))
-        .bearer_auth(upstream.api_key.as_str())
-        .header("Accept", "text/event-stream")
-        .header("originator", CYBION_ORIGINATOR)
-        .header("Content-Type", "application/json")
-        .body(body);
+    let mut headers = Vec::new();
     if let Some((spec, _)) = audit.as_ref() {
         for (key, header) in [
             (EXPERIMENTAL_THREAD_ID_HEADER_KEY, THREAD_ID_HEADER),
             (EXPERIMENTAL_SESSION_ID_HEADER_KEY, SESSION_ID_HEADER),
         ] {
             if experimental_header_enabled(state, key).await? {
-                request = request.header(header, &spec.thread_id);
+                headers.push((header, spec.thread_id.clone()));
             }
         }
     }
+    let build_request = |body: Vec<u8>| {
+        let request = state
+            .client
+            .post(format!(
+                "{}/responses",
+                upstream.base_url.trim_end_matches('/')
+            ))
+            .bearer_auth(upstream.api_key.as_str())
+            .header("Accept", "text/event-stream")
+            .header("originator", CYBION_ORIGINATOR)
+            .header("Content-Type", "application/json")
+            .body(body);
+        headers
+            .iter()
+            .fold(request, |request, (header, thread_id)| {
+                request.header(*header, thread_id)
+            })
+    };
     let audit_id = if let Some((spec, _)) = audit.as_ref() {
         Some(begin_reasoning_audit(state, spec).await?)
     } else {
@@ -7303,38 +7311,53 @@ async fn send_responses_request(
     };
     let mut cancellation = audit.as_ref().and_then(|(_, receiver)| receiver.clone());
     let counters = traffic_user.map(|user| state.traffic.for_user(&user.id));
-    let response = match send_with_cancellation(request, &mut cancellation, counters.clone()).await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
-                finish_reasoning_audit(
-                    state,
-                    spec,
-                    id,
-                    if error.is_cancelled() {
-                        "cancelled"
-                    } else {
-                        "failed"
-                    },
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(error.message.as_str()),
-                )
-                .await;
+    // A strict Responses validator refuses replay fields it does not know, one
+    // name per request (`input[9].status`, then `id`, then `content`). The turn
+    // answers the first refusal by replaying the same context in portable form
+    // — one retry, and only for a parameter inside `input`. Each attempt borrows
+    // the body so the payload stays available for that replay.
+    let mut body = body;
+    let mut portable_replay = false;
+    let (response, response_id) = loop {
+        let response = match send_with_cancellation(
+            build_request(body.clone()),
+            &mut cancellation,
+            counters.clone(),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
+                    finish_reasoning_audit(
+                        state,
+                        spec,
+                        id,
+                        if error.is_cancelled() {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(error.message.as_str()),
+                    )
+                    .await;
+                }
+                return Err(error);
             }
-            return Err(error);
+        };
+        let response = traffic::upstream_response(response, counters.clone());
+        let status = response.status();
+        let response_id = gateway_request_id(response.headers());
+        if status.is_success() {
+            break (response, response_id);
         }
-    };
-    let response = traffic::upstream_response(response, counters);
-    let status = response.status();
-    let response_id = gateway_request_id(response.headers());
-    if !status.is_success() {
         let retry_after_ms = recovery::retry_after(response.headers());
-        let body = match read_response_body(response, &mut cancellation).await {
-            Ok(body) => body,
+        let error_body = match read_response_body(response, &mut cancellation).await {
+            Ok(error_body) => error_body,
             Err(error) => {
                 if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
                     finish_reasoning_audit(
@@ -7357,25 +7380,38 @@ async fn send_responses_request(
                 return Err(error);
             }
         };
+        if !portable_replay && replayed_field_refused(&error_body) {
+            portable_replay = true;
+            if let Some((spec, _)) = audit.as_ref() {
+                tracing::warn!(
+                    thread_id = %spec.thread_id,
+                    model = %spec.model,
+                    "the upstream refused a replayed field; replaying in portable form"
+                );
+            }
+            body = portable_replay_body(body)?;
+            continue;
+        }
         let mut message = format!(
             "upstream Responses request failed with HTTP {status}: {}",
-            upstream_error_detail(&body)
+            upstream_error_detail(&error_body)
         );
         if status == StatusCode::UNAUTHORIZED {
             message.push_str(
                 ". Open Configuration and verify the Responses-compatible API key, then retry or continue this Thread.",
             );
         }
-        let error = if status == StatusCode::PAYLOAD_TOO_LARGE || context_overflow_response(&body) {
-            ApiError::context_overflow(message)
-        } else if (status.is_server_error() || matches!(status.as_u16(), 408 | 429))
-            && !body.contains("insufficient_quota")
-            && !body.contains("usage_not_included")
-        {
-            ApiError::transient(message, retry_after_ms)
-        } else {
-            ApiError::unavailable(message)
-        };
+        let error =
+            if status == StatusCode::PAYLOAD_TOO_LARGE || context_overflow_response(&error_body) {
+                ApiError::context_overflow(message)
+            } else if (status.is_server_error() || matches!(status.as_u16(), 408 | 429))
+                && !error_body.contains("insufficient_quota")
+                && !error_body.contains("usage_not_included")
+            {
+                ApiError::transient(message, retry_after_ms)
+            } else {
+                ApiError::unavailable(message)
+            };
         if let (Some((spec, _)), Some(id)) = (audit.as_ref(), audit_id) {
             finish_reasoning_audit(
                 state,
@@ -7391,7 +7427,7 @@ async fn send_responses_request(
             .await;
         }
         return Err(error);
-    }
+    };
 
     let content_type = response
         .headers()
@@ -7887,6 +7923,56 @@ fn sanitize_responses_input(payload: &mut Value) {
             _ => {}
         }
     }
+}
+
+/// A strict Responses validator names the replayed field it refuses, as a path
+/// into `input` (`Unknown parameter: 'input[9].status'`). Such a verdict is
+/// about the replay, not about this request's own shape, so the turn answers it
+/// by replaying the same context in portable form; a refusal of anything outside
+/// `input` is a real request error and stays one.
+fn replayed_field_refused(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/param")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|param| param.starts_with("input["))
+}
+
+/// The same context with every issuer-scoped field removed. `id` is namespaced
+/// by the model that produced the item (`rs_`, `fc_`, `msg_`), `status` is the
+/// completion state of the response that produced it, and a `reasoning` item's
+/// `content` is thinking text that only its issuer accepts back. A `reasoning`
+/// item left with no summary to replay disappears, envelope or not.
+fn portable_replay_body(body: Vec<u8>) -> Result<Vec<u8>, ApiError> {
+    let mut payload: Value = serde_json::from_slice(&body).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to re-read the upstream Responses payload: {error}"
+        ))
+    })?;
+    if let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) {
+        items.retain_mut(|item| {
+            let Some(object) = item.as_object_mut() else {
+                return true;
+            };
+            object.remove("id");
+            object.remove("status");
+            if object.get("type").and_then(Value::as_str) != Some("reasoning") {
+                return true;
+            }
+            object.remove("content");
+            // The envelope stays issuer-bound, so it cannot carry the retry: a
+            // reasoning item survives only as the summary a model can read.
+            object
+                .get("summary")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| !parts.is_empty())
+        });
+    }
+    serialize_responses_payload(payload)
 }
 
 fn upstream_error_detail(body: &str) -> String {
@@ -12511,6 +12597,70 @@ mod tests {
         assert_eq!(call.call_id, "call_1");
         assert_eq!(arguments["worker_id"], "worker-1");
         assert_eq!(response_text(&result.value).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_refused_replay_parameter_is_told_apart_from_a_request_error() {
+        // The two refusals production reported: a replayed `status`, and a
+        // foreign `id` namespace. Both name a path into `input`.
+        assert!(replayed_field_refused(
+            r#"{"error":{"message":"Unknown parameter: 'input[9].status'.","type":"invalid_request_error","param":"input[9].status","code":"unknown_parameter"}}"#
+        ));
+        assert!(replayed_field_refused(
+            r#"{"error":{"message":"Invalid 'input[1].id'.","param":"input[1].id","code":"invalid_value"}}"#
+        ));
+        // A request that is wrong on its own terms, not about the replay.
+        assert!(!replayed_field_refused(
+            r#"{"error":{"message":"Unknown parameter: 'tools[0].name'.","param":"tools[0].name"}}"#
+        ));
+        assert!(!replayed_field_refused(
+            r#"{"error":{"message":"The `reasoning_text` in the thinking mode must be passed back to the API.","param":null,"code":"invalid_request_error"}}"#
+        ));
+        assert!(!replayed_field_refused(
+            r#"{"detail":"Stream must be set to true"}"#
+        ));
+        assert!(!replayed_field_refused("not json"));
+    }
+
+    #[test]
+    fn portable_replay_drops_issuer_fields_and_keeps_what_the_next_model_can_read() {
+        let body = serde_json::to_vec(&json!({
+            "model":"gpt-6-astra",
+            "input":[
+                {"role":"user","content":"hello"},
+                {"type":"reasoning","id":"rs-uuid","status":"completed",
+                 "summary":[{"type":"summary_text","text":"kept"}],
+                 "content":[{"type":"reasoning_text","text":"private thinking"}],
+                 "encrypted_content":"cipher"},
+                {"type":"reasoning","id":"rs-empty","status":"completed","summary":[],
+                 "content":[{"type":"reasoning_text","text":"nothing left"}]},
+                {"type":"message","id":"msg-uuid","status":"completed","role":"assistant",
+                 "content":[{"type":"output_text","text":"visible"}]},
+                {"type":"function_call","id":"fc-uuid","status":"completed","name":"bash",
+                 "call_id":"call-a","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call-a","output":"ok"}
+            ]
+        }))
+        .unwrap();
+        let portable: Value = serde_json::from_slice(&portable_replay_body(body).unwrap()).unwrap();
+        let items = portable["input"].as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            5,
+            "a reasoning item with nothing left to replay disappears: {items:?}"
+        );
+        assert_eq!(items[1]["type"], "reasoning");
+        assert_eq!(items[1]["summary"][0]["text"], "kept");
+        assert!(items.iter().all(|item| item.get("id").is_none()));
+        assert!(items.iter().all(|item| item.get("status").is_none()));
+        assert!(
+            items
+                .iter()
+                .all(|item| item["type"] != "reasoning" || item.get("content").is_none()),
+            "raw thinking text never reaches another model"
+        );
+        assert_eq!(items[2]["content"][0]["text"], "visible");
+        assert_eq!(items[3]["call_id"], "call-a");
     }
 
     #[test]
