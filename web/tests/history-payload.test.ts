@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { bashCallCountdown, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, webSearchFunctionCall } from "../src/lib/history-payload.ts"
+import { bashCallCountdown, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, viewImageFunctionCall, webSearchFunctionCall } from "../src/lib/history-payload.ts"
 
 test("conversation text is derived from stored protocol payloads", () => {
   for (const [payload, expected] of [
@@ -18,21 +18,21 @@ test("conversation text is derived from stored protocol payloads", () => {
   assert.equal(historyPayloadText(protocol), JSON.stringify(protocol, null, 2))
 })
 
-test("bash function calls preserve multiline commands, the call id and both clocks", () => {
+test("bash function calls preserve the intent summary, multiline commands, the call id and both clocks", () => {
   const command = 'cd ~/Projects/cybion\nprintf "你好\\n"'
-  const payload = { type: "function_call", id: "fc-1", call_id: "call-1", name: "bash", arguments: JSON.stringify({ worker_id: "worker-1", command, delay_seconds: 30, timeout_seconds: 900 }) }
-  assert.deepEqual(bashFunctionCall(payload), { callId: "call-1", workerId: "worker-1", command, delaySeconds: 30, timeoutSeconds: 900 })
+  const payload = { type: "function_call", id: "fc-1", call_id: "call-1", name: "bash", arguments: JSON.stringify({ worker_id: "worker-1", summary: "  inspect the workspace  ", command, delay_seconds: 30, timeout_seconds: 900 }) }
+  assert.deepEqual(bashFunctionCall(payload), { callId: "call-1", workerId: "worker-1", summary: "inspect the workspace", command, delaySeconds: 30, timeoutSeconds: 900 })
   const bare = { type: "function_call", name: "bash", arguments: JSON.stringify({ worker_id: "worker-1", command }) }
-  assert.deepEqual(bashFunctionCall(bare), { callId: null, workerId: "worker-1", command, delaySeconds: null, timeoutSeconds: null })
+  assert.deepEqual(bashFunctionCall(bare), { callId: null, workerId: "worker-1", summary: null, command, delaySeconds: null, timeoutSeconds: null })
   // The tool accepts whole seconds of at least 1; anything else is no clock at all.
   for (const value of [0, -5, 1.5, "60", null, true]) {
     const arguments_ = JSON.stringify({ worker_id: "worker-1", command, delay_seconds: value, timeout_seconds: value })
-    assert.deepEqual(bashFunctionCall({ ...bare, arguments: arguments_ }), { callId: null, workerId: "worker-1", command, delaySeconds: null, timeoutSeconds: null }, String(value))
+    assert.deepEqual(bashFunctionCall({ ...bare, arguments: arguments_ }), { callId: null, workerId: "worker-1", summary: null, command, delaySeconds: null, timeoutSeconds: null }, String(value))
   }
 })
 
 test("bash countdowns chain the controller delay into the Worker timeout", () => {
-  const call = { callId: "call-1", workerId: "worker-1", command: "pwd", delaySeconds: 60, timeoutSeconds: 300 }
+  const call = { callId: "call-1", workerId: "worker-1", summary: null, command: "pwd", delaySeconds: 60, timeoutSeconds: 300 }
   const startedAt = 1_000
   // The delay is served in the controller and the timeout clock starts where it ends.
   assert.deepEqual(bashCallCountdown(call, startedAt, startedAt), { phase: "delayed", seconds: 60 })
@@ -126,24 +126,33 @@ test("unrelated events and malformed native tool arguments keep the generic prot
   )
 })
 
-test("browser and desktop calls expose their action payloads", () => {
+test("view image calls expose the intent summary and the image path", () => {
+  const call = (args: unknown) => ({ type: "function_call", name: "view_image", arguments: JSON.stringify(args) })
+  assert.deepEqual(
+    viewImageFunctionCall(call({ worker_id: "worker-1", summary: "  check the rendered page  ", path: "/tmp/page.png" })),
+    { workerId: "worker-1", summary: "check the rendered page", path: "/tmp/page.png" },
+  )
+  assert.deepEqual(viewImageFunctionCall(call({ worker_id: "worker-1", path: "/tmp/page.png" })), { workerId: "worker-1", summary: null, path: "/tmp/page.png" })
+})
+
+test("browser and desktop calls expose the intent summary and their action payloads", () => {
   const browser = (args: unknown) => ({ type: "function_call", name: "browser_control", arguments: JSON.stringify(args) })
   for (const [payload, expected] of [
-    [browser({ action: "navigate", url: "https://example.com" }), { action: "navigate", url: "https://example.com" }],
-    [browser({ action: "open", url: "https://example.com" }), { action: "open", url: "https://example.com" }],
-    [browser({ action: "evaluate", text: " document.title " }), { action: "evaluate", text: "document.title" }],
-    [browser({ action: "click", selector: "#submit" }), { action: "click", selector: "#submit" }],
-    [browser({ action: "type", selector: "#q", text: "rust" }), { action: "type", selector: "#q", text: "rust" }],
-    [browser({ action: "screenshot" }), { action: "screenshot" }],
+    [browser({ summary: "  open the docs  ", action: "navigate", url: "https://example.com" }), { summary: "open the docs", action: "navigate", url: "https://example.com" }],
+    [browser({ action: "open", url: "https://example.com" }), { summary: null, action: "open", url: "https://example.com" }],
+    [browser({ action: "evaluate", text: " document.title " }), { summary: null, action: "evaluate", text: "document.title" }],
+    [browser({ action: "click", selector: "#submit" }), { summary: null, action: "click", selector: "#submit" }],
+    [browser({ action: "type", selector: "#q", text: "rust" }), { summary: null, action: "type", selector: "#q", text: "rust" }],
+    [browser({ action: "screenshot" }), { summary: null, action: "screenshot" }],
   ] as const) {
     assert.deepEqual(browserControlFunctionCall(payload), expected)
   }
   const computer = (args: unknown) => ({ type: "function_call", name: "computer_use", arguments: JSON.stringify(args) })
   for (const [payload, expected] of [
-    [computer({ action: "move", x: 100, y: 200 }), { action: "move", x: 100, y: 200 }],
-    [computer({ action: "click", x: 30, y: 40 }), { action: "click", x: 30, y: 40 }],
-    [computer({ action: "type", text: " hello " }), { action: "type", text: "hello" }],
-    [computer({ action: "screenshot" }), { action: "screenshot" }],
+    [computer({ summary: "move the pointer over the canvas", action: "move", x: 100, y: 200 }), { summary: "move the pointer over the canvas", action: "move", x: 100, y: 200 }],
+    [computer({ action: "click", x: 30, y: 40 }), { summary: null, action: "click", x: 30, y: 40 }],
+    [computer({ action: "type", text: " hello " }), { summary: null, action: "type", text: "hello" }],
+    [computer({ action: "screenshot" }), { summary: null, action: "screenshot" }],
   ] as const) {
     assert.deepEqual(computerUseFunctionCall(payload), expected)
   }

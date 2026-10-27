@@ -54,13 +54,15 @@ function integerNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) ? value : null
 }
 
-// The `bash` call as stored in the Responses item: the Worker, the command and
-// the two clocks the card can count down. `delay_seconds` waits in the controller
-// before the call starts; `timeout_seconds` counts from execution start and the
-// tool documents 600 when the call omits it.
+// The `bash` call as stored in the Responses item: the Worker, the intent
+// summary the model wrote for the card, the command and the two clocks the card
+// can count down. `delay_seconds` waits in the controller before the call
+// starts; `timeout_seconds` counts from execution start and the tool documents
+// 600 when the call omits it.
 export type BashFunctionCall = {
   callId: string | null
   workerId: string
+  summary: string | null
   command: string
   delaySeconds: number | null
   timeoutSeconds: number | null
@@ -74,6 +76,7 @@ export function bashFunctionCall(payload: unknown): BashFunctionCall | null {
   return {
     callId: nonEmptyString(object.call_id),
     workerId: args.worker_id,
+    summary: nonEmptyString(args.summary),
     command: args.command,
     delaySeconds: secondsArgument(args.delay_seconds),
     timeoutSeconds: secondsArgument(args.timeout_seconds),
@@ -109,16 +112,16 @@ export function bashCallCountdown(call: BashFunctionCall, startedAt: number, now
   return remaining > 0 ? { phase: "running", seconds: remaining } : { phase: "expired" }
 }
 
-// The `view_image` call as stored in the Responses item: the Worker and the
-// path of the image file it reads.
-export type ViewImageFunctionCall = { workerId: string; path: string }
+// The `view_image` call as stored in the Responses item: the Worker, the intent
+// summary and the path of the image file it reads.
+export type ViewImageFunctionCall = { workerId: string; summary: string | null; path: string }
 
 export function viewImageFunctionCall(payload: unknown): ViewImageFunctionCall | null {
   const object = historyPayloadObject(payload)
   if (object?.type !== "function_call" || object.name !== "view_image" || typeof object.arguments !== "string") return null
   const args = parseFunctionArguments(object.arguments)
   if (typeof args?.worker_id !== "string" || typeof args.path !== "string") return null
-  return { workerId: args.worker_id, path: args.path }
+  return { workerId: args.worker_id, summary: nonEmptyString(args.summary), path: args.path }
 }
 
 export type WebSearchFunctionCall = { query: string }
@@ -197,15 +200,17 @@ export function viewedImageSource(payload: unknown): string | null {
   return null
 }
 
-// The `browser_control` call as stored in the Responses item: the action plus
-// the argument fields that action carries. An unknown action or a missing
-// field keeps the generic protocol rendering.
-export type BrowserControlFunctionCall =
+// The `browser_control` call as stored in the Responses item: the intent
+// summary the model wrote for the card, the action plus the argument fields
+// that action carries. An unknown action or a missing field keeps the generic
+// protocol rendering.
+export type BrowserControlFunctionCall = { summary: string | null } & (
   | { action: "navigate" | "open"; url: string }
   | { action: "evaluate"; text: string }
   | { action: "click"; selector: string }
   | { action: "type"; selector: string; text: string }
   | { action: "screenshot" }
+)
 
 export function browserControlFunctionCall(payload: unknown): BrowserControlFunctionCall | null {
   const object = historyPayloadObject(payload)
@@ -213,40 +218,42 @@ export function browserControlFunctionCall(payload: unknown): BrowserControlFunc
   const args = parseFunctionArguments(object.arguments)
   const action = nonEmptyString(args?.action)
   if (action === null) return null
+  const summary = nonEmptyString(args?.summary)
   switch (action) {
     case "navigate":
     case "open": {
       const url = nonEmptyString(args?.url)
-      return url === null ? null : { action, url }
+      return url === null ? null : { summary, action, url }
     }
     case "evaluate": {
       const script = nonEmptyString(args?.text)
-      return script === null ? null : { action, text: script }
+      return script === null ? null : { summary, action, text: script }
     }
     case "click": {
       const selector = nonEmptyString(args?.selector)
-      return selector === null ? null : { action, selector }
+      return selector === null ? null : { summary, action, selector }
     }
     case "type": {
       const selector = nonEmptyString(args?.selector)
       const text = nonEmptyString(args?.text)
-      return selector === null || text === null ? null : { action, selector, text }
+      return selector === null || text === null ? null : { summary, action, selector, text }
     }
     case "screenshot":
-      return { action }
+      return { summary, action }
     default:
       return null
   }
 }
 
-// The `computer_use` call as stored in the Responses item: the action plus its
-// coordinates or text. An unknown action or a missing field keeps the generic
-// protocol rendering.
-export type ComputerUseFunctionCall =
+// The `computer_use` call as stored in the Responses item: the intent summary
+// the model wrote for the card plus the action and its coordinates or text. An
+// unknown action or a missing field keeps the generic protocol rendering.
+export type ComputerUseFunctionCall = { summary: string | null } & (
   | { action: "move"; x: number; y: number }
   | { action: "click"; x: number; y: number }
   | { action: "type"; text: string }
   | { action: "screenshot" }
+)
 
 export function computerUseFunctionCall(payload: unknown): ComputerUseFunctionCall | null {
   const object = historyPayloadObject(payload)
@@ -254,19 +261,20 @@ export function computerUseFunctionCall(payload: unknown): ComputerUseFunctionCa
   const args = parseFunctionArguments(object.arguments)
   const action = nonEmptyString(args?.action)
   if (action === null) return null
+  const summary = nonEmptyString(args?.summary)
   switch (action) {
     case "move":
     case "click": {
       const x = integerNumber(args?.x)
       const y = integerNumber(args?.y)
-      return x === null || y === null ? null : { action, x, y }
+      return x === null || y === null ? null : { summary, action, x, y }
     }
     case "type": {
       const text = nonEmptyString(args?.text)
-      return text === null ? null : { action, text }
+      return text === null ? null : { summary, action, text }
     }
     case "screenshot":
-      return { action }
+      return { summary, action }
     default:
       return null
   }

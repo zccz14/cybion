@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { ImageIcon } from "lucide-react"
 import type { ViewImageFunctionCall } from "@/lib/history-payload"
+import { WorkerCallSummary } from "@/components/worker-call-summary"
 
 const copy = {
   en: { title: "View an image", path: "Image path" },
@@ -25,6 +26,7 @@ export function ViewImageCall({ language, call, time, children }: {
         <span className="text-sm font-medium">{text.title}</span>
         <time className="text-xs text-muted-foreground">{time}</time>
       </div>
+      <WorkerCallSummary summary={call.summary} />
       <p className="mt-2 text-sm text-muted-foreground">{text.path}</p>
       <pre className={monoBlock}>{call.path}</pre>
       {children}

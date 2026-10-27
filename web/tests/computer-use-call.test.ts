@@ -9,12 +9,13 @@ test("desktop control calls render action details with escaped text in both lang
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { ComputerUseCall } = await server.ssrLoadModule("/src/components/computer-use-call.tsx")
-    const render = (language: string, call: unknown) => renderToStaticMarkup(createElement(ComputerUseCall, {
-      language, call, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+    const render = (language: string, call: Record<string, unknown>) => renderToStaticMarkup(createElement(ComputerUseCall, {
+      language, call: { summary: null, ...call }, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
     for (const language of ["en", "zh"]) {
-      const move = render(language, { action: "move", x: 100, y: 200 })
+      const move = render(language, { summary: "移动 & <b>测试</b>", action: "move", x: 100, y: 200 })
       assert.ok(move.includes(language === "zh" ? "移动鼠标到 (100, 200)" : "Move the pointer to (100, 200)"))
+      assert.ok(move.includes("移动 &amp; &lt;b&gt;测试&lt;/b&gt;"))
       const click = render(language, { action: "click", x: 30, y: 40 })
       assert.ok(click.includes(language === "zh" ? "点击 (30, 40)" : "Click at (30, 40)"))
       const typed = render(language, { action: "type", text: "你好 & <b>world</b>" })
