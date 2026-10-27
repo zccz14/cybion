@@ -149,6 +149,25 @@ export function imageGenerationFunctionCall(payload: unknown): ImageGenerationFu
   return { prompt: args.prompt.trim(), referenceImages: referenceImagePositions(args.reference_images) }
 }
 
+export type AudioTranscriptionFunctionCall = { audioRef: string; prompt: string | null; keywords: string[]; language: string | null; model: string | null }
+
+// The intercepted `normai_audio_transcription` call as stored in the Responses
+// item: the attachment it re-reads plus the hints the model wanted.
+export function audioTranscriptionFunctionCall(payload: unknown): AudioTranscriptionFunctionCall | null {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "function_call" || object.name !== "normai_audio_transcription" || typeof object.arguments !== "string") return null
+  const args = parseFunctionArguments(object.arguments)
+  if (typeof args?.audio_ref !== "string" || args.audio_ref.trim() === "") return null
+  const keywords = Array.isArray(args.keywords) ? args.keywords.filter((keyword): keyword is string => typeof keyword === "string" && keyword.trim() !== "") : []
+  return {
+    audioRef: args.audio_ref.trim(),
+    prompt: typeof args.prompt === "string" && args.prompt.trim() !== "" ? args.prompt.trim() : null,
+    keywords,
+    language: typeof args.language === "string" && args.language.trim() !== "" ? args.language.trim() : null,
+    model: typeof args.model === "string" && args.model.trim() !== "" ? args.model.trim() : null,
+  }
+}
+
 // Positions that cannot name an attached picture are left out of the display
 // line; the raw payload disclosure keeps the full attempted argument.
 function referenceImagePositions(value: unknown): number[] {

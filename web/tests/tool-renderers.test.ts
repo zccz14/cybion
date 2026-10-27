@@ -1,9 +1,9 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, imageGenerationFunctionCall, viewImageFunctionCall, webSearchFunctionCall } from "../src/lib/history-payload.ts"
+import { audioTranscriptionFunctionCall, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, imageGenerationFunctionCall, viewImageFunctionCall, webSearchFunctionCall } from "../src/lib/history-payload.ts"
 
-const families = [bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, viewImageFunctionCall, cybionToolFunctionCall, webSearchFunctionCall, imageGenerationFunctionCall]
+const families = [bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, viewImageFunctionCall, cybionToolFunctionCall, webSearchFunctionCall, imageGenerationFunctionCall, audioTranscriptionFunctionCall]
 
 const samples: Record<string, unknown> = {
   bash: { type: "function_call", name: "bash", arguments: '{"worker_id":"worker-1","command":"pwd"}' },
@@ -23,6 +23,7 @@ const samples: Record<string, unknown> = {
   cross_out_notes: { type: "function_call", name: "cross_out_notes", arguments: '{"note_ids":["a1b2c3d4"]}' },
   normai_web_search: { type: "function_call", name: "normai_web_search", arguments: '{"query":"rust release"}' },
   normai_image_generation: { type: "function_call", name: "normai_image_generation", arguments: '{"prompt":"a dog"}' },
+  normai_audio_transcription: { type: "function_call", name: "normai_audio_transcription", arguments: '{"audio_ref":"0000000000000000000000000000000000000000000000000000000000000000","prompt":"quarterly review","keywords":["CZON"]}' },
 }
 
 // INVARIANT: every built-in tool in tools.json needs its own renderer matcher;

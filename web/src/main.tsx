@@ -73,15 +73,17 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } fro
 
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
-import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall } from "@/lib/history-payload"
+import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall, audioTranscriptionFunctionCall, type AudioTranscriptionFunctionCall } from "@/lib/history-payload"
 import { formattedTime, formatStatsDuration } from "@/lib/time"
 import { inFlightCallIds, loadedThreadRecords, oldestRecordId, pollThreadHistory, recordInFlight, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { manualLoadNotice, type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
 import { useComposerImages } from "@/hooks/use-composer-images"
+import { useComposerAudio } from "@/hooks/use-composer-audio"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
 import { ComposerAttachments } from "@/components/composer-attachments"
+import { ComposerAudio } from "@/components/composer-audio"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
 import { AssistantMessage } from "@/components/assistant-message"
 import { CybionMark } from "@/components/cybion-mark"
@@ -182,6 +184,7 @@ type ThreadDefaults = {
   context_budget_tokens: number
   minimal_mode: boolean
   image_generation_model: string
+  audio_transcription_model: string | null
   /** Loaded Manuals a Thread keeps at once unless it overrides the cap. */
   max_loaded_manuals: number
 }
@@ -215,7 +218,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals"> & { input: string; images: string[] }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model"> & { input: string; images: string[]; audios: string[] }
 type ApiKey = {
   id: string
   label: string
@@ -720,6 +723,7 @@ const copy = {
     toolDeleteUltimateMachine: "Delete an Ultimate Machine",
     toolWebSearch: "Web search",
     toolImageGeneration: "Image generation",
+    toolAudioTranscription: "Speech-to-text",
     phaseKernel: "Kernel",
     phaseDevice: "Device",
     toolsKernelHint: "Executed by the Cybion Controller: Manuals, Worker and Ultimate Machine management, plus the web search and image generation it intercepts.",
@@ -1084,6 +1088,7 @@ const copy = {
     toolDeleteUltimateMachine: "删除终极机器",
     toolWebSearch: "网页搜索",
     toolImageGeneration: "图像生成",
+    toolAudioTranscription: "语音转写",
     phaseKernel: "内核",
     phaseDevice: "设备",
     toolsKernelHint: "由 Cybion 控制器执行：手册、Worker 与终极机器管理，以及被控制器接管的网页搜索与图像生成。",
@@ -1208,6 +1213,23 @@ function useImageModels(sdk: AuthMiniApi) {
   return useQuery({
     queryKey: ["upstream-image-models"],
     queryFn: ({ signal }) => api<UpstreamModels>(sdk, "/api/integrations/upstreams/models?kind=image", { signal }),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  })
+}
+
+// The account's console language, for the few labels this card writes inline
+// instead of through the copy dictionary.
+function isChineseUi() {
+  return typeof document !== "undefined" && document.documentElement.lang.startsWith("zh")
+}
+
+// The callable speech-to-text models an account can pick for audio input
+// (NormAI answers `?kind=sst` with its speech-to-text rows).
+function useAudioModels(sdk: AuthMiniApi) {
+  return useQuery({
+    queryKey: ["upstream-audio-models"],
+    queryFn: ({ signal }) => api<UpstreamModels>(sdk, "/api/integrations/upstreams/models?kind=sst", { signal }),
     staleTime: 5 * 60 * 1000,
     retry: false,
   })
@@ -1562,6 +1584,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const composer = useComposerDraft(userId, null)
   const { input, setInput, seed, clearSubmitted } = composer
   const attachments = useComposerImages()
+  const audio = useComposerAudio()
   useEffect(() => {
     if (typeof location.state?.initialInput !== "string") return
     const { initialInput, ...state } = location.state
@@ -1582,8 +1605,8 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     start.reset()
   }
   const submit = () => {
-    if (!value || (!input.trim() && attachments.images.length === 0) || start.isPending) return
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
+    if (!value || (!input.trim() && attachments.images.length === 0 && audio.audios.length === 0) || start.isPending) return
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images, audios: audio.audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1607,7 +1630,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || (!input.trim() && attachments.images.length === 0) || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerAudio language={language} audios={audio.audios} recording={audio.recording} disabled={false} onStart={audio.start} onStop={audio.stop} onAdd={audio.add} onRemove={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || (!input.trim() && attachments.images.length === 0 && audio.audios.length === 0) || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -1642,6 +1665,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useUpstreamModels(sdk)
   const imageModels = useImageModels(sdk)
+  const audioModels = useAudioModels(sdk)
   // The conversation opens on the window that starts at the most recent user input instead of
   // the whole thread; older pages load on demand, each one a whole turn that starts at the
   // previous input record, until `has_older` clears.
@@ -1710,6 +1734,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
   const composer = useComposerDraft(userId, threadId)
   const { input, setInput, clearSubmitted } = composer
   const attachments = useComposerImages()
+  const audio = useComposerAudio()
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -1722,9 +1747,9 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     setEditing(false)
   }, [threadId, thread.data?.title])
   const submit = useMutation({
-    mutationFn: (value: { input: string; images: string[] }) => api<RequestAck>(sdk, `/api/threads/${encodeURIComponent(threadId)}/inputs`, {
+    mutationFn: (value: { input: string; images: string[]; audios: string[] }) => api<RequestAck>(sdk, `/api/threads/${encodeURIComponent(threadId)}/inputs`, {
       method: "POST",
-      body: JSON.stringify({ input: value.input.trim(), images: value.images }),
+      body: JSON.stringify({ input: value.input.trim(), images: value.images, audios: value.audios }),
     }),
     onSuccess: (_request, submitted) => {
       clearSubmitted(submitted.input)
@@ -1770,7 +1795,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     },
   })
   const settings = useMutation({
-    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null; max_loaded_manuals?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
+    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null; audio_transcription_model?: string | null; max_loaded_manuals?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   const remove = useMutation({
@@ -1838,7 +1863,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
       <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
     </div>
     <ThreadUsagePanel usage={current.usage} language={language} />
-    {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || attachments.images.length > 0) && submit.mutate({ input, images: attachments.images })} /></div>}
+    {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || (attachments.images.length > 0 || audio.audios.length > 0)) && submit.mutate({ input, images: attachments.images, audios: audio.audios })} /></div>}
     {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
     {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
@@ -1867,10 +1892,10 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
         <MessageScrollerButton behavior="auto" />
       </MessageScroller>
     </MessageScrollerProvider>
-    <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || attachments.images.length > 0) && !busy) submit.mutate({ input, images: attachments.images }) }}>
-      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
+    <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || (attachments.images.length > 0 || audio.audios.length > 0)) && !busy) submit.mutate({ input, images: attachments.images, audios: audio.audios }) }}>
+      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerAudio language={language} audios={audio.audios} recording={audio.recording} disabled={false} onStart={audio.start} onStop={audio.stop} onAdd={audio.add} onRemove={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} />
+          <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} audioTranscription={defaults.data ? { override: current.audio_transcription_model, fallback: defaults.data.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (audio_transcription_model) => settings.mutate({ audio_transcription_model }) } : undefined} />
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
             {action === "send"
@@ -1945,6 +1970,21 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
   return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} />} />
+}
+
+function AudioTranscriptionCall({ language, call, time }: { language: Language; call: AudioTranscriptionFunctionCall; time: string }) {
+  const zh = language === "zh"
+  return <div className="flex w-fit max-w-full flex-col gap-1.5 rounded-lg border px-3 py-2 text-sm">
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span className="font-medium text-foreground">{zh ? "语音转写" : "Speech-to-text"}</span>
+      {call.model && <span>{call.model}</span>}
+      {call.language && <span>{call.language}</span>}
+      <span>{time}</span>
+    </div>
+    {call.prompt && <p className="whitespace-pre-wrap break-words text-xs">{call.prompt}</p>}
+    {call.keywords.length > 0 && <p className="break-words text-xs text-muted-foreground">{call.keywords.join(" · ")}</p>}
+    <p className="font-mono text-xs text-muted-foreground">{`audio_ref ${call.audioRef.slice(0, 12)}…`}</p>
+  </div>
 }
 
 function SafetyBufferingAlert({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
@@ -2058,6 +2098,11 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
         <HistoryRecordPayload language={language} record={record} />
       </details>
     </BashCommand>
+  }
+
+  const transcriptionCall = audioTranscriptionFunctionCall(payload)
+  if (transcriptionCall) {
+    return <AudioTranscriptionCall language={language} call={transcriptionCall} time={time} />
   }
 
   const searchCall = webSearchFunctionCall(payload)
@@ -3280,6 +3325,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const defaults = useQuery({ queryKey, queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useUpstreamModels(sdk)
   const imageModels = useImageModels(sdk)
+  const audioModels = useAudioModels(sdk)
   const save = useMutation({
     mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
     onMutate: () => client.cancelQueries({ queryKey }),
@@ -3348,6 +3394,17 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
               <FieldDescription id="default-thread-minimal-description">{t("minimalModeDescription")}</FieldDescription>
             </FieldContent>
             <Switch id="default-thread-minimal" aria-describedby="default-thread-minimal-description" checked={value.minimal_mode} disabled={save.isPending} onCheckedChange={(minimal_mode) => edit({ ...value, minimal_mode })} />
+          </Field>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="default-thread-audio-model">{isChineseUi() ? "语音识别模型" : "Speech-to-text model"}</FieldLabel>
+            <Select value={value.audio_transcription_model ?? "off"} disabled={save.isPending} onValueChange={(selection) => edit({ ...value, audio_transcription_model: selection === "off" ? null : selection })}>
+              <SelectTrigger id="default-thread-audio-model"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectGroup>
+                <SelectItem value="off">{isChineseUi() ? "关闭" : "Disabled"}</SelectItem>
+                {imageModelOptions(audioModels.data?.upstreams, null, [value.audio_transcription_model]).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
+              </SelectGroup></SelectContent>
+            </Select>
+            <FieldDescription id="default-thread-audio-model-description">{isChineseUi() ? "音频输入使用该语音识别模型；列表为空时先在上游添加语音转写模型。" : "Audio input uses this speech-to-text model; add speech-to-text models to an upstream when the list is empty."}</FieldDescription>
           </Field>
           <Field data-disabled={save.isPending}>
             <FieldLabel htmlFor="default-thread-image-model">{t("imageGenerationModel")}</FieldLabel>
@@ -3647,6 +3704,7 @@ const toolLabels: Record<string, CopyKey> = {
   view_image: "toolViewImage",
   normai_web_search: "toolWebSearch",
   normai_image_generation: "toolImageGeneration",
+  normai_audio_transcription: "toolAudioTranscription",
 }
 
 function ToolsPage() {
