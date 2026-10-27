@@ -74,10 +74,26 @@ test("user input splits typed text from pasted images and voice clips", () => {
   )
   assert.deepEqual(userInputView({ role: "user", content: [{ type: "input_image", image_url: png }] }), { text: "", images: [png], audios: [] })
   // A voice message carries no text: it must survive as its own kind of input.
-  assert.deepEqual(userInputView({ role: "user", content: [{ type: "input_audio", audio_url: voice }] }), { text: "", images: [], audios: [voice] })
+  assert.deepEqual(
+    userInputView({ role: "user", content: [{ type: "input_audio", audio_url: voice }] }),
+    { text: "", images: [], audios: [{ audioUrl: voice, audioRef: null, mediaType: null }] },
+  )
   assert.deepEqual(
     userInputView({ role: "user", content: [{ type: "input_text", text: "听一下" }, { type: "input_audio", audio_url: voice }] }),
-    { text: "听一下", images: [], audios: [voice] },
+    { text: "听一下", images: [], audios: [{ audioUrl: voice, audioRef: null, mediaType: null }] },
+  )
+  // Records written before the note moved onto the audio part still carry the
+  // provisional transcript as text; it must not render as the user's words.
+  assert.deepEqual(
+    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: "c".repeat(64), media_type: "audio/webm" }, { type: "input_text", text: "[audio attachment ref=" + "c".repeat(64) + " type=audio/webm] provisional transcript (m):\n你好" }] }),
+    { text: "", images: [], audios: [{ audioUrl: null, audioRef: "c".repeat(64), mediaType: "audio/webm" }] },
+  )
+  // Stored history externalises the bytes: what comes back is a reference, and
+  // the voice bar has to fetch the clip before it can play it.
+  const reference = "a".repeat(64)
+  assert.deepEqual(
+    userInputView({ role: "user", content: [{ type: "input_audio", audio_ref: reference, media_type: "audio/webm" }] }),
+    { text: "", images: [], audios: [{ audioUrl: null, audioRef: reference, mediaType: "audio/webm" }] },
   )
   assert.deepEqual(userInputView(null), { text: "", images: [], audios: [] })
 })

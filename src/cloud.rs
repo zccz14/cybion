@@ -733,7 +733,6 @@ async fn prepare_input_audio(
             .ok_or_else(|| ApiError::conflict("configure an upstream for this thread"))?
         }
     };
-    let mut notes = Vec::with_capacity(stored.len());
     for (object, media_type, bytes) in stored {
         let note = match transcribe_audio(state, &upstream, bytes, &media_type, &model, None, None)
             .await
@@ -746,14 +745,28 @@ async fn prepare_input_audio(
                 error.message
             ),
         };
-        notes.push(note);
-    }
-    if let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) {
-        for note in notes {
-            content.push(json!({"type":"input_text","text":note}));
-        }
+        attach_audio_note(item, &object, note);
     }
     Ok(())
+}
+
+/// Keeps the first-pass transcript on the audio part itself. The stored input
+/// then stays exactly what the user sent - a clip plus any typed text - while
+/// `audio_protocol_item` still hands the model the same note it used to read
+/// from a separate text part.
+fn attach_audio_note(item: &mut Value, reference: &str, note: String) {
+    let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for part in parts.iter_mut() {
+        if part.get("audio_ref").and_then(Value::as_str) != Some(reference) {
+            continue;
+        }
+        if let Some(object) = part.as_object_mut() {
+            object.insert("provisional_note".to_owned(), Value::String(note));
+        }
+        return;
+    }
 }
 
 /// Rewrites audio attachment parts for the request: upstream models take no
@@ -782,7 +795,16 @@ fn audio_protocol_item(item: &mut Value) {
             .and_then(Value::as_str)
             .unwrap_or("audio")
             .to_owned();
-        *part = json!({"type":"input_text","text":format!("[audio attachment ref={reference} type={media_type}]")});
+        // The provisional transcript rides along on the stored part; a part
+        // stored before that existed still gets the bare reference note.
+        let note = object
+            .get("provisional_note")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!("[audio attachment ref={reference} type={media_type}]")
+            });
+        *part = json!({"type":"input_text","text":note});
     }
 }
 
@@ -10160,6 +10182,54 @@ mod context_loads_tests;
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn the_provisional_transcript_stays_on_the_audio_part() {
+        let reference = "c".repeat(64);
+        let mut item = json!({
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "audio_ref": reference, "media_type": "audio/webm"},
+                {"type": "input_text", "text": "听一下"}
+            ]
+        });
+        attach_audio_note(&mut item, &reference, "provisional note".to_owned());
+        let content = item["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "the note must not add a text part");
+        assert_eq!(content[0]["provisional_note"], "provisional note");
+        assert_eq!(content[1]["text"], "听一下");
+    }
+
+    #[test]
+    fn the_model_still_reads_the_provisional_transcript() {
+        let reference = "d".repeat(64);
+        let mut item = json!({
+            "role": "user",
+            "content": [{
+                "type": "input_audio",
+                "audio_ref": reference,
+                "media_type": "audio/webm",
+                "provisional_note": "provisional note"
+            }]
+        });
+        audio_protocol_item(&mut item);
+        assert_eq!(item["content"][0]["type"], "input_text");
+        assert_eq!(item["content"][0]["text"], "provisional note");
+    }
+
+    #[test]
+    fn audio_parts_without_a_transcript_still_name_their_reference() {
+        let reference = "e".repeat(64);
+        let mut item = json!({
+            "role": "user",
+            "content": [{"type": "input_audio", "audio_ref": reference, "media_type": "audio/webm"}]
+        });
+        audio_protocol_item(&mut item);
+        assert_eq!(
+            item["content"][0]["text"],
+            format!("[audio attachment ref={reference} type=audio/webm]")
+        );
+    }
 
     pub(super) fn test_state() -> (tempfile::TempDir, AppState) {
         let root = tempfile::tempdir().unwrap();

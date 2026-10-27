@@ -28,6 +28,13 @@ test("a sent voice message renders as one playable bar instead of text", async (
     assert.ok(!audioOnly.includes("—".repeat(5)))
     // A text-only input never grows a voice bar.
     assert.ok(!text({ role: "user", content: "只有文字" }).includes('data-slot="audio-message"'))
+    // Stored history only carries the object reference: the bar renders right
+    // away, disabled until the bytes arrive, and remembers what to fetch.
+    const reference = "b".repeat(64)
+    const stored = text({ role: "user", content: [{ type: "input_audio", audio_ref: reference, media_type: "audio/webm" }] })
+    assert.ok(stored.includes('data-audio-ref="' + reference + '"'))
+    assert.match(stored, /<button[^>]*disabled/)
+    assert.ok(stored.includes('aria-label="播放语音"'))
   } finally {
     await server.close()
   }
