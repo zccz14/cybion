@@ -25,15 +25,16 @@ re-derive with better hints.
   keep the reference, the player fetches the bytes on demand
   (`GET /api/objects/{ref}?media_type=...`, audio types only), and only text
   enters the request.
-- **No first pass**: ingest stores the bytes and stops. Transcribing every
-  upload would bill one speech-to-text request for a clip the model may never
-  listen to, and a transcript invented before the model knows the topic has
-  nowhere to go: the model calls `normai_audio_transcription` when it actually
-  needs the words, with its own vocabulary hints.
+- **Provisional transcript**: on ingest the Controller transcribes each
+  attachment once with the effective model and appends an `input_text` part
+  carrying the audio reference, the media type and the transcript, marked as a
+  provisional machine transcript with a note that
+  `normai_audio_transcription` can re-extract it. A failed first pass appends
+  the same note without text, so the model still knows the audio exists and
+  can retry through the tool.
 - **Request projection**: `load_protocol_items` rewrites an `input_audio` part
-  into a note naming the reference and the tool that reads it (never forwarding
-  an `input_audio` part, which upstream Chat/Responses models reject). History
-  surfaces keep the reference.
+  into the note above (never forwarding an `input_audio` part, which upstream
+  Chat/Responses models reject). History surfaces keep the reference.
 
 ## Re-extraction
 
@@ -81,9 +82,10 @@ must add `sst` rows to an upstream before voice input can be switched on.
 ## Staging
 
 1. **Backend**: schema + settings, ingest (`audios` on both input endpoints),
-   object storage, the tool and its cache, the object read endpoint, and docs. Verifiable over the API before any UI exists.
-2. **Composer**: record controls, attachment chips, the in-Thread player, and
-   the two model pickers.
+   object storage, provisional transcript, the tool and its cache, the object
+   read endpoint, and docs. Verifiable over the API before any UI exists.
+2. **Composer**: record/upload controls, attachment chips, the in-Thread
+   player, and the two model pickers.
 
 ## Console
 
@@ -105,6 +107,9 @@ must add `sst` rows to an upstream before voice input can be switched on.
 - **Span re-transcription** (`start`/`end`, needed for an hour-long meeting
   and for going past the upstream's 25 MiB limit) requires server-side audio
   decoding; it lands with ffmpeg-backed slicing.
+- **In-Thread playback**: the bytes are already served by
+  `GET /api/objects/{ref}?media_type=…`, but the conversation shows the
+  provisional transcript as text without an `<audio>` control yet.
 - **Diarization** (`gpt-4o-transcribe-diarize`, which takes no prompt) and
   speaker labels.
 - **Spend guardrails**: no result cache, no per-turn ceiling, no attempt cap.
