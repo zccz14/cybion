@@ -24,3 +24,12 @@ const copy = {
 export function threadStatusText(status: ThreadDisplayStatus, language: "en" | "zh") {
   return { label: copy[language][status], hint: copy[language][`${status}Hint`] }
 }
+
+// A running Thread shows what it is doing instead of the generic running label:
+// the one-sentence summary the model wrote with the newest unanswered Worker
+// call. Every other state, and a running Thread with no Worker call in flight,
+// keeps its canonical label.
+export function threadStatusLabel(status: ThreadDisplayStatus, language: "en" | "zh", runningSummary?: string | null) {
+  const summary = status === "running" ? runningSummary?.trim() : ""
+  return summary ? summary : copy[language][status]
+}

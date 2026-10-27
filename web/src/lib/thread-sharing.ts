@@ -9,7 +9,7 @@ export type ThreadGrant = {
 }
 export type SharedThread = {
   id: string; owner_user_id: string; grant_id: string; access: "viewer"
-  title: string; status: "idle" | "running" | "failed"; display_status: ThreadDisplayStatus
+  title: string; status: "idle" | "running" | "failed"; display_status: ThreadDisplayStatus; running_summary: string | null
   usage: ThreadUsage; created_at: number; updated_at: number; shared_at: number
 }
 export type SharedThreadPageData = { items: SharedThread[]; next_cursor: string | null }
