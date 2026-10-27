@@ -88,7 +88,7 @@ test("long titles, selected states and readable status colors work in light and 
     await page.screenshot({ path: `test-results/thread-status-${theme}.png`, fullPage: true })
     await page.setViewportSize({ width: 390, height: 844 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
-    await expect(page.getByRole("link", { name: /压缩长期研究任务/ }).locator(".truncate")).toHaveCSS("text-overflow", "ellipsis")
+    await expect(page.getByRole("link", { name: /压缩长期研究任务/ }).locator('[data-slot="thread-title"]')).toHaveCSS("text-overflow", "ellipsis")
     await page.screenshot({ path: `test-results/thread-status-mobile-${theme}.png`, fullPage: true })
     await page.setViewportSize({ width: 320, height: 640 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)

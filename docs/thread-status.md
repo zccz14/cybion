@@ -27,6 +27,13 @@ finished or the user's real-world objective has been achieved.
   and color mapping. Every row renders the list's own polled snapshot, so the
   open row agrees with the header within one refresh interval; the list never
   borrows the conversation's snapshot to shortcut that wait.
+- While a Worker call is in flight, the visible status text is the one-sentence
+  `summary` written with the newest unanswered Worker call of the current turn
+  instead of Running / 运行中. The icon, color, loader, and explanatory hint keep
+  the running state. A Thread waiting on the model, a compacting Thread, a call
+  recorded before summaries existed, or malformed arguments keep the canonical
+  label. Long summaries truncate to one line; their full text stays in the
+  label's title and the row tooltip.
 - Amber is reserved here for active work, green for successful completion, red
   for failure, and muted ink for neutral states. Each status has a distinct
   shape and visible text; color and animation are supplementary signals.
@@ -46,8 +53,18 @@ new user input. Existing input/control record IDs fence stale responses; there
 is no separate execution entity. See [recovery](thread-recovery.md).
 
 Both fields have a purpose: `status` governs execution controls; `display_status`
-explains the current execution or its outcome. No new stored state, schema
-migration, per-row history fetch, or client-side inference is needed.
+explains the current execution or its outcome. No stored state, schema
+migration, or client-side inference is needed.
+
+The same projection derives `running_summary`. When the Thread is running it
+reads the newest `response_output` Worker call of the current turn that has no
+matching tool output, extracts `arguments.summary` (or `input.summary` for a
+custom tool call), and returns NULL when that call is answered, carries no
+summary, or its arguments are not JSON. Worker calls are persisted and settled
+in record order, so an answered newest call proves every older call in the turn
+is settled too. The lookup is one indexed tail read of the Thread's own history,
+limited to running Threads; it stores nothing and cannot drift from the
+conversation.
 
 A shared SQL projection reads the current control state and the newest **input
 or thread-control record**, ordered by durable record ID:
@@ -70,13 +87,20 @@ record. The result is read in the same SQLite statement as Thread metadata.
 - Backend tests exercise create → run → complete → continue → cancel → compact
   → complete → fail → retry, including late failure/success, newer-input
   supersession, renames, independent threads/users, and raw activity payloads.
-- Frontend tests cover bilingual labels and reuse by both lists and conversation
-  surfaces. Playwright covers every icon/label, selected navigation, keyboard
-  tooltips, state updates, reduced motion, light/dark contrast, and narrow layouts.
+- Backend tests cover the running summary appearing for the newest unanswered
+  call, disappearing when its output lands, ignoring the previous turn's
+  unanswered call, falling back for calls recorded without a summary and for
+  malformed arguments, and ending at finalization.
+- Frontend tests cover bilingual labels, the summary replacement, and reuse by
+  both lists and conversation surfaces. Playwright covers every icon/label,
+  selected navigation, keyboard tooltips, state updates, reduced motion,
+  light/dark contrast, truncation, and narrow layouts.
 - The necessary classification paths are confined to the server projection.
   Client presentation is a fixed lookup table. The open row's snapshot selection
-  prevents disagreement with the header. No new compatibility/fallback paths are
-  introduced; the previous independent browser-side compaction resolver is removed.
+  prevents disagreement with the header. The previous independent browser-side
+  compaction resolver is removed. A Worker call recorded before `summary`
+  existed falls back to the canonical running label; history is append-only, so
+  that presentation fallback is permanent and adds no second status path.
 
 Commands:
 

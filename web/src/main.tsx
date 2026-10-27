@@ -196,6 +196,7 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "i
   title: string
   status: ThreadStatus
   display_status: ThreadDisplayStatus
+  running_summary: string | null
   context_budget_tokens: number | null
   minimal_mode: boolean | null
   /** `null` follows the account default; `""` disables image generation. */
@@ -1854,7 +1855,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
           <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button>
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
-          <ThreadStatusSummary status={current.display_status} language={language} />
+          <ThreadStatusSummary status={current.display_status} runningSummary={current.running_summary} language={language} />
           {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
         </div>
       </div>}
@@ -1885,7 +1886,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
             <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} inFlight={recordInFlight(record, inFlightCalls)} />} />
             {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
             {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
-            {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} language={language} /></div></MessageScrollerItem>}
+            {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} runningSummary={current.running_summary} language={language} /></div></MessageScrollerItem>}
             {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
           </MessageScrollerContent>
         </MessageScrollerViewport>

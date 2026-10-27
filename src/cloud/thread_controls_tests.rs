@@ -953,6 +953,128 @@ async fn display_status_ignores_audits_and_late_output_and_is_scoped_to_the_thre
     assert!(read_thread_for(&state, &other, thread.id).await.is_err());
 }
 
+async fn running_summary(state: &AppState, user: &User, thread: &ThreadView) -> Option<String> {
+    let detail = read_thread_for(state, user, thread.id.clone())
+        .await
+        .unwrap();
+    let list = list_all_threads(state, user, ThreadListFilter::active()).await;
+    let listed = list.iter().find(|item| item.id == thread.id).unwrap();
+    assert_eq!(detail.running_summary, listed.running_summary);
+    detail.running_summary
+}
+
+#[tokio::test]
+async fn running_summary_follows_the_newest_unanswered_worker_call() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "running-summary-owner").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+
+    let _first = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt(user_text("run")),
+    )
+    .await;
+    // A running Thread that is still waiting on the model has no Worker call in
+    // flight, so it keeps the plain running label.
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(connection, &thread_id, "response_output", json!({
+            "type":"function_call","id":"fc-1","call_id":"call-1","name":"bash",
+            "arguments": json!({"worker_id":"00000000-0000-4000-8000-000000000001","summary":"检查磁盘","command":"df -h"}).to_string()
+        }));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("检查磁盘")
+    );
+
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(
+            connection,
+            &thread_id,
+            "tool_output",
+            json!({
+                "type":"function_call_output","call_id":"call-1","output":"{\"ok\":true}"
+            }),
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+
+    // A custom tool call carries its arguments in `input`.
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(connection, &thread_id, "response_output", json!({
+            "type":"custom_tool_call","id":"ct-2","call_id":"call-2","name":"bash",
+            "input": json!({"worker_id":"00000000-0000-4000-8000-000000000001","summary":"查看日志","command":"tail -n 20 app.log"}).to_string()
+        }));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("查看日志")
+    );
+
+    // A newer input starts a new turn: the previous turn's unanswered call is no
+    // longer what the Thread is doing.
+    let next = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt(user_text("next")),
+    )
+    .await;
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+
+    // A call recorded before summaries existed, and malformed arguments, only
+    // lose the summary; they never fail the Thread view.
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        insert_record(connection, &thread_id, "response_output", json!({
+            "type":"function_call","id":"fc-3","call_id":"call-3","name":"bash",
+            "arguments": json!({"worker_id":"00000000-0000-4000-8000-000000000001","command":"pwd"}).to_string()
+        }));
+        insert_record(connection, &thread_id, "response_output", json!({
+            "type":"function_call","id":"fc-4","call_id":"call-4","name":"bash",
+            "arguments": "{\"worker_id\":"
+        }));
+        insert_record(connection, &thread_id, "response_output", json!({
+            "type":"function_call","id":"fc-5","call_id":"call-5","name":"bash",
+            "arguments": json!({"worker_id":"00000000-0000-4000-8000-000000000001","summary":123,"command":"pwd"}).to_string()
+        }));
+        insert_record(connection, &thread_id, "response_output", json!({
+            "type":"function_call","id":"fc-6","call_id":"call-6","name":"bash",
+            "arguments": json!({"worker_id":"00000000-0000-4000-8000-000000000001","summary":"   ","command":"pwd"}).to_string()
+        }));
+        // Raw non-JSON history rows are valid stored data; the projection must
+        // skip them instead of failing the Thread view.
+        connection.execute("INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES(?,'response_output','not JSON',0)", [&thread_id])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+
+    // Finalization ends the run; a running summary never outlives it.
+    finalize_request_success(&state, &user, &thread.id, next)
+        .await
+        .unwrap();
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+}
+
 #[tokio::test]
 async fn proactive_compaction_checkpoints_the_context_before_an_oversized_inference() {
     let (_root, state) = test_state();
