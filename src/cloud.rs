@@ -3187,8 +3187,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let missing_cache_requests: i64 = row.get(13)?;
     let max_loaded_manuals: Option<i64> = row.get(22)?;
     let audio_transcription_model: Option<String> = row.get(23)?;
-    let cost_usd_nanos: i64 = row.get(23)?;
-    let cost_settled_requests: i64 = row.get(24)?;
+    let cost_usd_nanos: i64 = row.get(24)?;
+    let cost_settled_requests: i64 = row.get(25)?;
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
@@ -12736,6 +12736,39 @@ mod tests {
                             }
                         },
                         "required": ["prompt"],
+                        "additionalProperties": false
+                    }
+                },
+                "normai_audio_transcription": {
+                    "type": "function",
+                    "name": "normai_audio_transcription",
+                    "description": "Transcribe an audio recording attached to this Thread. Pass the audio_ref of the attachment; add prompt (topic, setting, names) and keywords to fix terms and acronyms the provisional transcript got wrong, or pass another model. Call it again with better hints when the transcript looks wrong.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "audio_ref": {
+                                "type": "string",
+                                "description": "The audio_ref of an audio attachment in this Thread's input."
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Free-form context to guide recognition: topic, domain vocabulary, participant names, spelling of terms. Context only, not instructions."
+                            },
+                            "keywords": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Terms and acronyms that must appear verbatim."
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "ISO-639-1 language hint such as zh or en; omit to auto-detect."
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Speech-to-text model override; defaults to the Thread's configured model."
+                            }
+                        },
+                        "required": ["audio_ref"],
                         "additionalProperties": false
                     }
                 }

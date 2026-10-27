@@ -103,7 +103,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
     assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","max_loaded_manuals":12});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","audio_transcription_model":null,"max_loaded_manuals":12});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
