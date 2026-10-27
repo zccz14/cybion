@@ -63,16 +63,23 @@ test("unrelated events and incomplete or malformed bash arguments retain the gen
   }
 })
 
-test("user input splits typed text from pasted images", () => {
-  assert.deepEqual(userInputView({ role: "user", content: "plain text" }), { text: "plain text", images: [] })
+test("user input splits typed text from pasted images and voice clips", () => {
+  assert.deepEqual(userInputView({ role: "user", content: "plain text" }), { text: "plain text", images: [], audios: [] })
   const png = "data:image/png;base64,AAAA"
   const jpeg = "data:image/jpeg;base64,BBBB"
+  const voice = "data:audio/webm;base64,CCCC"
   assert.deepEqual(
     userInputView({ role: "user", content: [{ type: "input_text", text: "这个报错怎么回事？" }, { type: "input_image", image_url: png }, { type: "input_image", image_url: jpeg }] }),
-    { text: "这个报错怎么回事？", images: [png, jpeg] },
+    { text: "这个报错怎么回事？", images: [png, jpeg], audios: [] },
   )
-  assert.deepEqual(userInputView({ role: "user", content: [{ type: "input_image", image_url: png }] }), { text: "", images: [png] })
-  assert.deepEqual(userInputView(null), { text: "", images: [] })
+  assert.deepEqual(userInputView({ role: "user", content: [{ type: "input_image", image_url: png }] }), { text: "", images: [png], audios: [] })
+  // A voice message carries no text: it must survive as its own kind of input.
+  assert.deepEqual(userInputView({ role: "user", content: [{ type: "input_audio", audio_url: voice }] }), { text: "", images: [], audios: [voice] })
+  assert.deepEqual(
+    userInputView({ role: "user", content: [{ type: "input_text", text: "听一下" }, { type: "input_audio", audio_url: voice }] }),
+    { text: "听一下", images: [], audios: [voice] },
+  )
+  assert.deepEqual(userInputView(null), { text: "", images: [], audios: [] })
 })
 
 test("native search and image tool calls expose query, prompt and reference positions", () => {

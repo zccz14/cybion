@@ -9,7 +9,12 @@ export function useComposerAudio(): {
   audios: string[]
   recording: boolean
   start: () => Promise<boolean>
-  stop: () => void
+  /// Stops the recorder and hands the clip back as a data URL. Nothing is
+  /// stored: the caller either sends it straight out as a voice message or
+  /// drops it, which is why there is no "finished but unattached" state.
+  finish: () => Promise<string | null>
+  /// Stops the recorder and throws the clip away.
+  cancel: () => void
   add: (files: File[]) => Promise<void>
   remove: (index: number) => void
   clear: () => void
@@ -19,9 +24,12 @@ export function useComposerAudio(): {
   const recorder = useRef<MediaRecorder | null>(null)
   const stream = useRef<MediaStream | null>(null)
   const chunks = useRef<Blob[]>([])
+  const settle = useRef<((value: string | null) => void) | null>(null)
 
   useEffect(
     () => () => {
+      settle.current?.(null)
+      settle.current = null
       if (recorder.current?.state !== "inactive") recorder.current?.stop()
       stream.current?.getTracks().forEach((track) => track.stop())
     },
@@ -51,7 +59,13 @@ export function useComposerAudio(): {
         stream.current = null
         recorder.current = null
         setRecording(false)
-        if (blob.size > 0) void add([recordingFile(blob, Date.now())])
+        const resolve = settle.current
+        settle.current = null
+        if (blob.size === 0) {
+          resolve?.(null)
+          return
+        }
+        void audioFileDataUrl(recordingFile(blob, Date.now())).then((dataUrl) => resolve?.(dataUrl))
       }
       recorder.current = next
       next.start()
@@ -60,15 +74,35 @@ export function useComposerAudio(): {
     } catch {
       return false
     }
-  }, [add])
+  }, [])
 
-  const stop = useCallback(() => recorder.current?.stop(), [])
+  const finish = useCallback(
+    () =>
+      new Promise<string | null>((resolve) => {
+        const current = recorder.current
+        if (!current || current.state === "inactive") {
+          resolve(null)
+          return
+        }
+        settle.current = resolve
+        current.stop()
+      }),
+    []
+  )
+
+  const cancel = useCallback(() => {
+    const current = recorder.current
+    if (!current || current.state === "inactive") return
+    settle.current = () => undefined
+    current.stop()
+  }, [])
+
   const remove = useCallback((index: number) => {
     setAudios((current) => current.filter((_, currentIndex) => currentIndex !== index))
   }, [])
   const clear = useCallback(() => setAudios([]), [])
 
-  return { audios, recording, start, stop, add, remove, clear }
+  return { audios, recording, start, finish, cancel, add, remove, clear }
 }
 
 export type ComposerAudioState = ReturnType<typeof useComposerAudio>

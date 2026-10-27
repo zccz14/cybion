@@ -28,22 +28,25 @@ export function historyPayloadText(payload: unknown): string {
   return JSON.stringify(payload, null, 2) ?? String(payload)
 }
 
-export type UserInputView = { text: string; images: string[] }
+export type UserInputView = { text: string; images: string[]; audios: string[] }
 
 // A user input payload is either plain text or Responses content parts:
-// `input_text` carries the typed text and `input_image` each pasted data URL.
+// `input_text` carries the typed text, `input_image` each pasted data URL and
+// `input_audio` each recorded or uploaded voice clip.
 export function userInputView(payload: unknown): UserInputView {
   const object = historyPayloadObject(payload)
-  if (typeof object?.content === "string") return { text: object.content, images: [] }
+  if (typeof object?.content === "string") return { text: object.content, images: [], audios: [] }
   const parts = Array.isArray(object?.content) ? object.content : []
   const text: string[] = []
   const images: string[] = []
+  const audios: string[] = []
   for (const part of parts) {
     const partObject = historyPayloadObject(part)
     if (partObject?.type === "input_text" && typeof partObject.text === "string") text.push(partObject.text)
     if (partObject?.type === "input_image" && typeof partObject.image_url === "string") images.push(partObject.image_url)
+    if (partObject?.type === "input_audio" && typeof partObject.audio_url === "string") audios.push(partObject.audio_url)
   }
-  return { text: text.join(""), images }
+  return { text: text.join(""), images, audios }
 }
 
 function nonEmptyString(value: unknown): string | null {
