@@ -11,7 +11,7 @@ test("bash commands render Worker names, language, command text and raw details"
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { BashCommand } = await server.ssrLoadModule("/src/components/bash-command.tsx")
-    const call = { callId: "call-1", workerId: "worker-1", command: 'pwd\necho "<script>alert(1)</script>"', delaySeconds: null, timeoutSeconds: null }
+    const call = { callId: "call-1", workerId: "worker-1", summary: "检查 <script>alert(1)</script> 工作区", command: 'pwd\necho "<script>alert(1)</script>"', delaySeconds: null, timeoutSeconds: null }
     const render = (language: string, workers: { id: string; label: string }[] | undefined) => renderToStaticMarkup(createElement(BashCommand, {
       language, call, workers, time: "12:34:56", startedAt: now, inFlight: false, children: createElement("details", null, "Raw protocol"),
     }))
@@ -20,6 +20,7 @@ test("bash commands render Worker names, language, command text and raw details"
       assert.ok(html.includes(language === "zh" ? "正在调用 MacMini 上的命令" : "Calling a command on MacMini"))
       assert.ok(!html.includes("worker-1"))
       assert.ok(!html.includes("MBA"))
+      assert.ok(html.includes("检查 &lt;script&gt;alert(1)&lt;/script&gt; 工作区"))
       assert.ok(html.includes('pwd\necho &quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;'))
       assert.ok(!html.includes("<script>"))
       assert.match(html, /<time[^>]*>12:34:56<\/time>/)
@@ -38,7 +39,7 @@ test("a call in flight counts the controller delay down and then the Worker time
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { BashCommand } = await server.ssrLoadModule("/src/components/bash-command.tsx")
-    const call = (delaySeconds: number | null, timeoutSeconds: number | null) => ({ callId: "call-1", workerId: "worker-1", command: "pwd", delaySeconds, timeoutSeconds })
+    const call = (delaySeconds: number | null, timeoutSeconds: number | null) => ({ callId: "call-1", workerId: "worker-1", summary: null, command: "pwd", delaySeconds, timeoutSeconds })
     // The countdown reads the browser clock, so each case is anchored far enough from
     // a phase boundary that the second it renders in cannot change the phase.
     const render = (language: string, startedAt: number, inFlight: boolean, schedule: ReturnType<typeof call>) => renderToStaticMarkup(createElement(BashCommand, {

@@ -9,12 +9,13 @@ test("browser control calls render action details with escaped text in both lang
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { BrowserControlCall } = await server.ssrLoadModule("/src/components/browser-control-call.tsx")
-    const render = (language: string, call: unknown) => renderToStaticMarkup(createElement(BrowserControlCall, {
-      language, call, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
+    const render = (language: string, call: Record<string, unknown>) => renderToStaticMarkup(createElement(BrowserControlCall, {
+      language, call: { summary: null, ...call }, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
     for (const language of ["en", "zh"]) {
-      const navigate = render(language, { action: "navigate", url: "https://example.com/<script>alert(1)</script>" })
+      const navigate = render(language, { summary: "打开 <script>alert(1)</script> 文档", action: "navigate", url: "https://example.com/<script>alert(1)</script>" })
       assert.ok(navigate.includes(language === "zh" ? "打开网页" : "Open page"))
+      assert.ok(navigate.includes("打开 &lt;script&gt;alert(1)&lt;/script&gt; 文档"))
       assert.ok(navigate.includes("https://example.com/&lt;script&gt;alert(1)&lt;/script&gt;"))
       assert.ok(!navigate.includes("<script>"))
       const typed = render(language, { action: "type", selector: "#query", text: "你好 & <b>world</b>" })

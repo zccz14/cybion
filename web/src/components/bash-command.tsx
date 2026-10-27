@@ -3,6 +3,7 @@ import { TerminalSquareIcon } from "lucide-react"
 import { useLiveSeconds } from "@/hooks/use-now"
 import { bashCallCountdown, type BashFunctionCall } from "@/lib/history-payload"
 import { formatStatsDuration } from "@/lib/time"
+import { WorkerCallSummary } from "@/components/worker-call-summary"
 
 const copy = {
   en: {
@@ -39,6 +40,7 @@ export function BashCommand({ language, call, workers, time, startedAt, inFlight
         <span className="text-sm font-medium">{text.calling(workerName)}</span>
         <time className="text-xs text-muted-foreground">{time}</time>
       </div>
+      <WorkerCallSummary summary={call.summary} />
       <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/60 px-3 py-2 font-mono text-xs leading-5">{call.command}</pre>
       {inFlight && <BashCallCountdown language={language} call={call} startedAt={startedAt} />}
       {children}

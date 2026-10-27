@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { AppWindowIcon } from "lucide-react"
 import type { BrowserControlFunctionCall } from "@/lib/history-payload"
+import { WorkerCallSummary } from "@/components/worker-call-summary"
 
 const copy = {
   en: { title: "Browser control", open: "Open page", evaluate: "Evaluate script", click: "Click element", type: "Type text", screenshot: "Capture a screenshot", selector: "Selector" },
@@ -25,6 +26,7 @@ export function BrowserControlCall({ language, call, time, children }: {
         <span className="text-sm font-medium">{text.title}</span>
         <time className="text-xs text-muted-foreground">{time}</time>
       </div>
+      <WorkerCallSummary summary={call.summary} />
       <BrowserControlDetail language={language} call={call} />
       {children}
     </div>

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { MousePointerClickIcon } from "lucide-react"
 import type { ComputerUseFunctionCall } from "@/lib/history-payload"
+import { WorkerCallSummary } from "@/components/worker-call-summary"
 
 const copy = {
   en: { title: "Control the desktop", move: (x: number, y: number) => `Move the pointer to (${x}, ${y})`, click: (x: number, y: number) => `Click at (${x}, ${y})`, type: "Type text", screenshot: "Capture a screenshot" },
@@ -25,6 +26,7 @@ export function ComputerUseCall({ language, call, time, children }: {
         <span className="text-sm font-medium">{text.title}</span>
         <time className="text-xs text-muted-foreground">{time}</time>
       </div>
+      <WorkerCallSummary summary={call.summary} />
       <ComputerUseDetail language={language} call={call} />
       {children}
     </div>

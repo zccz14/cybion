@@ -168,7 +168,7 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         "partial deltas do not enter replay history"
     );
     tx.send(Ok(ResponseEvent::OutputItemDone(ResponseItem::from_value(json!({"type":"message","id":"m","role":"assistant","content":[{"type":"output_text","text":"final text"}]})).unwrap()))).await.unwrap();
-    let tool = ResponseItem::from_value(json!({"type":"custom_tool_call","id":"ct","call_id":"custom-1","name":"bash","input":json!({"worker_id":worker_id,"command":"pwd"}).to_string()})).unwrap();
+    let tool = ResponseItem::from_value(json!({"type":"custom_tool_call","id":"ct","call_id":"custom-1","name":"bash","input":json!({"worker_id":worker_id,"summary":"inspect the Worker","command":"pwd"}).to_string()})).unwrap();
     tx.send(Ok(ResponseEvent::OutputItemDone(tool.clone())))
         .await
         .unwrap();
@@ -289,7 +289,7 @@ async fn thread_persists_deltas_and_dispatches_worker_before_response_completed(
         "stale".to_owned(),
         "function_call_output".to_owned(),
         "bash".to_owned(),
-        json!({"worker_id":worker_id,"command":"pwd"}),
+        json!({"worker_id":worker_id,"summary":"inspect the Worker","command":"pwd"}),
     )
     .await
     .unwrap_err();
@@ -1315,7 +1315,7 @@ async fn seed_delayed_call(state: &AppState, user: &User, thread: &ThreadView, s
             "response_output",
             json!({
                 "type":"function_call","id":"fc-delay","call_id":"delay-1","name":"bash",
-                "arguments": json!({"worker_id":"00000000-0000-4000-8000-000000000051","command":"run-after-wait","delay_seconds":seconds}).to_string()
+                "arguments": json!({"worker_id":"00000000-0000-4000-8000-000000000051","summary":"inspect the Worker","command":"run-after-wait","delay_seconds":seconds}).to_string()
             }),
         );
         Ok(())
@@ -1367,7 +1367,7 @@ async fn delayed_worker_calls_wait_in_the_controller_before_dispatch() {
     tx.send(Ok(ResponseEvent::OutputItemDone(
         ResponseItem::from_value(json!({
             "type":"function_call","id":"fc-delay","call_id":"delay-1","name":"bash",
-            "arguments": json!({"worker_id":worker_id,"command":"run-after-wait","delay_seconds":86400}).to_string()
+            "arguments": json!({"worker_id":worker_id,"summary":"inspect the Worker","command":"run-after-wait","delay_seconds":86400}).to_string()
         }))
         .unwrap(),
     )))
@@ -1419,7 +1419,7 @@ async fn delayed_worker_call_dispatches_after_the_controller_wait() {
                 "response_output",
                 json!({
                     "type":"function_call","id":"fc-delay","call_id":"delay-1","name":"bash",
-                    "arguments": json!({"worker_id":worker_id,"command":"run-after-wait","delay_seconds":1}).to_string()
+                    "arguments": json!({"worker_id":worker_id,"summary":"inspect the Worker","command":"run-after-wait","delay_seconds":1}).to_string()
                 }),
             );
             Ok(())
@@ -1571,7 +1571,7 @@ async fn offline_worker_calls_are_answered_without_queueing_execution() {
     for (id, _, _) in workers {
         let tool = ResponseItem::from_value(json!({
             "type":"function_call", "id":format!("fc-{id}"), "call_id":id, "name":"bash",
-            "arguments":json!({"worker_id":id,"command":"echo must-not-run"}).to_string()
+            "arguments":json!({"worker_id":id,"summary":"inspect the Worker","command":"echo must-not-run"}).to_string()
         }))
         .unwrap();
         assert!(matches!(
@@ -1963,7 +1963,7 @@ async fn superseded_worker_callback_is_stored_once_outside_the_protocol_context(
         "old-call".to_owned(),
         "function_call_output".to_owned(),
         "bash".to_owned(),
-        json!({"worker_id":worker_id,"command":"pwd"}),
+        json!({"worker_id":worker_id,"summary":"inspect the Worker","command":"pwd"}),
     )
     .await
     .unwrap();

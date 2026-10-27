@@ -17,7 +17,7 @@ fn intent(c: &Connection, name: &str, call: &str) -> Intent {
     intent_for(c, 1, name, call)
 }
 fn intent_for(c: &Connection, input: i64, name: &str, call: &str) -> Intent {
-    let payload = json!({"type":"function_call","call_id":call,"name":name,"arguments":json!({"worker_id":W,"command":"pwd","action":"screenshot"}).to_string()});
+    let payload = json!({"type":"function_call","call_id":call,"name":name,"arguments":json!({"worker_id":W,"summary":"inspect the Worker","command":"pwd","action":"screenshot"}).to_string()});
     let record = persist_history_record(
         c,
         HistoryRecordInsert {
@@ -127,7 +127,10 @@ fn owner_ledger_caller_history_idempotency_and_forged_discovery() {
     assert_eq!(count(&a, "worker_calls"), 1);
     assert_eq!(count(&b, "worker_calls"), 0);
     let mut changed = i.clone();
-    changed.payload["arguments"] = json!({"worker_id":W,"command":"other"}).to_string().into();
+    changed.payload["arguments"] =
+        json!({"worker_id":W,"summary":"inspect the Worker","command":"other"})
+            .to_string()
+            .into();
     assert!(enqueue_intent(&mut a, "b", &changed).is_err());
     assert!(save_foreign_result(&a, W, &i.id, "{}", "completed", None).is_err());
     let call = worker_protocol::claim(&mut a, W, None).unwrap().unwrap();
@@ -656,7 +659,7 @@ async fn committed_stream_dispatch_management_and_callback_unavailable_recipient
             .await
             .is_err()
     );
-    let item=ResponseItem::from_value(json!({"type":"function_call","call_id":"shared-stream","name":"bash","arguments":json!({"worker_id":W,"command":"pwd"}).to_string()})).unwrap();
+    let item=ResponseItem::from_value(json!({"type":"function_call","call_id":"shared-stream","name":"bash","arguments":json!({"worker_id":W,"summary":"inspect the Worker","command":"pwd"}).to_string()})).unwrap();
     let ids = append_response_output_items(&state, &b, &thread, input, std::slice::from_ref(&item))
         .await
         .unwrap();
@@ -1228,9 +1231,10 @@ fn accepted_result_remains_recoverable_after_revoke_and_offline_without_reexecut
     );
     assert!(enqueue_intent(&mut a, "c", &i).is_err());
     let mut changed = i.clone();
-    changed.payload["arguments"] = json!({"worker_id":W,"command":"different"})
-        .to_string()
-        .into();
+    changed.payload["arguments"] =
+        json!({"worker_id":W,"summary":"inspect the Worker","command":"different"})
+            .to_string()
+            .into();
     assert!(enqueue_intent(&mut a, "b", &changed).is_err());
     project_output(&a, "a", &i.id).unwrap();
     project_output(&a, "a", &i.id).unwrap();

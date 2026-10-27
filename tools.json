@@ -240,6 +240,11 @@
             "type": "string",
             "description": "Exact worker_id from cybion_list_workers."
           },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One short sentence, in the user's language, saying why you are making this call. It is shown on the call card as the intent summary, so state the goal, not the command."
+          },
           "command": {
             "type": "string"
           },
@@ -256,6 +261,7 @@
         },
         "required": [
           "worker_id",
+          "summary",
           "command"
         ],
         "additionalProperties": false
@@ -271,6 +277,11 @@
           "worker_id": {
             "type": "string",
             "description": "Exact worker_id from cybion_list_workers."
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One short sentence, in the user's language, saying why you are making this call. It is shown on the call card as the intent summary, so state the goal, not the command."
           },
           "action": {
             "type": "string"
@@ -292,6 +303,7 @@
         },
         "required": [
           "worker_id",
+          "summary",
           "action"
         ],
         "additionalProperties": false
@@ -307,6 +319,11 @@
           "worker_id": {
             "type": "string",
             "description": "Exact worker_id from cybion_list_workers."
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One short sentence, in the user's language, saying why you are making this call. It is shown on the call card as the intent summary, so state the goal, not the command."
           },
           "action": {
             "type": "string"
@@ -328,6 +345,7 @@
         },
         "required": [
           "worker_id",
+          "summary",
           "action"
         ],
         "additionalProperties": false
@@ -344,6 +362,11 @@
             "type": "string",
             "description": "Exact worker_id from cybion_list_workers."
           },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One short sentence, in the user's language, saying why you are making this call. It is shown on the call card as the intent summary, so state the goal, not the command."
+          },
           "path": {
             "type": "string",
             "description": "Path of the image file on the Worker."
@@ -356,6 +379,7 @@
         },
         "required": [
           "worker_id",
+          "summary",
           "path"
         ],
         "additionalProperties": false

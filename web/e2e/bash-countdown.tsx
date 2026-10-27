@@ -3,7 +3,7 @@ import { BashCommand } from "../src/components/bash-command"
 import "../src/styles.css"
 
 const now = Math.floor(Date.now() / 1000)
-const call = (delaySeconds: number | null, timeoutSeconds: number | null) => ({ callId: "call-1", workerId: "worker-1", command: "pwd", delaySeconds, timeoutSeconds })
+const call = (delaySeconds: number | null, timeoutSeconds: number | null) => ({ callId: "call-1", workerId: "worker-1", summary: "检查工作区", command: "pwd", delaySeconds, timeoutSeconds })
 const workers = [{ id: "worker-1", label: "MacMini" }]
 
 function Card({ name, call: schedule, startedAt, inFlight }: { name: string; call: ReturnType<typeof call>; startedAt: number; inFlight: boolean }) {

@@ -58,7 +58,7 @@ def main():
                     output = [{"id": "final", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "finished smoke"}]}]
                 else:
                     assert len(requests) == 1, "model was called again before original tool settlement"
-                    output = [{"id": "tool", "type": "function_call", "call_id": "smoke-call", "name": "bash", "arguments": json.dumps({"worker_id": metadata["worker_id"], "command": command})}]
+                    output = [{"id": "tool", "type": "function_call", "call_id": "smoke-call", "name": "bash", "arguments": json.dumps({"worker_id": metadata["worker_id"], "summary": "verify recovery", "command": command})}]
                 encoded = json.dumps({"id": f"response-{len(requests)}", "end_turn": answered, "output": output}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

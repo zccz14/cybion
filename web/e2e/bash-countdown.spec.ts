@@ -36,4 +36,6 @@ test("the Worker timeout, its default and the settled card each read their own s
   await expect(countdown(page, "expired")).toHaveText("已过超时 · 正在取消")
   // A settled call has no deadline left to show.
   await expect(card(page, "settled").locator('[data-slot="bash-countdown"]')).toHaveCount(0)
+  // The card keeps showing why the model made the call.
+  await expect(card(page, "settled").locator('[data-slot="worker-call-summary"]')).toHaveText("检查工作区")
 })
