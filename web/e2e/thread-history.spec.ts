@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test"
 
 const groupSelector = '[data-slot="thread-process-group"]'
+const retryText = "Transient error; retry 1/4 scheduled: upstream Responses stream: Transport error: error decoding response body"
 
 test("only consecutive process items collapse; input, Activity, checkpoints and assistant replies stay visible", async ({ page }) => {
   const errors: string[] = []
@@ -13,15 +14,19 @@ test("only consecutive process items collapse; input, Activity, checkpoints and 
   await expect(page.getByText("Activity：已完成第一阶段检查。", { exact: true })).toBeVisible()
   await expect(page.getByText("AI 回复：部署检查通过，正在检查服务。", { exact: true })).toBeVisible()
   await expect(page.getByText("正在分析部署记录。", { exact: true })).toBeHidden()
+  // 自动重试是恢复记账，折叠在过程里，不像 Activity 那样单独占一张卡片。
+  await expect(page.getByText(retryText, { exact: true })).toBeHidden()
   await expect(page.getByText("已保存上下文检查点。", { exact: true })).toBeVisible()
-  await expect(groups.first().locator(":scope > summary")).toContainText("3 条")
-  await expect(groups.first().locator(":scope > summary")).toContainText("运行了 01 小时 01 分钟 05 秒")
+  await expect(groups.first().locator(":scope > summary")).toContainText("4 条")
+  // 折叠进来的重试记录也落在这一组的时间跨度里：它比最后一次工具输出晚一秒。
+  await expect(groups.first().locator(":scope > summary")).toContainText("运行了 01 小时 01 分钟 06 秒")
   await expect(groups.nth(1).locator(":scope > summary")).toContainText("1 条")
   await expect(groups.nth(1).locator(":scope > summary")).toContainText("运行了 00 小时 00 分钟 00 秒")
   await groups.first().locator(":scope > summary").click()
   await expect(page.getByText("正在分析部署记录。", { exact: true })).toBeVisible()
   await expect(page.getByText("部署检查通过。", { exact: true })).toBeVisible()
-  expect(await groups.first().locator("article").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-record-id")))).toEqual(["2", "3", "4"])
+  await expect(page.getByText(retryText, { exact: true })).toBeVisible()
+  expect(await groups.first().locator("article").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-record-id")))).toEqual(["2", "3", "4", "5"])
   await groups.first().getByText("原始记录 #2", { exact: true }).click()
   await expect(groups.first().locator("pre").first()).toBeVisible()
   await expect(groups.nth(1)).not.toHaveAttribute("open")
@@ -49,7 +54,7 @@ test("keyboard toggles, polling, language changes and streaming handoff preserve
   await expect(summary).toContainText("2 messages")
   await expect(summary).toContainText("Ran for 00h 02m 15s")
   await expect(last.locator("article")).toHaveCount(2)
-  await expect(last.locator('[data-record-id="8"]')).toHaveCount(1)
+  await expect(last.locator('[data-record-id="10"]')).toHaveCount(1)
   await expect(last.locator('[data-record-id="-1"]')).toHaveCount(0)
   await page.getByRole("button", { name: "Finish", exact: true }).click()
   await expect(last).toHaveAttribute("open", "")
@@ -114,19 +119,20 @@ test("minimal mode folds a turn down to its input and last tail candidate", asyn
   await expect(toggle).toHaveAttribute("aria-pressed", "true")
   const groups = page.locator(groupSelector)
   await expect(groups).toHaveCount(2)
-  await expect(groups.first().locator(":scope > summary")).toContainText("5 条")
+  await expect(groups.first().locator(":scope > summary")).toContainText("6 条")
   await expect(groups.nth(1).locator(":scope > summary")).toContainText("1 条")
   await expect(page.getByText("请检查部署状态。", { exact: true })).toBeVisible()
   await expect(page.getByText("AI 回复：部署检查通过，正在检查服务。", { exact: true })).toBeVisible()
   await expect(page.getByText("Activity：已完成第一阶段检查。", { exact: true })).toBeHidden()
   await expect(page.getByText("正在分析部署记录。", { exact: true })).toBeHidden()
+  await expect(page.getByText(retryText, { exact: true })).toBeHidden()
   await groups.first().locator(":scope > summary").click()
   await expect(page.getByText("Activity：已完成第一阶段检查。", { exact: true })).toBeVisible()
   await groups.first().locator(":scope > summary").click()
   await page.getByRole("button", { name: "Finish", exact: true }).click()
   await expect(page.getByText("AI 回复：全部检查通过。", { exact: true })).toBeVisible()
   await expect(page.getByText("AI 回复：部署检查通过，正在检查服务。", { exact: true })).toBeHidden()
-  await expect(groups.first().locator(":scope > summary")).toContainText("6 条")
+  await expect(groups.first().locator(":scope > summary")).toContainText("7 条")
   await toggle.click()
   await expect(toggle).toHaveAttribute("aria-pressed", "false")
   await expect(page.getByText("Activity：已完成第一阶段检查。", { exact: true })).toBeVisible()

@@ -25,9 +25,11 @@ const historyRecords = [
   record(2, "response_output", { id: "rs_2", type: "reasoning", summary: [{ text: "正在分析部署记录。" }] }, 10),
   record(3, "response_output", { id: "fc_3", type: "function_call", name: "bash", arguments: '{"command":"git status"}' }, 30),
   record(4, "tool_output", { output: "部署检查通过。" }, 3675),
-  record(5, "activity", { content: "Activity：已完成第一阶段检查。" }, 3680),
-  record(6, "checkpoint", { content: "已保存上下文检查点。" }, 3681),
-  record(7, "response_output", { id: "msg_7", type: "message", content: [{ text: `AI 回复：部署检查通过，正在检查服务。\n\n${wideTable}` }] }, 3690),
+  // 复现里上游流断掉后自动重试的那条记录：它只是恢复记账，不该单独占一张卡片。
+  record(5, "activity", { role: "system", content: "Transient error; retry 1/4 scheduled: upstream Responses stream: Transport error: error decoding response body", next_retry_at: base + 3678 }, 3676),
+  record(6, "activity", { content: "Activity：已完成第一阶段检查。" }, 3680),
+  record(7, "checkpoint", { content: "已保存上下文检查点。" }, 3681),
+  record(8, "response_output", { id: "msg_8", type: "message", content: [{ text: `AI 回复：部署检查通过，正在检查服务。\n\n${wideTable}` }] }, 3690),
 ]
 const liveItem = { id: "rs_live", type: "reasoning", summary: [{ text: "正在检查服务健康状态。" }] }
 const responseView: ThreadResponseView = {
@@ -49,8 +51,8 @@ function Fixture() {
     return [...saved, ...pendingResponseRecords(view, saved, threadId)]
   }, [history, view, threadId])
   const append = () => {
-    setHistory([...historyRecords, record(8, "response_output", liveItem, 4000), record(9, "tool_output", { output: "服务健康检查通过。" }, 4135)])
-    setView({ ...view, response: { ...view.response, output: [{ item: liveItem, done: true, record_id: 8 }] } })
+    setHistory([...historyRecords, record(10, "response_output", liveItem, 4000), record(11, "tool_output", { output: "服务健康检查通过。" }, 4135)])
+    setView({ ...view, response: { ...view.response, output: [{ item: liveItem, done: true, record_id: 10 }] } })
   }
   return <main className="flex h-svh min-w-0 flex-col bg-background text-foreground">
     <header className="flex shrink-0 flex-wrap items-center gap-3 border-b p-3 text-sm">
@@ -59,7 +61,7 @@ function Fixture() {
       <button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button>
       <button onClick={() => { setHistory(structuredClone(history)); setView(structuredClone(view)) }}>Poll</button>
       <button onClick={append}>Append</button>
-      <button onClick={() => setHistory([...history, record(10, "response_output", { id: "msg_10", type: "message", content: [{ text: "AI 回复：全部检查通过。" }] }, 4140)])}>Finish</button>
+      <button onClick={() => setHistory([...history, record(12, "response_output", { id: "msg_12", type: "message", content: [{ text: "AI 回复：全部检查通过。" }] }, 4140)])}>Finish</button>
       <button onClick={() => setThreadId(threadId === "thread-a" ? "thread-b" : "thread-a")}>Thread</button>
       <button aria-pressed={minimal} onClick={() => setMinimal(!minimal)}>Minimal</button>
       <button aria-pressed={running} onClick={() => setRunning(!running)}>Running</button>
