@@ -45,7 +45,7 @@ re-derive with better hints.
 { "audio_ref": "<sha256>", "prompt": "…", "keywords": ["CZON", "Rust Workers"],
   "language": "zh", "model": "gpt-4o-transcribe" }
 → { "status": "completed", "text": "…", "model": "…", "prompt_used": "…",
-    "cached": false }
+    "prompt_used": "…" }
 ```
 
 - The Controller posts multipart to `{upstream}/audio/transcriptions` with the
@@ -54,11 +54,9 @@ re-derive with better hints.
 - `keywords` fold into `prompt` for models without a native keyword field
   (`gpt-4o-transcribe` takes free-form `prompt`; `gpt-4o-transcribe-diarize`
   takes none). `prompt_used` echoes what was sent.
-- Results are cached in `audio_transcriptions(audio_ref, model, hint)` where
-  `hint` is the normalized prompt + keywords + language: an identical call is
-  free and answers `cached: true`. At most 8 distinct attempts per audio
-  attachment, after which the tool answers with an error instead of spending
-  again.
+- Every call transcribes again: no result cache and no per-audio attempt cap in
+  this version. Speech-to-text is cheap, and a cap would get in the way of a
+  model that legitimately retries a span with different vocabulary hints.
 - Client errors are answered to the model as `{ "error": … }`, never failing
   the turn — the same convention as the other native tools.
 
@@ -67,17 +65,19 @@ re-derive with better hints.
 `audio_transcription_model` exists at both levels, mirroring
 `image_generation_model`:
 
-| Level | Column | Empty |
-| --- | --- | --- |
-| Account default | `thread_defaults.audio_transcription_model` | disabled |
-| Thread override | `threads.audio_transcription_model` | disabled |
+| Level | Column |
+| --- | --- |
+| Account default | `thread_defaults.audio_transcription_model` |
+| Thread override | `threads.audio_transcription_model` |
 
-The thread override wins; `null` follows the account default; an empty string
-at either level disables audio input, and the composer's record/upload
-controls stay disabled with a hint. Unlike image generation the account
-default ships as `gpt-4o-transcribe` so voice input works on a fresh account.
-The model options mirror the image picker: `GET {upstream}/models?kind=sst`
-lists the callable speech-to-text models.
+Both columns are nullable and **default to null**: audio input ships off,
+because an account is not guaranteed to have any speech-to-text model on
+NormAI — the model has to exist first. The thread override wins; null there
+follows the account default; null at both levels keeps audio input disabled
+and the composer's record/upload controls disabled with a hint pointing at the
+picker. The options mirror the image picker: `GET {upstream}/models?kind=sst`
+lists the callable speech-to-text models, and an empty list means the account
+must add `sst` rows to an upstream before voice input can be switched on.
 
 ## Staging
 
@@ -94,8 +94,9 @@ lists the callable speech-to-text models.
   decoding; it lands with ffmpeg-backed slicing.
 - **Diarization** (`gpt-4o-transcribe-diarize`, which takes no prompt) and
   speaker labels.
-- **Spend ceiling per turn** beyond the 8-attempt cap; the cache is what keeps
-  repeated extraction cheap.
+- **Spend guardrails**: no result cache, no per-turn ceiling, no attempt cap.
+  Speech-to-text is cheap enough that a repeated extraction is acceptable
+  behaviour rather than a runaway.
 - Retention: audio follows its Thread today, and — like images — object bytes
   are not reclaimed when a Thread is deleted. Any PII retention policy must
   cover `objects/` and the transcription cache.
