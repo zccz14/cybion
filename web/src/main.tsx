@@ -1599,6 +1599,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     onSuccess: (_request, payload) => {
       clearSubmitted(payload.input)
       attachments.clear()
+      audio.clear()
       void client.invalidateQueries({ queryKey: ["threads"] })
     },
   })
@@ -1606,9 +1607,10 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     setDraft(next)
     start.reset()
   }
-  const submit = () => {
-    if (!value || (!input.trim() && attachments.images.length === 0 && audio.audios.length === 0) || start.isPending) return
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images, audios: audio.audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
+  const submit = (recorded: string[] = []) => {
+    const audios = [...audio.audios, ...recorded]
+    if (!value || (!input.trim() && attachments.images.length === 0 && audios.length === 0) || start.isPending) return
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1628,11 +1630,11 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
           <ConversationWelcome language={language} />
           {connection.isPending && !value?.upstream_id && <p role="status" className="text-sm text-muted-foreground">{help.preparing}</p>}
           {connection.error && <Alert><CircleAlertIcon /><AlertTitle>{help.connectionFailed}</AlertTitle><AlertDescription className="space-y-3"><p>{help.connectionRecovery}</p><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={connection.isFetching} onClick={() => void connection.refetch()}>{help.retryConnection}</Button><Button asChild size="sm" variant="outline"><Link to="/configuration">{help.modelAction}</Link></Button></div></AlertDescription></Alert>}
-          {start.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{help.startFailed}</AlertTitle><AlertDescription className="space-y-3"><p className="break-words">{errorMessage(start.error)}</p><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={start.isPending} onClick={submit}>{help.retrySend}</Button><Button asChild size="sm" variant="outline"><Link to="/configuration">{help.modelAction}</Link></Button></div></AlertDescription></Alert>}
+          {start.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{help.startFailed}</AlertTitle><AlertDescription className="space-y-3"><p className="break-words">{errorMessage(start.error)}</p><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={start.isPending} onClick={() => submit()}>{help.retrySend}</Button><Button asChild size="sm" variant="outline"><Link to="/configuration">{help.modelAction}</Link></Button></div></AlertDescription></Alert>}
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerAudio language={language} audios={audio.audios} recording={audio.recording} disabled={false} onStart={audio.start} onStop={audio.stop} onAdd={audio.add} onRemove={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<Button className="ml-auto" disabled={!value || (!input.trim() && attachments.images.length === 0 && audio.audios.length === 0) || start.isPending}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} onRemove={attachments.remove} onRemoveAudio={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || (!input.trim() && attachments.images.length === 0 && audio.audios.length === 0) || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -1756,6 +1758,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     onSuccess: (_request, submitted) => {
       clearSubmitted(submitted.input)
       attachments.clear()
+      audio.clear()
       void client.invalidateQueries({ queryKey: ["history", threadId] })
       void client.invalidateQueries({ queryKey: ["thread", threadId] })
       void client.invalidateQueries({ queryKey: ["threads"] })
@@ -1839,6 +1842,11 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     ? { label: t("restoreThread"), icon: <ArchiveRestoreIcon className="size-4" />, next: false }
     : { label: t("archiveThread"), icon: <ArchiveIcon className="size-4" />, next: true }
   const busy = submit.isPending || control.isPending
+  const submitInput = (recorded: string[] = []) => {
+    const audios = [...audio.audios, ...recorded]
+    if (busy || (!input.trim() && attachments.images.length === 0 && audios.length === 0)) return
+    submit.mutate({ input, images: attachments.images, audios })
+  }
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
   const action = composerAction(input, attachments.images.length, running)
   return <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
@@ -1865,7 +1873,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
       <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
     </div>
     <ThreadUsagePanel usage={current.usage} language={language} />
-    {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => (input.trim() || (attachments.images.length > 0 || audio.audios.length > 0)) && submit.mutate({ input, images: attachments.images, audios: audio.audios })} /></div>}
+    {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => submitInput()} /></div>}
     {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
     {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
@@ -1894,14 +1902,15 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
         <MessageScrollerButton behavior="auto" />
       </MessageScroller>
     </MessageScrollerProvider>
-    <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); if ((input.trim() || (attachments.images.length > 0 || audio.audios.length > 0)) && !busy) submit.mutate({ input, images: attachments.images, audios: audio.audios }) }}>
-      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} onRemove={attachments.remove} /><ComposerAudio language={language} audios={audio.audios} recording={audio.recording} disabled={false} onStart={audio.start} onStop={audio.stop} onAdd={audio.add} onRemove={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
+    <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submitInput() }}>
+      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} onRemove={attachments.remove} onRemoveAudio={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} audioTranscription={defaults.data ? { override: current.audio_transcription_model, fallback: defaults.data.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (audio_transcription_model) => settings.mutate({ audio_transcription_model }) } : undefined} />
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
+            <ComposerAudio language={language} recording={audio.recording} disabled={busy} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submitInput([dataUrl]) })} onCancel={audio.cancel} />
             {action === "send"
-              ? <Button disabled={busy}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
+              ? <Button disabled={busy || audio.recording}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
               : action === "stop"
                 ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
                 : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}

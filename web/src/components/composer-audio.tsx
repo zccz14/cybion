@@ -1,105 +1,58 @@
-import { MicIcon, SquareIcon, XIcon } from "lucide-react"
-import { useRef } from "react"
+import { MicIcon, SendIcon, XIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { audioAttachmentSize } from "@/lib/composer-audio"
 
 const copy = {
   en: {
-    record: "Record audio",
-    stop: "Stop recording",
-    upload: "Attach audio",
-    recording: "Recording",
-    attachment: "Audio",
-    remove: "Remove audio",
+    record: "Record a voice message",
+    send: "Send voice message",
+    cancel: "Cancel recording",
   },
   zh: {
-    record: "录制音频",
-    stop: "停止录音",
-    upload: "添加音频",
-    recording: "正在录音",
-    attachment: "音频",
-    remove: "移除音频",
+    record: "录制语音",
+    send: "发送语音",
+    cancel: "取消录音",
   },
 } as const
 
+/// The composer's voice control: one microphone button that turns into a
+/// send/cancel pair while recording. It sits in the toolbar between the
+/// compaction button and the send button. Picking an audio file stays available
+/// through `useComposerAudio().add` for a future attachment entry point, so the
+/// composer no longer spends a second button on it.
 export function ComposerAudio({
   language,
-  audios,
   recording,
   disabled,
   onStart,
-  onStop,
-  onAdd,
-  onRemove,
+  onSend,
+  onCancel,
 }: {
   language: "en" | "zh"
-  audios: string[]
   recording: boolean
   disabled: boolean
   onStart: () => Promise<boolean>
-  onStop: () => void
-  onAdd: (files: File[]) => Promise<void>
-  onRemove: (index: number) => void
+  onSend: () => void
+  onCancel: () => void
 }) {
   const t = copy[language]
-  const picker = useRef<HTMLInputElement | null>(null)
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {recording ? (
-        <Button type="button" variant="destructive" size="sm" onClick={onStop}>
-          <SquareIcon data-icon="inline-start" />
-          {t.stop}
-        </Button>
-      ) : (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled}
-          onClick={() => void onStart()}
-        >
-          <MicIcon data-icon="inline-start" />
-          {t.record}
-        </Button>
-      )}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        disabled={disabled || recording}
-        onClick={() => picker.current?.click()}
-      >
-        {t.upload}
-      </Button>
-      <input
-        ref={picker}
-        type="file"
-        accept="audio/*,.m4a,.webm,.wav,.mp3,.ogg,.flac,.aac"
-        className="hidden"
-        onChange={(event) => {
-          const files = Array.from(event.target.files ?? [])
-          event.target.value = ""
-          if (files.length > 0) void onAdd(files)
-        }}
-      />
-      {audios.map((dataUrl, index) => (
-        <span
-          key={index}
-          className="inline-flex items-center gap-1.5 rounded-md border bg-muted px-2 py-1 text-xs"
-        >
-          {t.attachment} · {audioAttachmentSize(dataUrl)}
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="ghost"
-            aria-label={t.remove}
-            onClick={() => onRemove(index)}
-          >
-            <XIcon className="size-3" />
-          </Button>
-        </span>
-      ))}
-    </div>
-  )
+  if (recording) return <>
+    <Button type="button" size="icon" aria-label={t.send} title={t.send} onClick={onSend}>
+      <SendIcon />
+    </Button>
+    <Button type="button" size="icon" variant="outline" aria-label={t.cancel} title={t.cancel} onClick={onCancel}>
+      <XIcon />
+    </Button>
+  </>
+  return <Button
+    type="button"
+    size="icon"
+    variant="outline"
+    aria-label={t.record}
+    title={t.record}
+    disabled={disabled}
+    onClick={() => void onStart()}
+  >
+    <MicIcon />
+  </Button>
 }

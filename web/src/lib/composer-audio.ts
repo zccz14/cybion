@@ -30,3 +30,11 @@ export function audioAttachmentSize(dataUrl: string): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${Math.max(1, Math.round(bytes / 1024))} KB`
 }
+
+/// A voice bar's length label. A MediaRecorder WebM often reports no duration at
+/// first, so an unknown value stays an ellipsis instead of a wrong "0:00".
+export function audioDurationLabel(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "—"
+  const total = Math.round(seconds)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`
+}
