@@ -57,14 +57,19 @@ explains the current execution or its outcome. No stored state, schema
 migration, or client-side inference is needed.
 
 The same projection derives `running_summary`. When the Thread is running it
-reads the newest `response_output` Worker call of the current turn that has no
-matching tool output, extracts `arguments.summary` (or `input.summary` for a
-custom tool call), and returns NULL when that call is answered, carries no
-summary, or its arguments are not JSON. Worker calls are persisted and settled
-in record order, so an answered newest call proves every older call in the turn
-is settled too. The lookup is one indexed tail read of the Thread's own history,
-limited to running Threads; it stores nothing and cannot drift from the
-conversation.
+prefers the newest `response_output` Worker call of the current turn that has no
+matching tool output, extracting `arguments.summary` (or `input.summary` for a
+custom tool call): a call in flight is what the Thread is doing, so it wins over
+reasoning, which is only what the Thread is thinking. With no such call it falls
+back to the newest `reasoning` record after `max(last input, last tool output)`
+whose `summary` array still holds non-blank text, joining the parts with a blank
+line. That waterline keeps the fallback honest - a tool result answers the
+reasoning before it, so that text never reappears afterwards - and a reasoning
+record without text is skipped instead of shadowing an older one that has some.
+Worker calls are persisted and settled in record order, so an answered newest
+call proves every older call in the turn is settled too. The lookup is one
+indexed tail read of the Thread's own history, limited to running Threads; it
+stores nothing and cannot drift from the conversation.
 
 A shared SQL projection reads the current control state and the newest **input
 or thread-control record**, ordered by durable record ID:
@@ -88,9 +93,11 @@ record. The result is read in the same SQLite statement as Thread metadata.
   → complete → fail → retry, including late failure/success, newer-input
   supersession, renames, independent threads/users, and raw activity payloads.
 - Backend tests cover the running summary appearing for the newest unanswered
-  call, disappearing when its output lands, ignoring the previous turn's
-  unanswered call, falling back for calls recorded without a summary and for
-  malformed arguments, and ending at finalization.
+  call and for the newest reasoning summary after the waterline, preferring the
+  call, dropping reasoning once its tool result lands, taking every text part
+  while skipping text-less reasoning, ignoring the previous turn's records,
+  falling back for calls recorded without a summary and for malformed
+  arguments, and ending at finalization.
 - Frontend tests cover bilingual labels, the summary replacement, and reuse by
   both lists and conversation surfaces. Playwright covers every icon/label,
   selected navigation, keyboard tooltips, state updates, reduced motion,

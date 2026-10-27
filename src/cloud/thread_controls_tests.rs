@@ -1075,6 +1075,195 @@ async fn running_summary_follows_the_newest_unanswered_worker_call() {
     assert_eq!(running_summary(&state, &user, &thread).await, None);
 }
 
+fn reasoning(parts: &[&str]) -> Value {
+    json!({
+        "type": "reasoning",
+        "summary": parts
+            .iter()
+            .map(|text| json!({"type": "summary_text", "text": text}))
+            .collect::<Vec<_>>(),
+    })
+}
+
+async fn append_record(
+    state: &AppState,
+    user: &User,
+    thread: &ThreadView,
+    kind: &'static str,
+    payload: Value,
+) {
+    let thread_id = thread.id.clone();
+    user_db(state, user, false, move |connection| {
+        insert_record(connection, &thread_id, kind, payload);
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn running_summary_falls_back_to_the_newest_unanswered_reasoning_summary() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "running-summary-reasoning-owner").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let _run = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt(user_text("run")),
+    )
+    .await;
+    // Nothing is known about a Thread the model has not thought about yet.
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+
+    // While the model thinks, its reasoning summary says what the Thread is doing.
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        reasoning(&["先看磁盘"]),
+    )
+    .await;
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("先看磁盘")
+    );
+
+    // A Worker call in flight is the Thread's current action, so it wins.
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        json!({
+            "type":"function_call","id":"fc-1","call_id":"call-1","name":"bash",
+            "arguments": json!({
+                "worker_id":"00000000-0000-4000-8000-000000000001","summary":"检查磁盘","command":"df -h"
+            }).to_string()
+        }),
+    )
+    .await;
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("检查磁盘")
+    );
+
+    // The tool output answers both the call and the reasoning before it.
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "tool_output",
+        json!({"type":"function_call_output","call_id":"call-1","output":"{\"ok\":true}"}),
+    )
+    .await;
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+
+    // Reasoning recorded after that result is current again.
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        reasoning(&["磁盘正常，接着看日志"]),
+    )
+    .await;
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("磁盘正常，接着看日志")
+    );
+
+    // A reasoning record without text cannot shadow the one that carries it.
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        reasoning(&["", "   "]),
+    )
+    .await;
+    append_record(&state, &user, &thread, "response_output", reasoning(&[])).await;
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        json!({"type":"reasoning","summary":[{"type":"summary_text"}]}),
+    )
+    .await;
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("磁盘正常，接着看日志")
+    );
+
+    // Every text part is kept, blank parts dropped.
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        reasoning(&["第一段", "", "第二段"]),
+    )
+    .await;
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("第一段\n\n第二段")
+    );
+
+    // Stored history the projection cannot read is skipped, not fatal.
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        json!({"type":"reasoning","summary":"不是数组"}),
+    )
+    .await;
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, false, move |connection| {
+        connection.execute(
+            "INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES(?,'response_output','not JSON',0)",
+            [&thread_id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("第一段\n\n第二段")
+    );
+
+    // A new turn starts over from its own input.
+    let next = record(
+        &state,
+        &user,
+        &thread,
+        RequestInput::Prompt(user_text("next")),
+    )
+    .await;
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+    append_record(
+        &state,
+        &user,
+        &thread,
+        "response_output",
+        reasoning(&["新一轮开始"]),
+    )
+    .await;
+    assert_eq!(
+        running_summary(&state, &user, &thread).await.as_deref(),
+        Some("新一轮开始")
+    );
+
+    // Finalization ends the run; a running summary never outlives it.
+    finalize_request_success(&state, &user, &thread.id, next)
+        .await
+        .unwrap();
+    assert_eq!(running_summary(&state, &user, &thread).await, None);
+}
+
 #[tokio::test]
 async fn proactive_compaction_checkpoints_the_context_before_an_oversized_inference() {
     let (_root, state) = test_state();

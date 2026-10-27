@@ -3652,8 +3652,15 @@ fn externalize_input_images(data_dir: &Path, input: &mut Value) -> Result<(), Ap
 //
 // INVARIANT: Worker calls are persisted and settled in record order, so once the
 // newest Worker call of the current turn has its tool output, no older call in
-// that turn is still running. Running summary therefore reads only the newest
-// call and yields NULL when it is answered.
+// that turn is still running. The running summary therefore reads the newest
+// Worker call only, and a call in flight wins over reasoning: the call is what the
+// Thread is doing, reasoning is only what it is thinking.
+//
+// INVARIANT: a reasoning summary stays current only while its thinking is
+// unanswered. Anything at or before max(last input, last tool output) is stale, so
+// once a tool result lands the reasoning that preceded it never shows again. A
+// reasoning record without a non-blank text part is skipped rather than shown, so
+// it cannot shadow an older reasoning summary that still carries text.
 const THREAD_VIEW_SELECT: &str = r#"
 SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast,t.status,t.created_at,t.updated_at,
        CASE
@@ -3676,26 +3683,51 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        t.max_loaded_manuals,
        t.audio_transcription_model,
        COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0),
-       CASE WHEN t.status='running' THEN (
-         SELECT CASE WHEN NOT EXISTS (
-             SELECT 1 FROM history_records o INDEXED BY history_records_thread_kind_created
-             WHERE o.thread_id=h.thread_id AND o.kind='tool_output' AND o.id>h.id
-               AND json_valid(o.payload)
-               AND json_extract(o.payload,'$.call_id')=json_extract(h.payload,'$.call_id'))
-           THEN COALESCE(
-             CASE WHEN json_valid(json_extract(h.payload,'$.arguments'))
-                   AND json_type(json_extract(h.payload,'$.arguments'),'$.summary')='text'
-                  THEN NULLIF(TRIM(json_extract(json_extract(h.payload,'$.arguments'),'$.summary')),'') END,
-             CASE WHEN json_valid(json_extract(h.payload,'$.input'))
-                   AND json_type(json_extract(h.payload,'$.input'),'$.summary')='text'
-                  THEN NULLIF(TRIM(json_extract(json_extract(h.payload,'$.input'),'$.summary')),'') END)
-         END
-         FROM history_records h INDEXED BY history_records_thread_kind_created
-         WHERE h.thread_id=t.id AND h.kind='response_output' AND json_valid(h.payload)
-           AND json_extract(h.payload,'$.type') IN ('function_call','custom_tool_call')
-           AND h.id > COALESCE((SELECT MAX(id) FROM history_records INDEXED BY history_records_thread_kind_created
-                                WHERE thread_id=t.id AND kind='input'),0)
-         ORDER BY h.id DESC LIMIT 1
+       CASE WHEN t.status='running' THEN COALESCE(
+         (
+           SELECT CASE WHEN NOT EXISTS (
+               SELECT 1 FROM history_records o INDEXED BY history_records_thread_kind_created
+               WHERE o.thread_id=h.thread_id AND o.kind='tool_output' AND o.id>h.id
+                 AND json_valid(o.payload)
+                 AND json_extract(o.payload,'$.call_id')=json_extract(h.payload,'$.call_id'))
+             THEN COALESCE(
+               CASE WHEN json_valid(json_extract(h.payload,'$.arguments'))
+                     AND json_type(json_extract(h.payload,'$.arguments'),'$.summary')='text'
+                    THEN NULLIF(TRIM(json_extract(json_extract(h.payload,'$.arguments'),'$.summary')),'') END,
+               CASE WHEN json_valid(json_extract(h.payload,'$.input'))
+                     AND json_type(json_extract(h.payload,'$.input'),'$.summary')='text'
+                    THEN NULLIF(TRIM(json_extract(json_extract(h.payload,'$.input'),'$.summary')),'') END)
+           END
+           FROM history_records h INDEXED BY history_records_thread_kind_created
+           WHERE h.thread_id=t.id AND h.kind='response_output' AND json_valid(h.payload)
+             AND json_extract(h.payload,'$.type') IN ('function_call','custom_tool_call')
+             AND h.id > COALESCE((SELECT MAX(id) FROM history_records INDEXED BY history_records_thread_kind_created
+                                  WHERE thread_id=t.id AND kind='input'),0)
+           ORDER BY h.id DESC LIMIT 1
+         ),
+         (
+           -- Reasoning is the fallback: the newest summary recorded after the
+           -- waterline that still carries text.
+           SELECT NULLIF(TRIM((
+             SELECT group_concat(json_extract(value,'$.text'), char(10)||char(10))
+             FROM json_each(r.payload,'$.summary')
+             WHERE json_type(value,'$.text')='text' AND TRIM(json_extract(value,'$.text'))<>''
+           )),'')
+           FROM history_records r INDEXED BY history_records_thread_kind_created
+           WHERE r.thread_id=t.id AND r.kind='response_output' AND json_valid(r.payload)
+             AND json_extract(r.payload,'$.type')='reasoning'
+             AND json_type(r.payload,'$.summary')='array'
+             AND EXISTS (
+               SELECT 1 FROM json_each(r.payload,'$.summary')
+               WHERE json_type(value,'$.text')='text' AND TRIM(json_extract(value,'$.text'))<>''
+             )
+             AND r.id > max(
+               COALESCE((SELECT MAX(id) FROM history_records INDEXED BY history_records_thread_kind_created
+                         WHERE thread_id=t.id AND kind='input'),0),
+               COALESCE((SELECT MAX(id) FROM history_records INDEXED BY history_records_thread_kind_created
+                         WHERE thread_id=t.id AND kind='tool_output'),0))
+           ORDER BY r.id DESC LIMIT 1
+         )
        ) END AS running_summary
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
