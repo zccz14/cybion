@@ -697,30 +697,76 @@ async fn transcribe_audio(
     Ok((text, request_id))
 }
 
-/// Stores the audio attachments of one fresh input item. Nothing is transcribed
-/// here: reading a clip costs one speech-to-text request, and an attachment the
-/// model never listens to should not pay for one. The model asks
-/// `normai_audio_transcription` when it actually needs the words, and the part
-/// it reads names the reference.
+/// Stores the audio attachments of one fresh input item and runs the first
+/// transcription pass with the effective model, appending one text part per
+/// attachment that carries the reference and the provisional transcript. A
+/// failed first pass still names the reference, so the model can retry through
+/// `normai_audio_transcription` with vocabulary hints.
 async fn prepare_input_audio(
     state: &AppState,
     user: &User,
     thread: Option<&ThreadView>,
+    upstream_id: Option<&str>,
     item: &mut Value,
 ) -> Result<(), ApiError> {
     let defaults = user_db(state, user, false, |connection| {
         load_thread_defaults(connection)
     })
     .await?;
-    if externalize_input_audio(state.data_dir.as_path(), item)?.is_empty() {
+    let stored = externalize_input_audio(state.data_dir.as_path(), item)?;
+    if stored.is_empty() {
         return Ok(());
     }
-    if effective_audio_transcription_model(thread, &defaults).is_none() {
+    let Some(model) = effective_audio_transcription_model(thread, &defaults) else {
         return Err(ApiError::bad_request(
             "audio input needs a speech-to-text model: pick one from GET {upstream}/models?kind=sst in the settings first",
         ));
+    };
+    let upstream = match thread {
+        Some(thread) => load_thread_upstream(state, user, thread).await?,
+        None => {
+            let upstream_id = upstream_id.map(str::to_owned);
+            user_db(state, user, false, move |connection| {
+                upstreams::for_thread_id(connection, upstream_id.as_deref())
+            })
+            .await?
+            .ok_or_else(|| ApiError::conflict("configure an upstream for this thread"))?
+        }
+    };
+    for (object, media_type, bytes) in stored {
+        let note = match transcribe_audio(state, &upstream, bytes, &media_type, &model, None, None)
+            .await
+        {
+            Ok((text, _)) => format!(
+                "[audio attachment ref={object} type={media_type}] provisional transcript ({model}):\n{text}\nCall normai_audio_transcription with this ref and prompt/keywords to re-extract terms the first pass missed."
+            ),
+            Err(error) => format!(
+                "[audio attachment ref={object} type={media_type}] the provisional transcript failed ({}); call normai_audio_transcription with this ref and prompt/keywords to transcribe it.",
+                error.message
+            ),
+        };
+        attach_audio_note(item, &object, note);
     }
     Ok(())
+}
+
+/// Keeps the first-pass transcript on the audio part itself. The stored input
+/// then stays exactly what the user sent - a clip plus any typed text - while
+/// `audio_protocol_item` still hands the model the same note it used to read
+/// from a separate text part.
+fn attach_audio_note(item: &mut Value, reference: &str, note: String) {
+    let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for part in parts.iter_mut() {
+        if part.get("audio_ref").and_then(Value::as_str) != Some(reference) {
+            continue;
+        }
+        if let Some(object) = part.as_object_mut() {
+            object.insert("provisional_note".to_owned(), Value::String(note));
+        }
+        return;
+    }
 }
 
 /// Rewrites audio attachment parts for the request: upstream models take no
@@ -749,18 +795,13 @@ fn audio_protocol_item(item: &mut Value) {
             .and_then(Value::as_str)
             .unwrap_or("audio")
             .to_owned();
-        // Inputs stored while the first pass existed still carry its transcript;
-        // everything newer gets a note that names the reference and says how to
-        // read it.
+        // The provisional transcript rides along on the stored part; a part
+        // stored before that existed still gets the bare reference note.
         let note = object
             .get("provisional_note")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "[audio attachment ref={reference} type={media_type}] call normai_audio_transcription with this audio_ref to read the clip"
-                )
-            });
+            .unwrap_or_else(|| format!("[audio attachment ref={reference} type={media_type}]"));
         *part = json!({"type":"input_text","text":note});
     }
 }
@@ -4207,8 +4248,16 @@ async fn start_thread(
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
     Json(input): Json<StartThreadInput>,
 ) -> Result<Json<RequestView>, ApiError> {
+    let upstream_id = input.upstream_id.clone();
     let mut message = input_message(input.input, input.images, input.audios)?;
-    prepare_input_audio(&state, &identity.user, None, &mut message).await?;
+    prepare_input_audio(
+        &state,
+        &identity.user,
+        None,
+        upstream_id.as_deref(),
+        &mut message,
+    )
+    .await?;
     let model = model_id(input.model)?;
     let reasoning_effort = reasoning_effort(input.reasoning_effort)?;
     let thread = create_thread_for(
@@ -4773,7 +4822,7 @@ async fn thread_input(
         move |connection| load_thread(connection, &id)
     })
     .await?;
-    prepare_input_audio(&state, &identity.user, Some(&thread), &mut input).await?;
+    prepare_input_audio(&state, &identity.user, Some(&thread), None, &mut input).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
@@ -9793,7 +9842,7 @@ async fn external_thread_input(
         move |connection| load_thread(connection, &id)
     })
     .await?;
-    prepare_input_audio(&state, &identity.user, Some(&thread), &mut input).await?;
+    prepare_input_audio(&state, &identity.user, Some(&thread), None, &mut input).await?;
     Ok(Json(
         enqueue_request(state, identity.user, id, input).await?,
     ))
@@ -10133,6 +10182,23 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
+    fn the_provisional_transcript_stays_on_the_audio_part() {
+        let reference = "c".repeat(64);
+        let mut item = json!({
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "audio_ref": reference, "media_type": "audio/webm"},
+                {"type": "input_text", "text": "听一下"}
+            ]
+        });
+        attach_audio_note(&mut item, &reference, "provisional note".to_owned());
+        let content = item["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "the note must not add a text part");
+        assert_eq!(content[0]["provisional_note"], "provisional note");
+        assert_eq!(content[1]["text"], "听一下");
+    }
+
+    #[test]
     fn the_model_still_reads_the_provisional_transcript() {
         let reference = "d".repeat(64);
         let mut item = json!({
@@ -10150,7 +10216,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_parts_without_a_transcript_name_their_reference_and_how_to_read_it() {
+    fn audio_parts_without_a_transcript_still_name_their_reference() {
         let reference = "e".repeat(64);
         let mut item = json!({
             "role": "user",
@@ -10159,9 +10225,7 @@ mod tests {
         audio_protocol_item(&mut item);
         assert_eq!(
             item["content"][0]["text"],
-            format!(
-                "[audio attachment ref={reference} type=audio/webm] call normai_audio_transcription with this audio_ref to read the clip"
-            )
+            format!("[audio attachment ref={reference} type=audio/webm]")
         );
     }
 
@@ -12912,7 +12976,7 @@ mod tests {
                 "normai_audio_transcription": {
                     "type": "function",
                     "name": "normai_audio_transcription",
-                    "description": "Transcribe an audio recording attached to this Thread. Pass the audio_ref of the attachment; add prompt (topic, setting, names) and keywords to fix terms and acronyms, or pass another model. Call it again with better hints when the transcript looks wrong.",
+                    "description": "Transcribe an audio recording attached to this Thread. Pass the audio_ref of the attachment; add prompt (topic, setting, names) and keywords to fix terms and acronyms the provisional transcript got wrong, or pass another model. Call it again with better hints when the transcript looks wrong.",
                     "parameters": {
                         "type": "object",
                         "properties": {
