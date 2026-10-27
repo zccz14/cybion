@@ -297,7 +297,12 @@ pub(super) async fn delete(
 
 #[derive(Deserialize)]
 pub(super) struct ModelsQuery {
-    /// `image` narrows every upstream catalog to its image generation models.
+    /// `image` narrows every upstream catalog to its image generation models,
+    /// `sst` to its speech-to-text models. Readers must keep this list in step
+    /// with the kinds the console asks for: a kind missing here is a 400, and
+    /// the picker behind it silently offers nothing (`?kind=sst` was rejected
+    /// this way, so audio input could not name a transcription model on any
+    /// upstream that had one).
     pub(super) kind: Option<String>,
 }
 
@@ -309,6 +314,7 @@ pub(super) async fn models(
     let kind = match query.kind.as_deref().unwrap_or_default() {
         "" => None,
         "image" => Some("image"),
+        "sst" => Some("sst"),
         kind => return Err(ApiError::bad_request(format!("unknown model kind: {kind}"))),
     };
     let upstreams = user_db(&state, &identity.user, true, |connection| {

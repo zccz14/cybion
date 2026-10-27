@@ -518,6 +518,63 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
     );
 }
 
+/// The audio input picker asks its catalog for `?kind=sst`. A whitelist that
+/// only knew `image` answered 400, so every speech-to-text model stayed
+/// invisible even on an upstream that served two of them.
+#[tokio::test]
+async fn the_audio_picker_reads_the_upstream_speech_to_text_catalog() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "audio-models-owner").unwrap();
+    let (catalog_port, catalog) = serve_model_catalog_once().await;
+    let created = upstreams::create(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(upstreams::CreateUpstreamInput {
+            name: "normai".to_owned(),
+            base_url: format!("http://127.0.0.1:{catalog_port}/v1"),
+            api_key: Some("sk-audio".to_owned()),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let catalogs = upstreams::models(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Query(upstreams::ModelsQuery {
+            kind: Some("sst".to_owned()),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(catalogs.upstreams.len(), 1);
+    assert_eq!(catalogs.upstreams[0].id, created.id);
+    assert_eq!(
+        catalogs.upstreams[0].models,
+        ["gpt-5.6-terra", "meta-llama/Llama-3.1-8B-Instruct"]
+    );
+    let head = catalog.await.unwrap().to_lowercase();
+    assert!(
+        head.starts_with("get /v1/models?kind=sst http/1.1"),
+        "the speech-to-text kind must reach the upstream catalog: {head}"
+    );
+
+    // tts has no feature behind it yet, so the catalog keeps refusing it.
+    match upstreams::models(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Query(upstreams::ModelsQuery {
+            kind: Some("tts".to_owned()),
+        }),
+    )
+    .await
+    {
+        Ok(_) => panic!("an unknown kind must not be forwarded"),
+        Err(error) => assert_eq!(error.status, StatusCode::BAD_REQUEST),
+    }
+}
+
 #[tokio::test]
 async fn user_upstream_configuration_round_trips_without_exposing_the_key() {
     let (_root, state) = test_state();
