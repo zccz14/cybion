@@ -80,7 +80,10 @@
             "description": "Markdown body (up to 200,000 characters). Omit to keep the current body, or for an empty one when creating."
           },
           "parent_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Parent: an exact manual_id to become a child of that Manual, null for the top level, or \"TRASH\" to move the Manual into the trash where the user can still see and restore it (updates only). Omit to keep the current parent, or to create at the top level."
           }
         },
@@ -428,6 +431,43 @@
         },
         "required": [
           "prompt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "normai_audio_transcription": {
+      "type": "function",
+      "name": "normai_audio_transcription",
+      "description": "Transcribe an audio recording attached to this Thread. Pass the audio_ref of the attachment; add prompt (topic, setting, names) and keywords to fix terms and acronyms the provisional transcript got wrong, or pass another model. Call it again with better hints when the transcript looks wrong.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "audio_ref": {
+            "type": "string",
+            "description": "The audio_ref of an audio attachment in this Thread's input."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Free-form context to guide recognition: topic, domain vocabulary, participant names, spelling of terms. Context only, not instructions."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Terms and acronyms that must appear verbatim."
+          },
+          "language": {
+            "type": "string",
+            "description": "ISO-639-1 language hint such as zh or en; omit to auto-detect."
+          },
+          "model": {
+            "type": "string",
+            "description": "Speech-to-text model override; defaults to the Thread's configured model."
+          }
+        },
+        "required": [
+          "audio_ref"
         ],
         "additionalProperties": false
       }

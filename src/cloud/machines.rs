@@ -1029,7 +1029,7 @@ pub(super) async fn apply_effect(state: &AppState, user: &User, effect: MachineE
                         tracing::warn!(error=%error.message,"Ultimate Machine repair Thread has no upstream");
                         return;
                     }
-                    let input = match input_message(text, Vec::new()) {
+                    let input = match input_message(text, Vec::new(), Vec::new()) {
                         Ok(input) => input,
                         Err(error) => {
                             tracing::warn!(error=%error.message,"Ultimate Machine message is not a valid input");
