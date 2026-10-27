@@ -35,6 +35,24 @@ test("a sent voice message renders as one playable bar instead of text", async (
     assert.ok(stored.includes('data-audio-ref="' + reference + '"'))
     assert.match(stored, /<button[^>]*disabled/)
     assert.ok(stored.includes('aria-label="播放语音"'))
+    // The first-pass transcript shows up as a subtitle under the bar, so the
+    // words are readable without pressing play.
+    const referenceWithNote = "d".repeat(64)
+    const subtitled = text({
+      role: "user",
+      content: [{
+        type: "input_audio",
+        audio_ref: referenceWithNote,
+        media_type: "audio/webm",
+        provisional_note: `[audio attachment ref=${referenceWithNote} type=audio/webm] provisional transcript (qwen-audio-3.0-asr-flash):\n记得把发布也跟上\nCall normai_audio_transcription with this ref and prompt/keywords to re-extract terms the first pass missed.`,
+      }],
+    })
+    assert.ok(subtitled.includes('data-slot="audio-transcript"'))
+    assert.ok(subtitled.includes("记得把发布也跟上"))
+    assert.ok(subtitled.includes("qwen-audio-3.0-asr-flash"))
+    assert.ok(subtitled.indexOf('data-slot="audio-message"') < subtitled.indexOf("记得把发布也跟上"))
+    // No transcript, no subtitle.
+    assert.ok(!audioOnly.includes('data-slot="audio-transcript"'))
   } finally {
     await server.close()
   }

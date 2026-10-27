@@ -5,16 +5,17 @@ import { audioDurationLabel } from "@/lib/composer-audio"
 import type { UserInputAudio } from "@/lib/history-payload"
 
 const copy = {
-  en: { play: "Play voice message", pause: "Pause voice message", unavailable: "Voice message unavailable" },
-  zh: { play: "播放语音", pause: "暂停语音", unavailable: "语音无法播放" },
+  en: { play: "Play voice message", pause: "Pause voice message", unavailable: "Voice message unavailable", subtitle: "Subtitle" },
+  zh: { play: "播放语音", pause: "暂停语音", unavailable: "语音无法播放", subtitle: "字幕" },
 } as const
 
 // Fixed heights keep the waveform identical between renders; it marks the bubble
 // as a voice message without pretending to be a real amplitude envelope.
 const bars = [6, 11, 15, 8, 13, 7, 16, 10, 14, 9]
 
-/// One sent audio input, drawn as a voice bar: the whole row is the play/pause
-/// control, the waveform marks it as audio and the label shows its length.
+/// One sent audio input: a voice bar you can play, with the first-pass
+/// transcript underneath as a subtitle, so the words are readable without
+/// pressing play.
 ///
 /// History replays only an `audio_ref`, so the bytes are fetched once through
 /// `loadAudio` (`GET /api/objects/{id}`); a fresh input that still carries its
@@ -66,7 +67,7 @@ export function AudioMessage({ language, audio, loadAudio }: {
     }
     element.currentTime = 1e101
   }
-  return (
+  return <div className="flex flex-col items-end gap-1">
     <button
       type="button"
       data-slot="audio-message"
@@ -94,5 +95,14 @@ export function AudioMessage({ language, audio, loadAudio }: {
         />
       )}
     </button>
-  )
+    {audio.transcript && (
+      <p
+        data-slot="audio-transcript"
+        title={audio.transcriptModel ? `${t.subtitle} · ${audio.transcriptModel}` : undefined}
+        className="max-w-[75ch] whitespace-pre-wrap break-words px-1 text-xs leading-5 text-muted-foreground"
+      >
+        {audio.transcript}
+      </p>
+    )}
+  </div>
 }
