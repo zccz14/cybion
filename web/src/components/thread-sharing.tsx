@@ -21,7 +21,6 @@ const copy = {
     recipients: "People with access", empty: "No access granted yet.", viewer: "Can view", revoked: "Revoked", pending: "Authorized; list sync pending", revocationPending: "Revoked; list sync pending", revoke: "Revoke access", retry: "Retry", loading: "Loading access…",
     revokeConfirm: "Revoke access for {uid}? Future reads will be blocked. Previously read or copied content cannot be recalled. Your running task will continue.",
     copy: "Copy access link", copied: "Link copied", copyFailed: "Could not copy. Select and copy the link below.",
-    uid: "My user ID", uidHint: "Send this ID to the Thread owner to receive a share.", copyUid: "Copy user ID", uidCopied: "User ID copied",
     ongoing: "New messages in this Thread are also shared.", owner: "You · Owner",
   },
   zh: {
@@ -32,23 +31,12 @@ const copy = {
     recipients: "拥有访问权限", empty: "尚未授予访问权限。", viewer: "可查看", revoked: "已撤销", pending: "已授权，列表同步中", revocationPending: "已撤销，列表同步中", revoke: "撤销访问", retry: "重试", loading: "正在加载权限…",
     revokeConfirm: "撤销 {uid} 的访问权限？后续读取将被阻止，已经阅读或复制的内容无法收回。你正在运行的任务不会停止。",
     copy: "复制访问链接", copied: "已复制链接", copyFailed: "复制失败，请手动选择并复制下方链接。",
-    uid: "我的用户 ID", uidHint: "将此 ID 发给 Thread 所有者，由对方授权分享。", copyUid: "复制用户 ID", uidCopied: "已复制用户 ID",
     ongoing: "此 Thread 的后续消息也会分享给对方。", owner: "你 · 所有者",
   },
 } satisfies Record<"en" | "zh", Record<string, string>>
 
 export function SharingError({ error, retry, language }: { error: unknown; retry?: () => void; language: "en" | "zh" }) {
   return <Alert variant="destructive"><AlertDescription className="flex flex-wrap items-center gap-2"><span className="min-w-0 break-words">{error instanceof Error ? error.message : String(error)}</span>{retry && <Button type="button" size="sm" variant="outline" onClick={retry}>{copy[language].retry}</Button>}</AlertDescription></Alert>
-}
-
-export function SharingUserId({ userId, language }: { userId: string; language: "en" | "zh" }) {
-  const t = copy[language]
-  const [status, setStatus] = useState("")
-  return <section aria-label={t.uid} className="flex flex-col gap-2 rounded-xl border p-3">
-    <p className="text-sm font-medium">{t.uid}</p><p className="text-xs text-muted-foreground">{t.uidHint}</p>
-    <div className="flex items-center gap-2"><code className="min-w-0 flex-1 break-all text-xs">{userId}</code><Button size="sm" variant="outline" aria-label={t.copyUid} onClick={async () => { try { await navigator.clipboard.writeText(userId); setStatus(t.uidCopied) } catch { setStatus(t.copyFailed) } }}><CopyIcon /></Button></div>
-    <p role="status" className="text-xs text-muted-foreground">{status}</p>
-  </section>
 }
 
 type Props = { userId: string; sessionId: string | null | undefined; threadId: string; language: "en" | "zh"; request: SharingRequest }

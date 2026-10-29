@@ -8,6 +8,7 @@ const shot = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAu
 const directory: LinkitFixtureUser[] = [
   { user_id: "recipient", username: "recipient", avatar_url: null },
   { user_id: "user-1", username: "user-1", avatar_url: null },
+  { user_id: "remote-owner", username: "Remote Owner", avatar_url: null },
 ]
 function record(n: number, kind: string, payload: unknown) { return { id: n, thread_id: id, kind, payload, created_at: 1_800_000_000 + n } }
 async function fixture(page: Page) {
@@ -102,6 +103,7 @@ test("viewer reads history, screenshots, viewed images and live updates without 
   await page.goto(`/e2e/thread-sharing.html#${routePath}`)
   await expect(page.getByRole("heading", { name: "Owner's private task" })).toBeVisible()
   await expect(page.getByText("Read only", { exact: true })).toBeVisible()
+  await expect(page.locator(".linkit-user-info--compact .linkit-user-info__username")).toHaveText("Remote Owner")
   await expect(page.getByText("Latest original question", { exact: true })).toBeVisible()
   await expect(page.getByText("Streaming owner reply", { exact: true })).toBeVisible()
   await page.getByRole("button", { name: "Load earlier messages" }).click()
@@ -164,10 +166,12 @@ test("account switches and temporary source failures never render previous priva
   expect(JSON.stringify(await page.evaluate("window.sharingFixtureCache()"))).not.toContain("Saved answer")
 })
 
-test("shared discovery exposes stable UID and hiding only changes the recipient list", async ({ page }) => {
+test("shared discovery names the owner through Linkit, never prints my own user ID, and hiding only changes the recipient list", async ({ page }) => {
   const { calls } = await fixture(page)
   await page.goto("/e2e/thread-sharing.html#/shared-threads")
-  await expect(page.getByRole("region", { name: "My user ID" })).toContainText("user-1")
+  await expect(page.getByRole("region", { name: "My user ID" })).toHaveCount(0)
+  await expect(page.getByText("user-1", { exact: false })).toHaveCount(0)
+  await expect(page.locator(".linkit-user-info--compact .linkit-user-info__username")).toHaveText("Remote Owner")
   await page.getByRole("button", { name: "Hide from my list" }).click()
   await expect(page.getByRole("link", { name: "Owner's private task" })).toHaveCount(0)
   await page.getByRole("button", { name: "Hidden shares" }).click()
