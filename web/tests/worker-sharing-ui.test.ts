@@ -13,21 +13,24 @@ const withLinkit = (children: ReactElement) => createElement(AuthMiniProvider, {
 const owner = { id: "owned", label: "Owner device", owner_user_id: "stable-owner", access: "owner", status: "online", created_at: 1 }
 const shared = { id: "shared", label: "Shared device", owner_user_id: "remote-owner", access: "shared", status: "unknown", created_at: 1 }
 
-test("real WorkerConnections separates access roles and exposes the stable UID without shared owner controls", async () => {
+test("real WorkerConnections separates access roles, never prints my own user ID and names the shared owner through Linkit without shared owner controls", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   try {
     const { WorkerConnections } = await server.ssrLoadModule("/src/components/worker-connections.tsx")
-    client.setQueryData(["me", sessionId], { user_id: "stable-owner" })
     client.setQueryData(["workers", sessionId], [shared])
     client.setQueryData(["worker-release"], { version: "v0.2.0", platforms: [], release_url: "" })
-    const render = (language: string) => renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(MemoryRouter, {}, createElement(WorkerConnections, { sessionId, language, request: () => { throw new Error("Unexpected request during render") } }))))
+    const render = (language: string) => renderToStaticMarkup(createElement(QueryClientProvider, { client }, withLinkit(createElement(MemoryRouter, {}, createElement(WorkerConnections, { sessionId, userId: "stable-owner", language, request: () => { throw new Error("Unexpected request during render") } })))))
     const html = render("en")
     assert.match(html, /Shared with me/)
-    assert.match(html, /remote-owner/)
     assert.match(html, /Unknown · not queried live/)
-    assert.match(html, /stable-owner/)
+    // The shared owner is named through LinkitUserInfo rather than a bare user ID row.
+    assert.match(html, /Owner:<\/span><button[^>]*class="linkit-user-info linkit-user-info--compact"/)
+    assert.match(html, /linkit-user-info__id[^>]*title="remote-owner"/)
+    // Neither my session nor my own user ID belongs on this page.
+    assert.doesNotMatch(html, /stable-owner/)
     assert.doesNotMatch(html, /session-not-uid/)
+    assert.doesNotMatch(html, /My user ID/)
     assert.match(html, /href="\/threads\/new"/)
     for (const label of ["Share access", "Rename", "Remove", "Upgrade Worker", "Run connection check", "Command execution verified; ready to use", "Generate manual configuration"]) assert.ok(!html.includes(label), label)
     assert.match(render("zh"), /与我共享/)

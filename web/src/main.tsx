@@ -1523,7 +1523,7 @@ function WorkspaceShell({
             <Route path="/admin/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/system" element={<SystemPage sdk={sdk} />} />
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
-            <Route path="/workers" element={<WorkersPage sdk={sdk} />} />
+            <Route path="/workers" element={<WorkersPage sdk={sdk} userId={userId} />} />
             <Route path="/machines" element={<UltimateMachinesPage sdk={sdk} />} />
             <Route path="/admin/configuration" element={<SystemConfigurationPage sdk={sdk} />} />
             <Route path="/configuration" element={<ConfigurationPage sdk={sdk} />} />
@@ -3709,9 +3709,9 @@ function ApiKeysPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("api")} description={t("apiDescription")}><Card><CardHeader><CardTitle>{t("createKey")}</CardTitle><CardDescription>{t("keyWarning")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-3 sm:flex-row" onSubmit={(event) => { event.preventDefault(); if (label.trim()) create.mutate(label.trim()) }}><Input aria-label={t("apiKeyLabel")} value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t("apiKeyLabel")} /><Button disabled={!label.trim() || create.isPending}>{create.isPending ? <Spinner /> : <PlusIcon data-icon="inline-start" />}{t("createKey")}</Button></form>{created && <Alert className="mt-4"><FileKey2Icon /><AlertTitle>{t("copyNow")}</AlertTitle><AlertDescription className="flex flex-col gap-2"><span>{t("keyWarning")}</span><SecretValue value={created.secret} /></AlertDescription></Alert>}{create.error && <p className="mt-3 text-sm text-destructive">{errorMessage(create.error)}</p>}</CardContent></Card><Card><CardHeader><CardTitle>{t("apiTitle")}</CardTitle></CardHeader><CardContent>{keys.error && <RequestError error={keys.error} onRetry={() => void keys.refetch()} />}{keys.isLoading && <Skeleton className="h-8" />}{keys.data && keys.data.length === 0 && <p className="text-sm text-muted-foreground">{t("noKeys")}</p>}{keys.data?.map((key) => <div className="flex items-center gap-3 border-b py-3 last:border-0" key={key.id}><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{key.label}</p><p className="text-xs text-muted-foreground">{key.prefix}… · {formattedTime(language, key.created_at)}</p></div><Button size="sm" variant="ghost" disabled={revoke.isPending} onClick={() => revoke.mutate(key.id)}><Trash2Icon data-icon="inline-start" />{t("revoke")}</Button></div>)}</CardContent></Card></Page>
 }
 
-function WorkersPage({ sdk }: { sdk: AuthMiniApi }) {
+function WorkersPage({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
   const { language } = useUi()
-  return <WorkerConnections key={sdk.session.getState().sessionId} language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />
+  return <WorkerConnections key={sdk.session.getState().sessionId} language={language} sessionId={sdk.session.getState().sessionId} userId={userId} request={(path, init) => api(sdk, path, init)} />
 }
 
 // INVARIANT: every built-in and Worker tool in tools.json needs a label here;

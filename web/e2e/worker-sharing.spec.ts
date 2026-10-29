@@ -7,6 +7,7 @@ const shared = { id: "shared-worker", label: "Shared Linux", owner_user_id: "rem
 const directory: LinkitFixtureUser[] = [
   { user_id: "recipient", username: "recipient", avatar_url: null },
   { user_id: "stable-owner", username: "stable-owner", avatar_url: null },
+  { user_id: "remote-owner", username: "Remote Owner", avatar_url: null },
 ]
 async function fixture(page: Page, sharedOnly = false) {
   const calls: { path: string; method: string; body: string | null; session: string }[] = []
@@ -50,15 +51,12 @@ async function pick(scope: Page | Locator, query: string, name: RegExp) {
   await scope.getByRole("option", { name }).click()
 }
 
-test("stable UID, user-picker recipient selection, explicit grant consent, sync and revoke", async ({ page, context }) => {
+test("user-picker recipient selection, explicit grant consent, sync and revoke without printing my own user ID", async ({ page }) => {
   const state = await fixture(page)
-  await context.grantPermissions(["clipboard-read", "clipboard-write"])
   await openEnglish(page)
-  const uid = page.getByRole("region", { name: "My user ID" })
-  await expect(uid).toContainText("stable-owner")
-  await expect(uid).not.toContainText("test-session")
-  await uid.getByRole("button", { name: "Copy", exact: true }).click()
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("stable-owner")
+  await expect(page.getByRole("region", { name: "My user ID" })).toHaveCount(0)
+  await expect(page.getByText("stable-owner", { exact: false })).toHaveCount(0)
+  await expect(page.locator(".linkit-user-info--compact .linkit-user-info__username")).toHaveText("Remote Owner")
   expect(state.calls.some((call) => call.path.includes("/grants"))).toBe(false)
   await page.getByRole("button", { name: "Share access", exact: true }).click()
   const panel = page.getByRole("region", { name: "Share access" })
@@ -95,7 +93,7 @@ test("shared-only discovery starts a Thread without owner controls or forbidden 
   const state = await fixture(page, true)
   await openEnglish(page)
   await expect(page.getByText("Shared Linux", { exact: true })).toBeVisible()
-  await expect(page.getByText("Owner:", { exact: false })).toContainText("remote-owner")
+  await expect(page.locator(".linkit-user-info--compact .linkit-user-info__username")).toHaveText("Remote Owner")
   await expect(page.getByText("Unknown · not queried live", { exact: true })).toBeVisible()
   for (const name of ["Share access", "Rename", "Remove", "Upgrade Worker", "Run connection check", "Generate manual configuration"]) {
     await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0)
@@ -129,7 +127,8 @@ test("grant errors, list retry, account switching and mobile bilingual theme", a
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: "test-results/worker-sharing-mobile-dark.png", fullPage: true })
   await page.getByRole("button", { name: "Switch account" }).click()
-  await expect(page.getByRole("region", { name: "我的用户 ID" })).toContainText("other-user")
+  await expect(page.getByRole("region", { name: "我的用户 ID" })).toHaveCount(0)
+  await expect(page.getByText("other-user", { exact: false })).toHaveCount(0)
   await expect(page.getByRole("region", { name: "共享访问" })).toHaveCount(0)
   await expect(page.getByText("Owner Mac", { exact: true })).toHaveCount(0)
   expect(state.calls.filter((call) => call.session === "other-session").every((call) => !call.path.includes("/grants"))).toBe(true)
