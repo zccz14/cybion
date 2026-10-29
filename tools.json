@@ -59,13 +59,13 @@
     {
       "type": "function",
       "name": "write_manual",
-      "description": "Create or edit one of the user's local Manuals from the controller — title, Use When description, body, and parent. Omit manual_id to create a new Manual: name is required and it starts at the top level or under parent_id. Pass manual_id to edit that Manual; omitted fields keep their current values, and parent_id takes an exact manual_id, null for the top level, or the special value \"TRASH\" to move the Manual into the trash (updates only). A trashed Manual disappears from every Manual tool, while the user still sees it in the Manuals page and can restore it. Returns the Manual metadata. The read-only Cybion Common Manual cannot be written, and a Manual hidden by the trash cannot be written until it is restored. A Manual its owner locked refuses every write_manual change — title, Use When description, body, parent, and TRASH — and answers with its child Manuals, which stay writable.",
+      "description": "Create or edit one of the user's local Manuals from the controller — title, Use When description, body, and parent. Omit manual_id — or send null or an empty string, which count as omitted — to create a new Manual: name is required and it starts at the top level or under parent_id. Pass manual_id to edit that Manual; omitted fields keep their current values, and parent_id takes an exact manual_id, null for the top level, or the special value \"TRASH\" to move the Manual into the trash (updates only). A trashed Manual disappears from every Manual tool, while the user still sees it in the Manuals page and can restore it. Returns the Manual metadata. The read-only Cybion Common Manual cannot be written, and a Manual hidden by the trash cannot be written until it is restored. A Manual its owner locked refuses every write_manual change — title, Use When description, body, parent, and TRASH — and answers with its child Manuals, which stay writable.",
       "parameters": {
         "type": "object",
         "properties": {
           "manual_id": {
             "type": "string",
-            "description": "Omit to create a new Manual; pass the exact id of an existing local Manual to edit it, from list_manuals or from the children of a Manual this Thread has loaded."
+            "description": "Omit (or pass null or an empty string — all three count as omitted, so a caller that fills every property still creates) to create a new Manual; pass the exact id of an existing local Manual to edit it, from list_manuals or from the children of a Manual this Thread has loaded."
           },
           "name": {
             "type": "string",
@@ -84,7 +84,7 @@
               "string",
               "null"
             ],
-            "description": "Parent: an exact manual_id to become a child of that Manual, null for the top level, or \"TRASH\" to move the Manual into the trash where the user can still see and restore it (updates only). Omit to keep the current parent, or to create at the top level."
+            "description": "Parent: an exact manual_id to become a child of that Manual, null for the top level, or \"TRASH\" to move the Manual into the trash where the user can still see and restore it (updates only). Omit (or pass an empty string) to keep the current parent, or to create at the top level."
           }
         },
         "additionalProperties": false

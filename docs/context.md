@@ -65,7 +65,11 @@ the same way; see [Ultimate machines](machines.md).
 `write_manual` creates or edits one of the user's local Manuals — title, Use
 When description, body, and parent. Omitting `manual_id` creates a new
 Manual: `name` is required, and it starts at the top level or under
-`parent_id`. Editing keeps omitted fields at their current values; on either
+`parent_id`. A blank argument reads exactly like an omitted one — `null` and
+the empty string both count — because callers that treat every schema property
+as required send a blank value for the field they mean to leave out: a blank
+`manual_id` still creates, and a blank `parent_id` still leaves the parent
+alone. Editing keeps omitted fields at their current values; on either
 path a parent is an exact `manual_id` or `null` for the top level, and an
 edit may also pass the literal `TRASH`, which moves the Manual into the
 trash: the Manual and its subtree disappear from every Manual tool

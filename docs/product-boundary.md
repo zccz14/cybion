@@ -113,7 +113,8 @@ the first authenticated browser session initializes that key atomically.
   Use When description, body, and parent — an exact `manual_id`, `null` for
   the top level, or the literal `TRASH` to move the Manual into a trash.
   Omitting `manual_id` creates a new Manual (a `name` is required) at the
-  top level or under `parent_id`; a trashed Manual and its subtree leave
+  top level or under `parent_id`, and a blank `manual_id` or `parent_id` —
+  `null` or the empty string — counts as omitted; a trashed Manual and its subtree leave
   every Manual tool, while the Manuals page still shows it under Trash and
   restores it to its original place. A Manual its owner locked refuses every
   `write_manual` change and answers with its child Manuals, which stay
