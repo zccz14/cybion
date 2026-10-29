@@ -8661,6 +8661,9 @@ struct WorkerArguments {
 /// parent at TRASH hides it until the user restores it from the Manuals page.
 const TRASH_CONTEXT_ID: &str = "TRASH";
 
+/// Omitted fields stay `None`; a blank string or an explicit null reads the
+/// same as omitted, so a caller that fills every property still lands on the
+/// create branch.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WriteManualArguments {
@@ -8701,15 +8704,21 @@ async fn write_manual_tool_output(
     let arguments: WriteManualArguments = serde_json::from_str(input).map_err(|error| {
         ApiError::bad_request(format!("write_manual arguments are invalid: {error}"))
     })?;
+    // A model that reads the schema as "every property is required" sends a
+    // blank string, or an explicit null, for the argument it means to leave
+    // out. Both are read as "not given": a blank manual_id still creates, and a
+    // blank parent_id still leaves the parent alone.
+    let edit_id = arguments.manual_id.filter(|value| !value.trim().is_empty());
     let parent = match arguments.parent_id {
         None => WriteManualParent::Keep,
         Some(None) => WriteManualParent::TopLevel,
-        Some(Some(value)) if value == TRASH_CONTEXT_ID => WriteManualParent::Trash,
-        Some(Some(value)) => WriteManualParent::Manual(manual_id(&value)?),
+        Some(Some(value)) if value.trim().is_empty() => WriteManualParent::Keep,
+        Some(Some(value)) if value.trim() == TRASH_CONTEXT_ID => WriteManualParent::Trash,
+        Some(Some(value)) => WriteManualParent::Manual(manual_id(value.trim())?),
     };
-    let manual = match arguments.manual_id {
+    let manual = match edit_id {
         Some(value) => {
-            let id = manual_id(&value)?;
+            let id = manual_id(value.trim())?;
             edit_manual_tool_output(
                 state,
                 user,
@@ -12904,12 +12913,13 @@ mod tests {
                 .contains("locked")
         );
         assert_eq!(write_manual["parameters"]["required"], json!(null));
-        assert!(
-            write_manual["parameters"]["properties"]["manual_id"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("Omit to create")
-        );
+        // The id argument must say both how to create and that a blank value
+        // counts as omitted, which is what callers that fill every property send.
+        let manual_id_help = write_manual["parameters"]["properties"]["manual_id"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(manual_id_help.contains("Omit"));
+        assert!(manual_id_help.contains("empty string"));
         let workers = worker_tools();
         for tool in workers.as_array().unwrap() {
             assert_eq!(

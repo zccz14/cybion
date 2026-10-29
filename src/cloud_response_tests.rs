@@ -1012,6 +1012,76 @@ async fn write_manual_creates_new_manuals() {
 }
 
 #[tokio::test]
+async fn write_manual_reads_a_blank_id_as_omitted() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "blank-manual-id-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+
+    // A caller that fills every schema property sends "" or null for the id it
+    // means to leave out: both create a top level Manual.
+    for (call_id, blank) in [
+        ("write-blank-empty", json!("")),
+        ("write-blank-spaces", json!("   ")),
+        ("write-blank-null", json!(null)),
+    ] {
+        let name = format!("Blank {call_id}");
+        let created = tool_output(
+            &state,
+            &user,
+            &thread,
+            input,
+            call_id,
+            "write_manual",
+            json!({"manual_id": blank, "name": name}),
+        )
+        .await;
+        assert_eq!(created["name"], json!(name), "unexpected output: {created}");
+        assert_eq!(created["parent_id"], json!(null));
+        assert_eq!(created["trashed"], json!(false));
+    }
+
+    // A blank parent is "not given" too: a create starts at the top level and
+    // an edit keeps the parent it already has.
+    let parent = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-blank-parent",
+        "write_manual",
+        json!({"name": "Blank parent", "parent_id": ""}),
+    )
+    .await;
+    let parent_id = parent["id"].as_str().unwrap().to_owned();
+    assert_eq!(parent["parent_id"], json!(null));
+    let child = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-blank-child",
+        "write_manual",
+        json!({"manual_id": "", "name": "Blank child", "parent_id": parent_id}),
+    )
+    .await;
+    let child_id = child["id"].as_str().unwrap().to_owned();
+    assert_eq!(child["parent_id"], json!(parent_id));
+    let edited = tool_output(
+        &state,
+        &user,
+        &thread,
+        input,
+        "write-blank-edit",
+        "write_manual",
+        json!({"manual_id": child_id, "name": "Blank child renamed", "parent_id": ""}),
+    )
+    .await;
+    assert_eq!(edited["name"], json!("Blank child renamed"));
+    assert_eq!(edited["parent_id"], json!(parent_id));
+}
+
+#[tokio::test]
 async fn write_manual_refuses_a_locked_manual_and_points_at_its_children() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "locked-manual-user").unwrap();
