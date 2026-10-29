@@ -41,6 +41,16 @@ test("granted people render through the package-owned Linkit user info instead o
   assert.doesNotMatch(source, /<code className="min-w-0 basis-full/)
 })
 
+test("shared Thread lists and readers name the owner through Linkit and never print the viewer's own ID", () => {
+  const shared = readFileSync(new URL("../src/components/shared-threads.tsx", import.meta.url), "utf8")
+  assert.match(shared, /import \{ LinkitUserInfo \} from "linkit-react-components"/)
+  assert.equal(shared.match(/<LinkitUserInfo userId=\{(?:item|thread)\.owner_user_id\} compact \/>/g)?.length, 2)
+  assert.doesNotMatch(shared, /SharingUserId/)
+  assert.doesNotMatch(shared, /\{t\.owner\}: \{/)
+  const sharing = readFileSync(new URL("../src/components/thread-sharing.tsx", import.meta.url), "utf8")
+  assert.doesNotMatch(sharing, /SharingUserId|My user ID|我的用户 ID/)
+})
+
 test("production integration keeps the shared reader separate from owner execution and configuration", () => {
   const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   const shared = readFileSync(new URL("../src/components/shared-threads.tsx", import.meta.url), "utf8")

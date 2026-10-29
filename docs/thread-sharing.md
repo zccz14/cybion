@@ -11,10 +11,10 @@ Integration API keys and Controller/model tools keep their existing owner scope.
 
 A opens **Share Thread** in the conversation header, picks the recipient
 through the Linkit user picker — search by username or UUID — acknowledges the
-content boundary, and chooses **Authorize viewing**. B can copy **My user ID**
-from **Work → Shared with me** (also available on the Workers page) when A needs
-the exact ID. The dialog lists active/revoked recipients and pending discovery
-propagation.
+content boundary, and chooses **Authorize viewing**. The directory lookup is
+enough: neither side has to exchange a user ID, and no surface prints the
+viewer's own UID. The dialog lists active/revoked recipients and pending
+discovery propagation.
 A header chip keeps the active share count visible even when the dialog closes.
 An active grant's repeated PUT is idempotent. Self-grants fail; a recipient who has never signed in to Cybion is provisioned silently instead of being rejected.
 No invitation, email lookup, public user directory or anonymous capability link is
@@ -27,7 +27,8 @@ parameters are not forwarded. An owner opening their link returns to their usual
 owned Thread page. Forwarding B's link does not authorize C.
 
 **Shared with me** is a separate read-only list ordered by sharing time. It shows
-source-authorized title/status, owner UID, sharing time and a read-only label.
+source-authorized title/status, the owner named through Linkit, sharing time and
+a read-only label.
 Hiding/restoring a row changes only B's list; a hidden Thread remains readable by
 link. Regrant starts a new grant cycle and restores discovery visibility. Own
 Thread origin chips are labelled **Web / API**, independent of ownership; the
