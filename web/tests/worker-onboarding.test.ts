@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { normalizeCode, validCode, deviceStatus, checkReady, downloadUrl, installCommand, type Device, type Check, type Release } from "../src/lib/worker-onboarding.ts"
+import { ANDROID_PLATFORM, normalizeCode, validCode, deviceStatus, checkReady, downloadUrl, installCommand, platformOptions, platformVersion, releaseNotes, type Device, type Check, type Release } from "../src/lib/worker-onboarding.ts"
 const release: Release = JSON.parse(readFileSync(new URL("../../worker-release.json", import.meta.url), "utf8"))
 const origin = "https://cybion.ntnl.io"
 test("release manifest drives all five platform downloads and checksum commands", () => {
@@ -14,6 +14,27 @@ test("release manifest drives all five platform downloads and checksum commands"
   }
   assert.throws(() => downloadUrl(release, "unknown", origin))
 })
+test("the android app joins the selector with its own proxied APK release", () => {
+  const options = platformOptions(release)
+  assert.equal(options.filter((p) => p.id === ANDROID_PLATFORM).length, 1)
+  assert.equal(options.length, release.platforms.length + 1)
+  const version = release.android!.version
+  const apk = downloadUrl(release, ANDROID_PLATFORM, origin)
+  assert.equal(apk, `${origin}/worker-release/${version}/cybion-worker-android-aarch64.apk`)
+  assert.equal(downloadUrl(release, ANDROID_PLATFORM, `${origin}//`), apk)
+  assert.equal(platformVersion(release, ANDROID_PLATFORM), version)
+  assert.equal(platformVersion(release, "linux-aarch64"), release.version)
+  assert.equal(releaseNotes(release, ANDROID_PLATFORM), release.android!.release_url)
+  assert.equal(releaseNotes(release, "linux-aarch64"), release.release_url)
+  // An APK is installed by the device UI, never by a shell pipeline.
+  assert.throws(() => installCommand(release, ANDROID_PLATFORM, origin))
+  const withoutAndroid: Release = { ...release, android: undefined }
+  assert.ok(!platformOptions(withoutAndroid).some((p) => p.id === ANDROID_PLATFORM))
+  assert.equal(platformVersion(withoutAndroid, ANDROID_PLATFORM), null)
+  assert.throws(() => downloadUrl(withoutAndroid, ANDROID_PLATFORM, origin))
+  assert.throws(() => downloadUrl({ ...release, android: { version: "0.1.10", release_url: "" } }, ANDROID_PLATFORM, origin))
+})
+
 test("normalize pairing codes without accepting partial or non-hex values", () => {
   assert.equal(normalizeCode("abcd 1234-ef56"), "ABCD-1234-EF56")
   assert.ok(validCode("abcd1234ef56")); assert.ok(!validCode("1234")); assert.ok(!validCode("ZZZZ-1234-EF56"))

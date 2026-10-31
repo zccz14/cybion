@@ -14,13 +14,28 @@ export function deviceStatus(device: Device) { return !ownedDevice(device) || de
 export function checkReady(check: Check | null | undefined, device: Device | undefined) {
   return Boolean(device && ownedDevice(device) && device.status === "online" && check?.worker_id === device.id && check.status === "completed" && check.result?.shell?.status === "ready")
 }
-export function assetName(platform: string) { return `cybion-worker-${platform}.${platform.startsWith("windows") ? "zip" : "tar.gz"}` }
+// The Android app ships from cybion-worker-for-android on its own version line,
+// so it joins the selector as one more platform backed by release.android.
+export const ANDROID_PLATFORM = "android-aarch64"
+export function platformOptions(release: Release) {
+  return release.android ? [...release.platforms, { id: ANDROID_PLATFORM, label: "Android · arm64 (APK)" }] : release.platforms
+}
+export function platformVersion(release: Release, platform: string) {
+  return platform === ANDROID_PLATFORM ? release.android?.version ?? null : release.version
+}
+export function releaseNotes(release: Release, platform: string) {
+  return platform === ANDROID_PLATFORM ? release.android?.release_url ?? release.release_url : release.release_url
+}
+export function assetName(platform: string) { return `cybion-worker-${platform}.${platform === ANDROID_PLATFORM ? "apk" : platform.startsWith("windows") ? "zip" : "tar.gz"}` }
 export function downloadUrl(release: Release, platform: string, origin: string) {
-  if (!release.platforms.some((item) => item.id === platform) || !/^v\d+\.\d+\.\d+$/.test(release.version)) throw new Error("Invalid Worker release")
-  return `${origin.replace(/\/+$/, "")}/worker-release/${release.version}/${assetName(platform)}`
+  const version = platformVersion(release, platform)
+  const known = platform === ANDROID_PLATFORM ? Boolean(release.android) : release.platforms.some((item) => item.id === platform)
+  if (!known || !version || !/^v\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid Worker release")
+  return `${origin.replace(/\/+$/, "")}/worker-release/${version}/${assetName(platform)}`
 }
 export function runCommand(platform: string) { return platform.startsWith("windows") ? ".\\cybion-worker.exe run --background" : "./cybion-worker run --background" }
 export function installCommand(release: Release, platform: string, origin: string) {
+  if (platform === ANDROID_PLATFORM) throw new Error("Android installs from the APK, not a shell command")
   const url = downloadUrl(release, platform, origin)
   const asset = assetName(platform)
   const folder = `cybion-worker-${platform}`

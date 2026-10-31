@@ -98,9 +98,10 @@ Background mode is labeled honestly as distinct from reboot persistence.
 - Worker tests: no-clobber private configuration, exclusive process lock,
   resumable device credentials near expiry, cancellation, safe capability checks,
   delivery receipts for duplicates and reconnects.
-- Frontend tests: manifest/commands, exact-device readiness, per-device upgrade
-  targets, consent and no token persistence. Playwright covers approval, refresh,
-  first-task handoff, mobile remote installation in both languages, expiry and
+- Frontend tests: manifest/commands, the Android APK entry and its own release
+  line, exact-device readiness, per-device upgrade targets, consent and no token
+  persistence. Playwright covers approval, refresh, first-task handoff, mobile
+  remote installation in both languages, the mirrored APK download, expiry and
   timeout recovery.
 - `scripts/test-worker-roundtrip.py /path/to/cybion-worker` runs the real Worker
   against an authenticated disposable controller fixture; checks background
@@ -120,7 +121,12 @@ published by `zccz14/cybion-worker-for-android` as
 `cybion-worker-android-aarch64.apk` (plus its `.sha256` checksum) and mirrored
 from that repository; `worker-release.json` carries the Android release under
 `android`, and remote upgrades target it for devices whose pairing platform
-starts with `android`. The release gate verifies the GitHub-published assets of
+starts with `android`. The platform selector offers that app as
+`Android · arm64 (APK)`: its download button and release-notes link point at the
+Android release line (`/worker-release/{android version}/cybion-worker-android-aarch64.apk`),
+and the shell install commands are withheld because an APK is installed on the
+device itself. Selector options therefore come from the manifest (CLI platforms
+plus the optional Android entry), not from a hardcoded list. The release gate verifies the GitHub-published assets of
 every mirrored platform, and the public smoke downloads one CLI asset and the
 APK through the production mirror and checks both SHA-256 checksums.
 
