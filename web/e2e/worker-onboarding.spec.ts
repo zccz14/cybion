@@ -54,6 +54,23 @@ test("remote platform instructions and mobile layout remain usable in both langu
   await expect(page.getByRole("heading",{name:"Connect a device",exact:true})).toBeVisible()
   await page.screenshot({path:"test-results/worker-onboarding-mobile.png",fullPage:true})
 })
+test("the android APK downloads through the controller mirror instead of GitHub", async ({ page }) => {
+  await fixture(page)
+  await page.setViewportSize({width:390,height:844})
+  await page.goto("/e2e/fixture.html#/workers")
+  await page.getByRole("combobox").click()
+  await page.getByRole("option",{name:"Android · arm64 (APK)"}).click()
+  const apk = page.getByRole("link",{name:"下载 APK"})
+  await expect(apk).toHaveAttribute("href", new RegExp(`^https?://[^/]+/worker-release/${release.android.version}/cybion-worker-android-aarch64\\.apk$`))
+  await expect(apk).toHaveAttribute("download","cybion-worker-android-aarch64.apk")
+  await expect(page.getByText(`推荐版本 ${release.android.version}`,{exact:true})).toBeVisible()
+  await expect(page.getByRole("link",{name:"发布说明"})).toHaveAttribute("href", release.android.release_url)
+  await expect(page.getByText(/手机无需直连 GitHub/)).toBeVisible()
+  await expect(page.getByText("执行以下命令。首次运行会打开授权网页；没有浏览器时，在任意设备打开终端显示的地址。",{exact:true})).toHaveCount(0)
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true)
+  await page.screenshot({path:"test-results/worker-onboarding-android.png",fullPage:true})
+})
+
 test("expired codes and failed checks do not report readiness", async ({ page }) => {
   await fixture(page,"expired")
   await page.goto("/e2e/fixture.html#/workers?code=ABCD-1234-EF56")
