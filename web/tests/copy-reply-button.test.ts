@@ -28,7 +28,7 @@ test("assistant replies render the copy button directly beneath the reply conten
   assert.equal(main.match(/<AssistantMessage language=\{language\} text=\{text\} time=\{time\} \/>/g)?.length, 1)
   assert.ok(main.indexOf("<AssistantMessage") < main.indexOf('if (record.kind === "tool_output")'))
   assert.equal(message.match(/<CopyReplyButton text=\{text\} language=\{language\} \/>/g)?.length, 1)
-  const replyIndex = message.indexOf("<Markdown>{text}</Markdown>")
+  const replyIndex = message.indexOf("<Markdown content={text} />")
   const buttonIndex = message.indexOf("<CopyReplyButton")
   assert.ok(replyIndex >= 0 && buttonIndex > replyIndex)
 })

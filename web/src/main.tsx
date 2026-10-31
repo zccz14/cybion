@@ -22,7 +22,7 @@ import {
 import { AuthMiniProvider, useAuthMini, type AuthMiniVerificationFailure } from "auth-mini-react-components"
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitProvider, useLinkit } from "linkit-react-components"
-import { AppLayout, type AppNavGroup } from "@zccz14/ux"
+import { AppLayout, Markdown, type AppNavGroup } from "@zccz14/ux"
 import {
   ActivityIcon,
   ArchiveIcon,
@@ -120,7 +120,6 @@ import { BrowserControlCall } from "@/components/browser-control-call"
 import { ComputerUseCall } from "@/components/computer-use-call"
 import { CybionToolCall, type ManualSummary } from "@/components/cybion-tool-call"
 import { CheckpointMessage } from "@/components/checkpoint-message"
-import { Markdown } from "@/components/markdown"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core"
 import { collectSubtreeIds, commonAncestorIds, manualAncestorIds, manualCurrentPlacement, manualPlacementFor, manualTreeIndex, flattenTree, trashedRoots, visibleManuals, type ManualDropZone } from "@/lib/manuals-tree"
@@ -2077,7 +2076,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
           <span className="text-sm font-medium text-primary">{t("recordReasoning")}</span>
           <time className="text-xs text-muted-foreground">{time}</time>
         </div>
-        {summary ? <div className="prose prose-sm mt-2 max-w-none break-words dark:prose-neutral dark:prose-invert prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0"><Markdown>{summary}</Markdown></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
+        {summary ? <div className="mt-2 break-words text-sm"><Markdown content={summary} /></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
         <details className="group mt-2">
           <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
             <span>{t("recordPayload")}</span>
@@ -2352,8 +2351,8 @@ function CommonManualCard({ sdk }: { sdk: AuthMiniApi }) {
         {selected && <div className="min-w-0">
           <p className="font-medium">{selected.name}</p>
           {selected.description && <p className="mt-1 text-sm text-muted-foreground">{selected.description}</p>}
-          <div className="prose prose-sm mt-3 max-w-none break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">
-            <Markdown>{selected.content}</Markdown>
+          <div className="mt-3 break-words text-sm">
+            <Markdown content={selected.content} />
           </div>
         </div>}
       </div>}

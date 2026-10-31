@@ -72,15 +72,14 @@ test("dark text, actions, status labels and translucent focus rings retain contr
   assert.ok(contrast(rgb(resolve("user-message-foreground")), rgb(resolve("user-message"))) >= 4.5)
 })
 
-test("message surfaces are separated from primary actions and Markdown is neutral only in dark mode", () => {
+test("message surfaces are separated from primary actions and Markdown carries no palette of its own", () => {
   assert.equal(resolve("user-message"), "#262626")
   assert.notEqual(resolve("user-message"), resolve("primary"))
   assert.match(css, /--color-user-message: var\(--user-message\)/)
   assert.match(inputMessageSource, /bg-user-message[^"\n]+text-user-message-foreground/)
   assert.match(source, /border-primary\/20 bg-primary\/5[^"\n]+dark:border-border dark:bg-card/)
-  const markdownSurfaces = [source, assistantMessageSource, checkpointMessageSource]
-  assert.equal(markdownSurfaces.reduce((count, text) => count + (text.match(/dark:prose-neutral dark:prose-invert/g)?.length ?? 0), 0), 4)
-  for (const text of markdownSurfaces) assert.doesNotMatch(text, /\sprose-neutral\s/)
+  // 排版与配色都由 @zccz14/ux 的 .ux-markdown 提供，对话面不再携带自己的 prose 调色板。
+  for (const text of [source, assistantMessageSource, checkpointMessageSource]) assert.doesNotMatch(text, /\bprose\b/)
   assert.match(lightBlock, /color-scheme: light;/)
   assert.match(darkBlock, /color-scheme: dark;/)
 })

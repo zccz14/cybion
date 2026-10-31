@@ -178,7 +178,7 @@ test("the hosted shell keeps the outer navigation and Linkit account surface", (
     assert.match(source, new RegExp(`to: \"${route}\"`))
   }
   assert.match(source, /<LinkitProvider/)
-  assert.match(source, /import \{ AppLayout, type AppNavGroup \} from "@zccz14\/ux"/)
+  assert.match(source, /import \{ AppLayout, Markdown, type AppNavGroup \} from "@zccz14\/ux"/)
   assert.doesNotMatch(source, /<LinkitMyInfo/)
 })
 

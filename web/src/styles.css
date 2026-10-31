@@ -3,7 +3,6 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 @import "@zccz14/ux/styles.css";
-@plugin "@tailwindcss/typography";
 @source "../node_modules/auth-mini-react-components/dist";
 
 @custom-variant dark (&:is(.dark *));
@@ -350,11 +349,4 @@
   .markdown-editor__canvas .tiptap {
     min-height: 20rem;
   }
-}
-
-/* 公式（KaTeX）：块级公式在窄窗口里横向滚动，避免一条长公式撑破整条消息的宽度。 */
-.katex-display {
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-block: 0.25rem;
 }

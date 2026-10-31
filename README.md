@@ -253,7 +253,7 @@ base64 data URL. Poll the thread and history endpoints for the result.
   [recovery](docs/thread-recovery.md), [sharing](docs/thread-sharing.md).
 - [Manuals](docs/context.md) and [context compaction](docs/context_compacting.md).
 - [Sticky notes](docs/notes.md) — the zero-target kind of context.
-- [Math rendering](docs/math.md) — LaTeX formulas through KaTeX in every Markdown surface.
+- [Math rendering](docs/math.md) — how formulas reach every Markdown surface through the shared renderer.
 - [Worker onboarding](docs/worker-onboarding.md) and [worker sharing](docs/worker-sharing.md).
 - [Ultimate machines](docs/machines.md).
 - [History table](docs/history.md) and [usage statistics](docs/usage-statistics.md).

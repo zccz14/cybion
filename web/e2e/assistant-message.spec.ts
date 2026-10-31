@@ -44,7 +44,7 @@ test("a table wider than the reply scrolls inside the table, not the page", asyn
   await page.goto("/e2e/assistant-message.html")
   await page.setViewportSize({ width: 390, height: 844 })
   const message = page.locator(messageSelector)
-  const table = message.locator('[data-slot="markdown-table"]').last()
+  const table = message.locator('.ux-markdown__table').last()
   await expect(table.locator("table")).toBeVisible()
   const before = await table.evaluate((node) => {
     node.scrollLeft = 0
