@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState, type ReactNode } from "react"
 import { createRoot } from "react-dom/client"
-import { Markdown } from "../src/components/markdown"
+import { Markdown } from "@zccz14/ux"
 import "../src/styles.css"
 
 const flowchart = "```mermaid\ngraph TD\n  A[用户输入] --> B{意图识别}\n  B -->|代码任务| C[调用 Worker]\n  B -->|聊天| D[直接回复]\n```"
@@ -8,7 +8,7 @@ const partial = "```mermaid\ngraph TD\n  A -->\n```"
 const snippet = "```ts\nconst answer = 42\n```"
 
 function Message({ slot, children }: { slot: string; children: ReactNode }) {
-  return <article data-message={slot} className="prose prose-sm max-w-[75ch] dark:prose-neutral dark:prose-invert prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">{children}</article>
+  return <article data-message={slot} className="max-w-[75ch] text-sm">{children}</article>
 }
 
 function Fixture() {
@@ -20,9 +20,9 @@ function Fixture() {
       <button onClick={() => setDark(!dark)}>Theme</button>
       <button onClick={() => setCompleted(!completed)}>Complete</button>
     </header>
-    <Message slot="chart"><Markdown>{flowchart}</Markdown></Message>
-    <Message slot="stream"><Markdown>{completed ? flowchart : partial}</Markdown></Message>
-    <Message slot="snippet"><Markdown>{snippet}</Markdown></Message>
+    <Message slot="chart"><Markdown content={flowchart} /></Message>
+    <Message slot="stream"><Markdown content={completed ? flowchart : partial} /></Message>
+    <Message slot="snippet"><Markdown content={snippet} /></Message>
   </main>
 }
 

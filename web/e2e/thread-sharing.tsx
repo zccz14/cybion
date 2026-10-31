@@ -6,7 +6,7 @@ import { SharedThreadPage, SharedThreadsPage } from "../src/components/shared-th
 import { ThreadSharingButton } from "../src/components/thread-sharing"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import { UserInputMessage } from "../src/components/user-input-message"
-import { Markdown } from "../src/components/markdown"
+import { Markdown } from "@zccz14/ux"
 import { ScreenshotOutput } from "../src/components/screenshot-output"
 import { ViewedOutput } from "../src/components/viewed-output"
 import { historyPayloadText, screenshotImageSource, viewedImageSource } from "../src/lib/history-payload"
@@ -25,7 +25,7 @@ function Reader({ language, sessionId, userId, request }: { language: "en" | "zh
     if (viewed !== null) return <ViewedOutput language={language} source={viewed} />
     const shot = r.screenshot ? screenshotImageSource(r.payload) : null
     if (shot) return <ScreenshotOutput language={language} source={shot} />
-    return <div data-record-id={r.id}><Markdown>{historyPayloadText(r.payload)}</Markdown></div>
+    return <div data-record-id={r.id}><Markdown content={historyPayloadText(r.payload)} /></div>
   }
   return <SharedThreadPage language={language} sessionId={sessionId} userId={userId} request={request} ownerId={ownerId} threadId={threadId} renderRecord={record} />
 }

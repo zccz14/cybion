@@ -142,7 +142,7 @@ test("minimal mode folds a turn down to its input and last tail candidate", asyn
 test("a wide Markdown table scrolls inside itself, the Thread view never scrolls sideways", async ({ page }) => {
   await page.goto("/e2e/thread-history.html")
   const viewport = page.locator('[data-slot="message-scroller-viewport"]')
-  const table = page.locator('[data-slot="markdown-table"]').first()
+  const table = page.locator('.ux-markdown__table').first()
   await expect(table.locator("table")).toBeVisible()
   for (const theme of ["light", "dark"]) {
     if (theme === "dark") await page.getByRole("button", { name: "Theme", exact: true }).click()

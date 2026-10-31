@@ -1,7 +1,7 @@
 import { ChevronDownIcon, DatabaseIcon } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { HistoryRecordPayload } from "@/components/history-record-payload"
-import { Markdown } from "@/components/markdown"
+import { Markdown } from "@zccz14/ux"
 import { checkpointPreview } from "@/lib/checkpoint-text"
 import { historyPayloadText } from "@/lib/history-payload"
 import { formattedTime } from "@/lib/time"
@@ -46,10 +46,8 @@ export function CheckpointMessage({ language, record }: { language: "en" | "zh";
       <ChevronDownIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform group-open/checkpoint:rotate-180 motion-reduce:transition-none" />
     </summary>
     <div className="flex min-w-0 flex-col gap-2 border-t border-border/70 p-3 sm:p-4">
-      <div data-slot="checkpoint-content" className="max-w-[75ch] break-words">
-        <div className="prose prose-sm max-w-none break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">
-          <Markdown>{markdown}</Markdown>
-        </div>
+      <div data-slot="checkpoint-content" className="max-w-[75ch] break-words text-sm">
+        <Markdown content={markdown} />
       </div>
       <details className="group/payload">
         <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">

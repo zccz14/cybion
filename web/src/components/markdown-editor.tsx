@@ -47,7 +47,7 @@ import {
   type LucideIcon,
 } from "lucide-react"
 
-import { Markdown as MarkdownPreview } from "@/components/markdown"
+import { Markdown as MarkdownPreview } from "@zccz14/ux"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
@@ -734,8 +734,8 @@ export function MarkdownEditor({
 
       {mode === "preview" ? (
         <div className="markdown-editor__preview min-h-[32rem] px-5 py-8">
-          <div className="prose prose-sm max-w-[72ch] break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">
-            <MarkdownPreview>{value}</MarkdownPreview>
+          <div className="max-w-[72ch] break-words text-sm">
+            <MarkdownPreview content={value} />
           </div>
         </div>
       ) : null}

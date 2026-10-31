@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
-import { Markdown } from "../src/components/markdown"
+import { Markdown } from "@zccz14/ux"
 import { MoonIcon, SendIcon, SparklesIcon, SunIcon, TerminalSquareIcon } from "lucide-react"
 import { Button } from "../src/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../src/components/ui/card"
@@ -54,10 +54,10 @@ function ThemeFixture() {
           </MessageGroup><MessageFooter>18:30 · You</MessageFooter></MessageContent></Message>
           <div data-testid="reasoning" className="relative flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-3 py-3 dark:border-border dark:bg-card">
             <SparklesIcon className="mt-0.5 size-4 shrink-0 text-primary" />
-            <div><p className="text-sm font-medium text-primary">推理 (Reasoning)</p><div className="prose prose-sm mt-2 max-w-none break-words dark:prose-neutral dark:prose-invert"><Markdown>检查背景、悬停、弹层和文字的中性色层级。</Markdown></div></div>
+            <div><p className="text-sm font-medium text-primary">推理 (Reasoning)</p><div className="mt-2 break-words text-sm"><Markdown content="检查背景、悬停、弹层和文字的中性色层级。" /></div></div>
           </div>
           <div data-testid="assistant-message" className="rounded-2xl rounded-tl-md bg-card px-4 py-3 shadow-sm ring-1 ring-foreground/10">
-            <div data-testid="markdown" className="prose prose-sm max-w-none break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground"><Markdown>{markdown}</Markdown></div>
+            <div data-testid="markdown" className="break-words text-sm"><Markdown content={markdown} /></div>
           </div>
           <Card><CardHeader><CardTitle>Thread settings</CardTitle><CardDescription data-testid="muted-text">次要信息应在深灰表面上清晰可读。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4">
             <div className="flex flex-col gap-2"><Label htmlFor="thread-name">Thread name</Label><Input id="thread-name" defaultValue="Neutral theme" /></div>

@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState, type ReactNode } from "react"
 import { createRoot } from "react-dom/client"
-import { Markdown } from "../src/components/markdown"
+import { Markdown } from "@zccz14/ux"
 import "../src/styles.css"
 
 const inline = "## 质能方程 $E=mc^2$\n\n其中 $c$ 是光速，$\\alpha + \\beta$ 是两个系数。"
@@ -12,7 +12,7 @@ const escaped = "预算 \\$5 与 \\$10 两个价位用反斜杠转义，不会�
 const backslash = "可以先检验状态依赖的概率收缩：\n\n\\[ p=\\sigma\\left(\\frac{\\operatorname{logit}(\\mu)}{T(s)}\\right) \\]\n\n其中 \\(T(s)\\) 是温度系数，\\(\\mu\\) 是均值。"
 
 function Message({ slot, children }: { slot: string; children: ReactNode }) {
-  return <article data-message={slot} className="prose prose-sm max-w-[75ch] break-words dark:prose-neutral dark:prose-invert prose-headings:font-semibold prose-p:my-2 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground">{children}</article>
+  return <article data-message={slot} className="max-w-[75ch] break-words text-sm">{children}</article>
 }
 
 function Fixture() {
@@ -22,12 +22,12 @@ function Fixture() {
     <header className="flex flex-wrap gap-3 text-sm">
       <button onClick={() => setDark(!dark)}>Theme</button>
     </header>
-    <Message slot="inline"><Markdown>{inline}</Markdown></Message>
-    <Message slot="display"><Markdown>{display}</Markdown></Message>
-    <Message slot="wide"><Markdown>{wide}</Markdown></Message>
-    <Message slot="broken"><Markdown>{broken}</Markdown></Message>
-    <Message slot="escaped"><Markdown>{escaped}</Markdown></Message>
-    <Message slot="backslash"><Markdown>{backslash}</Markdown></Message>
+    <Message slot="inline"><Markdown content={inline} /></Message>
+    <Message slot="display"><Markdown content={display} /></Message>
+    <Message slot="wide"><Markdown content={wide} /></Message>
+    <Message slot="broken"><Markdown content={broken} /></Message>
+    <Message slot="escaped"><Markdown content={escaped} /></Message>
+    <Message slot="backslash"><Markdown content={backslash} /></Message>
   </main>
 }
 
