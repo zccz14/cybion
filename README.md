@@ -11,10 +11,94 @@ Bash, Browser Control, and Computer Use on the machine you choose — from
 context you control explicitly and a replayable archive.
 
 [Open Cybion](https://cybion.ntnl.io) ·
-[Mainland China](https://cybion.ntnl.top) · [Quick start](#quick-start) ·
+[Mainland China](https://cybion.ntnl.top) · [Soul](#soul-statements) ·
+[Quick start](#quick-start) ·
 [Context](#context-four-kinds-three-you-control) ·
 [Ultimate Machines](#ultimate-machines) ·
 [Integration API](#integration-api)
+
+## Soul statements
+
+Eleven sentences that decide what Cybion is. Everything else in this README is
+how they are built today.
+
+**1. The brain is in the cloud. The hands are on your devices.**
+
+- **Does:** hold the model key and the whole record on the server, and send
+  each command to a device you paired.
+- **Doesn't:** put a model key on a device, or run your work on a machine
+  nobody enrolled.
+
+**2. A device holds nothing that matters.**
+
+- **Does:** run as one small program with no database and no stored
+  credential, so it can be wiped, replaced, or reinstalled at any time.
+- **Doesn't:** let a device's own state become the record.
+
+**3. "I don't know" is a real answer.**
+
+- **Does:** mark a call whose device disappeared as unknown, and ask for it to
+  be cleaned up.
+- **Doesn't:** report a success or a failure it never saw.
+
+**4. You pay for thinking, not for keeping machines around.**
+
+- **Does:** bill the tokens a model reads and writes.
+- **Doesn't:** bill per device, per seat, or for the time a machine sits idle.
+
+**5. Context is material you own, not memory the model keeps.**
+
+- **Does:** store your Manuals, Notes, and Archive where you can read all of
+  them, and let a Thread load only what a task cites.
+- **Doesn't:** keep working state inside the model or inside an upstream
+  conversation.
+
+**6. Four kinds of context, four lifetimes.**
+
+- **Does:** keep Notes that should clear to zero, Manuals that get revised, an
+  Archive that only grows, and a World that is only ever sampled.
+- **Doesn't:** merge them into one pile, or let a compaction delete what it
+  summarizes.
+
+**7. The World is out there, and it cannot be stored.**
+
+- **Does:** read your machines, your network, and the web as samples taken at
+  one moment, and keep each result as evidence with a time on it.
+- **Doesn't:** build a table, a page, or a model "of the world".
+
+**8. The system never pretends it can undo reality.**
+
+- **Does:** cross a Note out instead of deleting it, append to the Archive
+  instead of rewriting it, and say plainly that revoking access does not undo a
+  command that already ran.
+- **Doesn't:** offer a delete that makes something disappear, or promise a
+  rollback it cannot perform.
+
+**9. Lending a hand is not lending a brain.**
+
+- **Does:** let another user run their own Thread on your device — their model,
+  their context, their key, your machine.
+- **Doesn't:** let them read your Threads, or pass that permission on to a third
+  person.
+
+**10. Seeing, using, and paying are three separate permissions.**
+
+- **Does:** give read-only sharing and Worker grants their own switches and
+  their own revocation.
+- **Doesn't:** let one of them imply another, or bring a revoked grant back to
+  life.
+
+**11. Cybion is a base, not a destination.**
+
+- **Does:** put Threads behind an API key so another product can drive Cybion
+  without our UI, and keep the Archive readable in full so it can be taken
+  away.
+- **Doesn't:** assume you will stay, or treat the web console as the only way
+  in.
+
+**Not finished yet:** Manuals and Notes can only be edited in the console, a job
+handed to another person has no agreed result or deadline, and there is no
+export. They are written here so they do not get quietly dropped.
 
 ## Why Cybion
 
