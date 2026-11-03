@@ -17,6 +17,7 @@ test("view chips map to the origin and status parameters", () => {
   assert.equal(threadListUrl({ view: "api", q: "" }), "/api/threads?origin=api")
   assert.equal(threadListUrl({ view: "running", q: "" }), "/api/threads?status=running")
   assert.equal(threadListUrl({ view: "failed", q: "" }), "/api/threads?status=failed")
+  assert.equal(threadListUrl({ view: "archived", q: "" }), "/api/threads?archived=true")
 })
 
 test("search text is trimmed, encoded, and combined with the view", () => {
@@ -28,11 +29,11 @@ test("search text is trimmed, encoded, and combined with the view", () => {
   assert.equal(hasThreadListFilters({ view: "all", q: "bridge" }), true)
 })
 
-test("cursors and the archived scope append to the query", () => {
+test("cursors append to the query and the archived view scopes the list", () => {
   assert.equal(threadListUrl({ view: "all", q: "" }, "123:0c4d"), "/api/threads?cursor=123%3A0c4d")
   assert.equal(threadListUrl({ view: "api", q: "room" }, "456:9f2e"), "/api/threads?origin=api&q=room&cursor=456%3A9f2e")
-  assert.equal(threadListUrl(allThreadListFilters, null, true), "/api/threads?archived=true")
-  assert.equal(threadListUrl(allThreadListFilters, "1:0c4d", true), "/api/threads?archived=true&cursor=1%3A0c4d")
+  assert.equal(threadListUrl({ view: "archived", q: "" }, "1:0c4d"), "/api/threads?archived=true&cursor=1%3A0c4d")
+  assert.equal(threadListUrl({ view: "archived", q: " legacy " }, null), "/api/threads?archived=true&q=legacy")
   assert.equal(threadListUrl({ view: "all", q: "" }, null), "/api/threads")
 })
 
@@ -53,7 +54,7 @@ test("thread list filters serialize into the URL, skipping defaults and keeping 
 })
 
 test("thread list filters round-trip through the URL", () => {
-  const cases = [defaultThreadListFilters, allThreadListFilters, { view: "api", q: "room/1" }, { view: "failed", q: "  x " }]
+  const cases = [defaultThreadListFilters, allThreadListFilters, { view: "api", q: "room/1" }, { view: "failed", q: "  x " }, { view: "archived", q: "legacy" }]
   for (const filters of cases) assert.deepEqual(parseThreadListFilters(serializeThreadListFilters(filters)), filters)
 })
 

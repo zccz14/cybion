@@ -53,11 +53,14 @@ function Fixture() {
   const filters = useMemo(() => parseThreadListFilters(searchParams), [searchParams])
   const setFilters = useCallback((next: ThreadListFilters) => setSearchParams(serializeThreadListFilters(next)), [setSearchParams])
   const [pagesLoaded, setPagesLoaded] = useState(1)
-  const all = paged ? [...threads, ...olderSeed] : threads
+  // The archived view is the same list read on the other side of `archived_at`,
+  // so the fixture swaps the rows the server would return and keeps every other
+  // part of the chrome — search, empty state, paging — identical.
+  const archivedView = filters.view === "archived"
+  const all = archivedView ? archived : paged ? [...threads, ...olderSeed] : threads
   const matches = all.filter((thread) => fixtureMatches(thread, filters))
-  const visible = matches.slice(0, pageSize * pagesLoaded)
-  const pagination = { hasMore: visible.length < matches.length, loadingMore: false, onLoadMore: () => setPagesLoaded((count) => count + 1) }
-  const archivedPagination = { hasMore: false, loadingMore: false, onLoadMore: () => {} }
+  const visible = archivedView ? matches : matches.slice(0, pageSize * pagesLoaded)
+  const pagination = { hasMore: !archivedView && visible.length < matches.length, loadingMore: false, onLoadMore: () => setPagesLoaded((count) => count + 1) }
   return <main className="flex h-svh flex-col bg-background text-foreground">
     <header className="flex shrink-0 items-center gap-3 border-b p-3">
       <CybionMark className="size-5" />
@@ -67,7 +70,7 @@ function Fixture() {
       <span data-testid="created">{created}</span>
       <span data-testid="restored">{restored}</span>
     </header>
-    <ThreadList threads={visible} archivedThreads={archived} archivedTotal={archived.length} loading={false} language={language} filters={filters} onFiltersChange={setFilters} pagination={pagination} archivedPagination={archivedPagination} onCreate={() => setCreated((value) => value + 1)} onRestore={(id) => { setArchived((items) => items.filter((item) => item.id !== id)); setRestored(id) }} restoringId={null} />
+    <ThreadList threads={visible} loading={false} language={language} filters={filters} onFiltersChange={setFilters} pagination={pagination} onCreate={() => setCreated((value) => value + 1)} onRestore={(id) => { setArchived((items) => items.filter((item) => item.id !== id)); setRestored(id) }} restoringId={null} />
   </main>
 }
 createRoot(document.getElementById("root")!).render(<StrictMode><TooltipProvider delayDuration={0}><HashRouter><Fixture /></HashRouter></TooltipProvider></StrictMode>)

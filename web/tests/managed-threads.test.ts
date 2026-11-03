@@ -209,15 +209,21 @@ test("narrow screens render a dedicated searchable thread list instead of the si
   assert.match(list, /onCreate/)
 })
 
-test("archived threads leave the default list and restore from the collapsed group", () => {
+test("archived threads get their own view chip instead of a collapsed group", () => {
   const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
-  assert.match(list, /threadListUrl\(allThreadListFilters, pageParam, true\)/)
-  assert.match(source, /archived_at !== null/)
+  const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
+  const controls = readFileSync(new URL("../src/components/thread-list-controls.tsx", import.meta.url), "utf8")
+  // One control bar, one preset per view: archived is a chip like the rest, so
+  // it inherits the URL, the search box and the shared paging.
+  assert.match(search, /THREAD_LIST_VIEWS = \["all", "mine", "api", "running", "failed", "archived"\]/)
+  assert.match(search, /archived: \[\["archived", "true"\]\]/)
+  assert.match(controls, /archived: "已归档"/)
+  assert.match(controls, /emptyArchived: "还没有归档的对话"/)
+  assert.match(list, /filters\.view === "archived" \? list\.onRestore : undefined/)
   assert.match(list, /archived: false/)
-  assert.match(list, /<ArchivedThreadGroup /)
-  assert.match(list, /export function ArchivedThreadGroup/)
-  assert.match(list, /archivedThreads: "已归档"/)
   assert.match(list, /restoreThread: "恢复"/)
+  assert.doesNotMatch(list, /ArchivedThreadGroup/)
+  assert.match(source, /archived_at !== null/)
 })
 
 test("integration-created threads keep their origin chip and external reference", () => {
