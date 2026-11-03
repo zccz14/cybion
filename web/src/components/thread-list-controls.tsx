@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { THREAD_LIST_VIEWS, hasThreadListFilters, type ThreadListFilters, type ThreadListView } from "@/lib/thread-search"
 
-type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | "emptyTitle" | "emptyFiltered" | "resetFilters" | "loadMore" | ThreadListView
+type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | "emptyTitle" | "emptyArchived" | "emptyFiltered" | "resetFilters" | "loadMore" | ThreadListView
 
 const copy = {
   en: {
@@ -17,7 +17,9 @@ const copy = {
     api: "API",
     running: "Running",
     failed: "Failed",
+    archived: "Archived",
     emptyTitle: "No conversations yet",
+    emptyArchived: "No archived conversations",
     emptyFiltered: "No conversations match your filters",
     resetFilters: "Show all",
     loadMore: "Load more",
@@ -31,7 +33,9 @@ const copy = {
     api: "API",
     running: "运行中",
     failed: "失败",
+    archived: "已归档",
     emptyTitle: "还没有对话。点击「新建对话」即可开始。",
+    emptyArchived: "还没有归档的对话",
     emptyFiltered: "没有匹配的对话",
     resetFilters: "显示全部",
     loadMore: "加载更多",
@@ -77,6 +81,10 @@ export function ThreadListEmptyState({ filters, language, onReset }: {
   onReset: () => void
 }) {
   const t = copy[language]
+  // The archived view has its own empty line: it is a roster of Threads that
+  // were put away, so "no conversations yet" would be a lie and there is
+  // nothing to widen with Show all.
+  if (filters.view === "archived" && filters.q.trim() === "") return <p className="px-3 py-2 text-sm text-muted-foreground">{t.emptyArchived}</p>
   if (!hasThreadListFilters(filters)) return <p className="px-3 py-2 text-sm text-muted-foreground">{t.emptyTitle}</p>
   return <div className="flex flex-col items-start gap-2 px-3 py-2">
     <p className="text-sm text-muted-foreground">{t.emptyFiltered}</p>

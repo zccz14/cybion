@@ -143,10 +143,12 @@ Archiving hides a Thread from the thread list without deleting anything.
 `archived_at`. `PATCH /api/threads/{id}` with `{"archived":true}` archives a
 Thread and `{"archived":false}` restores it. Archived Threads keep their
 history, audits, Worker calls, and recovery state, and stay usable through
-their normal endpoints; appending input does not restore them. The web UI
-lists archived Threads in a collapsed state under the thread list with a
-per-row restore action, and the conversation header offers Archive and
-Restore.
+their normal endpoints; appending input does not restore them. Archived
+Threads have their own view: the **Archived** chip in the thread list control
+bar turns the whole list into the archived roster, with the same search, the
+same paging, a per-row restore action, and `#/threads?view=archived` as its
+address. The conversation header offers Archive and Restore for the Thread
+that is open.
 
 The list endpoint filters and paginates on the server. Every provided
 parameter must match; omitted parameters match anything:
@@ -167,21 +169,24 @@ return HTTP 400.
 
 The web UI drives these parameters through one shared control bar: a search
 box (300 ms debounce) plus single-select view chips — All / Web / API /
-Running / Failed. Web (the existing `view=mine` URL) maps to `origin=web` and opens by default; API maps
-to `origin=api`, Running to `status=running`, and Failed to `status=failed`;
-search combines with the selected view. The selection lives in the page URL
-(for example `#/threads?view=api&q=room`), so a thread list link is
-shareable, a reload keeps the selection, and back/forward step through
+Running / Failed / Archived. Web (the existing `view=mine` URL) maps to
+`origin=web` and opens by default; API maps to `origin=api`, Running to
+`status=running`, Failed to `status=failed`, and Archived to
+`archived=true`; search combines with the selected view. The selection lives
+in the page URL (for example `#/threads?view=api&q=room`), so a thread list
+link is shareable, a reload keeps the selection, and back/forward step through
 filter changes. The default view omits `view`, and `q` stores the raw search
 text while the server request still trims it. More pages load automatically
-when the list footer scrolls into view, and the archived group pages the
-same way. The archived group sits outside the filter and keeps showing every
-archived Thread. An empty result offers a one-click "Show all" reset to the
-widest selection.
+when the list footer scrolls into view, in the archived view too, so the
+roster is browsable to its end. An empty result offers a one-click "Show all"
+reset to the widest selection; an empty archived roster says so instead and
+offers no reset.
 
-The list owns its own data. The component that renders it runs the paging and
-archived queries, the two-second refresh and the restore action; the shell
-above it passes the filter selection and nothing else. Two properties follow,
+The list owns its own data. The component that renders it runs the paged
+query, the two-second refresh and the restore action; the shell above it
+passes the filter selection and nothing else. Archived Threads are the same
+query with one more server parameter, not a second list, so the archived view
+inherits the paging, the polling and the cache. Two properties follow,
 and both are about how the app feels rather than what it stores. Opening a
 Thread never refetches the list and never unmounts it: the conversation column
 is keyed by Thread id, so a switch remounts that column alone. And the list

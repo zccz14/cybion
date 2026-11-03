@@ -1,4 +1,4 @@
-export const THREAD_LIST_VIEWS = ["all", "mine", "api", "running", "failed"] as const
+export const THREAD_LIST_VIEWS = ["all", "mine", "api", "running", "failed", "archived"] as const
 
 export type ThreadListView = (typeof THREAD_LIST_VIEWS)[number]
 
@@ -35,13 +35,16 @@ export function serializeThreadListFilters(filters: ThreadListFilters): URLSearc
 }
 
 // Each view is one single-select preset over the orthogonal server parameters;
-// search text combines with the selected view.
+// search text combines with the selected view. The archived preset is the one
+// scope that reads the other side of `archived_at`: every other preset lists
+// the active Threads.
 const viewParams = {
   all: [],
   mine: [["origin", "web"]],
   api: [["origin", "api"]],
   running: [["status", "running"]],
   failed: [["status", "failed"]],
+  archived: [["archived", "true"]],
 } satisfies Record<ThreadListView, [string, string][]>
 
 export function threadListSearchParams(filters: ThreadListFilters): URLSearchParams {
@@ -52,9 +55,8 @@ export function threadListSearchParams(filters: ThreadListFilters): URLSearchPar
   return params
 }
 
-export function threadListUrl(filters: ThreadListFilters, cursor?: string | null, archived = false): string {
+export function threadListUrl(filters: ThreadListFilters, cursor?: string | null): string {
   const params = threadListSearchParams(filters)
-  if (archived) params.set("archived", "true")
   if (cursor) params.set("cursor", cursor)
   const query = params.toString()
   return query === "" ? "/api/threads" : `/api/threads?${query}`

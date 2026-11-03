@@ -20,7 +20,7 @@ test("the list opens on my threads and search reports empty results with a reset
   await expect(page.getByRole("link")).toHaveCount(3)
 })
 
-test("view chips switch between all, mine, api, running, and failed", async ({ page }) => {
+test("view chips switch between all, mine, api, running, failed, and archived", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
   await expect(page.getByRole("button", { name: "网页创建" })).toHaveAttribute("aria-pressed", "true")
   await expect(page.getByRole("link")).toHaveCount(2)
@@ -39,7 +39,7 @@ test("view chips switch between all, mine, api, running, and failed", async ({ p
   await page.getByRole("button", { name: "失败" }).click()
   await expect(page.getByRole("link")).toHaveCount(1)
   await expect(page.getByRole("link")).toContainText("检查远程服务器连接")
-  await expect(page.getByRole("button", { name: "已归档 (1)" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "已归档" })).toHaveAttribute("aria-pressed", "false")
   await page.getByRole("button", { name: "全部" }).click()
   await expect(page.getByRole("link")).toHaveCount(3)
 })
@@ -84,17 +84,29 @@ test("rows stay within narrow light and dark layouts in both languages", async (
   await page.screenshot({ path: "test-results/thread-list-mobile.png" })
 })
 
-test("archived threads stay hidden until their group expands, then restore in place", async ({ page }) => {
+test("the archived view is the place archived threads are listed, searched, and restored", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
+  // Active views never mix archived rows in, and the archived view is the only
+  // place they show up.
   await expect(page.getByRole("link")).toHaveCount(2)
   await expect(page.getByRole("link", { name: /Legacy thread archive/ })).toHaveCount(0)
-  await page.getByRole("button", { name: "已归档 (1)" }).click()
-  await expect(page.getByRole("link")).toHaveCount(3)
+  await page.getByRole("button", { name: "已归档" }).click()
+  await expect(page).toHaveURL(/view=archived/)
+  await expect(page.getByRole("button", { name: "已归档" })).toHaveAttribute("aria-pressed", "true")
+  await expect(page.getByRole("link")).toHaveCount(1)
   await expect(page.getByRole("link", { name: /Legacy thread archive/ })).toBeVisible()
+  // The same search box narrows the archived roster, and a miss keeps the
+  // archived empty state instead of "no conversations yet".
+  await page.getByRole("searchbox").fill("没有这个线程")
+  await expect(page.getByRole("link")).toHaveCount(0)
+  await expect(page.getByText("没有匹配的对话")).toBeVisible()
+  await page.getByRole("searchbox").fill("")
   await page.getByRole("button", { name: "恢复" }).click()
   await expect(page.getByTestId("restored")).toHaveText("legacy")
+  await expect(page.getByRole("link")).toHaveCount(0)
+  await expect(page.getByText("还没有归档的对话")).toBeVisible()
+  await page.getByRole("button", { name: "网页创建" }).click()
   await expect(page.getByRole("link")).toHaveCount(2)
-  await expect(page.getByRole("button", { name: "已归档 (1)" })).toHaveCount(0)
 })
 
 test("filters live in the URL and survive reload, back, and forward", async ({ page }) => {
