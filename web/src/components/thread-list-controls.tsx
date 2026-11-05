@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { THREAD_LIST_VIEWS, hasThreadListFilters, type ThreadListFilters, type ThreadListView } from "@/lib/thread-search"
 
-type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | "emptyTitle" | "emptyArchived" | "emptyFiltered" | "resetFilters" | "loadMore" | ThreadListView
+type ThreadListControlsCopyKey = "newThread" | "searchThreads" | "viewsLabel" | "emptyTitle" | "emptyArchived" | "emptyFiltered" | "resetFilters" | "loadMore" | "blockedCount" | ThreadListView
 
 const copy = {
   en: {
@@ -17,6 +17,8 @@ const copy = {
     api: "API",
     running: "Running",
     failed: "Failed",
+    blocked: "Blocked",
+    blockedCount: "Threads waiting on you",
     archived: "Archived",
     emptyTitle: "No conversations yet",
     emptyArchived: "No archived conversations",
@@ -33,6 +35,8 @@ const copy = {
     api: "API",
     running: "运行中",
     failed: "失败",
+    blocked: "受阻",
+    blockedCount: "正在等你的线程数",
     archived: "已归档",
     emptyTitle: "还没有对话。点击「新建对话」即可开始。",
     emptyArchived: "还没有归档的对话",
@@ -45,11 +49,13 @@ const copy = {
 const views: readonly ThreadListView[] = THREAD_LIST_VIEWS
 const searchDebounceMs = 300
 
-export function ThreadListControls({ filters, language, onFiltersChange, onNewThread }: {
+export function ThreadListControls({ filters, language, onFiltersChange, onNewThread, blockedThreads }: {
   filters: ThreadListFilters
   language: "en" | "zh"
   onFiltersChange: (filters: ThreadListFilters) => void
   onNewThread: () => void
+  /** Threads waiting on the user; the blocked chip carries the count. */
+  blockedThreads?: number
 }) {
   const t = copy[language]
   const [draft, setDraft] = useState(filters.q)
@@ -70,7 +76,10 @@ export function ThreadListControls({ filters, language, onFiltersChange, onNewTh
       <Button size="sm" className="shrink-0" variant="outline" aria-label={t.newThread} onClick={onNewThread}><PlusIcon />{t.newThread}</Button>
     </div>
     <div role="group" aria-label={t.viewsLabel} className="flex flex-wrap items-center gap-1">
-      {views.map((view) => <Button key={view} type="button" size="xs" variant={filters.view === view ? "secondary" : "ghost"} aria-pressed={filters.view === view} className="rounded-full px-2" onClick={() => onFiltersChange({ ...filters, view })}>{t[view]}</Button>)}
+      {views.map((view) => <Button key={view} type="button" size="xs" variant={filters.view === view ? "secondary" : "ghost"} aria-pressed={filters.view === view} className="rounded-full px-2" onClick={() => onFiltersChange({ ...filters, view })}>
+        {t[view]}
+        {view === "blocked" && blockedThreads !== undefined && blockedThreads > 0 && <span title={t.blockedCount} className="ml-1 rounded-full bg-current/15 px-1.5 text-[0.65rem] tabular-nums">{blockedThreads}</span>}
+      </Button>)}
     </div>
   </div>
 }

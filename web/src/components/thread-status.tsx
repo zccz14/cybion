@@ -1,4 +1,4 @@
-import { CheckIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIcon, TriangleAlertIcon } from "lucide-react"
+import { CheckIcon, CirclePauseIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIcon, TriangleAlertIcon } from "lucide-react"
 import { NavLink, useLocation } from "react-router-dom"
 import { useNowSeconds } from "@/hooks/use-now"
 import { formatRelativeTime } from "@/lib/time"
@@ -17,6 +17,7 @@ const presentation = {
   completed: { icon: CheckIcon, color: "text-thread-success", motion: "" },
   failed: { icon: TriangleAlertIcon, color: "text-thread-failure", motion: "" },
   stopped: { icon: SquareIcon, color: "text-muted-foreground", motion: "" },
+  blocked: { icon: CirclePauseIcon, color: "text-thread-blocked", motion: "" },
 } as const
 
 function ThreadStatusIcon({ status, className }: { status: ThreadDisplayStatus; className?: string }) {

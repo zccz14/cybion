@@ -472,5 +472,17 @@
         "additionalProperties": false
       }
     }
-  }
+  },
+  "thread": [
+    {
+      "type": "function",
+      "name": "block_thread",
+      "description": "Block this Thread when you cannot go on: it is then marked as waiting on the user, not finished and not failed. Use it when a step needs a decision, a credential, or something only the user can provide — say what blocks them and what they must do in your answer, because that answer is the only explanation they get. This is not how you stop or cancel execution. The user's next message clears the block; there is no unblock tool, so do not wait for one.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ]
 }

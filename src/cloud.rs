@@ -35,6 +35,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod admin_users;
+mod blocked;
 mod common_manuals;
 mod cost;
 mod exe;
@@ -159,7 +160,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // History: 51 shipped `max_loaded_manuals`; the audio input columns were added
 // without a bump, so hosted databases at 51 never gained them and every thread
 // query failed with `no such column: t.audio_transcription_model` until 52.
-const USER_SCHEMA_VERSION: i64 = 54;
+const USER_SCHEMA_VERSION: i64 = 55;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1555,6 +1556,9 @@ CREATE TABLE IF NOT EXISTS threads (
   max_loaded_manuals INTEGER,
   audio_transcription_model TEXT,
   archived_at INTEGER,
+  -- Waiting on the user: its own axis, because `status` is written on every
+  -- turn boundary and a blocked Thread must survive finalization.
+  blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1)),
   status TEXT NOT NULL CHECK(status IN ('idle','running','failed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -2024,12 +2028,34 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if version < 53 {
         migrate_user_schema_through_53(&transaction, version)?;
     }
+    if version < 55 {
+        migrate_thread_blocked(&transaction)?;
+    }
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
     )?;
     transaction.pragma_update(None, "user_version", USER_SCHEMA_VERSION)?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Threads gain the blocked flag: the Thread is waiting on the user, and the
+/// model will not report it as finished. A fresh database already carries the
+/// column from `THREAD_SCHEMA`, so the upgrade checks before it alters. Retire
+/// this upgrade once every user database is audited at schema 55+; retain the
+/// column test.
+fn migrate_thread_blocked(transaction: &rusqlite::Transaction<'_>) -> Result<(), ApiError> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='blocked')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        transaction.execute_batch(
+            "ALTER TABLE threads ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1));",
+        )?;
+    }
     Ok(())
 }
 
@@ -3729,6 +3755,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
          WHEN t.status='running' THEN
            CASE WHEN boundary.kind='activity' AND json_extract(boundary.payload,'$.action')='compact'
                 THEN 'compacting' ELSE 'running' END
+         WHEN t.blocked=1 THEN 'blocked'
          WHEN boundary.id IS NULL THEN 'ready'
          WHEN boundary.kind='activity' AND json_extract(boundary.payload,'$.action')='cancel' THEN 'stopped'
          ELSE 'completed'
@@ -3919,6 +3946,8 @@ async fn create_thread_for(
 struct ThreadListFilter {
     /// `true` lists only archived threads; the default lists active ones.
     archived: bool,
+    /// `true` lists only Threads carrying an open issue: the blocked view.
+    blocked: bool,
     /// Persisted execution status: `idle`, `running`, or `failed`.
     status: Option<String>,
     /// Creation origin: `web` or `api`.
@@ -3977,6 +4006,11 @@ async fn list_threads_for(
         if let Some(status) = &filter.status {
             conditions.push("t.status = ?");
             values.push(rusqlite::types::Value::Text(status.clone()));
+        }
+        if filter.blocked {
+            // The blocked view lists Threads waiting on the user; archived ones
+            // are excluded by the archived condition above.
+            conditions.push("t.blocked=1");
         }
         if let Some(origin) = &filter.origin {
             conditions.push("t.created_by = ?");
@@ -4271,6 +4305,9 @@ struct ListThreadsQuery {
     /// `true` lists only archived threads; the default lists active ones.
     #[serde(default)]
     archived: bool,
+    /// `true` lists only Threads carrying an open issue.
+    #[serde(default)]
+    blocked: bool,
     /// Persisted execution status filter: `idle`, `running`, or `failed`.
     status: Option<String>,
     /// Creation origin filter: `web` or `api`.
@@ -4339,6 +4376,7 @@ async fn list_threads(
 ) -> Result<Json<ThreadListPage>, ApiError> {
     let filter = ThreadListFilter {
         archived: query.archived,
+        blocked: query.blocked,
         status: query
             .status
             .as_deref()
@@ -5931,6 +5969,12 @@ fn persist_history_record(
             record.created_at,
         ],
     )?;
+    if record.kind == "input" {
+        // The user speaking is what unblocks a Thread: they looked at it, so it
+        // is no longer waiting on them. This is the one write path for input
+        // records, so the rule cannot be forgotten by a caller.
+        blocked::clear_on_input(connection, record.thread_id)?;
+    }
     Ok(connection.last_insert_rowid())
 }
 
@@ -8715,6 +8759,10 @@ fn note_tools() -> Value {
     TOOL_CATALOG["note"].clone()
 }
 
+fn thread_tools() -> Value {
+    TOOL_CATALOG["thread"].clone()
+}
+
 fn is_worker_tool(name: &str) -> bool {
     run_phase::tool_phase(name) == Some(Phase::Device)
 }
@@ -8730,6 +8778,7 @@ fn responses_tools(
     if include_manual_tools {
         tools.extend(context_tools().as_array().cloned().unwrap_or_default());
         tools.extend(note_tools().as_array().cloned().unwrap_or_default());
+        tools.extend(thread_tools().as_array().cloned().unwrap_or_default());
     }
     if include_worker_tools {
         tools.extend(worker_tools().as_array().cloned().unwrap_or_default());
@@ -9546,6 +9595,7 @@ async fn controller_tool_output(
         "cybion_list_workers" => list_workers_tool_output(state, user).await,
         "add_notes" => notes::add_tool_output(state, user, thread_id, input).await,
         "cross_out_notes" => notes::cross_out_tool_output(state, user, thread_id, input).await,
+        "block_thread" => blocked::tool_output(state, user, thread_id, input).await,
         "cybion_list_ultimate_machines" => machines::list_tool_output(state, user).await,
         "cybion_get_ultimate_machine" => machines::get_tool_output(state, user, input).await,
         "cybion_set_ultimate_machine" => machines::set_tool_output(state, user, input).await,
@@ -10448,6 +10498,10 @@ mod common_manual_tests;
 #[cfg(test)]
 #[path = "cloud_manual_sort_tests.rs"]
 mod context_sort_tests;
+
+#[cfg(test)]
+#[path = "cloud_blocked_tests.rs"]
+mod blocked_tests;
 
 #[cfg(test)]
 #[path = "cloud_notes_tests.rs"]
@@ -12467,7 +12521,7 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 17);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 18);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -13033,7 +13087,7 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true, false);
-        assert_eq!(tools.as_array().unwrap().len(), 13);
+        assert_eq!(tools.as_array().unwrap().len(), 14);
         assert_eq!(tools[0]["name"], "list_manuals");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "load_manual");
@@ -13052,18 +13106,20 @@ mod tests {
         assert_eq!(tools[9]["parameters"]["required"], json!(["items"]));
         assert_eq!(tools[10]["name"], "cross_out_notes");
         assert_eq!(tools[10]["parameters"]["required"], json!(["note_ids"]));
-        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[11]["name"], "block_thread");
+        assert_eq!(tools[11]["parameters"]["required"], json!(null));
+        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true, false);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 17);
-        assert_eq!(worker_and_native[11]["name"], "bash");
-        assert_eq!(worker_and_native[14]["name"], "view_image");
-        assert_eq!(worker_and_native[15]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[16]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 18);
+        assert_eq!(worker_and_native[12]["name"], "bash");
+        assert_eq!(worker_and_native[15]["name"], "view_image");
+        assert_eq!(worker_and_native[16]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[17]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 12);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 13);
         assert_eq!(
-            web_search_only[11],
+            web_search_only[12],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false, false);
@@ -13085,7 +13141,8 @@ mod tests {
                 "cybion_set_ultimate_machine",
                 "cybion_delete_ultimate_machine",
                 "add_notes",
-                "cross_out_notes"
+                "cross_out_notes",
+                "block_thread"
             ]
         );
         assert_eq!(
@@ -13119,6 +13176,7 @@ mod tests {
             ]
         );
         assert_eq!(names(note_tools()), ["add_notes", "cross_out_notes"]);
+        assert_eq!(names(thread_tools()), ["block_thread"]);
         assert_eq!(
             names(worker_tools()),
             ["bash", "browser_control", "computer_use", "view_image"]
@@ -13393,7 +13451,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         assert_eq!(tools[0], TOOL_CATALOG["kernel"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["kernel"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["kernel"][2]);
@@ -13403,8 +13461,9 @@ mod tests {
         assert_eq!(tools[6], TOOL_CATALOG["kernel"][6]);
         assert_eq!(tools[9], TOOL_CATALOG["note"][0]);
         assert_eq!(tools[10], TOOL_CATALOG["note"][1]);
-        assert_eq!(tools[11], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[11], TOOL_CATALOG["thread"][0]);
+        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

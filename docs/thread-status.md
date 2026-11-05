@@ -12,6 +12,7 @@ finished or the user's real-world objective has been achieved.
 | `completed` | Completed / 已完成 | Check | Green | The latest execution finished successfully. |
 | `failed` | Failed / 执行失败 | Warning triangle | Red | The latest execution failed; inspect the conversation for details. |
 | `stopped` | Stopped / 已停止 | Square | Muted | Execution was explicitly stopped; saved history can be continued. |
+| `blocked` | Blocked / 受阻 | Paused circle | Violet | The Thread said it cannot go on and is waiting on the user. The next user message clears it. |
 
 ## Presentation
 
@@ -53,8 +54,17 @@ new user input. Existing input/control record IDs fence stale responses; there
 is no separate execution entity. See [recovery](thread-recovery.md).
 
 Both fields have a purpose: `status` governs execution controls; `display_status`
-explains the current execution or its outcome. No stored state, schema
-migration, or client-side inference is needed.
+explains the current execution or its outcome.
+
+One part of `display_status` is not an execution fact at all: `blocked`. A Thread
+waiting on its user is something the model states (`block_thread`) and only the
+user's next message retracts, so it lives in its own `threads.blocked` flag
+rather than as a value of `status`. Keeping it out of `status` is what lets the
+flag survive the writes every turn boundary makes (idle on finalization, failed
+on error), and what keeps the `WHERE status='running'` guards meaningful. There
+is no unblock tool and no expiry: the kernel clears the flag where the input
+record is written, so no caller can forget it and the model cannot decide when
+it stops waiting.
 
 The same projection derives `running_summary`. When the Thread is running it
 prefers the newest `response_output` Worker call of the current turn that has no
@@ -77,9 +87,11 @@ or thread-control record**, ordered by durable record ID:
 1. `failed` is always displayed as failed.
 2. `running` is compacting if the latest request boundary is a compact action;
    otherwise it is running.
-3. `idle` with no request boundary is ready.
-4. `idle` after a cancel boundary is stopped.
-5. Remaining `idle` executions are completed.
+3. A blocked Thread is blocked, unless it is failed or running: the block wins
+   over every settled state, and an executing or failed Thread keeps its own.
+4. `idle` with no request boundary is ready.
+5. `idle` after a cancel boundary is stopped.
+6. Remaining `idle` executions are completed.
 
 This follows the controller invariant that idle is written only on creation,
 successful finalization, or cancellation. A title change, completed title audit,
@@ -92,6 +104,9 @@ record. The result is read in the same SQLite statement as Thread metadata.
 - Backend tests exercise create → run → complete → continue → cancel → compact
   → complete → fail → retry, including late failure/success, newer-input
   supersession, renames, independent threads/users, and raw activity payloads.
+- Backend tests cover the block flag: it survives finalization, only an input
+  record clears it, and it never overrides running or failed. The blocked view
+  lists blocked active Threads only.
 - Backend tests cover the running summary appearing for the newest unanswered
   call and for the newest reasoning summary after the waterline, preferring the
   call, dropping reasoning once its tool result lands, taking every text part

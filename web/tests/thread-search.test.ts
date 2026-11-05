@@ -17,6 +17,7 @@ test("view chips map to the origin and status parameters", () => {
   assert.equal(threadListUrl({ view: "api", q: "" }), "/api/threads?origin=api")
   assert.equal(threadListUrl({ view: "running", q: "" }), "/api/threads?status=running")
   assert.equal(threadListUrl({ view: "failed", q: "" }), "/api/threads?status=failed")
+  assert.equal(threadListUrl({ view: "blocked", q: "" }), "/api/threads?blocked=true")
   assert.equal(threadListUrl({ view: "archived", q: "" }), "/api/threads?archived=true")
 })
 
@@ -26,6 +27,7 @@ test("search text is trimmed, encoded, and combined with the view", () => {
   assert.equal(hasThreadListFilters({ view: "all", q: "  " }), false)
   assert.equal(hasThreadListFilters({ view: "mine", q: "" }), true)
   assert.equal(hasThreadListFilters({ view: "failed", q: "" }), true)
+  assert.equal(hasThreadListFilters({ view: "blocked", q: "" }), true)
   assert.equal(hasThreadListFilters({ view: "all", q: "bridge" }), true)
 })
 

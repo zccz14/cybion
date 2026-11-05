@@ -1,4 +1,4 @@
-export const THREAD_LIST_VIEWS = ["all", "mine", "api", "running", "failed", "archived"] as const
+export const THREAD_LIST_VIEWS = ["all", "mine", "api", "running", "failed", "blocked", "archived"] as const
 
 export type ThreadListView = (typeof THREAD_LIST_VIEWS)[number]
 
@@ -44,6 +44,7 @@ const viewParams = {
   api: [["origin", "api"]],
   running: [["status", "running"]],
   failed: [["status", "failed"]],
+  blocked: [["blocked", "true"]],
   archived: [["archived", "true"]],
 } satisfies Record<ThreadListView, [string, string][]>
 

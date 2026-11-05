@@ -84,7 +84,11 @@ pub(super) fn tool_phase(name: &str) -> Option<Phase> {
     if group_has("worker") {
         return Some(Phase::Device);
     }
-    if group_has("kernel") || group_has("note") || TOOL_CATALOG["native"].get(name).is_some() {
+    if group_has("kernel")
+        || group_has("note")
+        || group_has("thread")
+        || TOOL_CATALOG["native"].get(name).is_some()
+    {
         return Some(Phase::Kernel);
     }
     None

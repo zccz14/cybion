@@ -618,6 +618,7 @@ const copy = {
     toolWriteManual: "Create or edit manuals",
     toolAddNotes: "Add notes",
     toolCrossOutNotes: "Cross out notes",
+    toolBlockThread: "Block the Thread",
     toolListManuals: "List manuals",
     toolListWorkers: "List Workers",
     toolListUltimateMachines: "List Ultimate Machines",
@@ -935,6 +936,7 @@ const copy = {
     toolWriteManual: "创建或编辑手册",
     toolAddNotes: "添加便签",
     toolCrossOutNotes: "划掉便签",
+    toolBlockThread: "标记受阻",
     toolListManuals: "列出手册",
     toolListWorkers: "列出 Worker",
     toolListUltimateMachines: "列出终极机器",
@@ -3427,6 +3429,7 @@ const toolLabels: Record<string, CopyKey> = {
   write_manual: "toolWriteManual",
   add_notes: "toolAddNotes",
   cross_out_notes: "toolCrossOutNotes",
+  block_thread: "toolBlockThread",
   cybion_list_ultimate_machines: "toolListUltimateMachines",
   cybion_get_ultimate_machine: "toolGetUltimateMachine",
   cybion_set_ultimate_machine: "toolSetUltimateMachine",
@@ -3447,7 +3450,7 @@ function ToolsPage() {
   // `manual` and `native` both run in the Controller, because the native tools
   // are intercepted there instead of being executed by the upstream.
   const groups = [
-    { title: t("phaseKernel"), hint: t("toolsKernelHint"), names: [...toolCatalog.kernel.map((tool) => tool.name), ...toolCatalog.note.map((tool) => tool.name), ...Object.keys(toolCatalog.native)] },
+    { title: t("phaseKernel"), hint: t("toolsKernelHint"), names: [...toolCatalog.kernel.map((tool) => tool.name), ...toolCatalog.note.map((tool) => tool.name), ...toolCatalog.thread.map((tool) => tool.name), ...Object.keys(toolCatalog.native)] },
     { title: t("phaseDevice"), hint: t("toolsDeviceHint"), names: toolCatalog.worker.map((tool) => tool.name) },
   ]
   return <Page title={t("tools")} description={t("toolsDescription")}>{groups.map((group) => <Card key={group.title}>
