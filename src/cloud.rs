@@ -9536,6 +9536,12 @@ async fn enqueue_worker_call(
     {
         return Ok(id);
     }
+    // The gate below refuses a call on the stored status, and that stored status
+    // is only a mirror of what the relay last said. Re-probe this device first so
+    // a stale mirror cannot turn a live device into a refusal.
+    if let Err(error) = exe::refresh_for_dispatch(state, user, worker_id).await {
+        tracing::warn!(error = %error.message, "eXe status re-probe before dispatch deferred");
+    }
     let worker_id = worker_id.to_owned();
     let thread_id = thread_id.to_owned();
     user_db(state, user, false, move |c| {

@@ -685,3 +685,133 @@ async fn adding_a_device_lists_it_once_and_shows_the_account_address() {
     let again = identity_for(&state, &user).await.unwrap();
     assert_eq!(again.0, address);
 }
+
+#[tokio::test]
+async fn a_stale_offline_mirror_does_not_refuse_a_device_the_relay_reports_online() {
+    let fixture = mock_fixture([21u8; 32]).await;
+    let state = fixture.state.clone();
+    let user = fixture.user.clone();
+    let thread = create_test_thread(&state, &user).await;
+    let worker_id = Uuid::new_v4().to_string();
+    let (worker, address) = (
+        worker_id.clone(),
+        fixture.device.lock().await.identity.address(),
+    );
+    // The mirror says offline, because that is what the last listing wrote and
+    // nothing has asked the relay since.
+    user_db(&state, &user, false, move |c| {
+        insert_device(c, &worker, "Phone", &address, &DeviceStatus::default())
+    })
+    .await
+    .unwrap();
+    let input = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |c| {
+            c.execute(
+                "UPDATE threads SET status='running' WHERE id=?",
+                [&thread_id],
+            )?;
+            Ok(insert_record(
+                c,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"hello"}),
+            ))
+        }
+    })
+    .await
+    .unwrap();
+
+    let call_id = super::super::enqueue_worker_call(
+        &state,
+        &user,
+        &worker_id,
+        &thread.id,
+        input,
+        "call-1".to_owned(),
+        "function_call_output".to_owned(),
+        "bash".to_owned(),
+        json!({"worker_id": worker_id, "summary": "inspect the device", "command": "echo hi"}),
+    )
+    .await
+    .expect("a device the relay reports online must not be refused");
+
+    let call_status: String = user_db(&state, &user, false, {
+        let call_id = call_id.clone();
+        move |c| {
+            Ok(c.query_row(
+                "SELECT status FROM worker_calls WHERE id=?",
+                [&call_id],
+                |r| r.get(0),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(call_status, "queued");
+    let (status, last_seen) = user_db(&state, &user, false, {
+        let worker = worker_id.clone();
+        move |c| {
+            Ok(c.query_row(
+                "SELECT status,last_seen_at FROM workers WHERE id=?",
+                [&worker],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )?)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, "online", "the re-probe stores what the relay said");
+    assert!(last_seen.is_some_and(|seen| seen > 0));
+}
+
+#[tokio::test]
+async fn a_device_stays_refused_when_the_relay_cannot_be_reached() {
+    let (_root, mut state) = test_state();
+    // A test must never reach the real relay.
+    state.exe_api_url = "http://127.0.0.1:9".into();
+    let user = user_for_subject(&state, "exe-stale-mirror-owner").unwrap();
+    ensure_user_db(&state, &user).await;
+    let thread = create_test_thread(&state, &user).await;
+    let worker_id = Uuid::new_v4().to_string();
+    let (worker, address) = (worker_id.clone(), Identity::from_seed([23u8; 32]).address());
+    user_db(&state, &user, false, move |c| {
+        insert_device(c, &worker, "Phone", &address, &DeviceStatus::default())
+    })
+    .await
+    .unwrap();
+    let input = user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |c| {
+            c.execute(
+                "UPDATE threads SET status='running' WHERE id=?",
+                [&thread_id],
+            )?;
+            Ok(insert_record(
+                c,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"hello"}),
+            ))
+        }
+    })
+    .await
+    .unwrap();
+
+    let error = super::super::enqueue_worker_call(
+        &state,
+        &user,
+        &worker_id,
+        &thread.id,
+        input,
+        "call-1".to_owned(),
+        "function_call_output".to_owned(),
+        "bash".to_owned(),
+        json!({"worker_id": worker_id, "summary": "inspect the device", "command": "echo hi"}),
+    )
+    .await
+    .unwrap_err();
+    // An unreachable relay must not soften the gate: an offline mirror still
+    // refuses, exactly as it did before the re-probe existed.
+    assert!(error.message.contains("is offline"), "{}", error.message);
+}
