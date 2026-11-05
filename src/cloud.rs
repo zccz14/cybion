@@ -37,6 +37,7 @@ use uuid::Uuid;
 mod admin_users;
 mod common_manuals;
 mod cost;
+mod exe;
 mod history;
 mod linkit_notifications;
 mod machines;
@@ -157,7 +158,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // History: 51 shipped `max_loaded_manuals`; the audio input columns were added
 // without a bump, so hosted databases at 51 never gained them and every thread
 // query failed with `no such column: t.audio_transcription_model` until 52.
-const USER_SCHEMA_VERSION: i64 = 52;
+const USER_SCHEMA_VERSION: i64 = 53;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -183,6 +184,9 @@ struct AppState {
     client: reqwest::Client,
     linkit_api_url: String,
     normai_api_url: String,
+    /// The eXe relay this Controller signs and seals calls for. Devices carry
+    /// their own endpoint list; the Controller only needs one entry.
+    exe_api_url: String,
     worker_release_base: String,
     worker_android_release_base: String,
     auth: Arc<OnceCell<AuthMiniLayer>>,
@@ -407,6 +411,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
             .build()?,
         linkit_api_url: LINKIT_API_URL.to_owned(),
         normai_api_url: NORMAI_API_URL.to_owned(),
+        exe_api_url: exe::API_URL.to_owned(),
         worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
         worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
         auth: Arc::new(OnceCell::new()),
@@ -423,6 +428,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
     tokio::spawn(recovery::supervise(state.clone()));
     tokio::spawn(stats::supervise(state.clone()));
     tokio::spawn(machines::supervise(state.clone()));
+    tokio::spawn(exe::supervise(state.clone()));
     tokio::spawn(cost::supervise(state.clone()));
     axum::serve(listener, app(state)).await?;
     Ok(())
@@ -1044,6 +1050,8 @@ fn app(state: AppState) -> Router {
             "/api/workers/{id}/check",
             get(worker_onboarding::check_read).post(worker_onboarding::check_start),
         )
+        .route("/api/exe", get(exe::read))
+        .route("/api/exe/devices", post(exe::add_device))
         .route("/api/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api/api-keys/{id}", delete(delete_api_key))
         .route(
@@ -1629,6 +1637,11 @@ CREATE TABLE IF NOT EXISTS workers (
   resource_json TEXT,
   hostname TEXT,
   version TEXT
+);
+CREATE TABLE IF NOT EXISTS exe_identity (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  secret TEXT NOT NULL,
+  created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS worker_calls (
   id TEXT PRIMARY KEY,
@@ -2323,6 +2336,10 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         ("workers", "upgrade_status", "TEXT"),
         ("workers", "upgrade_error", "TEXT"),
         ("workers", "platform", "TEXT"),
+        ("workers", "kind", "TEXT NOT NULL DEFAULT 'worker'"),
+        ("workers", "exe_address", "TEXT"),
+        ("worker_calls", "exe_call_id", "TEXT"),
+        ("worker_calls", "exe_envelope", "TEXT"),
     ] {
         let exists: bool = transaction.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?)"),
@@ -3041,6 +3058,10 @@ struct UpdateWorkerInput {
 struct WorkerView {
     owner_user_id: String,
     access: String,
+    /// `worker` or `exe`: one device layer, two kinds of hand.
+    kind: String,
+    /// The eXe address, for an eXe device; a Worker has no address to trust.
+    address: Option<String>,
     version: Option<String>,
     can_upgrade: bool,
     upgrade_target: Option<String>,
@@ -3145,6 +3166,9 @@ struct WorkerSummary {
     access: String,
     id: String,
     label: String,
+    kind: String,
+    address: Option<String>,
+    status: String,
 }
 
 #[derive(Deserialize)]
@@ -6658,13 +6682,20 @@ fn registered_workers(connection: &Connection) -> Result<Vec<WorkerSummary>, Api
         .and_then(|p| Path::new(p).file_stem())
         .and_then(|s| s.to_str())
         .unwrap_or_default();
-    let mut statement = connection.prepare("SELECT id,label,?, 'owner' FROM workers WHERE deleted_at IS NULL UNION ALL SELECT worker_id,label,owner_user_id,'shared' FROM shared_workers WHERE revoked_at IS NULL ORDER BY label,id")?;
-    let rows = statement.query_map([owner], |row| {
+    // An eXe device lives in the same list as a Worker: `kind` is what tells
+    // the two apart, and `exe_address` is its only routing data.
+    let mut statement = connection.prepare(
+        "SELECT id,label,?,'owner',kind,exe_address,CASE WHEN last_seen_at IS NOT NULL AND last_seen_at>=? THEN 'online' ELSE 'offline' END FROM workers WHERE deleted_at IS NULL UNION ALL SELECT worker_id,label,owner_user_id,'shared','worker',NULL,'unknown' FROM shared_workers WHERE revoked_at IS NULL ORDER BY 2,1",
+    )?;
+    let rows = statement.query_map(params![owner, now() - WORKER_ONLINE_SECONDS], |row| {
         Ok(WorkerSummary {
             owner_user_id: row.get(2)?,
             access: row.get(3)?,
             id: row.get(0)?,
             label: row.get(1)?,
+            kind: row.get(4)?,
+            address: row.get(5)?,
+            status: row.get(6)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -8914,13 +8945,30 @@ fn context_summary_item(summary: &ManualSummary, source: &str) -> Value {
 }
 
 async fn list_workers_tool_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
+    if let Err(error) = exe::refresh(state, user).await {
+        tracing::warn!(error = %error.message, "eXe device status refresh deferred");
+    }
     let workers = user_db(state, user, false, |connection| {
         registered_workers(connection)
     })
     .await?;
     let workers = workers
         .iter()
-        .map(|worker| json!({"worker_id": worker.id, "label": worker.label, "owner_user_id":worker.owner_user_id, "access":worker.access}))
+        .map(|worker| {
+            let mut view = json!({
+                "worker_id": worker.id,
+                "label": worker.label,
+                "owner_user_id": worker.owner_user_id,
+                "access": worker.access,
+                "kind": worker.kind,
+                "status": worker.status,
+            });
+            if let Some(address) = &worker.address {
+                view["address"] = json!(address);
+                view["executes"] = json!(["bash"]);
+            }
+            view
+        })
         .collect::<Vec<_>>();
     Ok(json!({ "workers": workers }))
 }
@@ -9534,13 +9582,31 @@ fn enqueue_worker_call_tx(
         return Ok(id);
     }
     let worker_id = record_id(worker_id)?;
-    let snapshot=c.query_row("SELECT label,hostname,version,resource_json,status,last_seen_at FROM workers WHERE deleted_at IS NULL AND id=?",[&worker_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<i64>>(5)?))).optional()?.ok_or_else(||ApiError::not_found("selected Worker not found"))?;
-    if snapshot.4 != "online"
+    let snapshot=c.query_row("SELECT label,hostname,version,resource_json,status,last_seen_at,kind FROM workers WHERE deleted_at IS NULL AND id=?",[&worker_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<i64>>(5)?,r.get::<_,String>(6)?))).optional()?.ok_or_else(||ApiError::not_found("selected Worker not found"))?;
+    if snapshot.6 == "exe" && name != "bash" {
+        // An eXe client implements one verb, a shell. Refusing here keeps the
+        // model from reading a tool's absence as a device problem.
+        return Err(ApiError::bad_request(format!(
+            "{name} is not available on an eXe device: it executes shell commands only, so use bash"
+        )));
+    }
+    let offline = snapshot.4 != "online"
         || snapshot
             .5
-            .is_none_or(|seen| seen < now() - WORKER_ONLINE_SECONDS)
-    {
-        return Err(ApiError::conflict("selected Worker is offline"));
+            .is_none_or(|seen| seen < now() - WORKER_ONLINE_SECONDS);
+    if offline {
+        return Err(ApiError::conflict(if snapshot.6 == "exe" {
+            format!(
+                "eXe device {} is offline; it was last seen by its relay at {}",
+                snapshot.0,
+                snapshot
+                    .5
+                    .map(|seen| seen.to_string())
+                    .unwrap_or_else(|| "never".to_owned())
+            )
+        } else {
+            "selected Worker is offline".to_owned()
+        }));
     }
     let id = Uuid::new_v4().to_string();
     c.execute("INSERT INTO worker_calls(id,responses_call_id,responses_output_type,worker_id,thread_id,input_record_id,name,arguments_json,status,created_at,worker_label,worker_hostname,worker_version,worker_resource_json) VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",params![id,responses_call_id,responses_output_type,worker_id,thread_id,input_record_id,name,arguments_json,now(),snapshot.0,snapshot.1,snapshot.2,snapshot.3])?;
@@ -9775,11 +9841,14 @@ async fn cancel_worker_call(state: &AppState, user: &User, call_id: &str) {
     };
     let call_id = call_id.to_owned();
     let result = user_db(state, &owner, false, move |connection| {
+        // An eXe call is running on a device that has no notice channel, so the
+        // driver needs the request written down to forward it at the relay.
         connection.execute(
             "UPDATE worker_calls
-             SET status='cancelled',error='request superseded by a newer input',completed_at=?
+             SET status='cancelled',error='request superseded by a newer input',completed_at=?,
+                 cancel_requested_at=COALESCE(cancel_requested_at,?)
              WHERE id=? AND status IN ('queued','delivered')",
-            params![now(), call_id],
+            params![now(), now(), call_id],
         )?;
         Ok(())
     })
@@ -10027,112 +10096,195 @@ async fn worker_result(
     }
     let data_dir = state.data_dir.clone();
     user_db(&state, &user, false, move |connection| {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let started:Option<(Option<i64>,String)>=transaction.query_row("SELECT started_at,name FROM worker_calls WHERE id=? AND worker_id=?",params![call_id,worker_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let Some((started,name))=started else {
-            return Err(ApiError::not_found("Worker call not found"));
-        };
-        if started.is_none() {
-            return Err(ApiError::conflict("Worker call has not been delivered"));
-        }
-        // A view_image success persists as its input_image parts; every other
-        // result, failures included, keeps its text form.
-        let result = if name=="view_image" {
-            view_image_result(&data_dir,&input.result)?
-        } else {
-            input.result.clone()
-        };
-        let result_json = serde_json::to_string(&result).map_err(ApiError::internal)?;
-        if worker_sharing::save_foreign_result(&transaction, &worker_id, &call_id, &result_json, status, error_text.as_deref())? {
-            transaction.commit()?;
-            return Ok(());
-        }
-        let call: Option<WorkerCallResultRow> = transaction
-            .query_row(
-                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type,created_at FROM worker_calls
-                 WHERE id=? AND worker_id=?",
-                params![&call_id, &worker_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
-            )
-            .optional()?;
-        let Some((thread_id, input_record_id, call_status, existing_output_id, responses_call_id, responses_output_type, created_at)) = call else {
-            return Err(ApiError::not_found("Worker call not found"));
-        };
-        let thread_exists:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM threads WHERE id=?)",[&thread_id],|r|r.get(0))?;
-        if !thread_exists {
-            let saved:Option<String>=transaction.query_row("SELECT result_json FROM worker_calls WHERE id=?",[&call_id],|r|r.get(0))?;
-            if saved.as_deref().is_some_and(|v|v!=result_json) {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
-            stats::mark_dirty(&transaction, created_at)?;
-            transaction.execute("UPDATE worker_calls SET result_json=?,status='failed',error=COALESCE(error,'Thread deleted'),completed_at=COALESCE(completed_at,?),output_discarded=1 WHERE id=?",params![result_json,now(),call_id])?;
-            transaction.commit()?;return Ok(());
-        }
-        if existing_output_id.is_some() {
-            let saved:Option<String>=transaction.query_row("SELECT result_json FROM worker_calls WHERE id=?",[&call_id],|r|r.get(0))?;
-            if let Some(saved)=saved {
-                if saved!=result_json {return Err(ApiError::conflict("conflicting result for completed Worker call"));}
-            } else {
-                persist_history_record(&transaction,HistoryRecordInsert{thread_id:&thread_id,kind:"activity",payload:&json!({"type":"late_worker_result","call_id":responses_call_id,"result":result}),created_at:now()})?;
-                stats::mark_dirty(&transaction, created_at)?;
-                transaction.execute("UPDATE worker_calls SET result_json=? WHERE id=?",params![result_json,call_id])?;
-            }
-            transaction.commit()?;
-            return Ok(());
-        }
-        let output_value = if name=="view_image" && result.is_array() {
-            result
-        } else {
-            json!(result.to_string())
-        };
-        let output = json!({
-            "type": responses_output_type,
-            "call_id": if responses_call_id.is_empty() { call_id.clone() } else { responses_call_id.clone() },
-            "output": output_value,
-        });
-        stats::mark_dirty(&transaction, created_at)?;
-        let accepted = matches!(call_status.as_str(), "queued" | "delivered");
-        if accepted {
-            transaction.execute(
-                "UPDATE worker_calls
-                 SET status=?,result_json=?,error=?,completed_at=?,received_at=COALESCE(received_at,?)
-                 WHERE id=? AND worker_id=? AND status IN ('queued','delivered')",
-                params![status, result_json, error_text, now(), now(), &call_id, &worker_id],
-            )?;
-        } else {
-            // A superseded call can still finish on the device. Preserve that
-            // result once, while keeping its terminal cancellation/failure state.
-            transaction.execute(
-                "UPDATE worker_calls SET result_json=?,error=COALESCE(error,?),received_at=COALESCE(received_at,?)
-                 WHERE id=? AND worker_id=? AND output_record_id IS NULL",
-                params![result_json, error_text, now(), &call_id, &worker_id],
-            )?;
-        }
-        let superseded = if let Some(input_record_id) = input_record_id {
-            request_superseded(&transaction, &thread_id, input_record_id)?
-        } else {
-            true
-        };
-        let kind = if superseded { "activity" } else { "tool_output" };
-        let output_record_id = persist_history_record(
-            &transaction,
-            HistoryRecordInsert {
-                thread_id: &thread_id,
-                kind,
-                payload: &output,
-                created_at: now(),
-            },
-        )?;
-        transaction.execute(
-            "UPDATE worker_calls SET output_record_id=? WHERE id=?",
-            params![output_record_id, &call_id],
-        )?;
-        transaction.commit()?;
-        Ok(())
+        settle_worker_call_result(
+            &data_dir,
+            connection,
+            &worker_id,
+            &call_id,
+            input.result.clone(),
+            status,
+            error_text.clone(),
+        )
     })
     .await?;
     if let Err(error) = worker_sharing::deliver(&state, &user, &delivery_id).await {
         tracing::warn!(error=%error.message,"durable Worker result delivery deferred");
     }
     Ok(Json(json!({"ok":true})))
+}
+
+/// Writes one settled call into the ledger a Thread reads from. Both paths end
+/// here — the Worker result endpoint and the eXe driver — so a device answering
+/// late, twice, or after its Thread moved on is handled once, in one place.
+#[allow(clippy::too_many_arguments)]
+fn settle_worker_call_result(
+    data_dir: &Path,
+    connection: &mut Connection,
+    worker_id: &str,
+    call_id: &str,
+    result: Value,
+    status: &str,
+    error_text: Option<String>,
+) -> Result<(), ApiError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let started: Option<(Option<i64>, String)> = transaction
+        .query_row(
+            "SELECT started_at,name FROM worker_calls WHERE id=? AND worker_id=?",
+            params![call_id, worker_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+
+    let Some((started, name)) = started else {
+        return Err(ApiError::not_found("Worker call not found"));
+    };
+    if started.is_none() {
+        return Err(ApiError::conflict("Worker call has not been delivered"));
+    }
+    // A view_image success persists as its input_image parts; every other
+    // result, failures included, keeps its text form.
+    let result = if name == "view_image" {
+        view_image_result(data_dir, &result)?
+    } else {
+        result
+    };
+    let result_json = serde_json::to_string(&result).map_err(ApiError::internal)?;
+    if worker_sharing::save_foreign_result(
+        &transaction,
+        worker_id,
+        call_id,
+        &result_json,
+        status,
+        error_text.as_deref(),
+    )? {
+        transaction.commit()?;
+        return Ok(());
+    }
+    let call: Option<WorkerCallResultRow> = transaction
+            .query_row(
+                "SELECT thread_id,input_record_id,status,output_record_id,responses_call_id,responses_output_type,created_at FROM worker_calls
+                 WHERE id=? AND worker_id=?",
+                params![call_id, worker_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            )
+            .optional()?;
+    let Some((
+        thread_id,
+        input_record_id,
+        call_status,
+        existing_output_id,
+        responses_call_id,
+        responses_output_type,
+        created_at,
+    )) = call
+    else {
+        return Err(ApiError::not_found("Worker call not found"));
+    };
+    let thread_exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?)",
+        [&thread_id],
+        |r| r.get(0),
+    )?;
+    if !thread_exists {
+        let saved: Option<String> = transaction.query_row(
+            "SELECT result_json FROM worker_calls WHERE id=?",
+            [call_id],
+            |r| r.get(0),
+        )?;
+        if saved.as_deref().is_some_and(|v| v != result_json) {
+            return Err(ApiError::conflict(
+                "conflicting result for completed Worker call",
+            ));
+        }
+        stats::mark_dirty(&transaction, created_at)?;
+        transaction.execute("UPDATE worker_calls SET result_json=?,status='failed',error=COALESCE(error,'Thread deleted'),completed_at=COALESCE(completed_at,?),output_discarded=1 WHERE id=?",params![result_json,now(),call_id])?;
+        transaction.commit()?;
+        return Ok(());
+    }
+    if existing_output_id.is_some() {
+        let saved: Option<String> = transaction.query_row(
+            "SELECT result_json FROM worker_calls WHERE id=?",
+            [call_id],
+            |r| r.get(0),
+        )?;
+        if let Some(saved) = saved {
+            if saved != result_json {
+                return Err(ApiError::conflict(
+                    "conflicting result for completed Worker call",
+                ));
+            }
+        } else {
+            persist_history_record(
+                &transaction,
+                HistoryRecordInsert {
+                    thread_id: &thread_id,
+                    kind: "activity",
+                    payload: &json!({"type":"late_worker_result","call_id":responses_call_id,"result":result}),
+                    created_at: now(),
+                },
+            )?;
+            stats::mark_dirty(&transaction, created_at)?;
+            transaction.execute(
+                "UPDATE worker_calls SET result_json=? WHERE id=?",
+                params![result_json, call_id],
+            )?;
+        }
+        transaction.commit()?;
+        return Ok(());
+    }
+    let output_value = if name == "view_image" && result.is_array() {
+        result
+    } else {
+        json!(result.to_string())
+    };
+    let output = json!({
+        "type": responses_output_type,
+        "call_id": if responses_call_id.is_empty() { call_id.to_owned() } else { responses_call_id.clone() },
+        "output": output_value,
+    });
+    stats::mark_dirty(&transaction, created_at)?;
+    let accepted = matches!(call_status.as_str(), "queued" | "delivered");
+    if accepted {
+        transaction.execute(
+                "UPDATE worker_calls
+                 SET status=?,result_json=?,error=?,completed_at=?,received_at=COALESCE(received_at,?)
+                 WHERE id=? AND worker_id=? AND status IN ('queued','delivered')",
+                params![status, result_json, error_text, now(), now(), call_id, worker_id],
+            )?;
+    } else {
+        // A superseded call can still finish on the device. Preserve that
+        // result once, while keeping its terminal cancellation/failure state.
+        transaction.execute(
+                "UPDATE worker_calls SET result_json=?,error=COALESCE(error,?),received_at=COALESCE(received_at,?)
+                 WHERE id=? AND worker_id=? AND output_record_id IS NULL",
+                params![result_json, error_text, now(), call_id, worker_id],
+            )?;
+    }
+    let superseded = if let Some(input_record_id) = input_record_id {
+        request_superseded(&transaction, &thread_id, input_record_id)?
+    } else {
+        true
+    };
+    let kind = if superseded {
+        "activity"
+    } else {
+        "tool_output"
+    };
+    let output_record_id = persist_history_record(
+        &transaction,
+        HistoryRecordInsert {
+            thread_id: &thread_id,
+            kind,
+            payload: &output,
+            created_at: now(),
+        },
+    )?;
+    transaction.execute(
+        "UPDATE worker_calls SET output_record_id=? WHERE id=?",
+        params![output_record_id, call_id],
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 async fn worker_call_received(
@@ -10287,6 +10439,7 @@ mod tests {
                     .unwrap(),
                 linkit_api_url: LINKIT_API_URL.to_owned(),
                 normai_api_url: NORMAI_API_URL.to_owned(),
+                exe_api_url: exe::API_URL.to_owned(),
                 worker_release_base: WORKER_RELEASE_BASE_URL.to_owned(),
                 worker_android_release_base: WORKER_ANDROID_RELEASE_BASE_URL.to_owned(),
                 auth: Arc::new(OnceCell::new()),

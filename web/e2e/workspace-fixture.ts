@@ -79,6 +79,7 @@ export async function stubWorkspace(page: Page, options: {
       if (path === "/api/integrations/upstreams/models") return json({ upstreams: defaults.upstream_id ? [{ ...upstream, models: [defaults.model], error: null }] : [] })
       if (path === "/api/integrations/linkit") return json(notifications)
       if (path === "/api/workers") return json([])
+      if (path === "/api/exe") return json({ address: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", created_at: 1, devices: [] })
       if (path === "/api/worker-release") return json(release)
       if (path === "/api/threads") {
         if (url.searchParams.get("limit") === "1" && options.countFails) return json({ error: "Fixture: count unavailable" }, 503)

@@ -516,10 +516,18 @@ pub(super) async fn check_start(
             {
                 return Ok(Some(check));
             }
-            let version: Option<String> =
-                tx.query_row("SELECT version FROM workers WHERE deleted_at IS NULL AND id=?", [&id], |r| {
-                    r.get(0)
-                })?;
+            let (version, kind): (Option<String>, String) = tx.query_row(
+                "SELECT version,kind FROM workers WHERE deleted_at IS NULL AND id=?",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            // An eXe device runs its own client on its own schedule: there is no
+            // Worker process here to diagnose, and no channel to send a check on.
+            if kind == "exe" {
+                return Err(ApiError::conflict(
+                    "An eXe device has no Cybion Worker to diagnose; run `exe status` on the device instead",
+                ));
+            }
             // COMPATIBILITY: maintained by Cybion. Pre-0.1.4 Workers cannot dispatch
             // diagnostics. Remove this guard only when the supported minimum is 0.1.4
             // and stored/active Worker versions have been audited; keep a version test.

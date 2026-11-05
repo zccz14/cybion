@@ -13,6 +13,7 @@ async function fixture(page: Page) {
     const uid = session === "other-session" ? "other-owner" : "stable-owner"
     if (path === "/api/me") return route.fulfill({ json: { user_id: uid } })
     if (path === "/api/workers") return route.fulfill({ json: [] })
+    if (path === "/api/exe") return route.fulfill({ json: { address: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", created_at: 1, devices: [] } })
     if (path === "/api/worker-calls") return route.fulfill({ json: { page: 1, page_size: 20, total: 2, items: [summary("own", uid), summary("foreign", "recipient")].map((item) => ({ ...item, status })) } })
     if (path.startsWith("/api/worker-calls/")) {
       const id = path.split("/").at(-1)!

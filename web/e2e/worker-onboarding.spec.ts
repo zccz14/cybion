@@ -13,6 +13,7 @@ async function fixture(page: Page, scenario = "success") {
     let body: unknown = {}
     if (path === "/api/me") body = { user_id: "test-user" }
     else if (path === "/api/worker-release") body = release
+    else if (path === "/api/exe") body = { address: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", created_at: created, devices: [] }
     else if (path === "/api/workers") body = approved ? [device] : []
     else if (path.startsWith("/api/worker-pairings/")) {
       if (route.request().method() === "POST") { approved = true; posts++ }

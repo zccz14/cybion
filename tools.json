@@ -13,7 +13,7 @@
     {
       "type": "function",
       "name": "cybion_list_workers",
-      "description": "List owned and shared Workers (worker_id, label, owner_user_id, access) from the controller. Every Worker tool call must include an exact worker_id from this list; never choose a Worker implicitly. Registered Workers are not necessarily online; availability is checked when a Worker tool is called.",
+      "description": "List owned and shared devices (worker_id, label, owner_user_id, access, kind, status) from the controller: paired Cybion Workers (kind \"worker\") and eXe devices (kind \"exe\", carrying the address that device trusts). Every device tool call must include an exact worker_id from this list; never choose a device implicitly. Online status is what the last check saw, and availability is checked again when a device tool is called. An eXe device executes bash only.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -235,7 +235,7 @@
     {
       "type": "function",
       "name": "bash",
-      "description": "Run a shell command on the user's selected Worker. To wait before the command runs, set delay_seconds instead of embedding a `sleep`: embedded sleeps count toward Worker call duration and misreport Worker performance.",
+      "description": "Run a shell command on the user's selected device: a Cybion Worker or an eXe device. On an eXe device every call is a round trip through its relay and the shell is the only verb it implements, so prefer one command that does the whole job (`cd x && a && b`) over many small ones. To wait before the command runs, set delay_seconds instead of embedding a `sleep`: embedded sleeps count toward call duration and misreport device performance.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -273,7 +273,7 @@
     {
       "type": "function",
       "name": "browser_control",
-      "description": "Control an isolated browser on the user's selected Worker. delay_seconds waits in the controller before the action starts.",
+      "description": "Control an isolated browser on the user's selected Worker. A Cybion Worker only: an eXe device executes bash only. delay_seconds waits in the controller before the action starts.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -315,7 +315,7 @@
     {
       "type": "function",
       "name": "computer_use",
-      "description": "Perform a user-device computer action through the selected Worker. delay_seconds waits in the controller before the action starts.",
+      "description": "Perform a user-device computer action through the selected Worker. A Cybion Worker only: an eXe device executes bash only. delay_seconds waits in the controller before the action starts.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -357,7 +357,7 @@
     {
       "type": "function",
       "name": "view_image",
-      "description": "Read an image file (PNG, JPEG, WebP, or GIF) from the selected Worker's filesystem and attach it to this conversation so you can see it. Use it whenever you need to look at a picture, diagram, screenshot file, or photo that lives on the Worker; files larger than 4 MiB must be resized first (for example with bash).",
+      "description": "Read an image file (PNG, JPEG, WebP, or GIF) from the selected Worker's filesystem and attach it to this conversation so you can see it. Use it whenever you need to look at a picture, diagram, screenshot file, or photo that lives on the Worker; files larger than 4 MiB must be resized first (for example with bash). A Cybion Worker only: on an eXe device, read the file with bash instead.",
       "parameters": {
         "type": "object",
         "properties": {

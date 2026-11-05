@@ -1372,7 +1372,7 @@ async fn registry_tools_list_top_level_manuals_and_registered_workers() {
     .await;
     assert_eq!(
         workers,
-        json!({"workers":[{"worker_id":"worker-a","label":"Alpha","owner_user_id":"registry-tool-user","access":"owner"},{"worker_id":"worker-z","label":"Zulu","owner_user_id":"registry-tool-user","access":"owner"}]})
+        json!({"workers":[{"worker_id":"worker-a","label":"Alpha","owner_user_id":"registry-tool-user","access":"owner","kind":"worker","status":"offline"},{"worker_id":"worker-z","label":"Zulu","owner_user_id":"registry-tool-user","access":"owner","kind":"worker","status":"offline"}]})
     );
 }
 
