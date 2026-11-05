@@ -5,6 +5,7 @@ import { HashRouter, Routes, Route, useLocation } from "react-router-dom"
 import { RoutePerformance } from "../src/components/route-performance"
 import { WorkerAudit } from "../src/components/worker-audit"
 import { WorkerConnections } from "../src/components/worker-connections"
+import { InsightsView } from "../src/components/insights"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import "../src/styles.css"
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -18,6 +19,6 @@ function Fixture() {
   const [language,setLanguage]=useState<"zh"|"en">("zh")
   const [sessionId, setSessionId] = useState("test-session")
   const sessionRequest = <T,>(path: string, init?: RequestInit) => request<T>(sessionId, path, init)
-  return <><button onClick={()=>setLanguage(language==="zh"?"en":"zh")}>Language</button><button onClick={() => setSessionId(sessionId === "test-session" ? "other-session" : "test-session")}>Switch account</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button><Routes><Route path="/worker-audit" element={<WorkerAudit language={language} request={sessionRequest} sessionId={sessionId} />} /><Route path="/route-performance" element={<RoutePerformance language={language} request={sessionRequest} sessionId={sessionId} />} /><Route path="/threads/new" element={<Draft/>}/><Route path="*" element={<WorkerConnections language={language} request={sessionRequest} sessionId={sessionId}/>}/></Routes></>
+  return <><button onClick={()=>setLanguage(language==="zh"?"en":"zh")}>Language</button><button onClick={() => setSessionId(sessionId === "test-session" ? "other-session" : "test-session")}>Switch account</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button><Routes><Route path="/worker-audit" element={<WorkerAudit language={language} request={sessionRequest} sessionId={sessionId} />} /><Route path="/route-performance" element={<RoutePerformance language={language} request={sessionRequest} sessionId={sessionId} />} /><Route path="/insights" element={<main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><InsightsView language={language} sessionId={sessionId} request={sessionRequest} /></main>} /><Route path="/threads/new" element={<Draft/>}/><Route path="*" element={<WorkerConnections language={language} request={sessionRequest} sessionId={sessionId}/>}/></Routes></>
 }
 createRoot(document.getElementById("root")!).render(<StrictMode><QueryClientProvider client={client}><TooltipProvider><HashRouter><Fixture/></HashRouter></TooltipProvider></QueryClientProvider></StrictMode>)

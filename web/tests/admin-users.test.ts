@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 
 const source = readFileSync(new URL("../src/components/admin-users.tsx", import.meta.url), "utf8")
+// The definitions block is shared with the account's own Usage statistics page.
+const notes = readFileSync(new URL("../src/lib/account-metrics.ts", import.meta.url), "utf8")
 
 test("administrator users page keeps identity and per-user operational metrics together", () => {
   assert.match(source, /LinkitUserInfo userId=\{user\.user_id\}/)
@@ -16,8 +18,8 @@ test("administrator users page keeps identity and per-user operational metrics t
 test("administrator users page reports running Threads by responsible party", () => {
   assert.match(source, /type Running = \{\n  total: number; kernel: number; inference: number; device: number; unattended: number; longest_seconds: number\n\}/)
   assert.match(source, /\["running", t\.running\]/)
-  assert.match(source, /三态之和等于运行中的线程数/)
-  assert.match(source, /The three always add up to the running total/)
+  assert.match(notes, /三态之和等于运行中的线程数/)
+  assert.match(notes, /The three always add up to the running total/)
   assert.match(source, /query\.data\.running\.unattended > 0/)
   assert.doesNotMatch(source, /in_flight|inFlight/)
 })

@@ -399,3 +399,142 @@ async fn rollup_backfill_seeds_a_database_that_predates_it() {
     assert_eq!(rolled, (1, 20, 8, 4, 2, 1, 0));
     assert_eq!(rolled, counted);
 }
+
+/// Seeds one account with a completed audit, a history record, a Thread and a
+/// Worker, plus traffic the middleware would have counted.
+async fn seeded_account(state: &AppState, owner: &User) {
+    user_db(state, owner, true, |connection| {
+        connection.execute_batch(
+            "INSERT INTO threads(id,title,model,status,created_at,updated_at)
+               VALUES('t1','Account','test-model','idle',10,10);
+             INSERT INTO history_records(thread_id,kind,payload,created_at)
+               VALUES('t1','input','{}',11);
+             INSERT INTO reasoning_audits(input_record_id,thread_id,request_kind,model,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens)
+               VALUES(1,'t1','inference','test-model','completed',20,30,100,40,25);
+             INSERT INTO workers(id,label,token_hash,created_at,status)
+               VALUES('w1','Laptop','hash',0,'online');",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    state.traffic.for_user(&owner.id).seed(7, 11, 13, 17);
+}
+
+async fn usage_page(state: &AppState, user: &User, range: &str, model: Option<&str>) -> Insights {
+    insights(
+        State(state.clone()),
+        identity(user),
+        Query(InsightsQuery {
+            range: Some(range.to_owned()),
+            model: model.map(str::to_owned),
+            request_kind: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0
+}
+
+fn traffic_tuple(snapshot: Option<&traffic::Snapshot>) -> Option<(u64, u64, u64, u64)> {
+    snapshot.map(|value| {
+        (
+            value.worker_received_bytes,
+            value.worker_sent_bytes,
+            value.upstream_received_bytes,
+            value.upstream_sent_bytes,
+        )
+    })
+}
+
+// The account's own Usage statistics page must report the same numbers, from the
+// same sources, as its row on the administrator's Users page: the caller reads
+// the two back to back and every field has to agree.
+#[tokio::test]
+async fn the_usage_page_account_block_matches_the_users_page_row() {
+    let (_root, state) = test_state();
+    assert!(admin_user_sync(&state.admin_db_path, "root", true).unwrap());
+    let root = user_for_subject(&state, "root").unwrap();
+    let owner = user_for_subject(&state, "account-owner").unwrap();
+    seeded_account(&state, &owner).await;
+
+    let page = usage_page(&state, &owner, "7d", None).await;
+    let report = list(State(state.clone()), identity(&root)).await.unwrap().0;
+    let row = report
+        .items
+        .iter()
+        .find(|item| item.user_id == owner.id)
+        .unwrap();
+    let metrics = row.metrics.as_ref().unwrap();
+    let account = &page.account.metrics;
+
+    // The absolute values pin the definition, not only the agreement.
+    assert_eq!(account.requests, 1);
+    assert_eq!(account.input_tokens, 100);
+    assert_eq!(account.output_tokens, 40);
+    assert_eq!(account.total_tokens, 140);
+    assert_eq!(account.cached_tokens, 25);
+    assert_eq!(account.cache_hit_rate, Some(0.25));
+    assert_eq!(account.history_records, 1);
+    assert_eq!(account.threads, 1);
+    assert_eq!(account.workers, 1);
+
+    assert_eq!(account.requests, metrics.requests);
+    assert_eq!(account.input_tokens, metrics.input_tokens);
+    assert_eq!(account.output_tokens, metrics.output_tokens);
+    assert_eq!(account.total_tokens, metrics.total_tokens);
+    assert_eq!(account.cached_tokens, metrics.cached_tokens);
+    assert_eq!(account.cache_hit_rate, metrics.cache_hit_rate);
+    assert_eq!(account.history_records, metrics.history_records);
+    assert_eq!(account.threads, metrics.threads);
+    assert_eq!(account.workers, metrics.workers);
+    assert_eq!(
+        (
+            account.running.total,
+            account.running.kernel,
+            account.running.inference,
+            account.running.device,
+            account.running.unattended,
+        ),
+        (
+            metrics.running.total,
+            metrics.running.kernel,
+            metrics.running.inference,
+            metrics.running.device,
+            metrics.running.unattended,
+        ),
+    );
+    // A WAL can grow between the two reads; the database file is stable, and
+    // each total has to be its own three files.
+    assert_eq!(account.sqlite_main_bytes, metrics.sqlite_main_bytes);
+    for value in [account, metrics] {
+        assert_eq!(
+            value.sqlite_bytes,
+            value.sqlite_main_bytes + value.sqlite_wal_bytes + value.sqlite_shm_bytes
+        );
+    }
+
+    // Traffic is read from the same in-memory counters either way.
+    assert_eq!(
+        traffic_tuple(page.account.traffic.as_ref()),
+        Some((7, 11, 13, 17))
+    );
+    assert_eq!(traffic_tuple(row.traffic.as_ref()), Some((7, 11, 13, 17)));
+}
+
+// The block is the account's lifetime total: the range and the model filter
+// narrow the snapshot sections and nothing else, and it is already there before
+// the first snapshot is built.
+#[tokio::test]
+async fn the_usage_page_account_block_ignores_the_range_and_filters() {
+    let (_root, state) = test_state();
+    let owner = user_for_subject(&state, "account-owner").unwrap();
+    seeded_account(&state, &owner).await;
+
+    let page = usage_page(&state, &owner, "24h", Some("no-such-model")).await;
+    assert_eq!(page.generated_at, None);
+    assert_eq!(page.requests.total, 0);
+    assert_eq!(page.tokens.total_tokens, 0);
+    assert_eq!(page.account.metrics.requests, 1);
+    assert_eq!(page.account.metrics.total_tokens, 140);
+}

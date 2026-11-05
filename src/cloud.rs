@@ -2740,6 +2740,21 @@ struct Insights {
     history: InsightHistory,
     dimensions: InsightDimensions,
     activity: InsightActivity,
+    /// The account's all-time totals, attached by the request handler from the
+    /// same connection and the live state; see `InsightAccount`.
+    account: InsightAccount,
+}
+
+/// The all-time account block, in exactly the shape the administrator's Users
+/// page reports for one account: `metrics` is that page's row and `traffic` its
+/// snapshot. Every field is an O(1) read — one `user_rollup` row, the running
+/// set, three SQLite file sizes and the in-memory traffic counters — so the
+/// Usage statistics page can poll it beside the snapshots without touching
+/// history.
+#[derive(Serialize, Default)]
+struct InsightAccount {
+    metrics: admin_users::Metrics,
+    traffic: Option<traffic::Snapshot>,
 }
 
 #[derive(Serialize)]
@@ -4115,9 +4130,22 @@ async fn insights(
     let model = query.model.filter(|value| !value.trim().is_empty());
     let request_kind = query.request_kind.filter(|value| !value.trim().is_empty());
     state.stats.note_read(&identity.user.id);
+    // The account block ignores the range: the rollup row and the running set
+    // come from the same connection as the snapshot, the traffic counters from
+    // memory, so attaching it costs no extra table read.
+    let live = state.live_phases().await;
+    let traffic = state.traffic.snapshot(&identity.user.id);
+    let path = identity.user.path.clone();
+    let user_id = identity.user.id.clone();
     user_db(&state, &identity.user, true, move |connection| {
         let transaction = connection.transaction()?;
-        stats::load_insights(&transaction, &range, model, request_kind)
+        let mut insights = stats::load_insights(&transaction, &range, model, request_kind)?;
+        insights.account = InsightAccount {
+            metrics: admin_users::account(&transaction, &path, &user_id, &live)
+                .map_err(ApiError::internal)?,
+            traffic,
+        };
+        Ok(insights)
     })
     .await
     .map(Json)

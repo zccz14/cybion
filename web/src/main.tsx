@@ -75,7 +75,8 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } fro
 import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
 import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall, audioTranscriptionFunctionCall, type AudioTranscriptionFunctionCall } from "@/lib/history-payload"
-import { formattedTime, formatStatsDuration } from "@/lib/time"
+import { formatBytes } from "@/lib/format"
+import { formattedTime } from "@/lib/time"
 import { inFlightCallIds, loadedThreadRecords, oldestRecordId, pollThreadHistory, recordInFlight, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { manualLoadNotice, type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
 import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
@@ -104,6 +105,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { ThreadSharingButton } from "@/components/thread-sharing"
 import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads"
+import { InsightsView } from "@/components/insights"
 import { sharedThreadReturnHash } from "@/lib/thread-sharing"
 import { RoutePerformance } from "@/components/route-performance"
 import { WorkerAudit } from "@/components/worker-audit"
@@ -263,60 +265,6 @@ type ReasoningAuditPage = {
   total: number
   page: number
   page_size: number
-}
-type InsightModel = {
-  model: string
-  reasoning_effort: string | null
-  calls: number
-  completed: number
-  in_flight: number
-  failed: number
-  cancelled: number
-  input_tokens: number
-  output_tokens: number
-  total_tokens: number
-  cached_tokens: number
-  cache_hit_rate: number | null
-  input_output_ratio: number | null
-  duration_seconds: number
-  average_duration_seconds: number | null
-}
-type InsightWorkerItem = {
-  worker_id: string
-  worker_label: string
-  calls: number
-  read_bytes: number
-  write_bytes: number
-  duration_seconds: number
-  average_duration_seconds: number | null
-}
-type InsightActiveDay = {
-  date: string
-  active_threads: number
-  activity_records: number
-  input_records: number
-  requests: number
-  total_tokens: number
-}
-type Insights = {
-  range: "24h" | "7d" | "30d" | "all"
-  generated_at: number | null
-  backfilling: boolean
-  activity: { timezone: string; days: InsightActiveDay[] }
-  tokens: {
-    completed_requests: number
-    input_tokens: number
-    output_tokens: number
-    total_tokens: number
-    cached_tokens: number
-    cache_hit_rate: number | null
-    input_output_ratio: number | null
-  }
-  requests: { total: number; completed: number; in_flight: number; failed: number; cancelled: number }
-  by_model: InsightModel[]
-  worker: { calls: number; read_bytes: number; write_bytes: number; duration_seconds: number; average_duration_seconds: number | null; by_worker: InsightWorkerItem[] }
-  history: { total_records: number; payload_bytes: number; checkpoint_count: number; latest_record_at: number | null }
-  dimensions: { models: string[]; request_kinds: string[] }
 }
 type Upstream = {
   id: string
@@ -563,58 +511,8 @@ const copy = {
     saveWorker: "Save name",
     workerAuditRange: "{from}–{to} of {total} calls",
     auditRange: "{from}–{to} of {total} requests",
-    usageStatsDescription: "Token usage, cache efficiency, request outcomes, Worker call duration and bytes, and how Thread running time divides between inference, Worker calls, and Cybion overhead. Daily activity is a workspace-wide UTC calendar independent of model/request filters.",
-    statsRange: "Time range",
-    stats24h: "Last 24 hours",
-    stats7d: "Last 7 days",
-    stats30d: "Last 30 days",
-    statsAll: "All time",
-    statsModel: "Model",
-    statsAllModels: "All models",
-    statsRequestKind: "Request type",
-    statsAllRequestKinds: "All request types",
-    statsClearFilters: "Clear filters",
-    statsGenerated: "Snapshot {time}",
-    statsBackfilling: "Snapshots are still backfilling history; older days fill in as the patrol proceeds.",
-    statsTokenUsage: "Token usage",
-    statsCompletedRequests: "Completed requests",
-    statsInputTokens: "Input tokens",
-    statsOutputTokens: "Output tokens",
-    statsTotalTokens: "Total tokens",
-    statsCachedTokens: "Cached input",
+    usageStatsDescription: "Token usage, cache efficiency, request outcomes, Worker call duration and bytes, and the account’s all-time totals with its running Threads. Daily activity is a workspace-wide UTC calendar independent of model/request filters.",
     statsCacheRate: "Cache rate",
-    statsInputOutputRatio: "Input / output",
-    statsRequests: "Request outcomes",
-    statsCalls: "Calls",
-    statsCompleted: "Completed",
-    statsInFlight: "In flight",
-    statsFailed: "Failed",
-    statsCancelled: "Cancelled",
-    statsByModel: "By model",
-    statsWorkerCalls: "Worker calls",
-    statsWorkerDescription: "Worker calls from queue to result: duration, arguments read by the Worker, and results written back.",
-    statsReadBytes: "Read Bytes",
-    statsWriteBytes: "Write Bytes",
-    statsWorker: "Worker",
-    statsNoWorkers: "No Worker calls in this range.",
-    statsTotalDuration: "Total duration",
-    statsAverageDuration: "Avg duration",
-    statsHistory: "Protocol history",
-    statsHistoryRecords: "Records",
-    statsPayloadBytes: "Payload bytes",
-    statsCheckpoints: "Checkpoints",
-    statsLatestRecord: "Latest record",
-    statsDailyActivity: "Daily active Threads",
-    statsDailyActivityDescription: "A Thread is active when it has at least one non-checkpoint protocol record. Calendar days use UTC over the closed hours inside the selected range; model and request filters do not apply.",
-    statsActiveThreads: "Active Threads",
-    statsActivityRecords: "Activity records",
-    statsInputs: "Inputs",
-    statsCalendarLegend: "Fewer",
-    statsCalendarLegendMore: "More",
-    statsTimezone: "Timezone",
-    statsRequestsCount: "Requests",
-    statsTotalTokensShort: "Tokens",
-    statsNoData: "No statistics for this range.",
     previous: "Previous",
     next: "Next",
     pageSize: "Per page",
@@ -930,58 +828,8 @@ const copy = {
     saveWorker: "保存名称",
     workerAuditRange: "第 {from}–{to} 条，共 {total} 次调用",
     auditRange: "第 {from}–{to} 条，共 {total} 个请求",
-    usageStatsDescription: "按模型查看 Token 用量、缓存效率、请求结果、Worker 调用耗时与字节流量，以及 Thread 运行耗时在推理、Worker 调用和 Cybion 开销之间的拆分。每日活跃统计是独立于模型/请求类型筛选的工作区级 UTC 日历。",
-    statsRange: "时间范围",
-    stats24h: "近 24 小时",
-    stats7d: "近 7 天",
-    stats30d: "近 30 天",
-    statsAll: "全部时间",
-    statsModel: "模型",
-    statsAllModels: "全部模型",
-    statsRequestKind: "请求类型",
-    statsAllRequestKinds: "全部请求类型",
-    statsClearFilters: "清除筛选",
-    statsGenerated: "快照时间 {time}",
-    statsBackfilling: "快照仍在回填历史，较早的数据会随巡检逐步补全。",
-    statsTokenUsage: "Token 用量",
-    statsCompletedRequests: "已完成请求",
-    statsInputTokens: "输入 Token",
-    statsOutputTokens: "输出 Token",
-    statsTotalTokens: "总 Token",
-    statsCachedTokens: "缓存输入",
+    usageStatsDescription: "按模型查看 Token 用量、缓存效率、请求结果、Worker 调用耗时与字节流量，以及账号全量累计与当前运行中的线程分布。每日活跃统计是独立于模型/请求类型筛选的工作区级 UTC 日历。",
     statsCacheRate: "缓存率",
-    statsInputOutputRatio: "输入 / 输出",
-    statsRequests: "请求结果",
-    statsCalls: "调用次数",
-    statsCompleted: "已完成",
-    statsInFlight: "在途",
-    statsFailed: "失败",
-    statsCancelled: "已取消",
-    statsByModel: "按模型",
-    statsWorkerCalls: "Worker 调用",
-    statsWorkerDescription: "Worker 调用从排队到返回结果：耗时、Worker 读取的参数与写回的结果。",
-    statsReadBytes: "读取 Bytes",
-    statsWriteBytes: "写入 Bytes",
-    statsWorker: "Worker",
-    statsNoWorkers: "当前范围没有 Worker 调用。",
-    statsTotalDuration: "总耗时",
-    statsAverageDuration: "平均耗时",
-    statsHistory: "协议历史",
-    statsHistoryRecords: "记录数",
-    statsPayloadBytes: "负载字节",
-    statsCheckpoints: "检查点",
-    statsLatestRecord: "最近记录",
-    statsDailyActivity: "每日活跃 Thread",
-    statsDailyActivityDescription: "Thread 在某天至少产生一条非 checkpoint 协议记录时视为活跃。按 UTC 自然日统计，只计入所选范围内已封口的小时；不受模型和请求类型筛选影响。",
-    statsActiveThreads: "活跃 Thread",
-    statsActivityRecords: "活动记录",
-    statsInputs: "输入",
-    statsCalendarLegend: "少",
-    statsCalendarLegendMore: "多",
-    statsTimezone: "时区",
-    statsRequestsCount: "请求",
-    statsTotalTokensShort: "Token",
-    statsNoData: "当前范围没有统计数据。",
     previous: "上一页",
     next: "下一页",
     pageSize: "每页",
@@ -1160,17 +1008,6 @@ function callbackUrl() {
   const target = shared ?? (location.hash.startsWith("#/workers") && code && /^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/.test(code)
     ? `#/workers?code=${code}` : "#/auth/callback")
   return `${location.origin}${location.pathname}${target}`
-}
-
-function formatBytes(value: number) {
-  const units = ["B", "KB", "MB", "GB", "TB"]
-  let size = value
-  let index = 0
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024
-    index += 1
-  }
-  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`
 }
 
 async function accessToken(sdk: AuthMiniApi) {
@@ -3102,156 +2939,9 @@ function ManualEditorForm({ draft, editDraft, remove, submit, flush, deleteSelec
 
 function InsightsPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
-  const [range, setRange] = useState<Insights["range"]>("7d")
-  const [model, setModel] = useState("all")
-  const [requestKind, setRequestKind] = useState("all")
-  const query = useQuery({
-    queryKey: ["insights", sdk.session.getState().sessionId, range, model, requestKind],
-    queryFn: () => {
-      const params = new URLSearchParams({ range })
-      if (model !== "all") params.set("model", model)
-      if (requestKind !== "all") params.set("request_kind", requestKind)
-      return api<Insights>(sdk, `/api/insights?${params}`)
-    },
-    refetchInterval: 5000,
-  })
-  const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
-  const rate = (value: number | null) => value === null
-    ? "—"
-    : `${value.toLocaleString(language === "zh" ? "zh-CN" : "en", { maximumFractionDigits: 1 })}%`
-  const ratio = (value: number | null) => value === null
-    ? "—"
-    : `${value.toLocaleString(language === "zh" ? "zh-CN" : "en", { maximumFractionDigits: 2 })}:1`
-  const duration = (value: number) => formatStatsDuration(value, language)
-  const clear = () => { setRange("7d"); setModel("all"); setRequestKind("all") }
-  if (query.error) return <Page title={t("usageStats")} description={t("usageStatsDescription")}><RequestError error={query.error} onRetry={() => void query.refetch()} /></Page>
-  if (!query.data) return <Page title={t("usageStats")} description={t("usageStatsDescription")}><Card><CardContent className="flex items-center gap-2 pt-6"><Spinner />{t("usageStats")}</CardContent></Card></Page>
-  const data = query.data
-  const tokenMetrics = [
-    [t("statsCompletedRequests"), number(data.tokens.completed_requests)],
-    [t("statsInputTokens"), number(data.tokens.input_tokens)],
-    [t("statsOutputTokens"), number(data.tokens.output_tokens)],
-    [t("statsTotalTokens"), number(data.tokens.total_tokens)],
-    [t("statsCachedTokens"), number(data.tokens.cached_tokens)],
-    [t("statsCacheRate"), rate(data.tokens.cache_hit_rate)],
-    [t("statsInputOutputRatio"), ratio(data.tokens.input_output_ratio)],
-  ]
-  const outcomes: { label: string; count: number; variant: "outline" | "secondary" | "destructive" }[] = [
-    { label: t("statsCalls"), count: data.requests.total, variant: "outline" },
-    { label: t("statsCompleted"), count: data.requests.completed, variant: "secondary" },
-    { label: t("statsInFlight"), count: data.requests.in_flight, variant: "secondary" },
-    { label: t("statsFailed"), count: data.requests.failed, variant: "destructive" },
-    { label: t("statsCancelled"), count: data.requests.cancelled, variant: "outline" },
-  ]
   return <Page title={t("usageStats")} description={t("usageStatsDescription")}>
-    <Card>
-      <CardContent className="flex flex-wrap items-center gap-2 pt-6">
-        <Select value={range} onValueChange={(value) => setRange(value as Insights["range"])}>
-          <SelectTrigger aria-label={t("statsRange")} size="sm"><SelectValue /></SelectTrigger>
-          <SelectContent><SelectItem value="24h">{t("stats24h")}</SelectItem><SelectItem value="7d">{t("stats7d")}</SelectItem><SelectItem value="30d">{t("stats30d")}</SelectItem><SelectItem value="all">{t("statsAll")}</SelectItem></SelectContent>
-        </Select>
-        <Select value={model} onValueChange={setModel}>
-          <SelectTrigger aria-label={t("statsModel")} size="sm"><SelectValue /></SelectTrigger>
-          <SelectContent><SelectItem value="all">{t("statsAllModels")}</SelectItem>{data.dimensions.models.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent>
-        </Select>
-        <Select value={requestKind} onValueChange={setRequestKind}>
-          <SelectTrigger aria-label={t("statsRequestKind")} size="sm"><SelectValue /></SelectTrigger>
-          <SelectContent><SelectItem value="all">{t("statsAllRequestKinds")}</SelectItem>{data.dimensions.request_kinds.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent>
-        </Select>
-        <Button type="button" variant="outline" size="sm" onClick={clear}><RefreshCwIcon data-icon="inline-start" />{t("statsClearFilters")}</Button>
-      </CardContent>
-    </Card>
-    <div className="flex flex-col gap-1">
-      <p className="text-xs text-muted-foreground">{t("statsGenerated").replace("{time}", formattedTime(language, data.generated_at))}</p>
-      {data.backfilling && <p className="text-xs text-muted-foreground">{t("statsBackfilling")}</p>}
-    </div>
-    <DailyActivityCard
-      days={data.activity.days}
-      timezone={data.activity.timezone}
-    />
-    <Card>
-      <CardHeader><CardTitle>{t("statsTokenUsage")}</CardTitle><CardDescription>{t("statsByModel")}</CardDescription></CardHeader>
-      <CardContent>
-        <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">{tokenMetrics.map(([label, value]) => <div key={String(label)}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{value}</dd></div>)}</dl>
-      </CardContent>
-    </Card>
-    <Card>
-      <CardHeader><CardTitle>{t("statsByModel")}</CardTitle><CardDescription>{number(data.requests.total)} {t("statsCalls")}</CardDescription></CardHeader>
-      <CardContent>
-        {data.by_model.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoData")}</p> : <div className="overflow-x-auto"><table className="w-full min-w-[78rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-3 py-2 font-medium">{t("statsModel")}</th><th className="px-3 py-2 font-medium">{t("reasoningEffort")}</th><th className="px-3 py-2 font-medium">{t("statsCalls")}</th><th className="px-3 py-2 font-medium">{t("statsInputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsOutputTokens")}</th><th className="px-3 py-2 font-medium">{t("statsTotalTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCachedTokens")}</th><th className="px-3 py-2 font-medium">{t("statsCacheRate")}</th><th className="px-3 py-2 font-medium">{t("statsInputOutputRatio")}</th><th className="px-3 py-2 font-medium">{t("statsAverageDuration")}</th><th className="px-3 py-2 font-medium">{t("statsTotalDuration")}</th></tr></thead><tbody className="divide-y">{data.by_model.map((item) => <tr key={JSON.stringify([item.model, item.reasoning_effort])} className="align-top"><td className="px-3 py-3"><code>{item.model}</code><p className="mt-1 text-xs text-muted-foreground">{number(item.completed)} {t("statsCompleted")}</p></td><td className="px-3 py-3"><code>{item.reasoning_effort ?? "—"}</code></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.calls)}<p className="mt-1 text-xs text-muted-foreground">{number(item.in_flight)} {t("statsInFlight")}</p></td><td className="px-3 py-3 font-mono tabular-nums">{number(item.input_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.output_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.total_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{number(item.cached_tokens)}</td><td className="px-3 py-3 font-mono tabular-nums">{rate(item.cache_hit_rate)}</td><td className="px-3 py-3 font-mono tabular-nums">{ratio(item.input_output_ratio)}</td><td className="px-3 py-3 font-mono tabular-nums">{item.average_duration_seconds === null ? "—" : duration(item.average_duration_seconds)}</td><td className="px-3 py-3 font-mono tabular-nums">{duration(item.duration_seconds)}</td></tr>)}</tbody></table></div>}
-      </CardContent>
-    </Card>
-    <section className="grid gap-4 xl:grid-cols-2">
-      <Card><CardHeader><CardTitle>{t("statsRequests")}</CardTitle></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2">{outcomes.map(({ label, count, variant }) => <div className="flex items-center justify-between rounded-lg border px-3 py-2" key={label}><Badge variant={variant}>{label}</Badge><span className="font-mono text-sm tabular-nums">{number(count)}</span></div>)}</CardContent></Card>
-      <Card><CardHeader><CardTitle>{t("statsWorkerCalls")}</CardTitle><CardDescription>{t("statsWorkerDescription")}</CardDescription></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-3"><div><dt className="text-xs text-muted-foreground">{t("statsCalls")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.worker.calls)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsTotalDuration")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{duration(data.worker.duration_seconds)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsAverageDuration")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{data.worker.average_duration_seconds === null ? "—" : duration(data.worker.average_duration_seconds)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsReadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.read_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsWriteBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.worker.write_bytes)}</dd></div></dl>{data.worker.by_worker.length === 0 ? <p className="mt-6 text-sm text-muted-foreground">{t("statsNoWorkers")}</p> : <div className="mt-6 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="px-2 py-2 font-medium">{t("statsWorker")}</th><th className="px-2 py-2 font-medium">{t("statsCalls")}</th><th className="px-2 py-2 font-medium">{t("statsTotalDuration")}</th><th className="px-2 py-2 font-medium">{t("statsAverageDuration")}</th><th className="px-2 py-2 font-medium">{t("statsReadBytes")}</th><th className="px-2 py-2 font-medium">{t("statsWriteBytes")}</th></tr></thead><tbody className="divide-y">{data.worker.by_worker.map((item) => <tr key={item.worker_id}><td className="px-2 py-2"><p>{item.worker_label}</p><code className="text-xs text-muted-foreground">{item.worker_id}</code></td><td className="px-2 py-2 font-mono tabular-nums">{number(item.calls)}</td><td className="px-2 py-2 font-mono tabular-nums">{duration(item.duration_seconds)}</td><td className="px-2 py-2 font-mono tabular-nums">{item.average_duration_seconds === null ? "—" : duration(item.average_duration_seconds)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.read_bytes)}</td><td className="px-2 py-2 font-mono tabular-nums">{formatBytes(item.write_bytes)}</td></tr>)}</tbody></table></div>}</CardContent></Card>
-    </section>
-    <Card><CardHeader><CardTitle>{t("statsHistory")}</CardTitle></CardHeader><CardContent><dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><div><dt className="text-xs text-muted-foreground">{t("statsHistoryRecords")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.total_records)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsPayloadBytes")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{formatBytes(data.history.payload_bytes)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsCheckpoints")}</dt><dd className="mt-1 font-mono text-lg font-medium tabular-nums">{number(data.history.checkpoint_count)}</dd></div><div><dt className="text-xs text-muted-foreground">{t("statsLatestRecord")}</dt><dd className="mt-1 text-sm font-medium">{formattedTime(language, data.history.latest_record_at)}</dd></div></dl></CardContent></Card>
+    <InsightsView language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />
   </Page>
-}
-
-function DailyActivityCard({
-  days,
-  timezone,
-}: {
-  days: InsightActiveDay[]
-  timezone: string
-}) {
-  const { t, language } = useUi()
-  const maxActiveThreads = Math.max(1, ...days.map((day) => day.active_threads))
-  const calendar = useMemo(() => {
-    if (days.length === 0) return [] as Array<{ date: string | null; day: InsightActiveDay | null }>
-    const byDate = new Map(days.map((day) => [day.date, day]))
-    const first = new Date(`${days[0].date}T00:00:00Z`)
-    const last = new Date(`${days.at(-1)!.date}T00:00:00Z`)
-    first.setUTCDate(first.getUTCDate() - first.getUTCDay())
-    last.setUTCDate(last.getUTCDate() + (6 - last.getUTCDay()))
-    const cells: Array<{ date: string | null; day: InsightActiveDay | null }> = []
-    for (const cursor = new Date(first); cursor <= last; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
-      const date = cursor.toISOString().slice(0, 10)
-      cells.push({ date: byDate.has(date) ? date : null, day: byDate.get(date) ?? null })
-    }
-    return cells
-  }, [days])
-  const dateLabel = (date: string) => new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en", {
-    dateStyle: "medium",
-    timeZone: "UTC",
-  }).format(new Date(`${date}T00:00:00Z`))
-  const tone = (count: number) => {
-    if (count === 0) return "bg-muted"
-    const share = count / maxActiveThreads
-    if (share <= 0.25) return "bg-primary/20"
-    if (share <= 0.5) return "bg-primary/40"
-    if (share <= 0.75) return "bg-primary/65"
-    return "bg-primary"
-  }
-  const dayDescription = (day: InsightActiveDay) => `${dateLabel(day.date)} · ${day.active_threads} ${t("statsActiveThreads")} · ${day.input_records} ${t("statsInputs")}`
-  return <Card>
-    <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-      <div><CardTitle className="flex items-center gap-2"><CalendarDaysIcon />{t("statsDailyActivity")}</CardTitle><CardDescription>{t("statsDailyActivityDescription")}</CardDescription></div>
-      <Badge variant="outline">{t("statsTimezone")}: {timezone}</Badge>
-    </CardHeader>
-    <CardContent>
-      {days.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t("statsNoData")}</p> : <>
-        <div className="overflow-x-auto pb-2" role="grid" aria-label={t("statsDailyActivity")}>
-          <div className="grid min-w-max grid-flow-col grid-rows-7 gap-1" style={{ gridAutoColumns: "0.8rem" }}>
-            {calendar.map((cell, index) => cell.day && cell.date
-              ? <span
-                key={cell.date}
-                role="gridcell"
-                aria-label={dayDescription(cell.day)}
-                title={dayDescription(cell.day)}
-                className={`size-3.5 rounded-sm ${tone(cell.day.active_threads)}`}
-              />
-              : <span key={`blank-${index}`} aria-hidden="true" className="size-3.5" />)}
-          </div>
-        </div>
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
-          <p>{t("statsDailyActivity")}</p>
-          <div className="flex items-center gap-2" aria-label={t("statsDailyActivity")}><span>{t("statsCalendarLegend")}</span><span className="size-3 rounded-sm bg-muted" /><span className="size-3 rounded-sm bg-primary/20" /><span className="size-3 rounded-sm bg-primary/40" /><span className="size-3 rounded-sm bg-primary/65" /><span className="size-3 rounded-sm bg-primary" /><span>{t("statsCalendarLegendMore")}</span></div>
-        </div>
-      </>}
-    </CardContent>
-  </Card>
 }
 
 /** The gateway's request ID, linked to its console when the audit row names one. */

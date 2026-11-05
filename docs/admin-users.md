@@ -67,6 +67,15 @@ run within five seconds, so the count only includes Threads that have been
 without an executor for 30 seconds: seeing it above zero means recovery is not
 resuming them.
 
+## Where else the numbers appear
+
+The account block of an account's own **Usage statistics** page (`#/insights`)
+is this row, in this shape: both pages call `admin_users::account`, so requests,
+tokens, cache rate, history records, Threads, Workers, the running split, SQLite
+sizes and traffic read identically in the two places, and the definitions block
+is shared copy. The usage page labels it as lifetime totals because, unlike its
+snapshot sections, the range selector does not narrow it.
+
 ## Cost
 
 Each poll (every 5 seconds) opens each user database read-only and answers two

@@ -20,6 +20,26 @@ pub(super) struct Snapshot {
     pub upstream_sent_bytes: u64,
 }
 
+#[cfg(test)]
+impl Counters {
+    /// A fixture stand-in for traffic the middleware would have counted.
+    pub(super) fn seed(
+        &self,
+        worker_received: u64,
+        worker_sent: u64,
+        upstream_received: u64,
+        upstream_sent: u64,
+    ) {
+        self.worker_received
+            .fetch_add(worker_received, Ordering::Relaxed);
+        self.worker_sent.fetch_add(worker_sent, Ordering::Relaxed);
+        self.upstream_received
+            .fetch_add(upstream_received, Ordering::Relaxed);
+        self.upstream_sent
+            .fetch_add(upstream_sent, Ordering::Relaxed);
+    }
+}
+
 impl Counters {
     fn snapshot(&self) -> Snapshot {
         Snapshot {

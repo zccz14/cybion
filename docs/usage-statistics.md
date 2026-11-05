@@ -86,6 +86,7 @@ backfill; its hours close as time passes.
 | Worker calls | How long did Worker calls take, and how much did they transfer? | `stats_view_worker` (range × worker, durations, read/write bytes) |
 | Protocol history | How much history is stored? | `stats_view_totals` (records, payload bytes, checkpoints, latest record) |
 | Daily activity | Which Threads were active? | `stats_view_day` for the range's UTC days |
+| Account totals | How much has this account used overall? | Not a snapshot: the `user_rollup` row, the running set, the in-memory traffic counters and the SQLite file sizes |
 
 Model and request-kind filters narrow the token and request summaries, the
 By-model rows, and the Worker section. A Worker call is attributed to the
@@ -94,6 +95,25 @@ input_record_id)` — so a filtered read counts each call once and no
 fingerprinting heuristic is involved. Executions dispatched by other accounts
 through worker sharing stay unattributed and appear only in unfiltered Worker
 numbers.
+
+## Account totals
+
+The top card is the account's lifetime total, and it is the same block the
+administrator's Users page reports for this account — `admin_users::account`
+answers both, so the two pages cannot disagree about what a number means. It
+shows requests, input/output/cached tokens and cache rate, history records,
+Threads, Workers, the running split (kernel / inference / device, unattended,
+longest), the SQLite main/WAL/SHM sizes, and the Worker and upstream traffic.
+
+The block deliberately reads none of the snapshot tables: the counters are the
+database's own `user_rollup` row (seven integers the triggers maintain), the
+running split is bounded by the Threads executing right now, traffic comes from
+the in-memory counters, and the file sizes are three `stat` calls. Attaching it
+to `/api/insights` therefore adds no read whose cost grows with history.
+
+Because it is a lifetime total, the range selector and the model / request-kind
+filters never change it; the page says so in the card and in **Metric
+definitions**, which reuses the Users page's wording verbatim.
 
 ## Durations
 

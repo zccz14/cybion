@@ -1898,6 +1898,10 @@ pub(super) fn load_insights(
             models,
             request_kinds,
         },
+        // The handler attaches the account block: it needs the live phases, the
+        // traffic counters and the database path, none of which a snapshot
+        // loader sees. Zero here; the endpoint never serves it that way.
+        account: InsightAccount::default(),
         activity: InsightActivity {
             timezone: INSIGHT_TIMEZONE,
             days: snapshot_activity_days(connection, range)?,
