@@ -125,6 +125,13 @@ test("the account block carries the administrator page's numbers and definitions
 
   const block = page.locator('[data-slot="insight-account"]')
   await expect(block).toContainText("Account totals")
+  // The account total leads the page, above the range and filter controls, and
+  // carries no caption of its own.
+  const filters = page.locator('[data-slot="insight-filters"]')
+  const [head, controls] = [await block.boundingBox(), await filters.boundingBox()]
+  expect(head && controls).toBeTruthy()
+  expect(controls!.y).toBeGreaterThanOrEqual(head!.y + head!.height - 1)
+  await expect(block).not.toContainText("All-time totals;")
   await expect(block).toContainText("1,234")
   await expect(block).toContainText("7,000,000")
   await expect(block).toContainText("Input 5,000,000")
