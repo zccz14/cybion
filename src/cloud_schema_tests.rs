@@ -642,7 +642,8 @@ async fn schema_29_upgrade_adds_cancel_requested_at_and_rebuilds_the_cancel_noti
     let user = user_for_subject(&state, "timeout-upgrade-user").unwrap();
     user_db(&state, &user, true, move |connection| {
         connection.execute_batch(
-            "DROP INDEX worker_calls_cancel_notice;
+            "DROP INDEX worker_calls_exe_pending;
+             DROP INDEX worker_calls_cancel_notice;
              ALTER TABLE worker_calls DROP COLUMN cancel_requested_at;
              CREATE INDEX worker_calls_cancel_notice ON worker_calls(completed_at,id) WHERE status='cancelled' AND cancel_notified_at IS NULL;
              PRAGMA user_version=28;",

@@ -158,7 +158,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // History: 51 shipped `max_loaded_manuals`; the audio input columns were added
 // without a bump, so hosted databases at 51 never gained them and every thread
 // query failed with `no such column: t.audio_transcription_model` until 52.
-const USER_SCHEMA_VERSION: i64 = 53;
+const USER_SCHEMA_VERSION: i64 = 54;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -2009,6 +2009,22 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if version > USER_SCHEMA_VERSION {
         return Err(ApiError::internal("unsupported future user schema"));
     }
+    if version < 53 {
+        migrate_user_schema_through_53(&transaction, version)?;
+    }
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
+         WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
+    )?;
+    transaction.pragma_update(None, "user_version", USER_SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_user_schema_through_53(
+    transaction: &rusqlite::Transaction<'_>,
+    version: i64,
+) -> Result<(), ApiError> {
     if version < RESETTABLE_USER_SCHEMA_VERSION {
         // The hosted schema was intentionally reset after the context model was corrected.
         // There is no supported migration from the discarded pre-release user databases.
@@ -2060,7 +2076,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
              DROP TABLE threads;
              ALTER TABLE threads_with_max RENAME TO threads;",
         )?;
-        check_user_foreign_keys(&transaction)?;
+        check_user_foreign_keys(transaction)?;
     }
     if (RESETTABLE_USER_SCHEMA_VERSION..9).contains(&version) {
         // COMPATIBILITY: the schema upgrader supports persisted versions 7/8.
@@ -2073,7 +2089,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
              ALTER TABLE history_records DROP COLUMN content;
              ALTER TABLE history_records DROP COLUMN visible;",
         )?;
-        check_user_foreign_keys(&transaction)?;
+        check_user_foreign_keys(transaction)?;
     }
     if version < 48 {
         // The Manual kind replaced the Context kind. Tables, columns and the
@@ -2128,7 +2144,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
                 )
                 .map_err(ApiError::internal)?;
         }
-        check_user_foreign_keys(&transaction)?;
+        check_user_foreign_keys(transaction)?;
     }
     transaction
         .execute_batch(USER_SCHEMA)
@@ -2393,21 +2409,21 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // Materialize it as the first upstream and bind existing threads and
         // defaults to it, then drop support once every user database is audited
         // at schema 16+; retain the migration test.
-        migrate_legacy_upstream(&transaction)?;
+        migrate_legacy_upstream(transaction)?;
     }
     if version < 22 {
-        worker_sharing::migrate(&transaction)?;
+        worker_sharing::migrate(transaction)?;
     }
     if version < 23 {
         // COMPATIBILITY: databases before 23 reject the cancelled Worker call
         // status. Retire this rebuild once every user database is audited at
         // schema 23+; retain the preservation test.
-        worker_sharing::migrate_cancelled(&transaction)?;
+        worker_sharing::migrate_cancelled(transaction)?;
     }
     if version < 24 {
         // COMPATIBILITY: deployed schema 23 has no Thread grants. Retire this
         // upgrade only after all retained user databases/backups are schema 24+.
-        thread_sharing::migrate(&transaction)?;
+        thread_sharing::migrate(transaction)?;
     }
     if version < 28 {
         // COMPATIBILITY: schema 27 stored the experimental x-codex-turn-state
@@ -2435,14 +2451,14 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // user arranged; existing rows backfill in the order the tree showed
         // before the upgrade. Retire this upgrade once every user database is
         // audited at schema 37+; retain the backfill test.
-        migrate_manual_sort_keys(&transaction)?;
+        migrate_manual_sort_keys(transaction)?;
     }
     if version < 39 {
         // Manuals gain the trash marker: a trashed Manual stays restorable
         // from the Manuals page and hidden from the Manual tools. Retire this
         // upgrade once every user database is audited at schema 39+; retain the
         // column test.
-        migrate_manual_trash(&transaction)?;
+        migrate_manual_trash(transaction)?;
     }
     if version < 45 {
         // Manuals gain the lock flag: a Manual its owner locked refuses
@@ -2450,7 +2466,7 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         // so a hand-written manual keeps its own words. Retire this upgrade
         // once every user database is audited at schema 45+; retain the column
         // test.
-        migrate_manual_lock(&transaction)?;
+        migrate_manual_lock(transaction)?;
     }
     transaction
         .execute_batch(USER_HISTORY_INDEXES)
@@ -2498,12 +2514,6 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     transaction
         .execute_batch(USER_ROLLUP_BACKFILL)
         .map_err(ApiError::internal)?;
-    if version < USER_SCHEMA_VERSION {
-        transaction
-            .execute_batch(&format!("PRAGMA user_version = {USER_SCHEMA_VERSION};"))
-            .map_err(ApiError::internal)?;
-    }
-    transaction.commit()?;
     Ok(())
 }
 
@@ -3971,11 +3981,15 @@ async fn list_threads_for(
         }
         values.push(rusqlite::types::Value::Integer(limit as i64 + 1));
         let mut statement = connection.prepare(&format!(
-            "{THREAD_VIEW_SELECT}
-             LEFT JOIN ({THREAD_USAGE_SELECT} GROUP BY thread_id) usage ON usage.thread_id=t.id
-             WHERE {}
-             ORDER BY t.updated_at DESC,t.id DESC
-             LIMIT ?",
+            "WITH page AS MATERIALIZED (
+                 SELECT t.id FROM threads t WHERE {}
+                 ORDER BY t.updated_at DESC,t.id DESC LIMIT ?
+             )
+             {THREAD_VIEW_SELECT}
+             LEFT JOIN ({THREAD_USAGE_SELECT} WHERE thread_id IN (SELECT id FROM page)
+                        GROUP BY thread_id) usage ON usage.thread_id=t.id
+             WHERE t.id IN (SELECT id FROM page)
+             ORDER BY t.updated_at DESC,t.id DESC",
             conditions.join(" AND ")
         ))?;
         let rows = statement.query_map(params_from_iter(values), thread_from_row)?;

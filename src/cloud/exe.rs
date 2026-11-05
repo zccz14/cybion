@@ -884,7 +884,7 @@ struct PendingCall {
 fn pending_calls(c: &Connection) -> Result<Vec<PendingCall>, ApiError> {
     let mut statement = c.prepare(
         "SELECT c.id,c.worker_id,w.exe_address,c.name,c.arguments_json,c.status,c.exe_call_id,c.exe_envelope,c.cancel_requested_at,c.cancel_notified_at
-         FROM worker_calls c JOIN workers w ON w.id=c.worker_id
+         FROM worker_calls c INDEXED BY worker_calls_exe_pending JOIN workers w ON w.id=c.worker_id
          WHERE w.kind='exe' AND w.deleted_at IS NULL
            AND (c.status IN ('queued','delivered') OR (c.cancel_requested_at IS NOT NULL AND c.cancel_notified_at IS NULL))
          ORDER BY c.created_at,c.id LIMIT ?",
