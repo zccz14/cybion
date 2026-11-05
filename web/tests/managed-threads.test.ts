@@ -132,7 +132,7 @@ test("the tools page groups the shared tool catalog by responsible party", () =>
   const catalog = JSON.parse(readFileSync(new URL("../../tools.json", import.meta.url), "utf8"))
   assert.match(source, /import toolCatalog from "\.\.\/\.\.\/tools\.json"/)
   // `manual`, `note` and `native` share one Controller group; `worker` is the device.
-  assert.match(source, /\[\.\.\.toolCatalog\.kernel\.map\(\(tool\) => tool\.name\), \.\.\.toolCatalog\.note\.map\(\(tool\) => tool\.name\), \.\.\.Object\.keys\(toolCatalog\.native\)\]/)
+  assert.match(source, /\[\.\.\.toolCatalog\.kernel\.map\(\(tool\) => tool\.name\), \.\.\.toolCatalog\.note\.map\(\(tool\) => tool\.name\), \.\.\.toolCatalog\.thread\.map\(\(tool\) => tool\.name\), \.\.\.Object\.keys\(toolCatalog\.native\)\]/)
   assert.match(source, /toolCatalog\.worker\.map/)
   assert.match(source, /title: t\("phaseKernel"\)/)
   assert.match(source, /title: t\("phaseDevice"\)/)
@@ -142,6 +142,7 @@ test("the tools page groups the shared tool catalog by responsible party", () =>
   const names = [
     ...catalog.kernel.map((tool: { name: string }) => tool.name),
     ...catalog.note.map((tool: { name: string }) => tool.name),
+    ...catalog.thread.map((tool: { name: string }) => tool.name),
     ...catalog.worker.map((tool: { name: string }) => tool.name),
     ...Object.keys(catalog.native),
   ]
@@ -215,7 +216,7 @@ test("archived threads get their own view chip instead of a collapsed group", ()
   const controls = readFileSync(new URL("../src/components/thread-list-controls.tsx", import.meta.url), "utf8")
   // One control bar, one preset per view: archived is a chip like the rest, so
   // it inherits the URL, the search box and the shared paging.
-  assert.match(search, /THREAD_LIST_VIEWS = \["all", "mine", "api", "running", "failed", "archived"\]/)
+  assert.match(search, /THREAD_LIST_VIEWS = \["all", "mine", "api", "running", "failed", "blocked", "archived"\]/)
   assert.match(search, /archived: \[\["archived", "true"\]\]/)
   assert.match(controls, /archived: "已归档"/)
   assert.match(controls, /emptyArchived: "还没有归档的对话"/)

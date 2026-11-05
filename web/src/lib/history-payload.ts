@@ -364,6 +364,7 @@ export type CybionToolFunctionCall =
   | { tool: "cybion_delete_ultimate_machine"; machineId: string }
   | { tool: "add_notes"; texts: string[] }
   | { tool: "cross_out_notes"; noteIds: string[] }
+  | { tool: "block_thread" }
 
 export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall | null {
   const object = historyPayloadObject(payload)
@@ -401,6 +402,8 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
         .filter((id): id is string => typeof id === "string" && id.trim() !== "")
       return noteIds.length === 0 ? null : { tool: "cross_out_notes", noteIds }
     }
+    case "block_thread":
+      return { tool: "block_thread" }
     case "list_manuals":
       return { tool: "list_manuals" }
     case "cybion_list_workers":

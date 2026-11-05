@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 import { threadStatusLabel, threadStatusText, type ThreadDisplayStatus } from "../src/lib/thread-status.ts"
 
-const statuses: ThreadDisplayStatus[] = ["ready", "running", "compacting", "completed", "failed", "stopped"]
+const statuses: ThreadDisplayStatus[] = ["ready", "running", "compacting", "completed", "failed", "stopped", "blocked"]
 
 test("every execution state has distinct labels and explanatory copy in both languages", () => {
   for (const language of ["zh", "en"] as const) {
@@ -18,6 +18,7 @@ test("every execution state has distinct labels and explanatory copy in both lan
   assert.equal(threadStatusText("completed", "zh").label, "已完成")
   assert.equal(threadStatusText("stopped", "zh").label, "已停止")
   assert.equal(threadStatusText("ready", "en").label, "Ready")
+  assert.equal(threadStatusText("blocked", "zh").label, "受阻")
 })
 
 test("a running Thread shows the newest Worker call's intent summary instead of the running label", () => {

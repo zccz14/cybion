@@ -21,6 +21,7 @@ const samples: Record<string, unknown> = {
   cybion_delete_ultimate_machine: { type: "function_call", name: "cybion_delete_ultimate_machine", arguments: '{"machine_id":"machine-1"}' },
   add_notes: { type: "function_call", name: "add_notes", arguments: '{"items":[{"text":"pay the rent"}]}' },
   cross_out_notes: { type: "function_call", name: "cross_out_notes", arguments: '{"note_ids":["a1b2c3d4"]}' },
+  block_thread: { type: "function_call", name: "block_thread", arguments: "{}" },
   normai_web_search: { type: "function_call", name: "normai_web_search", arguments: '{"query":"rust release"}' },
   normai_image_generation: { type: "function_call", name: "normai_image_generation", arguments: '{"prompt":"a dog"}' },
   normai_audio_transcription: { type: "function_call", name: "normai_audio_transcription", arguments: '{"audio_ref":"0000000000000000000000000000000000000000000000000000000000000000","prompt":"quarterly review","keywords":["CZON"]}' },
@@ -33,6 +34,7 @@ test("every built-in tool in the catalog has exactly one renderer matcher", () =
   const names = [
     ...catalog.kernel.map((tool: { name: string }) => tool.name),
     ...catalog.note.map((tool: { name: string }) => tool.name),
+    ...catalog.thread.map((tool: { name: string }) => tool.name),
     ...catalog.worker.map((tool: { name: string }) => tool.name),
     ...Object.keys(catalog.native),
   ]
