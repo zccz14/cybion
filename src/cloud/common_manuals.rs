@@ -78,6 +78,18 @@ const CONTENT: &[(&str, &str)] = &[
         include_str!("../../common-manuals/nodes/en/linkit.md"),
     ),
     (
+        "nodes/en/project-index.md",
+        include_str!("../../common-manuals/nodes/en/project-index.md"),
+    ),
+    (
+        "nodes/en/value-bias.md",
+        include_str!("../../common-manuals/nodes/en/value-bias.md"),
+    ),
+    (
+        "nodes/en/manual-format.md",
+        include_str!("../../common-manuals/nodes/en/manual-format.md"),
+    ),
+    (
         "nodes/zh/overview.md",
         include_str!("../../common-manuals/nodes/zh/overview.md"),
     ),
@@ -88,6 +100,18 @@ const CONTENT: &[(&str, &str)] = &[
     (
         "nodes/zh/linkit.md",
         include_str!("../../common-manuals/nodes/zh/linkit.md"),
+    ),
+    (
+        "nodes/zh/project-index.md",
+        include_str!("../../common-manuals/nodes/zh/project-index.md"),
+    ),
+    (
+        "nodes/zh/value-bias.md",
+        include_str!("../../common-manuals/nodes/zh/value-bias.md"),
+    ),
+    (
+        "nodes/zh/manual-format.md",
+        include_str!("../../common-manuals/nodes/zh/manual-format.md"),
     ),
 ];
 

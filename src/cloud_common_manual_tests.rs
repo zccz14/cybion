@@ -134,7 +134,13 @@ async fn load_tool_delivers_common_nodes_with_parent_and_children() {
             .contains("common-manuals/")
     );
     let children = copy["children"].as_array().unwrap();
-    assert_eq!(children.len(), 2);
+    let root_copy =
+        common_manuals::read(&root_id, common_manuals::SOURCE_LANGUAGE).expect("the root reads");
+    assert_eq!(
+        children.len(),
+        root_copy.children.len(),
+        "the load carries every direct child of the root"
+    );
     assert_eq!(children[0]["name"], "终极机器");
     assert_eq!(children[1]["name"], "Linkit");
 
@@ -190,7 +196,9 @@ async fn browser_read_resolves_common_nodes() {
     .await
     .unwrap();
     assert_eq!(view.manual.name, "Cybion 公共手册");
-    assert_eq!(view.children.len(), 2);
+    let source = common_manuals::read(&common_root_id(), common_manuals::SOURCE_LANGUAGE)
+        .expect("the root reads");
+    assert_eq!(view.children.len(), source.children.len());
 }
 
 #[tokio::test]
