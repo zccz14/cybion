@@ -84,10 +84,16 @@ questions, neither of which depends on how much history the user has:
 - **Usage counters** (requests, tokens, cache rate, history records, Threads,
   Workers) come from the single `user_rollup` row the database maintains for
   itself. Seven integers, no table scan.
-- **Running Threads** are bounded by the running set: in-flight audits and
-  unsettled Worker calls are reached through their status-prefixed indexes, and
-  pending shared intents through the partial `history_shared_intent_thread`
-  index.
+- **Running Threads** are bounded by the running set. Each piece of evidence is
+  aggregated from the rows that can produce it — in-flight audits through
+  `reasoning_audits_status_started`, unsettled local calls through
+  `worker_calls_status_created`, pending shared intents through the partial
+  `history_shared_intent_thread` index — and joined to the `status='running'`
+  Threads. Probing per Thread instead (`MAX(...) WHERE thread_id=?`) walks that
+  Thread's whole audit, call and history; on the largest production database
+  (5.6 GB, 504k history records) the correlated form cost ~125 ms per poll and
+  this one ~0.3 ms. The two forms return identical rows, and a test pins both
+  the equivalence and the access paths.
 
 The page never scans a history range and keeps no time series, so it stays a
 snapshot rather than the interval attribution that usage statistics removed

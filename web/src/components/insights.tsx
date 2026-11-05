@@ -106,7 +106,6 @@ const copy = {
     statsActiveThreads: "活跃 Thread", statsActivityRecords: "活动记录", statsInputs: "输入",
     statsCalendarLegend: "少", statsCalendarLegendMore: "多", statsTimezone: "时区", statsNoData: "当前范围没有统计数据。",
     accountTitle: "账号累计",
-    accountDescription: "全量累计，不受上方的时间范围与筛选影响；与管理员的「用户」页里本账号一行相同。数字来自数据库的累计行、当前运行集合、内存流量计数与三个文件大小，读取成本与历史长度无关。",
     accountRequests: "推理请求", accountInput: "输入", accountOutput: "输出", accountCached: "缓存输入",
     accountHistory: "历史记录", accountThreads: "线程", accountRunning: "运行中",
     accountKernel: "内核", accountInference: "推理", accountDevice: "设备", accountUnattended: "待恢复", accountLongest: "最久",
@@ -136,7 +135,6 @@ const copy = {
     statsActiveThreads: "Active Threads", statsActivityRecords: "Activity records", statsInputs: "Inputs",
     statsCalendarLegend: "Fewer", statsCalendarLegendMore: "More", statsTimezone: "Timezone", statsNoData: "No statistics for this range.",
     accountTitle: "Account totals",
-    accountDescription: "All-time totals; the range and filters above do not change them. Identical to this account's row on the administrator's Users page, read from the rollup row, the running set, the in-memory traffic counters and three file sizes — a cost that does not grow with history.",
     accountRequests: "Requests", accountInput: "Input", accountOutput: "Output", accountCached: "Cached input",
     accountHistory: "History", accountThreads: "Threads", accountRunning: "Running",
     accountKernel: "Kernel", accountInference: "Inference", accountDevice: "Device", accountUnattended: "unattended", accountLongest: "Longest",
@@ -171,7 +169,7 @@ function AccountCard({ account, language }: { account: Account; language: Langua
     <span aria-label={`${t.accountReceived} ${formatBytes(received)}`}>↓ {formatBytes(received)}</span>
   </span>
   return <Card data-slot="insight-account">
-    <CardHeader><CardTitle>{t.accountTitle}</CardTitle><CardDescription>{t.accountDescription}</CardDescription></CardHeader>
+    <CardHeader><CardTitle>{t.accountTitle}</CardTitle></CardHeader>
     <CardContent>
       <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
         <AccountMetric label={t.accountRequests} value={number(metrics.requests)} />
@@ -307,7 +305,8 @@ export function InsightsView({ language, sessionId, request }: {
     { label: t.statsCancelled, count: data.requests.cancelled, variant: "outline" },
   ]
   return <section className="flex min-w-0 flex-col gap-6" aria-label={t.title}>
-    <Card>
+    <AccountCard account={data.account} language={language} />
+    <Card data-slot="insight-filters">
       <CardContent className="flex flex-wrap items-center gap-2 pt-6">
         <Select value={range} onValueChange={(value) => setRange(value as Insights["range"])}>
           <SelectTrigger aria-label={t.statsRange} size="sm"><SelectValue /></SelectTrigger>
@@ -328,7 +327,6 @@ export function InsightsView({ language, sessionId, request }: {
       <p className="text-xs text-muted-foreground">{t.statsGenerated.replace("{time}", formattedTime(language, data.generated_at))}</p>
       {data.backfilling && <p className="text-xs text-muted-foreground">{t.statsBackfilling}</p>}
     </div>
-    <AccountCard account={data.account} language={language} />
     <DailyActivityCard days={data.activity.days} timezone={data.activity.timezone} language={language} />
     <Card>
       <CardHeader><CardTitle>{t.statsTokenUsage}</CardTitle><CardDescription>{t.statsByModel}</CardDescription></CardHeader>
