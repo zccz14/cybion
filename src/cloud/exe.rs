@@ -689,6 +689,74 @@ pub(super) async fn refresh(state: &AppState, user: &User) -> Result<(), ApiErro
     .await
 }
 
+/// The stored status is a mirror, not the truth: it is written when somebody
+/// lists devices, so between listings it can be hours out of date. The enqueue
+/// gate refuses on that mirror, and a refusal ends the turn, so before the gate
+/// speaks, ask the relay about this one device and store what it says. A relay
+/// that cannot be reached leaves the mirror untouched, and the gate then refuses
+/// exactly as it did before this existed.
+pub(super) async fn refresh_for_dispatch(
+    state: &AppState,
+    user: &User,
+    worker_id: &str,
+) -> Result<(), ApiError> {
+    let Ok(worker_id) = record_id(worker_id) else {
+        // Not a record id at all; the enqueue itself reports that.
+        return Ok(());
+    };
+    let stale = user_db(state, user, false, {
+        let worker_id = worker_id.clone();
+        move |c| mirror_says_offline(c, &worker_id)
+    })
+    .await?;
+    if !stale {
+        return Ok(());
+    }
+    let Some(address) = user_db(state, user, false, {
+        let worker_id = worker_id.clone();
+        move |c| exe_address(c, &worker_id)
+    })
+    .await?
+    else {
+        return Ok(());
+    };
+    let Some((identity, _)) = user_db(state, user, false, |c| stored(c)).await? else {
+        return Ok(());
+    };
+    let status = Relay::new(state, &identity).device(&address).await?;
+    user_db(state, user, false, move |c| {
+        apply_status(c, &worker_id, &status)
+    })
+    .await
+}
+
+/// What the mirror claims, without asking the relay. A row that is not an eXe
+/// device is never this function's business: the gate handles it on its own.
+fn mirror_says_offline(c: &Connection, worker_id: &str) -> Result<bool, ApiError> {
+    let found = c
+        .query_row(
+            "SELECT status,last_seen_at FROM workers WHERE kind='exe' AND deleted_at IS NULL AND id=?",
+            [worker_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()?;
+    let Some((status, last_seen)) = found else {
+        return Ok(false);
+    };
+    Ok(status != "online" || last_seen.is_none_or(|seen| seen < now() - WORKER_ONLINE_SECONDS))
+}
+
+fn exe_address(c: &Connection, worker_id: &str) -> Result<Option<String>, ApiError> {
+    let found = c
+        .query_row(
+            "SELECT exe_address FROM workers WHERE kind='exe' AND deleted_at IS NULL AND id=?",
+            [worker_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(found.flatten().filter(|address| !address.is_empty()))
+}
+
 /// `GET /api/exe`: the account's address — the only half of the key a user is
 /// meant to see — plus the devices that address can reach.
 pub(super) async fn read(
