@@ -134,8 +134,8 @@ async fn load_tool_delivers_common_nodes_with_parent_and_children() {
             .contains("common-manuals/")
     );
     let children = copy["children"].as_array().unwrap();
-    let root_copy = common_manuals::read(&root_id, common_manuals::SOURCE_LANGUAGE)
-        .expect("the root reads");
+    let root_copy =
+        common_manuals::read(&root_id, common_manuals::SOURCE_LANGUAGE).expect("the root reads");
     assert_eq!(
         children.len(),
         root_copy.children.len(),
