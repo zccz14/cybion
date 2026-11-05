@@ -147,6 +147,15 @@ you pick, every call shows which one, and Workers can be shared with other
 Cybion users without exchanging credentials. See
 [Worker onboarding](docs/worker-onboarding.md).
 
+**eXe devices are devices too.** An eXe client needs no Cybion Worker: every
+account holds one Ed25519 key pair whose public half is an address you can see
+and whose private half stays in the cloud, and a device that runs
+`exe trust <address>` becomes one more device in the same list. The Controller
+signs and seals each `bash` call to that address, the eXe relay only moves
+sealed envelopes, and the sealed answer is settled through the same ledger a
+Worker result lands in. One shell verb, no browser, no sharing yet — see
+[eXe devices](docs/exe-devices.md).
+
 **Ultimate Machines that keep watch.** Give Cybion a check command and an
 interval: the machine stays silent while the check returns 0, and when it
 fails, its dedicated Thread is asked to make it pass again. No dashboard to

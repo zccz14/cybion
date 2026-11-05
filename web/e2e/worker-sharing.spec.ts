@@ -26,6 +26,7 @@ async function fixture(page: Page, sharedOnly = false) {
     if (path === "/api/me") return route.fulfill({ json: { user_id: session === "other-session" ? "other-user" : "stable-owner" } })
     if (path === "/api/workers") return route.fulfill({ json: session === "other-session" || sharedOnly ? [shared] : [owner, shared] })
     if (path === "/api/worker-release") return route.fulfill({ json: { version: "v0.2.0", release_url: "", platforms: [] } })
+    if (path === "/api/exe") return route.fulfill({ json: { address: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", created_at: 1, devices: [] } })
     if (path === "/api/workers/owner-worker/grants") return route.fulfill({ json: grants.map((grant) => ({ ...grant, synced_revision: sync ? grant.revision : grant.synced_revision })) })
     if (path.startsWith("/api/workers/owner-worker/grants/")) {
       const uid = decodeURIComponent(path.split("/").at(-1)!)
@@ -101,7 +102,7 @@ test("shared-only discovery starts a Thread without owner controls or forbidden 
   await expect(page.getByText("Command execution verified; ready to use", { exact: true })).toHaveCount(0)
   await page.getByRole("link", { name: "Start using this device" }).click()
   await expect(page.getByTestId("draft")).toContainText("worker_id: shared-worker")
-  expect(state.calls.every((call) => ["/api/me", "/api/workers", "/api/worker-release"].includes(call.path) && call.method === "GET")).toBe(true)
+  expect(state.calls.every((call) => ["/api/me", "/api/workers", "/api/worker-release", "/api/exe"].includes(call.path) && call.method === "GET")).toBe(true)
 })
 
 test("grant errors, list retry, account switching and mobile bilingual theme", async ({ page }) => {
