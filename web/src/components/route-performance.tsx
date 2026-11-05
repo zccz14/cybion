@@ -11,7 +11,10 @@ import { cn, errorMessage } from "@/lib/utils"
 import {
   errorRate,
   formatLatency,
+  formatTotalDuration,
   routePerformanceWindows,
+  routeSources,
+  summarizeSources,
   seriesPeak,
   sortRoutes,
   type RoutePerformance,
@@ -39,6 +42,8 @@ const copy = {
     generated: "Read at {time}",
     coverage: "Newest bucket {time}",
     requests: "Requests",
+    total: "Total time",
+    clientErrorsTitle: "Client errors",
     errorRate: "Server errors",
     slow: "Slow requests",
     slowScope: "Requests at or above 1 s",
@@ -71,6 +76,11 @@ const copy = {
     retry: "Retry",
     loadError: "Could not read interface performance",
     sortBy: "Sort by {column}",
+    sources: "By source",
+    sourcesScope: "Device worker polling is traffic like any other, so it is counted here; the breakdown only says who asked.",
+    sourceBrowser: "Browser and API keys",
+    sourceIntegration: "Integration API",
+    sourceWorker: "Device workers",
   },
   zh: {
     title: "接口性能",
@@ -88,6 +98,8 @@ const copy = {
     generated: "读取于 {time}",
     coverage: "最新分桶 {time}",
     requests: "请求数",
+    total: "累计耗时",
+    clientErrorsTitle: "客户端错误",
     errorRate: "服务端错误",
     slow: "慢请求",
     slowScope: "耗时 ≥ 1 秒的请求",
@@ -120,6 +132,11 @@ const copy = {
     retry: "重试",
     loadError: "无法读取接口性能",
     sortBy: "按{column}排序",
+    sources: "按来源",
+    sourcesScope: "设备 Worker 的轮询也是接口流量，因此照常计入；这里只是说明这些请求是谁发的。",
+    sourceBrowser: "浏览器与 API Key",
+    sourceIntegration: "集成 API",
+    sourceWorker: "设备 Worker",
   },
 } as const
 
@@ -143,6 +160,7 @@ type RouteColumn = { key: RouteSortKey | null; label: keyof typeof copy.en; nume
 const columns: RouteColumn[] = [
   { key: null, label: "route", numeric: false },
   { key: "requests", label: "requests", numeric: true },
+  { key: "total_us", label: "total", numeric: true },
   { key: "client_errors", label: "clientErrors", numeric: true, narrow: "hidden md:table-cell" },
   { key: "server_errors", label: "serverErrors", numeric: true },
   { key: "slow_requests", label: "slowRequests", numeric: true, narrow: "hidden sm:table-cell" },
@@ -198,15 +216,18 @@ function RoutePerformanceSession({ language, sessionId, request }: Props) {
   const unitWord = data.resolution === "minute" ? t.unitMinute : t.unitHour
   const withUnit = (text: string) => text.replace("{unit}", unitWord)
   const totals = data.totals
+  const sources = summarizeSources(data.routes)
   const metrics = [
     [t.requests, number(totals.requests)],
+    [t.total, formatTotalDuration(totals.total_us, language)],
+    [t.clientErrorsTitle, number(totals.client_errors)],
     [t.errorRate, percent(errorRate(totals.server_errors, totals.requests))],
-    [t.p95, formatLatency(totals.p95_us)],
-    [t.max, formatLatency(totals.max_us)],
     [t.slow, number(totals.slow_requests)],
     [t.average, formatLatency(totals.average_us)],
     [t.p50, formatLatency(totals.p50_us)],
+    [t.p95, formatLatency(totals.p95_us)],
     [t.p99, formatLatency(totals.p99_us)],
+    [t.max, formatLatency(totals.max_us)],
   ]
   return <div className="flex flex-col gap-6">
     <Card>
@@ -229,12 +250,23 @@ function RoutePerformanceSession({ language, sessionId, request }: Props) {
     </Card>
     <Card>
       <CardContent className="pt-6">
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-4 lg:grid-cols-4" data-slot="route-performance-totals">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-4 lg:grid-cols-5" data-slot="route-performance-totals">
           {metrics.map(([label, value]) => <div key={label}>
             <dt className="text-xs text-muted-foreground">{label}</dt>
             <dd className="mt-1 font-mono text-lg font-medium tabular-nums">{value}</dd>
           </div>)}
         </dl>
+        <div className="mt-6 border-t pt-4" data-slot="route-performance-sources">
+          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
+            <span className="text-xs font-medium">{t.sources}</span>
+            {sources.map((summary) => <span key={summary.source} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Badge variant={summary.source === "worker" ? "outline" : "secondary"}>{sourceLabel(summary.source, t)}</Badge>
+              <span className="font-mono tabular-nums">{number(summary.requests)}</span>
+              <span className="tabular-nums">{formatTotalDuration(summary.total_us, language)}</span>
+            </span>)}
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">{t.sourcesScope}</p>
+        </div>
       </CardContent>
     </Card>
     <section className="grid gap-4 xl:grid-cols-2">
@@ -266,7 +298,7 @@ function RoutePerformanceSession({ language, sessionId, request }: Props) {
         {routes.length === 0
           ? <p className="py-6 text-sm text-muted-foreground">{t.empty}</p>
           : <div className="overflow-x-auto">
-            <table className="w-full min-w-[46rem] text-left text-sm" data-slot="route-performance-routes">
+            <table className="w-full min-w-[52rem] text-left text-sm" data-slot="route-performance-routes">
               <thead className="border-b text-xs text-muted-foreground">
                 <tr>{columns.map((column) => <th key={column.label} aria-sort={column.key === sortKey ? (descending ? "descending" : "ascending") : "none"} className={cn("px-3 py-2 font-medium", column.numeric && "text-right", column.narrow)}>
                   {column.key === null
@@ -277,7 +309,7 @@ function RoutePerformanceSession({ language, sessionId, request }: Props) {
                 </th>)}</tr>
               </thead>
               <tbody className="divide-y">
-                {routes.map((route) => <RouteRow key={`${route.method} ${route.route}`} route={route} formatLatency={formatLatency} number={number} />)}
+                {routes.map((route) => <RouteRow key={`${route.method} ${route.route}`} route={route} formatLatency={formatLatency} number={number} language={language} />)}
               </tbody>
             </table>
           </div>}
@@ -320,10 +352,12 @@ function RouteRow({
   route,
   formatLatency,
   number,
+  language,
 }: {
   route: RoutePerformanceRoute
   formatLatency: (value: number | null | undefined) => string
   number: (value: number) => string
+  language: "en" | "zh"
 }) {
   const value = (label: RouteColumn["label"]) => {
     switch (label) {
@@ -331,6 +365,8 @@ function RouteRow({
         return <RouteName method={route.method} route={route.route} />
       case "requests":
         return number(route.requests)
+      case "total":
+        return formatTotalDuration(route.total_us, language)
       case "clientErrors":
         return route.client_errors === 0 ? "—" : number(route.client_errors)
       case "serverErrors":
@@ -362,6 +398,12 @@ function RouteRow({
       )}
     >{value(column.label)}</td>)}
   </tr>
+}
+
+function sourceLabel(source: (typeof routeSources)[number], t: typeof copy.en | typeof copy.zh) {
+  if (source === "worker") return t.sourceWorker
+  if (source === "integration") return t.sourceIntegration
+  return t.sourceBrowser
 }
 
 function RouteName({ method, route }: { method: string; route: string }) {

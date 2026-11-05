@@ -4,6 +4,7 @@ type Route = {
   route: string
   method: string
   requests: number
+  total_us: number
   client_errors: number
   server_errors: number
   slow_requests: number
@@ -23,15 +24,18 @@ const bucket = (bucket_start: number, requests: number, p95_us: number | null, s
   p95_us,
 })
 
+// Four routes, one per corner of the page: a fast browser route, a slow one, a
+// device worker poll and an integration call.
 const routes: Route[] = [
   {
     route: "/api/threads",
     method: "GET",
     requests: 120,
+    total_us: 1_200_000,
     client_errors: 0,
     server_errors: 0,
     slow_requests: 0,
-    average_us: 8_000,
+    average_us: 10_000,
     p50_us: 5_000,
     p95_us: 25_000,
     p99_us: 50_000,
@@ -39,9 +43,25 @@ const routes: Route[] = [
     statuses: [{ status: 200, requests: 120 }],
   },
   {
+    route: "/worker/v1/users/{user_id}/workers/{worker_id}/calls",
+    method: "POST",
+    requests: 84,
+    total_us: 12_000_000,
+    client_errors: 0,
+    server_errors: 1,
+    slow_requests: 2,
+    average_us: 142_000,
+    p50_us: 100_000,
+    p95_us: 1_000_000,
+    p99_us: 2_500_000,
+    max_us: 3_100_000,
+    statuses: [{ status: 200, requests: 83 }, { status: 502, requests: 1 }],
+  },
+  {
     route: "/api/threads/{id}/inputs",
     method: "POST",
     requests: 30,
+    total_us: 45_000_000,
     client_errors: 2,
     server_errors: 3,
     slow_requests: 4,
@@ -57,18 +77,19 @@ const routes: Route[] = [
     ],
   },
   {
-    route: "/api/worker-calls",
-    method: "GET",
-    requests: 12,
+    route: "/v1/threads",
+    method: "POST",
+    requests: 3,
+    total_us: 60_000,
     client_errors: 0,
     server_errors: 0,
     slow_requests: 0,
-    average_us: 2_000,
-    p50_us: 2_000,
-    p95_us: 5_000,
-    p99_us: 10_000,
-    max_us: 12_000,
-    statuses: [{ status: 200, requests: 12 }],
+    average_us: 20_000,
+    p50_us: 10_000,
+    p95_us: 10_000,
+    p99_us: 25_000,
+    max_us: 25_000,
+    statuses: [{ status: 201, requests: 3 }],
   },
 ]
 
@@ -81,11 +102,12 @@ function payload(window: string) {
     generated_at: 1_700_000_000,
     latest_bucket_start: 1_699_999_800,
     totals: {
-      requests: 162,
+      requests: 237,
+      total_us: 58_260_000,
       client_errors: 2,
-      server_errors: 3,
-      slow_requests: 4,
-      average_us: 300_000,
+      server_errors: 4,
+      slow_requests: 6,
+      average_us: 245_000,
       p50_us: 5_000,
       p95_us: 2_500_000,
       p99_us: 30_000_000,
@@ -106,7 +128,7 @@ function payload(window: string) {
 
 const empty = (window: string) => ({
   ...payload(window),
-  totals: { requests: 0, client_errors: 0, server_errors: 0, slow_requests: 0, average_us: null, p50_us: null, p95_us: null, p99_us: null, max_us: null },
+  totals: { requests: 0, total_us: 0, client_errors: 0, server_errors: 0, slow_requests: 0, average_us: null, p50_us: null, p95_us: null, p99_us: null, max_us: null },
   routes: [],
   series: [],
   slow: [],
@@ -122,7 +144,7 @@ async function fixture(page: Page, respond: (window: string) => unknown = payloa
   return { windows }
 }
 
-test("the page reads every route's requests, percentiles and outcomes in one table", async ({ page }) => {
+test("the page reads every route's requests, cumulative time and outcomes in one table", async ({ page }) => {
   const errors: string[] = []
   page.on("pageerror", (error) => errors.push(error.stack ?? error.message))
   const state = await fixture(page)
@@ -131,28 +153,46 @@ test("the page reads every route's requests, percentiles and outcomes in one tab
 
   const totals = page.locator('[data-slot="route-performance-totals"]')
   await expect(totals).toContainText("Requests")
-  await expect(totals).toContainText("162")
-  await expect(totals).toContainText("1.9%")
-  await expect(totals).toContainText("2.5 s")
-  await expect(totals).toContainText("41 s")
+  await expect(totals).toContainText("237")
+  // 58.26 s of answering in the window, read as a duration rather than a number.
+  await expect(totals).toContainText("Total time")
+  await expect(totals).toContainText("58s")
+  await expect(totals).toContainText("1.7%")
 
   const table = page.locator('[data-slot="route-performance-routes"]')
-  await expect(table.getByRole("row")).toHaveCount(4)
+  await expect(table.getByRole("row")).toHaveCount(5)
   // Requests decide the default order.
-  await expect(table.getByRole("row").nth(1)).toContainText("/api/threads")
-  await expect(table.getByRole("row").nth(1)).toContainText("120")
-  const inputs = table.getByRole("row").nth(2)
+  const threads = table.getByRole("row").nth(1)
+  await expect(threads).toContainText("/api/threads")
+  await expect(threads).toContainText("120")
+  await expect(threads).toContainText("1.2s")
+  await expect(table.getByRole("row").nth(2)).toContainText("worker_id")
+  const inputs = table.getByRole("row").nth(3)
   await expect(inputs).toContainText("/api/threads/{id}/inputs")
+  await expect(inputs).toContainText("45s")
   await expect(inputs).toContainText("41 s")
-  // A 5xx is called out, and a route that never failed reads as a dash rather
-  // than a zero.
+  // A 5xx is called out, and a route that never failed reads as a dash.
   await expect(inputs.getByRole("cell", { name: "3", exact: true })).toHaveClass(/text-destructive/)
-  await expect(table.getByRole("row").nth(3)).toContainText("/api/worker-calls")
-  await expect(table.getByRole("row").nth(3).getByRole("cell", { name: "—", exact: true })).toHaveCount(3)
+  await expect(table.getByRole("row").nth(4).getByRole("cell", { name: "—", exact: true })).toHaveCount(3)
+
+  // Device polling is traffic too: it is reported per source instead of hidden.
+  const sources = page.locator('[data-slot="route-performance-sources"]')
+  await expect(sources).toContainText("Browser and API keys")
+  await expect(sources).toContainText("150")
+  await expect(sources).toContainText("46s")
+  await expect(sources).toContainText("Integration API")
+  await expect(sources).toContainText("Device workers")
+  await expect(sources).toContainText("84")
+  await expect(sources).toContainText("12s")
 
   const slow = page.locator('[data-slot="route-performance-slow"]')
   await expect(slow.getByRole("row")).toHaveCount(3)
   await expect(slow.getByRole("row").nth(1)).toContainText("41 s")
+
+  await page.getByRole("button", { name: "Language", exact: true }).click()
+  await expect(totals).toContainText("累计耗时")
+  await expect(totals).toContainText("58 秒")
+  await expect(sources).toContainText("设备 Worker")
 
   // The window asks for 24 hours until the operator changes it.
   expect(state.windows.length).toBeGreaterThan(0)
@@ -169,8 +209,13 @@ test("a column header sorts the table and the arrow follows the direction", asyn
   await expect(table.getByRole("row").nth(1)).toContainText("/api/threads/{id}/inputs")
   await expect(page.getByRole("columnheader", { name: /P95/ })).toHaveAttribute("aria-sort", "descending")
   await page.getByRole("button", { name: "Sort by P95" }).click()
-  await expect(table.getByRole("row").nth(1)).toContainText("/api/worker-calls")
+  await expect(table.getByRole("row").nth(1)).toContainText("/v1/threads")
   await expect(page.getByRole("columnheader", { name: /P95/ })).toHaveAttribute("aria-sort", "ascending")
+  // Cumulative time sorts on its own column, not on the average.
+  await page.getByRole("button", { name: "Sort by Total time" }).click()
+  await expect(table.getByRole("row").nth(1)).toContainText("/api/threads/{id}/inputs")
+  await page.getByRole("button", { name: "Sort by Total time" }).click()
+  await expect(table.getByRole("row").nth(1)).toContainText("/v1/threads")
 })
 
 test("the window switch asks for the new range and names its bucket", async ({ page }) => {

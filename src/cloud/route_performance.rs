@@ -499,6 +499,9 @@ pub(super) struct RoutePerformance {
 #[derive(Serialize)]
 pub(super) struct PerformanceTotals {
     pub requests: i64,
+    /// Cumulative time spent answering in the window; the capacity view the
+    /// average alone cannot give.
+    pub total_us: i64,
     pub client_errors: i64,
     pub server_errors: i64,
     pub slow_requests: i64,
@@ -514,6 +517,7 @@ pub(super) struct PerformanceRoute {
     pub route: String,
     pub method: String,
     pub requests: i64,
+    pub total_us: i64,
     pub client_errors: i64,
     pub server_errors: i64,
     pub slow_requests: i64,
@@ -729,6 +733,7 @@ pub(super) fn load(
         latest_bucket_start,
         totals: PerformanceTotals {
             requests: totals.requests,
+            total_us: totals.latency_sum_us,
             client_errors: totals.client_errors,
             server_errors: totals.server_errors,
             slow_requests: slow_count(&totals.bands),
@@ -761,6 +766,7 @@ fn performance_route(
         route,
         method,
         requests: aggregate.requests,
+        total_us: aggregate.latency_sum_us,
         client_errors: aggregate.client_errors,
         server_errors: aggregate.server_errors,
         slow_requests: slow_count(&aggregate.bands),

@@ -78,6 +78,8 @@ fn a_closed_minute_folds_into_the_minute_and_hour_buckets() {
     );
     assert_eq!(minute.totals.slow_requests, 1);
     assert_eq!(minute.totals.max_us, Some(3_000_000));
+    // Cumulative time is the sum of the samples: 12 + 7 + 3000 + 4 ms.
+    assert_eq!(minute.totals.total_us, 3_023_000);
     let get = minute
         .routes
         .iter()
@@ -90,6 +92,7 @@ fn a_closed_minute_folds_into_the_minute_and_hour_buckets() {
     assert_eq!(get.p50_us, Some(10_000));
     assert_eq!(get.p95_us, Some(25_000));
     assert_eq!(get.max_us, Some(12_000));
+    assert_eq!(get.total_us, 19_000);
     assert_eq!(statuses(get), vec![(200, 2)]);
     let post = minute
         .routes
@@ -99,6 +102,7 @@ fn a_closed_minute_folds_into_the_minute_and_hour_buckets() {
     // Equal counts break the tie by status, so the order is stable.
     assert_eq!(statuses(post), vec![(404, 1), (500, 1)]);
     assert_eq!(post.slow_requests, 1);
+    assert_eq!(post.total_us, 3_004_000);
     // A slow request is kept whole, so the page can show what went slow.
     assert_eq!(minute.slow.len(), 1);
     assert_eq!(minute.slow[0].route, "/api/threads");
@@ -183,6 +187,8 @@ fn the_minute_in_memory_answers_the_page_before_the_next_flush() {
     assert_eq!(live.totals.requests, 2);
     assert_eq!(live.totals.server_errors, 1);
     assert_eq!(live.totals.slow_requests, 1);
+    assert_eq!(live.totals.total_us, 4_020_000);
+    assert_eq!(live.routes[0].total_us, 4_020_000);
     assert_eq!(live.series.len(), 1);
     assert_eq!(live.series[0].bucket_start, running * 60);
     assert_eq!(live.series[0].requests, 2);
