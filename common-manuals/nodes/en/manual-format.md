@@ -16,6 +16,7 @@ One entry per block, one blank line between blocks; field names end with a half-
 field one: ...
 field two: ...
 field three:
+
 - use a list when you need more than one line
 - one item per line
 ```
@@ -24,11 +25,12 @@ field three:
 
 1. One entry per block, fixed field order, field names ending with a half-width `:`.
 2. No tables, no `|` separators, no nesting, no sub-headings; one blank line between blocks.
-3. Dates are always `YYYY-MM-DD`.
-4. Only decidable criteria and facts — no backstory, no persona.
-5. Edit, do not rewrite: append a block, or change exactly that one block. Ask the user before restructuring the whole Manual (new fields, new sections, bulk deletes).
-6. A block that gets overruled is deleted, never marked "obsolete" — leftovers keep getting read into context.
-7. Converge: more than three entries of the same kind merge into one more general entry; keep the whole Manual near 60 lines.
+3. In a list field (such as `evidence:`), start the items on their own paragraph: a blank line after `field:`, then `- `, or Markdown will not render them as a list.
+4. Dates are always `YYYY-MM-DD`.
+5. Only decidable criteria and facts — no backstory, no persona.
+6. Edit, do not rewrite: append a block, or change exactly that one block. Ask the user before restructuring the whole Manual (new fields, new sections, bulk deletes).
+7. A block that gets overruled is deleted, never marked "obsolete" — leftovers keep getting read into context.
+8. Converge: more than three entries of the same kind merge into one more general entry; keep the whole Manual near 60 lines.
 
 ## The `>` line
 

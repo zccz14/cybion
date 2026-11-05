@@ -32,7 +32,7 @@ At most one question per session. If he does not answer, take the cheapest path 
 
 ## What one block looks like
 
-Four fields: `scenario / tension / choice / evidence`. `evidence` is a list, each item with a date and a source (his own words first).
+Four fields: `scenario / tension / choice / evidence`. `evidence` is a list, each item with a date and a source (his own words first); the items start one blank line after `evidence:`.
 
 ```text
 # Value Bias
@@ -43,12 +43,14 @@ scenario: incident repair
 tension: fix it properly vs restore service first
 choice: restore service first — restore availability on production incidents, root cause can wait
 evidence:
+
 - 2026-02-11 · Ultimate Machine disk check
 
 scenario: communication
 tension: conclusion first vs derivation first
 choice: conclusion plus one piece of evidence — lead with the answer, put depth after it
 evidence:
+
 - 2026-02-02 · "tell me what to do first"
 ```
 
