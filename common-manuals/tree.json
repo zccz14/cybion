@@ -1,5 +1,5 @@
 {
-  "revision": 6,
+  "revision": 7,
   "root": {
     "id": "2b7b2b90-00a7-4c92-8b10-bee31b246e3a",
     "name": {
@@ -7,8 +7,8 @@
       "zh": "Cybion 公共手册"
     },
     "description": {
-      "en": "Cybion's built-in operating guide (shipped with the source, shared by every user, read-only): how to work with features like the Ultimate Machine. Read this first when you need operating guidance.",
-      "zh": "Cybion 自带的操作指南（随源码发布、所有用户共享、只读）：如何用终极机器等功能干活。需要操作指导时先读这里。"
+      "en": "Cybion's built-in operating guide (shipped with the source, shared by every user, read-only): how to work with features like the Ultimate Machine. Read this first when you need operating guidance; the two standing user Manuals (Project Index, Value Bias) and their format live in the nodes of the same name.",
+      "zh": "Cybion 自带的操作指南（随源码发布、所有用户共享、只读）：如何用终极机器等功能干活。需要操作指导时先读这里；两个常备用户手册（项目索引、价值偏置）的钩子与格式见同名节点。"
     },
     "content_file": {
       "en": "nodes/en/overview.md",
@@ -43,6 +43,51 @@
         "content_file": {
           "en": "nodes/en/linkit.md",
           "zh": "nodes/zh/linkit.md"
+        }
+      },
+      {
+        "id": "f1791d9f-331b-4bcd-9db0-eda7137b3992",
+        "name": {
+          "en": "Project Index",
+          "zh": "项目索引"
+        },
+        "description": {
+          "en": "Project Index: the user's projects as a routing list of name | location (Worker label:path or remote URL) | one-line summary; maintained while you work.",
+          "zh": "项目索引：把用户的项目记成「名称 | 位置 | 简介」的路由清单（位置是 Worker 标签:路径或远端仓库地址），干活时顺手维护。"
+        },
+        "content_file": {
+          "en": "nodes/en/project-index.md",
+          "zh": "nodes/zh/project-index.md"
+        }
+      },
+      {
+        "id": "cef27ef8-9cab-4073-961f-eab87cad0700",
+        "name": {
+          "en": "Value Bias",
+          "zh": "价值偏置"
+        },
+        "description": {
+          "en": "Value Bias: capture what the user chose under a real trade-off as an executable criterion, apply it first next time, and let him overrule it.",
+          "zh": "价值偏置：捕捉用户在真实取舍上的选择，记成可执行判据；下次冲突时先用，用完给他推翻的机会。"
+        },
+        "content_file": {
+          "en": "nodes/en/value-bias.md",
+          "zh": "nodes/zh/value-bias.md"
+        }
+      },
+      {
+        "id": "776350aa-c311-49a8-b792-53358f2b45a9",
+        "name": {
+          "en": "Manual Format",
+          "zh": "用户手册格式"
+        },
+        "description": {
+          "en": "Manual Format: what an agent-maintained user Manual looks like — one entry per line, fixed fields, edit rather than rewrite, converge near 60 lines.",
+          "zh": "用户手册格式：由 Agent 维护的用户手册该长什么样——一行一条、字段固定、增改不重写、收敛到约 60 行。"
+        },
+        "content_file": {
+          "en": "nodes/en/manual-format.md",
+          "zh": "nodes/zh/manual-format.md"
         }
       }
     ]
