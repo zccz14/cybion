@@ -1,47 +1,47 @@
 # Manual Format
 
-A user Manual is not an essay for a human; it is **context** that models reread and edit mechanically. With the wrong format every update becomes a rewrite, and every rewrite drifts.
+A user Manual is **context** that models reread and edit mechanically, not an essay for a human. With the wrong format every update becomes a rewrite, and every rewrite drifts.
 
-This page fixes the shape of agent-maintained user Manuals such as "Project Index" and "Value Bias". A Manual the user wrote by hand keeps his own style — do not retrofit it.
+This page is the **default format**. If the user's local Manuals include a manual-format page, theirs wins — it overrides this one.
 
-## Six hard rules
+## Block format
 
-1. **One entry per line, one thing per entry**: fields separated by ` | ` (half-width pipe, one space each side), fixed order, no nesting, no sub-bullets.
-2. **Every entry starts with a searchable key**: index lines start with the name, bias lines with the scenario. Finding an entry is a string match, not a read of the whole file.
-3. **Dates are always `YYYY-MM-DD`**, day precision; add a time only when the exact moment matters.
-4. **Only decidable criteria**, no backstory. Delete "because this bit us last time, therefore…" and keep "when X, do Y".
-5. **Edit, do not rewrite**: append a line or replace exactly the line that changed. Restructuring the whole Manual (new fields, new sections, bulk deletes) needs the user's agreement first.
-6. **Mark the source**: `(YYYY-MM-DD · where it came from)` at the end of the line, or as its own column. Traceability is what makes overruling possible.
-
-## The skeleton
+One entry per block, one blank line between blocks; field names end with a half-width colon, order fixed and declared on the `>` line at the top of the Manual.
 
 ```text
 # <Manual name>
 
-> One-line purpose + field contract (fixed order; write ? when unsure)
+> One <unit> per block, N fields: field one / field two / field three. Any other contract goes here.
 
-<entries: one line each>
+field one: ...
+field two: ...
+field three:
+- use a list when you need more than one line
+- one item per line
 ```
 
-- The heading is the Manual's name, matching `name`; no aliases.
-- That `>` line is the field contract for humans and for you: change it before you change the field order.
-- Entries are not grouped and carry no sub-headings; past roughly 60 lines, split into sections with level-2 headings.
+## Hard rules
 
-## Convergence
+1. One entry per block, fixed field order, field names ending with a half-width `:`.
+2. No tables, no `|` separators, no nesting, no sub-headings; one blank line between blocks.
+3. Dates are always `YYYY-MM-DD`.
+4. Only decidable criteria and facts — no backstory, no persona.
+5. Edit, do not rewrite: append a block, or change exactly that one block. Ask the user before restructuring the whole Manual (new fields, new sections, bulk deletes).
+6. A block that gets overruled is deleted, never marked "obsolete" — leftovers keep getting read into context.
+7. Converge: more than three entries of the same kind merge into one more general entry; keep the whole Manual near 60 lines.
 
-- A Manual **converges**: it is not append-only. More than three entries of the same kind should merge into one more general entry.
-- Dead entries are **deleted**, never marked "deprecated" — leftovers keep getting read into context, which is worse than absent.
-- Around 60 lines is the ceiling; merge first, and only then consider child Manuals.
+## The `>` line
 
-## How Note, Manual and Archive divide the work
+It is the field contract, for humans and for you: it declares the fields and their order. Change it before you change the fields; when the two disagree, the `>` line wins and the entries get fixed to match.
 
-- **Note**: what this turn must achieve, and its TODOs; crossed out when done.
-- **Manual**: criteria and facts that must survive turns and compaction — the format this page describes.
-- **Archive**: history, append-only, never edited.
-- In one line: what disappears when done is a Note, what stays valid and must converge is a Manual, what exists for review is an Archive.
+## Division of work
+
+- **Note**: this turn's goals and TODOs; crossed out when done.
+- **Manual**: criteria that must survive turns and compaction — in this format.
+- **Archive**: append-only history, never revised.
 
 ## When to create a Manual
 
-- Create it when the hook actually fires (there is a first project to record, a first bias to record) — do not pre-create empty Manuals.
+- Create it when the hook actually fires (a first project to record, a first bias to record) — never pre-create empty Manuals.
 - Say one sentence when you create it, so the user knows it exists, can edit it, and can delete it.
 - A Manual the user deleted is not recreated.

@@ -19,9 +19,9 @@ Not entries: one-off requests ("use Python this time"), environment facts ("I'm 
 
 Three moments surface on their own; when you see one, take it:
 
-1. He made a trade-off → record "option A / option B / he chose / the cost".
+1. He made a trade-off → record "option A / option B / what he chose / the cost".
 2. He rejected your approach → record the **class** of approach, not that action.
-3. The same tension shows up a second time and he chooses the same way → this one may graduate into a **general rule**.
+3. The same tension shows up a second time and he chooses the same way → write that one as a more general criterion.
 
 When the tension is visible but he says nothing: **ask one question, not a survey** — and it must carry the cost:
 
@@ -30,36 +30,44 @@ When the tension is visible but he says nothing: **ask one question, not a surve
 
 At most one question per session. If he does not answer, take the cheapest path and say which one you took and why.
 
-## What one entry looks like
+## What one block looks like
 
-`scenario | tension | what he chose | general rule | evidence`
+Four fields: `scenario / tension / choice / evidence`. `evidence` is a list, each item with a date and a source (his own words first).
 
 ```text
 # Value Bias
 
-> One entry per scenario: scenario | tension | what he chose | general rule | evidence
+> One scenario per block, four fields: scenario / tension / choice / evidence. Evidence is a list, each item dated and sourced; one blank line between blocks.
 
-incident repair | fix it properly vs restore service first | restore first, fix afterwards | restore availability first on production incidents, root cause can wait | 2026-02-11 · Ultimate Machine disk check
-communication | conclusion first vs derivation first | conclusion plus one piece of evidence | lead with the answer, put depth after it | 2026-02-02
+scenario: incident repair
+tension: fix it properly vs restore service first
+choice: restore service first — restore availability on production incidents, root cause can wait
+evidence:
+- 2026-02-11 · Ultimate Machine disk check
+
+scenario: communication
+tension: conclusion first vs derivation first
+choice: conclusion plus one piece of evidence — lead with the answer, put depth after it
+evidence:
+- 2026-02-02 · "tell me what to do first"
 ```
 
 - **scenario**: a coarse class (incident repair / code style / communication / spending), never a project name, or you will not match it on reuse.
 - **tension**: two things that both make sense and only one of which can win.
-- **what he chose**: what he actually picked, including the sacrifice.
-- **general rule**: a criterion you can execute next time — imperative, decidable. If you cannot write it, this is still a preference: keep it as evidence, do not promote it yet.
-- **evidence**: `YYYY-MM-DD` plus where it came from (Thread title or keyword), so it can be traced and overruled.
+- **choice**: the side he actually picked, followed directly by an executable criterion. If you cannot write the criterion, this is still a preference — keep the evidence and do not promote it.
+- **evidence**: `YYYY-MM-DD` plus where it came from (Thread title, keyword, or his words). A choice that has only appeared once gets "only once, awaiting a second confirmation" appended, and is not used as a general rule.
 
 ## How to use it
 
-- On a recurring tension, **act by the recorded rule first**, and say so: "Following what you chose before (restore service first), I…" — that gives him the chance to overrule on the spot.
-- Two rules conflict → follow the **more recent** one and explain why.
-- A rule that gets overruled is **deleted**, not marked "obsolete". A Manual converges; it is not a ledger.
-- Rules that keep conflicting mean the granularity is wrong: merge one level up.
+- On a recurring tension, **act by the recorded block first**, and say so: "Following what you chose before (restore service first), I…" — that gives him the chance to overrule on the spot.
+- Two blocks conflict → follow the **more recent** one and explain why.
+- A block that gets overruled is **deleted**, not marked "obsolete".
+- Blocks that keep conflicting mean the granularity is wrong: merge one level up.
 
 ## Guard rails
 
 - **No persona**: this is not a personality profile. "He likes things simple" never goes in.
-- **No fast promotion**: a class of tension needs at least two consistent choices before it becomes a general rule; one choice is only evidence.
-- **No follow-up interrogation**: the hook exists to ask less. Anything a rule already covers needs no confirmation.
+- **No fast promotion**: a choice seen once stays in evidence with a note until a second consistent choice arrives.
+- **No follow-up interrogation**: the hook exists to ask less. Anything a block already covers needs no confirmation.
 - **No sensitive content**: salary, health, address, accounts, customer lists stay out. Record the shape of the decision only.
-- **One Manual is enough**: top level, suggested name `Value Bias`, around 60 lines; past that, add sections rather than child Manuals.
+- **One Manual is enough**: top level, suggested name `Value Bias`, around 60 lines; past that, merge scenarios rather than adding child Manuals.
