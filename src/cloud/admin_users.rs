@@ -50,8 +50,8 @@ struct UserSummary {
     error: Option<String>,
 }
 
-#[derive(Serialize)]
-struct Metrics {
+#[derive(Serialize, Default)]
+pub(super) struct Metrics {
     requests: i64,
     input_tokens: i64,
     output_tokens: i64,
@@ -145,11 +145,26 @@ fn metrics(
 ) -> Result<Metrics> {
     let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.busy_timeout(Duration::from_secs(1))?;
-    let mut metrics = match rolled(&connection)? {
+    account(&connection, path, user_id, live)
+}
+
+/// The account block of one user database, read through a connection the caller
+/// already holds. Every field is O(1): the `user_rollup` row (seven integers, no
+/// scan), the running set (bounded by the Threads executing right now) and three
+/// file sizes. The administrator's Users page and the account's own Usage
+/// statistics page call this same function, so the two can never disagree about
+/// what a number means.
+pub(super) fn account(
+    connection: &Connection,
+    path: &Path,
+    user_id: &str,
+    live: &HashMap<(String, String), (Phase, i64)>,
+) -> Result<Metrics> {
+    let mut metrics = match rolled(connection)? {
         Some(metrics) => metrics,
-        None => counted(&connection)?,
+        None => counted(connection)?,
     };
-    metrics.running = running(&connection, user_id, live)?;
+    metrics.running = running(connection, user_id, live)?;
     metrics.sqlite_main_bytes = fs::metadata(path)?.len();
     metrics.sqlite_wal_bytes = file_size(&PathBuf::from(format!("{}-wal", path.display())))?;
     metrics.sqlite_shm_bytes = file_size(&PathBuf::from(format!("{}-shm", path.display())))?;
