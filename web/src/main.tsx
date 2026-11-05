@@ -29,6 +29,7 @@ import {
   ArchiveRestoreIcon,
   ArrowLeftIcon,
   ChartColumnIcon,
+  GaugeIcon,
   CheckIcon,
   CalendarDaysIcon,
   ChevronDownIcon,
@@ -104,6 +105,7 @@ import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundar
 import { ThreadSharingButton } from "@/components/thread-sharing"
 import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads"
 import { sharedThreadReturnHash } from "@/lib/thread-sharing"
+import { RoutePerformance } from "@/components/route-performance"
 import { WorkerAudit } from "@/components/worker-audit"
 import { WorkerConnections } from "@/components/worker-connections"
 import { UltimateMachines } from "@/components/ultimate-machines"
@@ -546,6 +548,8 @@ const copy = {
     auditCacheRateDescription: "Cached input tokens ÷ input tokens. — when usage is unavailable or input is zero.",
     auditEmpty: "No reasoning requests yet.",
     workerAudit: "Worker call audit",
+    routePerformance: "Interface performance",
+    routePerformanceDescription: "Requests, latency percentiles and outcomes per API route, measured while serving from the shared database. Only an administrator reads this page, because it covers every account's traffic without naming a caller.",
     workerAuditDescription: "Calls on Workers you own, including calls from people you granted access to. Shared Worker results remain in your Threads.",
     workerAuditEmpty: "No Worker calls yet.",
     workerCall: "Call",
@@ -911,6 +915,8 @@ const copy = {
     auditCacheRateDescription: "缓存输入 Token ÷ 输入 Token。用量尚未上报或输入为零时显示 —。",
     auditEmpty: "尚无推理请求。",
     workerAudit: "Worker 调用审计",
+    routePerformance: "接口性能",
+    routePerformanceDescription: "按接口路由统计请求量、延迟分位与结果，数据来自公共数据库。这个页面覆盖所有账号的流量且不标注调用者，因此仅管理员可见。",
     workerAuditDescription: "展示自有 Worker 上的调用，包括被授权用户发起的任务。使用他人共享设备的结果请在对应 Thread 中查看。",
     workerAuditEmpty: "尚无 Worker 调用。",
     workerCall: "调用",
@@ -1461,6 +1467,7 @@ function WorkspaceShell({
     { to: "/insights", label: t("usageStats"), icon: ChartColumnIcon },
     { to: "/reasoning-audit", label: t("audit"), icon: FileSearchIcon },
     { to: "/worker-audit", label: t("workerAudit"), icon: LogsIcon },
+    ...(isAdmin ? [{ to: "/route-performance", label: t("routePerformance"), icon: GaugeIcon }] : []),
   ]
   const administrationNav = isAdmin
     ? [
@@ -1517,6 +1524,7 @@ function WorkspaceShell({
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
+            <Route path="/route-performance" element={<RoutePerformancePage sdk={sdk} />} />
             <Route path="/archive" element={<HistoryPage sdk={sdk} />} />
             <Route path="/admin/users" element={<Page title={t("users")} description={t("usersDescription")}><AdminUsers language={language} allowed={isAdmin} sessionId={sdk.session.getState().sessionId} request={(signal) => api(sdk, "/api/admin/users", { signal })} /></Page>} />
             <Route path="/admin/resources" element={<SystemPage sdk={sdk} />} />
@@ -1542,6 +1550,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/insights")) return t("usageStats")
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
+  if (pathname.startsWith("/route-performance")) return t("routePerformance")
   if (pathname.startsWith("/archive")) return t("history")
   if (pathname.startsWith("/machines")) return t("machines")
   if (pathname.startsWith("/admin/users")) return t("users")
@@ -3299,6 +3308,11 @@ function usageLabel(item: ReasoningAudit) {
 function WorkerAuditPage({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   return <Page title={t("workerAudit")} description={t("workerAuditDescription")}><WorkerAudit language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
+}
+
+function RoutePerformancePage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t, language } = useUi()
+  return <Page title={t("routePerformance")} description={t("routePerformanceDescription")}><RoutePerformance language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
 }
 
 function UltimateMachinesPage({ sdk }: { sdk: AuthMiniApi }) {
