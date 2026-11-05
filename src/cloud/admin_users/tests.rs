@@ -538,3 +538,134 @@ async fn the_usage_page_account_block_ignores_the_range_and_filters() {
     assert_eq!(page.account.metrics.requests, 1);
     assert_eq!(page.account.metrics.total_tokens, 140);
 }
+
+/// The per-Thread probe the snapshot used before it aggregated the evidence
+/// sets, kept as the oracle: both forms must describe the same running Threads.
+const PER_THREAD_ORACLE: &str = r#"
+SELECT t.id, t.updated_at,
+  (SELECT MAX(a.started_at) FROM reasoning_audits a
+    WHERE a.thread_id=t.id AND a.status='in_flight'
+      AND a.request_kind IN ('inference','compaction')),
+  (SELECT MAX(COALESCE(w.started_at,w.created_at)) FROM worker_calls w
+    WHERE w.thread_id=t.id AND w.caller_user_id IS NULL
+      AND w.machine_id IS NULL AND w.status IN ('queued','delivered')),
+  (SELECT MAX(h.created_at) FROM history_records h
+    WHERE h.thread_id=t.id AND h.worker_call_id IS NOT NULL
+      AND h.worker_output_phase IS NULL
+      AND COALESCE(h.worker_owner_user_id,'')<>'')
+FROM threads t WHERE t.status='running'
+ORDER BY t.id
+"#;
+
+type Evidence = (String, i64, Option<i64>, Option<i64>, Option<i64>);
+
+fn evidence(connection: &Connection, sql: &str) -> Vec<Evidence> {
+    let mut statement = connection.prepare(sql).unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+/// Three running Threads covering each evidence source, an idle Thread whose
+/// evidence must be ignored, and enough unrelated history that a per-Thread
+/// probe would have work to do.
+async fn seeded_running_evidence(state: &AppState, owner: &User) {
+    user_db(state, owner, true, |connection| {
+        connection.execute_batch(
+            "INSERT INTO workers(id,label,token_hash,created_at,status)
+               VALUES('w1','Laptop','hash',0,'online');
+             INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES
+               ('r1','Inference and shared','m','running',100,100),
+               ('r2','Device','m','running',200,200),
+               ('r3','Kernel','m','running',300,300),
+               ('i1','Idle','m','idle',400,400);
+             INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,finished_at) VALUES
+               ('r1','inference','m','completed',110,120),
+               ('r1','compaction','m','completed',130,140),
+               ('r1','inference','m','in_flight',150,NULL),
+               ('i1','inference','m','in_flight',410,NULL);
+             INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES
+               ('r1','input','{}',160),('r1','response_output','{}',170),
+               ('i1','input','{}',420);
+             INSERT INTO worker_calls(id,worker_id,thread_id,name,arguments_json,status,created_at,started_at) VALUES
+               ('c1','w1','r1','bash','{}','queued',180,NULL),
+               ('c2','w1','r2','bash','{}','delivered',210,215),
+               ('c3','w1','i1','bash','{}','queued',430,NULL);
+             INSERT INTO history_records(thread_id,kind,payload,created_at,worker_call_id,worker_output_phase,worker_owner_user_id)
+               VALUES('r1','input','{}',190,'c1',NULL,'owner-a');",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_running_snapshot_agrees_with_the_per_thread_oracle() {
+    let (_root, state) = test_state();
+    let owner = user_for_subject(&state, "evidence-owner").unwrap();
+    seeded_running_evidence(&state, &owner).await;
+
+    let (aggregated, oracle) = user_db(&state, &owner, false, |connection| {
+        Ok((
+            evidence(connection, RUNNING_THREADS),
+            evidence(connection, PER_THREAD_ORACLE),
+        ))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(aggregated, oracle);
+    assert_eq!(
+        aggregated,
+        vec![
+            ("r1".to_owned(), 100, Some(150), Some(180), Some(190)),
+            ("r2".to_owned(), 200, None, Some(215), None),
+            ("r3".to_owned(), 300, None, None, None),
+        ]
+    );
+}
+
+// The five-second poll runs for every account, so the snapshot must reach the
+// evidence through the small partial indexes instead of walking a Thread's
+// whole audit / call / history history: on the production 5.6 GB database the
+// per-Thread form took ~125 ms and this one ~0.3 ms.
+#[tokio::test]
+async fn the_running_snapshot_never_walks_a_thread_history() {
+    let (_root, state) = test_state();
+    let owner = user_for_subject(&state, "plan-owner").unwrap();
+    seeded_running_evidence(&state, &owner).await;
+
+    let plan = user_db(&state, &owner, false, |connection| {
+        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {RUNNING_THREADS}"))?;
+        let details: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(details.join("\n"))
+    })
+    .await
+    .unwrap();
+
+    // The bounded evidence sets: a status-first scan for audits and calls, the
+    // partial index for pending shared intents.
+    assert!(plan.contains("reasoning_audits_status_started"), "{plan}");
+    assert!(plan.contains("worker_calls_status_created"), "{plan}");
+    assert!(plan.contains("history_shared_intent_thread"), "{plan}");
+    // The per-Thread probes: each one scans every row of the Thread.
+    assert!(!plan.contains("reasoning_audits_thread_started"), "{plan}");
+    assert!(!plan.contains("worker_calls_thread_created"), "{plan}");
+    assert!(
+        !plan.contains("history_records_thread_kind_created"),
+        "{plan}"
+    );
+}

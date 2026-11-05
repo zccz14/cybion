@@ -257,20 +257,35 @@ fn summary(
 }
 
 const RUNNING_THREADS: &str = r#"
-SELECT t.id, t.updated_at,
-  (SELECT MAX(a.started_at) FROM reasoning_audits a
-    WHERE a.thread_id=t.id AND a.status='in_flight'
-      AND a.request_kind IN ('inference','compaction')),
-  (SELECT MAX(COALESCE(w.started_at,w.created_at)) FROM worker_calls w
-    WHERE w.thread_id=t.id AND w.caller_user_id IS NULL
-      AND w.machine_id IS NULL AND w.status IN ('queued','delivered')),
-  (SELECT MAX(h.created_at) FROM history_records h
-    WHERE h.thread_id=t.id AND h.worker_call_id IS NOT NULL
-      AND h.worker_output_phase IS NULL
-      AND COALESCE(h.worker_owner_user_id,'')<>'')
-FROM threads t WHERE t.status='running'
+SELECT t.id, t.updated_at, inference.since, device.since, shared.since
+FROM threads t
+LEFT JOIN (
+  SELECT thread_id, MAX(started_at) AS since FROM reasoning_audits
+   WHERE status='in_flight' AND request_kind IN ('inference','compaction')
+   GROUP BY thread_id
+) inference ON inference.thread_id=t.id
+LEFT JOIN (
+  SELECT thread_id, MAX(COALESCE(started_at,created_at)) AS since FROM worker_calls
+   WHERE caller_user_id IS NULL AND machine_id IS NULL
+     AND status IN ('queued','delivered')
+   GROUP BY thread_id
+) device ON device.thread_id=t.id
+LEFT JOIN (
+  SELECT thread_id, MAX(created_at) AS since FROM history_records
+   WHERE worker_call_id IS NOT NULL AND worker_output_phase IS NULL
+     AND worker_owner_user_id IS NOT NULL AND worker_owner_user_id<>''
+   GROUP BY thread_id
+) shared ON shared.thread_id=t.id
+WHERE t.status='running'
 "#;
 
+// Each probe aggregates the rows that can produce the evidence — in-flight
+// audits, unsettled local calls, pending shared intents — and joins them to the
+// running Threads. Probing per Thread instead (`MAX(...) WHERE thread_id=?`)
+// walks that Thread's whole audit / call / history history: on a 5.6 GB database
+// the correlated form took ~125 ms and this one ~0.3 ms, and the poll runs every
+// five seconds for every account.
+//
 // A Thread that just started, or that the scan caught just as it finished, can
 // miss the live snapshot by the width of one pass; the recovery supervisor
 // re-registers a real run every five seconds, so only a Thread that stayed

@@ -1735,10 +1735,11 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_thread_id
 "#;
 
 // The administrator snapshot asks, per running Thread, whether a shared
-// device still owes a tool result. A local call answers from `worker_calls`,
-// but a shared call is only a pending intent row in the caller's history;
-// without this partial index that probe walks the Thread's whole history.
-// Pending shared intents are few, so the index stays small.
+// device still owes a tool result. A local call answers from `worker_calls`
+// (through the status-first `worker_calls_status_created` the sharing migration
+// owns), but a shared call is only a pending intent row in the caller's
+// history; without this partial index that probe walks the Thread's whole
+// history. Pending shared intents are few, so the index stays small.
 const USER_RUNNING_INDEXES: &str = r#"
 CREATE INDEX IF NOT EXISTS history_shared_intent_thread
   ON history_records(thread_id) WHERE worker_call_id IS NOT NULL

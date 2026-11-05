@@ -107,9 +107,12 @@ longest), the SQLite main/WAL/SHM sizes, and the Worker and upstream traffic.
 
 The block deliberately reads none of the snapshot tables: the counters are the
 database's own `user_rollup` row (seven integers the triggers maintain), the
-running split is bounded by the Threads executing right now, traffic comes from
+running split aggregates only the in-flight audits, unsettled Worker calls and
+pending shared intents of the Threads executing right now, traffic comes from
 the in-memory counters, and the file sizes are three `stat` calls. Attaching it
-to `/api/insights` therefore adds no read whose cost grows with history.
+to `/api/insights` therefore adds no read whose cost grows with history: on the
+largest production database every query of the endpoint together costs under a
+millisecond.
 
 Because it is a lifetime total, the range selector and the model / request-kind
 filters never change it; the page says so in the card and in **Metric
