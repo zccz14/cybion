@@ -71,7 +71,10 @@ fn a_user_database_carries_the_exe_schema_and_one_identity() {
     assert_eq!(created_at, now());
     let (again, _) = ensure(&connection).unwrap();
     assert_eq!(again.address(), identity.address());
-    assert_eq!(identity.address().len(), 44);
+    // The address is the base58 form of the 32-byte public key, and base58
+    // length follows the leading bytes (43 or 44 here), so assert the round
+    // trip rather than a character count.
+    assert_eq!(parse_address(&identity.address()).unwrap(), identity.public);
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM exe_identity", [], |r| r
