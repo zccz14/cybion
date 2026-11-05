@@ -46,6 +46,7 @@ mod normai;
 mod notes;
 mod objects;
 mod recovery;
+mod route_performance;
 mod run_phase;
 mod stats;
 mod thread_controls;
@@ -198,6 +199,8 @@ struct AppState {
     user_databases: Arc<user_databases::UserDatabases>,
     traffic: Arc<traffic::Monitor>,
     stats: Arc<stats::Patrol>,
+    /// Per-route request performance, recorded off the request path.
+    route_performance: Arc<route_performance::Monitor>,
 }
 
 #[derive(Clone)]
@@ -401,6 +404,8 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
     )?;
     let traffic = Arc::new(traffic::Monitor::open(&admin_db_path)?);
     tokio::spawn(traffic.clone().persist_periodically());
+    let route_performance = Arc::new(route_performance::Monitor::open(&admin_db_path)?);
+    tokio::spawn(route_performance.clone().persist_periodically());
     let state = AppState {
         data_dir: Arc::new(data_dir),
         admin_db_path: Arc::new(admin_db_path.clone()),
@@ -422,6 +427,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         user_databases: Arc::new(user_databases::UserDatabases::new()),
         traffic,
         stats: stats::Patrol::new(),
+        route_performance,
     };
     tracing::info!(%address, "Cybion Cloud listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -986,6 +992,7 @@ fn app(state: AppState) -> Router {
         .route("/api/reasoning-audits", get(reasoning_audits))
         .route("/api/worker-calls", get(worker_call_audits))
         .route("/api/worker-calls/{id}", get(worker_sharing::call_detail))
+        .route("/api/route-performance", get(route_performance_view))
         .route("/api/workers/{id}/grants", get(worker_sharing::list_grants))
         .route(
             "/api/workers/{id}/grants/{grantee}",
@@ -1136,6 +1143,10 @@ fn app(state: AppState) -> Router {
         .merge(external_api)
         .merge(worker_api)
         .fallback(static_asset)
+        .layer(from_fn_with_state(
+            state.clone(),
+            route_performance::measure,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -4118,6 +4129,34 @@ fn insight_range(value: Option<&str>) -> Result<String, ApiError> {
         "24h" | "7d" | "30d" | "all" => Ok(range.to_owned()),
         _ => Err(ApiError::bad_request("insight range is invalid")),
     }
+}
+
+#[derive(Deserialize)]
+struct RoutePerformanceQuery {
+    window: Option<String>,
+}
+
+/// The interface audit is cross-tenant: it reports every route's latency and
+/// outcome without attributing a request to a user, so only an administrator
+/// reads it.
+async fn route_performance_view(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Query(query): Query<RoutePerformanceQuery>,
+) -> Result<Json<route_performance::RoutePerformance>, ApiError> {
+    if !is_admin(&state, &identity.user.id, false).await? {
+        return Err(ApiError::forbidden("administrator access is required"));
+    }
+    let window = route_performance::window(query.window.as_deref())?;
+    let path = state.admin_db_path.clone();
+    // The minute still in memory is read here, before the blocking read, so the
+    // page is current while the request path keeps recording into it.
+    let live = state.route_performance.live();
+    let live_slow = state.route_performance.live_slow();
+    tokio::task::spawn_blocking(move || route_performance::load(&path, window, live, live_slow))
+        .await
+        .map_err(ApiError::internal)?
+        .map(Json)
 }
 
 async fn reasoning_audits(
@@ -10362,6 +10401,10 @@ mod normai_tests;
 mod traffic_tests;
 
 #[cfg(test)]
+#[path = "cloud_route_performance_tests.rs"]
+mod route_performance_tests;
+
+#[cfg(test)]
 #[path = "cloud_machine_tests.rs"]
 mod machine_tests;
 
@@ -10467,6 +10510,9 @@ mod tests {
                 worker_pairing_lock: Arc::new(Mutex::new(())),
                 active_requests: Arc::new(Mutex::new(HashMap::new())),
                 traffic: Arc::new(traffic::Monitor::open(&admin_db_path).unwrap()),
+                route_performance: Arc::new(
+                    route_performance::Monitor::open(&admin_db_path).unwrap(),
+                ),
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
                 user_databases: Arc::new(user_databases::UserDatabases::new()),
                 stats: stats::Patrol::new(),
