@@ -68,6 +68,11 @@ from the buckets, and merges the minute still in memory into the same numbers:
 
 Four aggregates come back: the totals, the per-route rows with their statuses,
 the per-bucket series the two charts draw, and the slowest recent requests.
+Every row carries its **cumulative time** (`total_us`, the sum of the samples)
+next to its average, because the two answer different questions: the average
+says whether a route is slow, the cumulative time says how much of the window
+the route actually consumed. A route at 900 ms over 400 calls is the expensive
+one, and only the cumulative column shows it.
 Percentiles are computed from the band counters, so a read costs the number of
 buckets and routes in the window — never the number of requests in history. The
 connection is read-only, so a page can never be the reason a flush waits.
@@ -83,14 +88,34 @@ percentile is never optimistic, except in the open-ended last band, which has no
 bound to report and falls back to the slowest request actually seen. Requests at
 or above one second are also counted as slow, both per route and per bucket.
 
+## What is counted, and what is not
+
+The audit measures **inbound requests that matched a route**. That has three
+consequences worth stating:
+
+- **Cybion's own background work is not counted.** The supervisor loops (request
+  recovery, statistics patrol, ultimate machines, eXe relay polling, cost
+  reconciliation) run inside the process and call functions, not the HTTP
+  interface. They produce no matched request, so they add no row.
+- **Outbound calls are not counted.** Talk to an upstream gateway, Linkit,
+  NormAI or the eXe relay leaves the process; this page never sees it. Outbound
+  bytes are the traffic counters' business, not this audit's.
+- **Device polling is counted.** A paired Worker polls the controller over HTTP
+  (`/worker/v1/...`), and `eXe` devices and the browser poll too. That is real
+  traffic on a real route, so it is measured like everything else — and it is
+  reported rather than hidden: the totals card splits the window by source into
+  browser and API keys (`/api/...`), the integration API (`/v1/...`) and device
+  workers (`/worker/...`), so an operator can tell how much of the request count
+  is polling before drawing conclusions about a route.
+
 ## What the page shows
 
 | Section | Answers |
 | --- | --- |
-| Totals | How many requests, how many failed, how slow the window was |
+| Totals | How many requests, how many failed, how slow the window was, how much time it consumed, and which source asked |
 | Requests | How the traffic moved across the window, with failing buckets in red |
 | P95 latency | How the tail behaved across the same buckets |
-| Routes | Per route and method: requests, 4xx, 5xx, slow, average, P50, P95, P99, max |
+| Routes | Per route and method: requests, cumulative time, 4xx, 5xx, slow, average, P50, P95, P99, max |
 | Slowest requests | The slowest of the newest 500 requests at or above one second |
 
 The page refreshes every ten seconds. Nothing is a snapshot that one has to ask
