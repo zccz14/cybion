@@ -1,4 +1,4 @@
-import { keepPreviousData, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArchiveRestoreIcon } from "lucide-react"
 import { ThreadLink } from "@/components/thread-status"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
@@ -42,7 +42,7 @@ function ThreadRow({ thread, language, onRestore, restoringId }: { thread: Threa
   </div>
 }
 
-export function ThreadList({ threads, loading, language, filters, onFiltersChange, pagination, onCreate, onRestore, restoringId }: {
+export function ThreadList({ threads, loading, language, filters, onFiltersChange, pagination, onCreate, onRestore, restoringId, blockedThreads }: {
   threads: ThreadListItem[]
   loading: boolean
   language: "en" | "zh"
@@ -52,6 +52,7 @@ export function ThreadList({ threads, loading, language, filters, onFiltersChang
   onCreate: () => void
   onRestore: (id: string) => void
   restoringId: string | null
+  blockedThreads?: number
 }) {
   const t = copy[language]
   // Restoring is only offered where archived Threads are listed; every other
@@ -59,7 +60,7 @@ export function ThreadList({ threads, loading, language, filters, onFiltersChang
   const archivedView = filters.view === "archived"
   return <div className="flex min-h-0 flex-1 flex-col">
     <div className="shrink-0 border-b p-3">
-      <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={onCreate} />
+      <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={onCreate} blockedThreads={blockedThreads} />
     </div>
     <div className="min-h-0 flex-1 overflow-y-auto p-3">
       {loading
@@ -81,6 +82,19 @@ type ThreadPage = { items: ThreadListItem[]; next_cursor: string | null; total: 
 // browser, the integration API, a Worker turn still running — arrive within one
 // interval, and every screen that shows the list shows the same fresh rows.
 const threadListPollMs = 2000
+
+// The one number the list shows about Threads it may not be listing: how many are
+// waiting on the user. It polls on the same cadence and reads the same server total
+// the blocked view itself would page through, so the chip and the view cannot disagree.
+function useBlockedThreadCount({ sessionId, request }: { sessionId: string | null | undefined; request: ThreadListRequest }) {
+  const blocked = useQuery({
+    queryKey: ["threads", sessionId, "blocked-count"],
+    queryFn: () => request<ThreadPage>("/api/threads?blocked=true&limit=1"),
+    refetchInterval: threadListPollMs,
+    staleTime: threadListPollMs,
+  })
+  return blocked.data?.total
+}
 
 // INVARIANT: the Thread List owns the threads. No page, shell or conversation above
 // it fetches, holds or polls thread rows, so opening a Thread cannot refetch the list,
@@ -131,14 +145,15 @@ export function ThreadListPane({ layout = "page", sessionId, request, language, 
   onCreate: () => void
 }) {
   const list = useThreadList({ sessionId, request, filters })
+  const blockedThreads = useBlockedThreadCount({ sessionId, request })
   const failure = Boolean(list.error) && <p className="px-3 py-2 text-xs text-destructive">{errorMessage(list.error)}</p>
   if (layout === "page") return <>
-    <ThreadList threads={list.threads} loading={list.loading} language={language} filters={filters} onFiltersChange={onFiltersChange} pagination={list.pagination} onCreate={onCreate} onRestore={list.onRestore} restoringId={list.restoringId} />
+    <ThreadList threads={list.threads} loading={list.loading} language={language} filters={filters} onFiltersChange={onFiltersChange} pagination={list.pagination} onCreate={onCreate} onRestore={list.onRestore} restoringId={list.restoringId} blockedThreads={blockedThreads} />
     {failure}
   </>
   return <>
     <div className="pb-2">
-      <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={onCreate} />
+      <ThreadListControls filters={filters} language={language} onFiltersChange={onFiltersChange} onNewThread={onCreate} blockedThreads={blockedThreads} />
     </div>
     <nav className="flex max-h-44 flex-col gap-1 overflow-y-auto lg:max-h-[calc(100svh-12rem)]" aria-label={filters.view === "archived" ? copy[language].archivedThreads : copy[language].threads}>
       {list.loading && <div className="flex flex-col gap-2 px-2 py-1"><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>}

@@ -7,12 +7,13 @@ const states = [
   ["stopped", "已停止", "Stopped", "square"],
   ["ready", "待开始", "Ready", "message-square-dashed"],
   ["compacting", "压缩中", "Compacting", "minimize-2"],
+  ["blocked", "受阻", "Blocked", "circle-pause"],
 ] as const
 
 test("all states have distinct icons, visible bilingual text, and matching detail badges", async ({ page }) => {
   await page.goto("/e2e/thread-status.html#/threads/running")
   const links = page.getByRole("navigation").getByRole("link")
-  await expect(links).toHaveCount(6)
+  await expect(links).toHaveCount(7)
   for (const [status, zh, , icon] of states) {
     const link = page.getByRole("navigation").locator(`[data-thread-status="${status}"]`)
     await expect(link.getByText(zh, { exact: true })).toBeVisible()

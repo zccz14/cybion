@@ -1,4 +1,4 @@
-export type ThreadDisplayStatus = "ready" | "running" | "compacting" | "completed" | "failed" | "stopped"
+export type ThreadDisplayStatus = "ready" | "running" | "compacting" | "completed" | "failed" | "stopped" | "blocked"
 
 type StatusCopyKey = ThreadDisplayStatus | `${ThreadDisplayStatus}Hint`
 
@@ -10,6 +10,7 @@ const copy = {
     completed: "Completed", completedHint: "The latest execution finished successfully. You can send another message.",
     failed: "Failed", failedHint: "The latest execution failed. Open the thread for error details.",
     stopped: "Stopped", stoppedHint: "Execution was stopped. Saved records are kept and you can continue.",
+    blocked: "Blocked", blockedHint: "Waiting on you: the Thread said it cannot go on. Send a message to clear the block and let it continue.",
   },
   zh: {
     ready: "待开始", readyHint: "尚未开始执行，发送消息即可开始。",
@@ -18,6 +19,7 @@ const copy = {
     completed: "已完成", completedHint: "最近一次执行已成功结束，可以继续发送消息。",
     failed: "执行失败", failedHint: "最近一次执行失败，打开线程查看错误详情。",
     stopped: "已停止", stoppedHint: "执行已停止，已保存的记录保留，可以继续执行。",
+    blocked: "受阻", blockedHint: "正在等你：这个线程说自己做不下去了。回一句话即解除受阻，让它继续。",
   },
 } satisfies Record<"en" | "zh", Record<StatusCopyKey, string>>
 

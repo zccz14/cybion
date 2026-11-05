@@ -27,6 +27,12 @@ const archivedSeed: ThreadListItem[] = [
   { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", updated_at: now - 40 * 86400, usage: emptyThreadUsage },
 ]
 
+// The blocked view is its own server-side selection, so the fixture swaps in the
+// Threads that wait on the user and leaves every other view's rows untouched.
+const blockedSeed: ThreadListItem[] = [
+  { id: "blocked", title: "部署卡在缺少生产环境令牌", created_by: "web", external_ref: null, display_status: "blocked", updated_at: now - 10 * 60, usage: emptyThreadUsage },
+]
+
 // The fixture mirrors the server-side filter and cursor paging semantics plus
 // the app shell's URL filter wiring, so the e2e suite can exercise the shared
 // list chrome without a backend.
@@ -35,6 +41,7 @@ function fixtureMatches(thread: ThreadListItem, filters: ThreadListFilters) {
   if (filters.view === "api" && thread.created_by !== "api") return false
   if (filters.view === "running" && thread.display_status !== "running" && thread.display_status !== "compacting") return false
   if (filters.view === "failed" && thread.display_status !== "failed") return false
+  if (filters.view === "blocked" && thread.display_status !== "blocked") return false
   const query = filters.q.trim().toLowerCase()
   if (query === "") return true
   return thread.title.toLowerCase().includes(query) || (thread.external_ref ?? "").toLowerCase().includes(query)
@@ -57,7 +64,8 @@ function Fixture() {
   // so the fixture swaps the rows the server would return and keeps every other
   // part of the chrome — search, empty state, paging — identical.
   const archivedView = filters.view === "archived"
-  const all = archivedView ? archived : paged ? [...threads, ...olderSeed] : threads
+  const blockedView = filters.view === "blocked"
+  const all = archivedView ? archived : blockedView ? blockedSeed : paged ? [...threads, ...olderSeed] : threads
   const matches = all.filter((thread) => fixtureMatches(thread, filters))
   const visible = archivedView ? matches : matches.slice(0, pageSize * pagesLoaded)
   const pagination = { hasMore: !archivedView && visible.length < matches.length, loadingMore: false, onLoadMore: () => setPagesLoaded((count) => count + 1) }
@@ -70,7 +78,7 @@ function Fixture() {
       <span data-testid="created">{created}</span>
       <span data-testid="restored">{restored}</span>
     </header>
-    <ThreadList threads={visible} loading={false} language={language} filters={filters} onFiltersChange={setFilters} pagination={pagination} onCreate={() => setCreated((value) => value + 1)} onRestore={(id) => { setArchived((items) => items.filter((item) => item.id !== id)); setRestored(id) }} restoringId={null} />
+    <ThreadList threads={visible} loading={false} language={language} filters={filters} onFiltersChange={setFilters} pagination={pagination} onCreate={() => setCreated((value) => value + 1)} onRestore={(id) => { setArchived((items) => items.filter((item) => item.id !== id)); setRestored(id) }} restoringId={null} blockedThreads={blockedSeed.length} />
   </main>
 }
 createRoot(document.getElementById("root")!).render(<StrictMode><TooltipProvider delayDuration={0}><HashRouter><Fixture /></HashRouter></TooltipProvider></StrictMode>)

@@ -39,6 +39,16 @@ test("view chips switch between all, mine, api, running, failed, and archived", 
   await page.getByRole("button", { name: "失败" }).click()
   await expect(page.getByRole("link")).toHaveCount(1)
   await expect(page.getByRole("link")).toContainText("检查远程服务器连接")
+  // The blocked chip carries how many Threads are waiting on the user, and the
+  // chip itself is the filter into them.
+  const blocked = page.getByRole("button", { name: /受阻/ })
+  await expect(blocked).toContainText("1")
+  await blocked.click()
+  await expect(blocked).toHaveAttribute("aria-pressed", "true")
+  // One preset is selected at a time: the origin chip must stand down.
+  await expect(page.getByRole("button", { name: "网页创建" })).toHaveAttribute("aria-pressed", "false")
+  await expect(page.getByRole("link")).toHaveCount(1)
+  await expect(page.getByRole("link")).toContainText("部署卡在缺少生产环境令牌")
   await expect(page.getByRole("button", { name: "已归档" })).toHaveAttribute("aria-pressed", "false")
   await page.getByRole("button", { name: "全部" }).click()
   await expect(page.getByRole("link")).toHaveCount(3)
