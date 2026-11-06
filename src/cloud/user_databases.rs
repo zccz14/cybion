@@ -80,6 +80,9 @@ impl UserDatabases {
             // once the operation has committed or rolled back.
             let admission = slot.queue.clone().lock_owned().await;
             let joined = tokio::task::spawn_blocking(move || {
+                // Names the statements this operation runs, so a slow one in the
+                // audit points at the handler that asked for it.
+                let _label = sql_performance::enter(caller);
                 let _admission = admission;
                 let mut connection = slot
                     .connection
