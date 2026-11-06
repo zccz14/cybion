@@ -134,6 +134,7 @@ import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, 
 import { ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
 import { ManualLoadNotice } from "@/components/manual-load-notice"
 import { ThreadManualLoads } from "@/components/thread-manual-loads"
+import { ThreadNotes } from "@/components/thread-notes"
 import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
 import { errorMessage } from "@/lib/utils"
@@ -1616,9 +1617,11 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
-  // Deleting a Thread tears off its open notes: the confirmation lists exactly
-  // what goes, because a note written here cannot be read by another Thread.
-  const threadNotes = useQuery({ queryKey: ["notes"], queryFn: () => api<{ open: Note[]; done: Note[] }>(sdk, "/api/notes"), enabled: deleteOpen })
+  // The Thread's open notes are one list with two readers: the row above the
+  // loaded manuals, and the delete confirmation that has to say exactly which
+  // notes leave with the Thread. The model writes and crosses them out
+  // mid-turn, so the query polls instead of waiting for a reload.
+  const threadNotes = useQuery({ queryKey: ["notes"], queryFn: () => api<{ open: Note[]; done: Note[] }>(sdk, "/api/notes"), refetchInterval: 3000 })
   const openThreadNotes = (threadNotes.data?.open ?? []).filter((note) => note.thread_id === threadId)
   useEffect(() => {
     setTitle(thread.data?.title ?? "")
@@ -1770,6 +1773,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
             {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
             {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
             {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} runningSummary={current.running_summary} language={language} /></div></MessageScrollerItem>}
+            {openThreadNotes.length > 0 && <div className="border-t pt-3"><ThreadNotes notes={openThreadNotes} language={language} /></div>}
             {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
           </MessageScrollerContent>
         </MessageScrollerViewport>
