@@ -4,12 +4,17 @@ import test from "node:test"
 import {
   callerLabel,
   callerSource,
+  formatPercent,
   formatScanPerCall,
   formatShare,
+  hotShare,
+  hotStatements,
   scanSeverity,
   sortStatements,
   sqlPreview,
   sqlSeriesPeak,
+  statementShare,
+  summarizeStatementSources,
   type SqlStatement,
 } from "../src/lib/sql-performance.ts"
 
@@ -117,4 +122,44 @@ test("the page is wired as an administrator-only audit page", () => {
   // is fired on their behalf.
   assert.match(page, /enabled: allowed/)
   assert.match(page, /if \(!allowed\) return/)
+})
+
+test("a share of the window reads as a percentage a reader can compare", () => {
+  // 450 ppm is 0.045%: one decimal would print 0.0%.
+  assert.equal(formatPercent(0), "0%")
+  assert.equal(formatPercent(0.0004), "<0.1%")
+  assert.equal(formatPercent(0.045), "4.5%")
+  assert.equal(formatPercent(0.096), "9.6%")
+  assert.equal(formatPercent(0.459), "46%")
+  assert.equal(formatPercent(1), "100%")
+  // A window with no recorded time divides by zero; it must not print NaN%.
+  assert.equal(statementShare({ total_us: 10 }, 0), 0)
+  assert.equal(formatPercent(statementShare({ total_us: 10 }, 0)), "0%")
+})
+
+test("the leaderboard names the statements that own the window", () => {
+  const commit = statement({ key: "commit", total_us: 19_180_000, statements: 7_572 })
+  const threads = statement({ key: "threads", total_us: 14_243_000, statements: 696 })
+  const workers = statement({ key: "workers", total_us: 4_000_000, statements: 1_538 })
+  const manuals = statement({ key: "manuals", total_us: 210_000, statements: 10 })
+  const all = [manuals, threads, commit, workers]
+  assert.deepEqual(hotStatements(all).map((row) => row.key), ["commit", "threads", "workers"])
+  assert.deepEqual(hotStatements(all, 1).map((row) => row.key), ["commit"])
+  // Three statements are 89.5% of the 41.8 s window.
+  assert.equal(formatPercent(hotShare(hotStatements(all), 41_800_000)), "90%")
+  assert.equal(hotShare(all, 0), 0)
+})
+
+test("the lanes are ordered by the time they spent, and an idle lane is left out", () => {
+  const lanes = summarizeStatementSources([
+    statement({ key: "a", caller: "src/cloud.rs:4045:5", total_us: 14_000_000 }),
+    statement({ key: "b", caller: "cloud::stats::patrol", total_us: 1_000_000 }),
+    statement({ key: "c", caller: "src/cloud/worker_sharing.rs:713:16", total_us: 113_000 }),
+    statement({ key: "d", caller: "src/cloud.rs:8438:5", total_us: 19_000_000 }),
+  ], 34_113_000)
+  assert.deepEqual(lanes.map((lane) => lane.source), ["browser", "patrol", "worker"])
+  assert.deepEqual(lanes.map((lane) => lane.statements), [2, 1, 1])
+  assert.equal(formatPercent(lanes[0].share), "97%")
+  assert.equal(formatPercent(lanes[2].share), "0.3%")
+  assert.deepEqual(summarizeStatementSources([], 0), [])
 })

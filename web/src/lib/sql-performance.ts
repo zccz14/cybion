@@ -135,6 +135,59 @@ export function callerLabel(caller: string): string {
   return caller.replace(/^src\//, "").replace(/^cloud\//, "")
 }
 
+/// A statement's share of the window's cumulative time. This is the number that
+/// answers "which statement is the hot spot": the leaderboard bar and the
+/// table's Share column are both drawn from it.
+export function statementShare(statement: Pick<SqlStatement, "total_us">, totalUs: number): number {
+  if (!(totalUs > 0)) return 0
+  return Math.max(0, statement.total_us) / totalUs
+}
+
+/// A share as a percentage a reader can compare: whole percents from 10% up, one
+/// decimal below, and "<0.1%" instead of a misleading "0%".
+export function formatPercent(share: number): string {
+  if (!Number.isFinite(share) || share <= 0) return "0%"
+  const percent = share * 100
+  if (percent < 0.1) return "<0.1%"
+  if (percent < 10) return `${percent.toFixed(1)}%`
+  return `${Math.round(percent)}%`
+}
+
+export type SqlSourceSummary = { source: SqlCallerSource; statements: number; total_us: number; share: number }
+
+/// Where the time goes by lane. A lane appears only when it actually spent
+/// time, and the busiest lane comes first, so the first chip answers "whose
+/// queue is being held".
+export function summarizeStatementSources(statements: SqlStatement[], totalUs: number): SqlSourceSummary[] {
+  // The denominator is the window's own total, so a lane's share reads on the
+  // same scale as the Share column even if the list were ever truncated.
+  const summaries = new Map<SqlCallerSource, SqlSourceSummary>()
+  for (const statement of statements) {
+    const source = callerSource(statement.caller)
+    const summary = summaries.get(source) ?? { source, statements: 0, total_us: 0, share: 0 }
+    summary.statements += 1
+    summary.total_us += statement.total_us
+    summaries.set(source, summary)
+  }
+  return [...summaries.values()]
+    .map((summary) => ({ ...summary, share: totalUs > 0 ? summary.total_us / totalUs : 0 }))
+    .filter((summary) => summary.total_us > 0)
+    .sort((left, right) => right.total_us - left.total_us)
+}
+
+/// The statements that own the window, largest cumulative time first. This is
+/// the leaderboard: three rows answer "where does the time go" before anyone
+/// reads the full table.
+export function hotStatements(statements: SqlStatement[], limit = 3): SqlStatement[] {
+  return sortStatements(statements, "total_us", true).slice(0, limit)
+}
+
+/// How much of the window the hottest few statements account for.
+export function hotShare(statements: SqlStatement[], totalUs: number): number {
+  if (!(totalUs > 0)) return 0
+  return statements.reduce((sum, statement) => sum + Math.max(0, statement.total_us), 0) / totalUs
+}
+
 export type SqlSortKey =
   | "statements"
   | "total_us"

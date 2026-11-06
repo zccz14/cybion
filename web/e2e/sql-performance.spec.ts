@@ -133,6 +133,17 @@ test("the page reads statement cost, scan steps and its own overhead in one plac
   await expect(totals).toContainText("Rows scanned")
   await expect(totals).toContainText("4,200,000")
 
+  // Before the table, three rows answer "where does the time go": the commit is
+  // 46% of the window, the thread list 34%, and together the three are 90%.
+  const hotspots = page.locator('[data-slot="sql-performance-hotspots"]')
+  await expect(hotspots.locator("li")).toHaveCount(3)
+  await expect(hotspots.locator("li").nth(0)).toContainText("COMMIT")
+  await expect(hotspots.locator("li").nth(0)).toContainText("46%")
+  await expect(hotspots.locator("li").nth(1)).toContainText("threads t")
+  await expect(hotspots.locator("li").nth(1)).toContainText("34%")
+  await expect(page.locator('[data-slot="sql-performance-hotspot-lanes"]')).toContainText("browser")
+  await expect(page.locator('[data-slot="sql-performance-hotspot-lanes"]')).toContainText("patrol")
+
   // The profiler reports what it costs, in the same units the rest of the page uses.
   const overhead = page.locator('[data-slot="sql-performance-overhead"]')
   await expect(overhead).toContainText("Share of wall time")
@@ -152,6 +163,10 @@ test("the page reads statement cost, scan steps and its own overhead in one plac
   // 884 rows walked per call is a wide scan, and the badge says so.
   await expect(rows.nth(1)).toContainText("wide scan")
   await expect(rows.nth(0)).toContainText("indexed")
+  // Share is the same number the leaderboard uses, so the table stays readable
+  // after sorting by another column.
+  await expect(page.getByRole("columnheader", { name: "Share" })).toBeVisible()
+  await expect(rows.nth(0)).toContainText("46%")
 
   // The statement text is cut to one line but the whole statement stays reachable.
   const longest = rows.nth(1).locator('[data-slot="sql-performance-statement-sql"]')
@@ -165,6 +180,8 @@ test("the page reads statement cost, scan steps and its own overhead in one plac
   await expect(totals).toContainText("累计耗时")
   await expect(totals).toContainText("42 秒")
   await expect(overhead).toContainText("占墙钟比例")
+  await expect(page.getByText("时间花在哪")).toBeVisible()
+  await expect(page.getByRole("columnheader", { name: "占比" })).toBeVisible()
 
   expect(new Set(state.windows)).toEqual(new Set(["24h"]))
   expect(errors).toEqual([])
