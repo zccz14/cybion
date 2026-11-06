@@ -52,6 +52,42 @@ jobs:
           path: |
             *.tar.gz
             *.tar.gz.sha256
+  components:
+    # Publishing waits for the npm trusted publisher to be configured for this
+    # repository; flip the NPM_COMPONENTS_PUBLISH variable once it is.
+    if: vars.NPM_COMPONENTS_PUBLISH == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: packages/cybion-components/pnpm-lock.yaml
+      - run: pnpm --dir packages/cybion-components install --frozen-lockfile
+      - run: pnpm --dir packages/cybion-components run typecheck
+      - run: pnpm --dir packages/cybion-components test
+      - run: pnpm --dir packages/cybion-components run build
+      - name: Publish to npm
+        run: |
+          cd packages/cybion-components
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
+            echo "${package_name}@${package_version} is already published; skipping."
+          else
+            npm publish
+          fi
+
   publish:
     needs: build
     runs-on: ubuntu-latest

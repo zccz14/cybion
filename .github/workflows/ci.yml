@@ -49,6 +49,12 @@ jobs:
           path: web/test-results
           if-no-files-found: ignore
       - run: pnpm --dir web run build
+      - name: Components package
+        run: |
+          pnpm --dir packages/cybion-components install --frozen-lockfile
+          pnpm --dir packages/cybion-components run typecheck
+          pnpm --dir packages/cybion-components test
+          pnpm --dir packages/cybion-components run build
       - run: python3 scripts/check-responses-parity.py
       - run: python3 scripts/test-smoke-worker-onboarding.py
       - run: bash -n .github/scripts/send-deploy.sh deploy/deploy-release.sh
