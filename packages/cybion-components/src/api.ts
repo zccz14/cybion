@@ -20,6 +20,8 @@ export type Thread = {
   context_budget_tokens: number | null
   minimal_mode: boolean | null
   image_generation_model: string | null
+  /** `null` follows the account default; speech-to-text stays on either way. */
+  audio_transcription_model: string | null
   max_loaded_manuals: number | null
   archived_at: number | null
   context_tokens: number | null
@@ -46,7 +48,7 @@ export type UpstreamModels = { upstreams: UpstreamCatalog[] }
 export type ThreadPatch = Partial<Pick<Thread,
   "title" | "model" | "upstream_id" | "reasoning_effort" | "service_tier_fast" |
   "context_budget_tokens" | "minimal_mode" | "image_generation_model" |
-  "max_loaded_manuals">> & { archived?: boolean }
+  "audio_transcription_model" | "max_loaded_manuals">> & { archived?: boolean }
 
 export type RequestAck = { thread_id: string; record_idx: number; status: "accepted" }
 
@@ -168,9 +170,10 @@ export class CybionThreadClient {
     return this.request<ThreadDefaults>("/api/thread-defaults")
   }
 
-  /** Audio the thread recorded is served from the object store behind the same bearer token. */
-  async object(reference: string): Promise<Blob> {
-    const path = `/api/objects/${encodeURIComponent(reference)}`
+  /** Audio and images the thread produced are served from the object store behind the same bearer token. */
+  async object(reference: string, mediaType?: string | null): Promise<Blob> {
+    const query = mediaType ? `?media_type=${encodeURIComponent(mediaType)}` : ""
+    const path = `/api/objects/${encodeURIComponent(reference)}${query}`
     const first = await this.fetchImpl(this.url(path), {
       headers: { Authorization: `Bearer ${await this.getToken()}` },
     })
