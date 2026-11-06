@@ -13,13 +13,18 @@ import { formatLatency, formatTotalDuration } from "@/lib/route-performance"
 import {
   callerLabel,
   callerSource,
+  formatPercent,
   formatScanPerCall,
   formatShare,
+  hotShare,
+  hotStatements,
   scanSeverity,
   sortStatements,
+  statementShare,
   sqlPerformanceWindows,
   sqlPreview,
   sqlSeriesPeak,
+  summarizeStatementSources,
   type SqlBucket,
   type SqlCallerSource,
   type SqlPerformance,
@@ -64,11 +69,17 @@ const copy = {
     volumeDescription: "Statements run each {unit} of the window",
     trend: "P95 latency",
     trendDescription: "The 95th percentile of statement time each {unit}",
+    hotspots: "Where the time goes",
+    hotspotsDescription: "The statements that own this window, largest cumulative time first. The bar is that statement's share of all statement time, so the longest bar is what holds the queue.",
+    hotspotTop: "These {count} account for {share} of the {total} recorded.",
+    hotspotLanes: "By lane",
+    share: "Share",
     table: "By statement",
     tableDescription: "Ordered by cumulative time: a statement that costs 18 ms every five seconds outranks one that costs 400 ms once. Click a column to sort.",
     tableCount: "{shown} of {total} statements shown",
     statement: "Statement",
     calls: "Calls",
+    callsSuffix: "calls",
     total: "Total",
     scanPerCall: "Scan/call",
     slowStatements: "Slow",
@@ -137,11 +148,17 @@ const copy = {
     volumeDescription: "区间内每{unit}执行的语句数",
     trend: "P95 延迟",
     trendDescription: "每{unit}语句耗时的 95 分位",
+    hotspots: "时间花在哪",
+    hotspotsDescription: "这个区间里最占时间的语句，按累计耗时从大到小。条形是它占全部语句耗时的比例——最长的那条，就是按住队列的地方。",
+    hotspotTop: "这 {count} 条占全部耗时的 {share}，合计 {total}。",
+    hotspotLanes: "按来源",
+    share: "占比",
     table: "按语句",
     tableDescription: "按累计耗时排序：每五秒跑一次、每次 18 毫秒的语句，排在只跑过一次的 400 毫秒语句前面。点击列头可改排序。",
     tableCount: "共 {total} 条，显示 {shown} 条",
     statement: "语句",
     calls: "次数",
+    callsSuffix: "次",
     total: "累计",
     scanPerCall: "扫描/次",
     slowStatements: "慢",
@@ -186,6 +203,8 @@ const columns: SqlColumn[] = [
   { key: null, label: "statement" },
   { key: "statements", label: "calls", numeric: true },
   { key: "total_us", label: "total", numeric: true },
+  // Share is proportional to Total, so sorting by it would be the same click.
+  { key: null, label: "share", numeric: true },
   { key: "fullscan_per_call", label: "scanPerCall", numeric: true },
   { key: "average_us", label: "average", numeric: true },
   { key: "p95_us", label: "p95", numeric: true, narrow: "hidden md:table-cell" },
@@ -304,6 +323,7 @@ function SqlPerformanceSession({ language, sessionId, request, allowed }: Props)
         </dl>
       </CardContent>
     </Card>
+    <Hotspots statements={data.statements} totalUs={totals.total_us} t={t} number={number} language={language} />
     <Card>
       <CardHeader>
         <CardTitle>{t.overhead}</CardTitle>
@@ -362,7 +382,7 @@ function SqlPerformanceSession({ language, sessionId, request, allowed }: Props)
         {statements.length === 0
           ? <p className="py-6 text-sm text-muted-foreground">{t.empty}</p>
           : <div className="max-h-[36rem] overflow-auto rounded-md border">
-            <table className="w-full min-w-[54rem] text-left text-sm" data-slot="sql-performance-statements">
+            <table className="w-full min-w-[58rem] text-left text-sm" data-slot="sql-performance-statements">
               <thead className="sticky top-0 z-10 bg-card text-xs text-muted-foreground shadow-[inset_0_-1px_0_var(--color-border)]">
                 <tr>{columns.map((column) => <th key={column.label} aria-sort={column.key !== null && column.key === sortKey ? (descending ? "descending" : "ascending") : "none"} className={cn("px-3 py-2 font-medium", column.numeric && "text-right", column.narrow)}>
                   {column.key === null
@@ -373,7 +393,7 @@ function SqlPerformanceSession({ language, sessionId, request, allowed }: Props)
                 </th>)}</tr>
               </thead>
               <tbody className="divide-y">
-                {statements.map((statement) => <StatementRow key={statement.key} statement={statement} t={t} number={number} language={language} />)}
+                {statements.map((statement) => <StatementRow key={statement.key} statement={statement} totalUs={totals.total_us} t={t} number={number} language={language} />)}
               </tbody>
             </table>
           </div>}
@@ -413,8 +433,59 @@ function SqlPerformanceSession({ language, sessionId, request, allowed }: Props)
   </div>
 }
 
-function StatementRow({ statement, t, number, language }: {
+function Hotspots({ statements, totalUs, t, number, language }: {
+  statements: SqlStatement[]
+  totalUs: number
+  t: typeof copy.en | typeof copy.zh
+  number: (value: number) => string
+  language: "en" | "zh"
+}) {
+  const top = hotStatements(statements, 3)
+  if (top.length === 0) return null
+  const lanes = summarizeStatementSources(statements, totalUs).slice(0, 4)
+  return <Card>
+    <CardHeader>
+      <CardTitle>{t.hotspots}</CardTitle>
+      <CardDescription>{t.hotspotsDescription}</CardDescription>
+    </CardHeader>
+    <CardContent className="flex flex-col gap-4">
+      <ol className="flex flex-col gap-3" data-slot="sql-performance-hotspots">
+        {top.map((statement, index) => {
+          const share = statementShare(statement, totalUs)
+          return <li key={statement.key} className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <span className="w-3 shrink-0 text-xs text-muted-foreground tabular-nums">{index + 1}</span>
+              <span className="min-w-0 flex-1"><StatementName sql={statement.sql} caller={statement.caller} t={t} /></span>
+              <span className="flex w-full items-baseline justify-end gap-3 font-mono text-sm tabular-nums sm:ml-auto sm:w-auto">
+                <span className="text-muted-foreground">{number(statement.statements)} {t.callsSuffix}</span>
+                <span>{formatTotalDuration(statement.total_us, language)}</span>
+                <span className="w-12 text-right font-medium">{formatPercent(share)}</span>
+              </span>
+            </div>
+            <div className="ml-6 flex h-2 overflow-hidden rounded-full bg-muted" title={formatPercent(share)}>
+              <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(1, share * 100)}%` }} />
+            </div>
+          </li>
+        })}
+      </ol>
+      <div className="flex flex-col gap-2 border-t pt-4">
+        <p className="text-xs text-muted-foreground tabular-nums">
+          {t.hotspotTop.replace("{count}", number(top.length)).replace("{share}", formatPercent(hotShare(top, totalUs))).replace("{total}", formatTotalDuration(totalUs, language))}
+        </p>
+        <div className="flex flex-wrap items-center gap-2 text-xs" data-slot="sql-performance-hotspot-lanes">
+          <span className="text-muted-foreground">{t.hotspotLanes}</span>
+          {lanes.map((lane) => <Badge key={lane.source} variant="outline" className="font-normal">
+            {sourceLabel(lane.source, t)} <span className="ml-1 font-mono tabular-nums">{formatPercent(lane.share)}</span>
+          </Badge>)}
+        </div>
+      </div>
+    </CardContent>
+  </Card>
+}
+
+function StatementRow({ statement, totalUs, t, number, language }: {
   statement: SqlStatement
+  totalUs: number
   t: typeof copy.en | typeof copy.zh
   number: (value: number) => string
   language: "en" | "zh"
@@ -426,6 +497,13 @@ function StatementRow({ statement, t, number, language }: {
         return number(statement.statements)
       case "total":
         return formatTotalDuration(statement.total_us, language)
+      case "share": {
+        const share = statementShare(statement, totalUs)
+        return <span className="inline-flex items-center justify-end gap-2">
+          <span className="h-1.5 w-10 overflow-hidden rounded-full bg-muted"><span className="block h-full rounded-full bg-primary" style={{ width: `${Math.max(2, Math.round(share * 100))}%` }} /></span>
+          <span className="w-10 text-right">{formatPercent(share)}</span>
+        </span>
+      }
       case "scanPerCall":
         // The badge is a fixed-width slot after the number, so the counts line up
         // on their right edge even though the verdicts differ in width.
