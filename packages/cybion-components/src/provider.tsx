@@ -47,6 +47,15 @@ export function CybionThreadProvider({ baseUrl, getToken, fetch, language = "zh"
   return <CybionContext.Provider value={value}>{children}</CybionContext.Provider>
 }
 
+/**
+ * Links inside record cards point at the host (a Manual, another Thread). A card
+ * rendered outside a provider — a test page, a host composing one record — still
+ * gets a working plain anchor.
+ */
+export function useCybionLink(): CybionLink {
+  return useContext(CybionContext)?.link ?? defaultLink
+}
+
 export function useCybion() {
   const value = useContext(CybionContext)
   if (!value) throw new Error("CybionThreadView must be rendered inside CybionThreadProvider")

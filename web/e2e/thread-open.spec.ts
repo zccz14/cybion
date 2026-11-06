@@ -12,7 +12,7 @@ test("a Thread opened from its URL survives the loading placeholder", async ({ p
   await page.goto("/#/threads/created-thread")
   await expect(page).toHaveURL(/#\/threads\/created-thread/)
   await expect(page.getByRole("heading", { name: "Fixture conversation" })).toBeVisible()
-  await expect(page.getByText("这个线程还没有消息。")).toBeVisible()
+  await expect(page.getByText("这个对话还没有消息。")).toBeVisible()
   await expect(page.getByPlaceholder("继续描述你的需求…")).toBeVisible()
   expect(fixture.unexpected).toEqual([])
 })

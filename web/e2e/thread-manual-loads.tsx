@@ -11,7 +11,7 @@ import { manualLoadNotice } from "../src/lib/thread-manual-loads"
 import type { HistoryRecord } from "../src/lib/thread-history"
 import { formattedTime } from "../src/lib/time"
 import "../src/styles.css"
-import { ManualLoadNotice, ThreadHistory } from "@zccz14/cybion-components"
+import { CybionThreadProvider, ManualLoadNotice, ThreadHistory } from "@zccz14/cybion-components"
 
 const manual = "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f"
 const edited = "c0ffee00-1111-2222-3333-444455556666"
@@ -66,4 +66,9 @@ function Fixture() {
     </section>
   </main>
 }
-createRoot(document.getElementById("root")!).render(<StrictMode><HashRouter><Fixture /></HashRouter></StrictMode>)
+// The host owns routing: inside this app the Manual link has to stay a hash route.
+const link = ({ href, children, ...rest }: { href: string; children?: React.ReactNode }) => <a href={`#${href}`} {...rest}>{children}</a>
+
+createRoot(document.getElementById("root")!).render(<StrictMode><HashRouter>
+  <CybionThreadProvider baseUrl="" getToken={() => "e2e"} link={link}><Fixture /></CybionThreadProvider>
+</HashRouter></StrictMode>)

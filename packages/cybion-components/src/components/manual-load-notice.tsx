@@ -1,4 +1,5 @@
 import { BookOpenIcon, BookXIcon } from "lucide-react"
+import { useCybionLink } from "../provider"
 import type { ManualSummary } from "./cybion-tool-call"
 
 const copy = {
@@ -25,6 +26,7 @@ export function ManualLoadNotice({ notice, lookup, language, time, recordId }: {
   time: string
   recordId: number
 }) {
+  const Link = useCybionLink()
   const text = copy[language]
   const loaded = notice.loaded
   const tone = loaded
@@ -44,7 +46,7 @@ export function ManualLoadNotice({ notice, lookup, language, time, recordId }: {
       </div>
       <p className="mt-1.5 text-sm leading-6 text-muted-foreground">{loaded ? text.loadedBody : text.unloadedBody}</p>
       <div className="mt-2 flex flex-wrap gap-2">
-        <a href={`/manuals?manual=${encodeURIComponent(notice.manual_id)}`} title={notice.manual_id} className="rounded-full border bg-card px-2 py-0.5 text-xs font-medium hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{lookup?.get(notice.manual_id)?.name ?? text.unknown}</a>
+        <Link href={`/manuals?manual=${encodeURIComponent(notice.manual_id)}`} title={notice.manual_id} className="rounded-full border bg-card px-2 py-0.5 text-xs font-medium hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{lookup?.get(notice.manual_id)?.name ?? text.unknown}</Link>
       </div>
       <div className="mt-2 text-[0.68rem] text-muted-foreground"><span className="font-mono">#{recordId}</span></div>
     </div>
