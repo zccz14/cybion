@@ -3754,3 +3754,102 @@ async fn inference_replays_portably_when_a_strict_validator_refuses_a_replay_fie
     .unwrap();
     assert_eq!(failed, 0, "the repaired turn never fails the Thread");
 }
+
+#[tokio::test]
+async fn a_turn_that_still_owes_a_note_is_sent_back_with_the_runtime_nudge() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "continuation-loop-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let note_id = user_db(&state, &user, true, {
+        let thread_id = thread.id.clone();
+        move |connection| notes::add(connection, &thread_id, &["pay the rent".to_owned()], 120)
+    })
+    .await
+    .unwrap()
+    .0[0]
+        .id
+        .clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        // The mock stops when the controller stops asking, so a loop that never
+        // hands the turn back fails the assertion instead of hanging the suite.
+        while let Ok(Ok((mut socket, _))) =
+            tokio::time::timeout(Duration::from_secs(3), listener.accept()).await
+        {
+            let request = read_json_request(&mut socket).await;
+            requests.push(request);
+            // The first answer claims to be finished; the kernel should refuse to
+            // end the turn and ask again. The second closes the note through the
+            // tool, so the third is the model's real summary.
+            let body = match requests.len() {
+                1 => json!({"id":"r0","end_turn":true,"output":[{"type":"message","id":"m0","role":"assistant","content":[{"type":"output_text","text":"I will start."}]}]}),
+                2 => json!({"id":"r1","end_turn":false,"output":[{"type":"function_call","id":"fc1","call_id":"call_1","name":"cross_out_notes","arguments":format!("{{\"note_ids\":[\"{note_id}\"]}}")}]}),
+                _ => json!({"id":"r2","end_turn":true,"output":[{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}),
+            }
+            .to_string();
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        }
+        requests
+    });
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: format!("http://{address}"),
+        api_key: "fixture".to_owned(),
+    };
+    // A live turn runs with the Thread marked running; the loop treats any other
+    // state as superseded.
+    user_db(&state, &user, true, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            connection.execute(
+                "UPDATE threads SET status='running' WHERE id=?",
+                [thread_id],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let input = input_record(&state, &user, &thread).await;
+    let (_tx, mut rx) = tokio::sync::watch::channel(false);
+    let (_, text) = tokio::time::timeout(
+        Duration::from_secs(20),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 3, "the turn was never handed back");
+    assert_eq!(text, "done");
+    let items = requests[1]["input"].as_array().unwrap();
+    let last = items.last().unwrap();
+    assert_eq!(last["role"], "developer");
+    let nudge = last["content"].as_str().unwrap();
+    assert!(nudge.starts_with("[Runtime continuation 1 of 3"), "{nudge}");
+    // The nudge is the last thing the model reads; the turn's own words and the
+    // assistant message it just wrote stay above it.
+    assert!(items.iter().any(|item| item["role"] == "user"));
+    let stored: i64 = user_db(&state, &user, false, |connection| {
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM history_records WHERE kind='activity' AND json_extract(payload,'$.type')='notes_continuation'",
+            [],
+            |row| row.get(0),
+        )?)
+    })
+    .await
+    .unwrap();
+    assert_eq!(stored, 1);
+}
