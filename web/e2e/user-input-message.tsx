@@ -1,8 +1,9 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { UserInputMessage } from "../src/components/user-input-message"
+
 import { Message, MessageContent } from "../src/components/ui/message"
 import "../src/styles.css"
+import { UserInputMessage } from "@zccz14/cybion-components"
 
 function tinyPng() {
   const canvas = document.createElement("canvas")

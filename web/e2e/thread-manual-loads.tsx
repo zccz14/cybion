@@ -2,15 +2,16 @@ import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
 import type { ManualSummary } from "../src/components/cybion-tool-call"
-import { ManualLoadNotice } from "../src/components/manual-load-notice"
+
 import { MessageScroller, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
-import { ThreadHistory } from "../src/components/thread-history"
+
 import { ThreadManualLoads } from "../src/components/thread-manual-loads"
 import { historyPayloadText } from "../src/lib/history-payload"
 import { manualLoadNotice } from "../src/lib/thread-manual-loads"
 import type { HistoryRecord } from "../src/lib/thread-history"
 import { formattedTime } from "../src/lib/time"
 import "../src/styles.css"
+import { ManualLoadNotice, ThreadHistory } from "@zccz14/cybion-components"
 
 const manual = "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f"
 const edited = "c0ffee00-1111-2222-3333-444455556666"

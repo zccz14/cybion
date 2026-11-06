@@ -20,7 +20,7 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
       '@zccz14/cybion-components': path.resolve(__dirname, '../packages/cybion-components/dist/index.js'),
     },
-    dedupe: ['react', 'react-dom', '@zccz14/ux', 'lucide-react', 'radix-ui', '@base-ui/react', 'clsx', 'tailwind-merge'],
+    dedupe: ['react', 'react-dom', '@zccz14/ux', '@shadcn/react', 'lucide-react', 'radix-ui', '@base-ui/react', 'embla-carousel-react', 'class-variance-authority', 'clsx', 'tailwind-merge'],
   },
   build: {
     outDir: 'dist',

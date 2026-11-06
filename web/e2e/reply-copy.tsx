@@ -1,7 +1,8 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { AssistantMessage } from "../src/components/assistant-message"
+
 import "../src/styles.css"
+import { AssistantMessage } from "@zccz14/cybion-components"
 
 const reply = "## 部署状态\n\n- 检查通过\n- 服务健康"
 

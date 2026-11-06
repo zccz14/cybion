@@ -1,7 +1,8 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { ScreenshotOutput } from "../src/components/screenshot-output"
+
 import "../src/styles.css"
+import { ScreenshotOutput } from "@zccz14/cybion-components"
 
 function tinyPng() {
   const canvas = document.createElement("canvas")

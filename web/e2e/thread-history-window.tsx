@@ -1,11 +1,12 @@
 import { StrictMode, useMemo, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { ThreadHistory } from "../src/components/thread-history"
+
 import { Button } from "../src/components/ui/button"
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
 import { historyPayloadText } from "../src/lib/history-payload"
 import type { HistoryRecord } from "../src/lib/thread-history"
 import "../src/styles.css"
+import { ThreadHistory } from "@zccz14/cybion-components"
 
 const base = 1_800_000_000
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown, seconds: number): HistoryRecord {
