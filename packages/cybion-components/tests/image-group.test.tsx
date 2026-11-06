@@ -83,7 +83,7 @@ describe("thread history image placement", () => {
   )
 
   it("keeps images as standalone records outside collapsed groups in normal mode", () => {
-    const { container } = wrap(<ThreadHistory records={records} language="en" minimal={false} renderRecord={stub} />)
+    const { container } = wrap(<ThreadHistory records={records} language="en" minimal={false} running={false} renderRecord={stub} />)
     expect(container.querySelector('[data-slot="thread-image-group"]')).toBeNull()
     for (const id of [11, 12]) {
       const node = container.querySelector(`[data-record-id="${id}"]`)!
