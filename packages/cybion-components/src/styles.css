@@ -1,0 +1,102 @@
+/*
+ * @zccz14/cybion-components — thread view stylesheet.
+ *
+ * Tailwind's theme and utilities are imported without preflight: the host app
+ * already ships its own reset, and a component package must not reset it again.
+ * Every colour resolves through the host's shadcn tokens first; the `:where(:root)`
+ * block below only supplies fallbacks (zero specificity, so a host that defines the
+ * token always wins).
+ */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "tw-animate-css";
+
+@source "./**/*.{ts,tsx}";
+
+@custom-variant dark (&:is(.dark *));
+
+:where(:root) {
+  --background: oklch(0.975 0.006 265);
+  --foreground: oklch(0.23 0.026 265);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.23 0.026 265);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.23 0.026 265);
+  --primary: oklch(0.43 0.17 274);
+  --primary-foreground: oklch(0.99 0.002 265);
+  --user-message: var(--primary);
+  --user-message-foreground: var(--primary-foreground);
+  --secondary: oklch(0.94 0.012 265);
+  --secondary-foreground: oklch(0.23 0.026 265);
+  --muted: oklch(0.955 0.01 265);
+  --muted-foreground: oklch(0.47 0.026 265);
+  --accent: oklch(0.94 0.018 265);
+  --accent-foreground: oklch(0.23 0.026 265);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.88 0.014 265);
+  --input: oklch(0.88 0.014 265);
+  --ring: oklch(0.56 0.15 274);
+  --thread-active: #92400e;
+  --thread-success: #047857;
+  --thread-failure: #b91c1c;
+  --thread-blocked: #6d28d9;
+  --radius: 0.625rem;
+}
+
+:where(.dark) {
+  --background: #121212;
+  --foreground: #f2f2f2;
+  --card: #1c1c1c;
+  --card-foreground: var(--foreground);
+  --popover: #242424;
+  --popover-foreground: var(--foreground);
+  --primary: #e5e5e5;
+  --primary-foreground: #171717;
+  --user-message: var(--muted);
+  --user-message-foreground: var(--foreground);
+  --secondary: #262626;
+  --secondary-foreground: var(--foreground);
+  --muted: #262626;
+  --muted-foreground: #a3a3a3;
+  --accent: #303030;
+  --accent-foreground: var(--foreground);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: #383838;
+  --input: #454545;
+  --ring: #d4d4d4;
+  --thread-active: #fcd34d;
+  --thread-success: #6ee7b7;
+  --thread-failure: #fca5a5;
+  --thread-blocked: #c4b5fd;
+}
+
+@theme inline {
+  --color-thread-active: var(--thread-active);
+  --color-thread-success: var(--thread-success);
+  --color-thread-failure: var(--thread-failure);
+  --color-thread-blocked: var(--thread-blocked);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-user-message: var(--user-message);
+  --color-user-message-foreground: var(--user-message-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}

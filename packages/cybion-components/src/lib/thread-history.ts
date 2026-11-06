@@ -1,0 +1,225 @@
+import { historyPayloadObject, screenshotImageSource, viewedImageSource } from "./history-payload"
+import { isManualNotice } from "./thread-manual-loads"
+import { generatedImageSource } from "./thread-response"
+
+export type HistoryRecord = {
+  id: number
+  thread_id: string
+  kind: "input" | "response_output" | "tool_output" | "checkpoint" | "activity"
+  payload: unknown
+  created_at: number
+  // Set by the server for tool outputs the Worker call ledger records as screenshots.
+  screenshot?: boolean
+}
+
+export type ThreadHistoryEntry =
+  | { type: "message"; key: string; record: HistoryRecord }
+  | { type: "process"; key: string; records: HistoryRecord[]; startedAt: number; finishedAt: number }
+  | { type: "image-group"; key: string; records: HistoryRecord[] }
+
+export type ThreadImage = { source: string; kind: "generated" | "screenshot" | "viewed" }
+
+// A record shows an image when it is a generated image carrying its base64
+// result, a ledger-marked screenshot carrying PNG data, or a view_image output
+// carrying its input_image part. Everything else stays ordinary protocol text.
+export function threadImage(record: HistoryRecord): ThreadImage | null {
+  const generated = generatedImageSource(record.payload)
+  if (generated !== null) return { source: generated, kind: "generated" }
+  const screenshot = record.screenshot === true ? screenshotImageSource(record.payload) : null
+  if (screenshot !== null) return { source: screenshot, kind: "screenshot" }
+  const viewed = viewedImageSource(record.payload)
+  return viewed !== null ? { source: viewed, kind: "viewed" } : null
+}
+
+// A retry notice is the controller's own recovery bookkeeping too: the Thread scheduled
+// another attempt instead of answering, so the record carries the time of that attempt and
+// no turn output. Folding it into the process group keeps an automatic retry out of the
+// conversation, where it would read as the turn's answer.
+export function isRetryNotice(record: HistoryRecord) {
+  if (record.kind !== "activity") return false
+  return typeof historyPayloadObject(record.payload)?.next_retry_at === "number"
+}
+
+function isStandaloneRecord(record: HistoryRecord) {
+  if (record.kind === "input") return true
+  // Every other activity is a status the turn itself produced. A Manual load or
+  // unload and a scheduled retry are the controller's own bookkeeping between
+  // requests, so they belong to the process around them and stay folded with the
+  // request that carried them.
+  if (record.kind === "activity") return !isManualNotice(record) && !isRetryNotice(record)
+  // A checkpoint is a compression boundary, not process: it stays in the conversation like a
+  // reply, ends the group before it, and starts none.
+  if (record.kind === "checkpoint") return true
+  // Image records never join a process group, so a collapsed group cannot hide one.
+  if (threadImage(record) !== null) return true
+  const payload = record.payload
+  return record.kind === "response_output" && payload !== null && typeof payload === "object"
+    && "type" in payload && payload.type === "message"
+}
+
+export function threadHistoryRecordKey(record: HistoryRecord) {
+  const payload = record.payload
+  // INVARIANT: Responses item IDs survive the preview-to-history handoff; synthetic row IDs do not.
+  if (record.kind === "response_output" && payload !== null && typeof payload === "object"
+    && "id" in payload && typeof payload.id === "string") return `${record.thread_id}:output:${payload.id}`
+  return `${record.thread_id}:record:${record.id}:${record.created_at}`
+}
+
+// INVARIANT: a Worker call is answered by a tool output that repeats its call_id,
+// and history is append-only, so the calls still owed an answer are the ones the
+// device is working on right now. A Thread settles only the newest turn's calls, so
+// an input boundary drops any call an earlier turn left unanswered.
+export function inFlightCallIds(records: readonly { kind: string; payload: unknown }[]): ReadonlySet<string> {
+  const inFlight = new Set<string>()
+  for (const record of records) {
+    if (record.kind === "input") inFlight.clear()
+    const callId = historyPayloadObject(record.payload)?.call_id
+    if (typeof callId !== "string") continue
+    if (record.kind === "response_output") inFlight.add(callId)
+    if (record.kind === "tool_output") inFlight.delete(callId)
+  }
+  return inFlight
+}
+
+export function recordInFlight(record: { kind: string; payload: unknown }, inFlight: ReadonlySet<string>) {
+  const callId = historyPayloadObject(record.payload)?.call_id
+  return record.kind === "response_output" && typeof callId === "string" && inFlight.has(callId)
+}
+
+export type ThreadHistoryWindow = {
+  records: HistoryRecord[]
+  hasOlder: boolean
+}
+
+// INVARIANT: olderPages stays ordered oldest first, so flattening it before the live window
+// keeps every loaded record in ascending record order.
+export function loadedThreadRecords(pages: readonly ThreadHistoryWindow[], window: ThreadHistoryWindow | undefined) {
+  return [...pages.flatMap((page) => page.records), ...(window?.records ?? [])]
+}
+
+export function newestRecordId(records: readonly HistoryRecord[]) {
+  return records.reduce((newest, record) => Math.max(newest, record.id), 0)
+}
+
+// INVARIANT: loaded records stay ordered by record id, so the first record is the cursor for
+// the page just before this window.
+export function oldestRecordId(records: readonly HistoryRecord[]) {
+  return records.length > 0 ? records[0].id : null
+}
+
+// INVARIANT: thread history is append-only, so incremental polling can ask the server for
+// records newer than the newest loaded one instead of reloading the whole thread. The first
+// load asks for the tail window that starts at the most recent user input.
+export async function pollThreadHistory(
+  previous: ThreadHistoryWindow | undefined,
+  loadWindow: () => Promise<ThreadHistoryWindow>,
+  fetchAfter: (after: number) => Promise<HistoryRecord[]>,
+): Promise<ThreadHistoryWindow> {
+  if (!previous) return loadWindow()
+  return { ...previous, records: [...previous.records, ...await fetchAfter(newestRecordId(previous.records))] }
+}
+
+export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHistoryEntry[] {
+  const entries: ThreadHistoryEntry[] = []
+  for (const record of records) {
+    const key = threadHistoryRecordKey(record)
+    if (isStandaloneRecord(record)) {
+      entries.push({ type: "message", key, record })
+      continue
+    }
+    const previous = entries.at(-1)
+    if (previous?.type === "process") {
+      previous.records.push(record)
+      previous.startedAt = Math.min(previous.startedAt, record.created_at)
+      previous.finishedAt = Math.max(previous.finishedAt, record.created_at)
+      continue
+    }
+    entries.push({ type: "process", key: `process:${key}`, records: [record], startedAt: record.created_at, finishedAt: record.created_at })
+  }
+  return entries
+}
+
+// Minimal mode keeps one tail candidate per turn: the last activity or message record.
+// Earlier activities, earlier replies, tool turns, and checkpoints all fold around it: a
+// checkpoint keeps its own card only where the turn shows it, so minimal mode still folds it.
+// A Manual or retry notice is never a candidate: it reports controller bookkeeping, not the
+// turn's outcome.
+function threadHistoryTailCandidate(record: HistoryRecord) {
+  if (record.kind === "activity") return !isManualNotice(record) && !isRetryNotice(record)
+  return record.kind === "response_output"
+    && record.payload !== null && typeof record.payload === "object"
+    && "type" in record.payload && record.payload.type === "message"
+}
+
+// INVARIANT: a turn is the span from an input record to the next input; only its tail
+// candidate stays visible, so every emitted entry still keys off a stable record key. The
+// turn's images collect into one image group shown with that tail candidate, so minimal
+// mode still never folds image content away.
+export function groupThreadHistoryMinimal(records: readonly HistoryRecord[]): ThreadHistoryEntry[] {
+  const entries: ThreadHistoryEntry[] = []
+  let segment: HistoryRecord[] = []
+  const flush = () => {
+    let winner = -1
+    for (let index = segment.length - 1; index >= 0; index -= 1) {
+      if (threadHistoryTailCandidate(segment[index])) { winner = index; break }
+    }
+    const images = segment.filter((record, index) => index !== winner && threadImage(record) !== null)
+    const flushImages = () => {
+      if (images.length === 0) return
+      entries.push({ type: "image-group", key: `images:${threadHistoryRecordKey(images[0])}`, records: images })
+    }
+    segment.forEach((record, index) => {
+      if (index !== winner && threadImage(record) !== null) return
+      if (record.kind === "input" || index === winner) {
+        entries.push({ type: "message", key: threadHistoryRecordKey(record), record })
+        if (index === winner) flushImages()
+        return
+      }
+      const previous = entries.at(-1)
+      if (previous?.type === "process") {
+        previous.records.push(record)
+        previous.startedAt = Math.min(previous.startedAt, record.created_at)
+        previous.finishedAt = Math.max(previous.finishedAt, record.created_at)
+        return
+      }
+      const key = threadHistoryRecordKey(record)
+      entries.push({ type: "process", key: `process:${key}`, records: [record], startedAt: record.created_at, finishedAt: record.created_at })
+    })
+    if (winner < 0) flushImages()
+    segment = []
+  }
+  for (const record of records) {
+    if (record.kind === "input") flush()
+    segment.push(record)
+  }
+  flush()
+  return entries
+}
+
+// A Thread that is still running keeps writing into its newest process group, so that group is
+// measured against the clock. A message — the user's input or an assistant reply — ends the
+// group before it, so the newest one is live only while nothing but image groups follow it.
+export function liveThreadProcessKey(entries: readonly ThreadHistoryEntry[]): string | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry.type === "process") return entry.key
+    if (entry.type === "message") return null
+  }
+  return null
+}
+
+// The clock is the browser's while `created_at` is the server's, so the clock never shortens the
+// span the group's own records already prove: a client running behind cannot rewind the counter.
+export function threadProcessDuration(startedAt: number, finishedAt: number, now: number) {
+  return Math.max(finishedAt, now) - startedAt
+}
+
+export function formatThreadProcessDuration(durationSeconds: number, language: "en" | "zh") {
+  const total = Math.max(0, Math.floor(durationSeconds))
+  const hours = String(Math.floor(total / 3600)).padStart(2, "0")
+  const minutes = String(Math.floor(total / 60) % 60).padStart(2, "0")
+  const seconds = String(total % 60).padStart(2, "0")
+  return language === "zh"
+    ? `运行了 ${hours} 小时 ${minutes} 分钟 ${seconds} 秒`
+    : `Ran for ${hours}h ${minutes}m ${seconds}s`
+}
