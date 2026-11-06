@@ -107,6 +107,13 @@ its Thread, because its row no longer sits under a group.
 Each open note offers *cross out* and *tear off*; a crossed note offers *tear off*
 only. The page never writes a note: notes come from Threads.
 
+The Thread view carries the same open notes in one compact row at the bottom of
+the conversation — the line below the running status and above the loaded
+manuals. It is read-only and shows only what is still owed there: the label with
+the count, then one truncated chip per note with the full text in its title. A
+Thread with nothing open renders no row at all, and the row disappears the moment
+the last note is crossed out, because it polls the same list the Notes page does.
+
 The Tools page lists both tools under the Controller group, and every tool call
 renders as its own card in the conversation.
 
