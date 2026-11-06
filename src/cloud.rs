@@ -37,6 +37,7 @@ use uuid::Uuid;
 mod admin_users;
 mod blocked;
 mod common_manuals;
+mod continuation;
 mod cost;
 mod exe;
 mod history;
@@ -6874,6 +6875,10 @@ async fn request_agent(
 ) -> Result<(ThreadView, String), (ThreadView, Box<ApiError>)> {
     let mut checkpoint_retries = 0;
     let mut proactive_compactions = 0;
+    // Set when the kernel decides this turn owes more work than it delivered:
+    // it rides the next request once and is then spent, so the instruction never
+    // accumulates in the context across the tool round-trips of one turn.
+    let mut continuation_nudge: Option<String> = None;
     let defaults = user_db(state, user, false, |connection| {
         load_thread_defaults(connection)
     })
@@ -6953,6 +6958,12 @@ async fn request_agent(
             // stay exactly what happened, and compaction and title requests
             // build their own input without it.
             notes::inject(&mut request_items, block);
+        }
+        if let Some(nudge) = continuation_nudge.take() {
+            // Appended last, after the notes block and the user's own words:
+            // the most recent instruction in the request is "the Thread is not
+            // done", while the user's message stays the goal being served.
+            request_items.push(json!({"role": "developer", "content": nudge}));
         }
         let response = match responses_request_with_options(
             state,
@@ -7047,7 +7058,23 @@ async fn request_agent(
                 .filter(|item| matches!(item, ResponseItem::Message(_)))
                 .map(ResponseItem::text)
                 .collect::<String>();
-            return Ok((thread.clone(), text));
+            // A stopped Thread ends here; a Thread that still owes notes is
+            // handed back to the model instead. Deciding must never cost the
+            // answer, so a storage failure ends the turn normally.
+            if *cancellation.borrow() {
+                return Ok((thread.clone(), text));
+            }
+            match continuation::decide(state, user, &thread.id, source_record_idx).await {
+                Ok(Some(nudge)) => {
+                    continuation_nudge = Some(nudge);
+                    continue;
+                }
+                Ok(None) => return Ok((thread.clone(), text)),
+                Err(error) => {
+                    tracing::warn!(error = %error.message, "could not decide a notes continuation");
+                    return Ok((thread.clone(), text));
+                }
+            }
         }
         // Tool state is durable; settlement at the top of the loop is also
         // the recovery path after a Controller restart.
@@ -10502,6 +10529,10 @@ mod context_sort_tests;
 #[cfg(test)]
 #[path = "cloud_blocked_tests.rs"]
 mod blocked_tests;
+
+#[cfg(test)]
+#[path = "cloud_continuation_tests.rs"]
+mod continuation_tests;
 
 #[cfg(test)]
 #[path = "cloud_notes_tests.rs"]

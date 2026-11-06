@@ -33,6 +33,10 @@ pub(super) const MAX_CHARS_CEILING: i64 = 2000;
 /// Crossed-out notes stay as evidence; the page shows the most recent ones.
 const DONE_HISTORY: i64 = 100;
 pub(super) const THREAD_MAX_CHARS_KEY: &str = "notes.thread_max_chars";
+/// Whether a Thread that still owes open notes is handed back to the model
+/// instead of ending its turn. A deployment switch, not a per-Thread one:
+/// turning it off must stop every Thread at once.
+pub(super) const CONTINUATION_KEY: &str = "notes.continuation";
 /// COMPATIBILITY: releases before global notes were removed stored a second,
 /// larger character limit under this key. The page prunes it while it reads the
 /// limit that remains, so no deployment keeps a setting nothing reads. Retire
@@ -93,12 +97,14 @@ pub(super) struct NotesView {
 #[derive(Serialize)]
 pub(super) struct NoteSettingsView {
     thread_max_chars: i64,
+    continuation: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UpdateNoteSettingsInput {
     thread_max_chars: Option<i64>,
+    continuation: Option<bool>,
 }
 
 fn note_view_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NoteView> {
@@ -319,6 +325,18 @@ pub(super) fn inject(items: &mut Vec<Value>, block: &str) {
     }
 }
 
+/// Whether the notes continuation loop runs at all. Read on the turn's own
+/// path, so flipping the switch takes effect on the next settlement.
+pub(super) async fn continuation_enabled(state: &AppState) -> Result<bool, ApiError> {
+    let path = state.admin_db_path.clone();
+    Ok(
+        tokio::task::spawn_blocking(move || admin_meta_int_sync(&path, CONTINUATION_KEY, 1))
+            .await
+            .map_err(ApiError::internal)??
+            != 0,
+    )
+}
+
 async fn thread_max_chars(state: &AppState) -> Result<i64, ApiError> {
     let path = state.admin_db_path.clone();
     tokio::task::spawn_blocking(move || {
@@ -445,13 +463,19 @@ pub(super) async fn settings(
     State(state): State<AppState>,
 ) -> Result<Json<NoteSettingsView>, ApiError> {
     let path = state.admin_db_path.clone();
-    let thread_max_chars = tokio::task::spawn_blocking(move || {
+    let (thread_max_chars, continuation) = tokio::task::spawn_blocking(move || {
         prune_admin_meta_sync(&path, RETIRED_GLOBAL_MAX_CHARS_KEY)?;
-        admin_meta_int_sync(&path, THREAD_MAX_CHARS_KEY, DEFAULT_THREAD_MAX_CHARS)
+        Ok::<_, ApiError>((
+            admin_meta_int_sync(&path, THREAD_MAX_CHARS_KEY, DEFAULT_THREAD_MAX_CHARS)?,
+            admin_meta_int_sync(&path, CONTINUATION_KEY, 1)? != 0,
+        ))
     })
     .await
     .map_err(ApiError::internal)??;
-    Ok(Json(NoteSettingsView { thread_max_chars }))
+    Ok(Json(NoteSettingsView {
+        thread_max_chars,
+        continuation,
+    }))
 }
 
 pub(super) async fn update_settings(
@@ -473,6 +497,9 @@ pub(super) async fn update_settings(
     tokio::task::spawn_blocking(move || {
         if let Some(value) = input.thread_max_chars {
             set_admin_meta_int_sync(&path, THREAD_MAX_CHARS_KEY, value)?;
+        }
+        if let Some(value) = input.continuation {
+            set_admin_meta_int_sync(&path, CONTINUATION_KEY, i64::from(value))?;
         }
         Ok::<_, ApiError>(())
     })
