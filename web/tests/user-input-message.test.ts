@@ -7,7 +7,7 @@ import { createTestServer } from "./vite-server.ts"
 test("user inputs render their text with the shared copy control on one footer row with the record meta", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { UserInputMessage } = await server.ssrLoadModule("/src/components/user-input-message.tsx")
+    const { UserInputMessage } = await server.ssrLoadModule("@zccz14/cybion-components")
     const footer = "#12 · 12:34:56"
     const render = (language: string, content: string) => renderToStaticMarkup(createElement(UserInputMessage, { language, payload: { role: "user", content }, footer }))
     const zh = render("zh", "看看这张图。")

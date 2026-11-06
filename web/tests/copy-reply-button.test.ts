@@ -4,11 +4,12 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { createTestServer } from "./vite-server.ts"
+import { readPackageSource } from "./package-source.ts"
 
 test("the reply copy button labels itself in both languages and owns a status line", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { CopyReplyButton } = await server.ssrLoadModule("/src/components/copy-reply-button.tsx")
+    const { CopyReplyButton } = await server.ssrLoadModule("@zccz14/cybion-components")
     const zh = renderToStaticMarkup(createElement(CopyReplyButton, { text: "回复内容", language: "zh" }))
     assert.match(zh, /<button[^>]*type="button"/)
     assert.ok(zh.includes('aria-label="复制"'))
@@ -22,11 +23,10 @@ test("the reply copy button labels itself in both languages and owns a status li
 })
 
 test("assistant replies render the copy button directly beneath the reply content", () => {
-  const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-  const message = readFileSync(new URL("../src/components/assistant-message.tsx", import.meta.url), "utf8")
-  assert.match(main, /import \{ AssistantMessage \} from "@\/components\/assistant-message"/)
-  assert.equal(main.match(/<AssistantMessage language=\{language\} streaming=\{record\.id < 0\} text=\{text\} time=\{time\} \/>/g)?.length, 1)
-  assert.ok(main.indexOf("<AssistantMessage") < main.indexOf('if (record.kind === "tool_output")'))
+  const history = readPackageSource("components/history-message.tsx")
+  const message = readPackageSource("components/assistant-message.tsx")
+  assert.equal(history.match(/<AssistantMessage language=\{language\} streaming=\{record\.id < 0\} text=\{text\} time=\{time\} \/>/g)?.length, 1)
+  assert.ok(history.indexOf("<AssistantMessage") < history.indexOf('if (record.kind === "tool_output") {'))
   assert.equal(message.match(/<CopyReplyButton text=\{text\} language=\{language\} \/>/g)?.length, 1)
   const replyIndex = message.indexOf("<Markdown content={text} reveal={streaming} />")
   const buttonIndex = message.indexOf("<CopyReplyButton")

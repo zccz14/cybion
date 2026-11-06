@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OnceCell, watch};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -1170,6 +1171,11 @@ fn app(state: AppState) -> Router {
             route_performance::measure,
         ))
         .layer(TraceLayer::new_for_http())
+        // The browser thread view is embedded by other origins (Tickets, docs,
+        // integrator apps) and authenticates with an Auth Mini JWT, never a
+        // cookie, so any origin may call the API: there is no ambient authority
+        // for a hostile page to borrow.
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

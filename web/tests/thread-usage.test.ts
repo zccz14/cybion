@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
 import { compactTokenCount, emptyThreadUsage, threadCacheRate, threadCost } from "../src/lib/thread-usage.ts"
 
@@ -22,7 +23,7 @@ test("list and detail use server cumulative usage, not a sum of streaming previe
   const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
   const link = readFileSync(new URL("../src/components/thread-status.tsx", import.meta.url), "utf8")
   assert.match(main, /usage: ThreadUsage/)
-  assert.match(main, /<ThreadUsagePanel usage=\{current.usage\} language=\{language\}/)
+  assert.match(readPackageSource("thread-view.tsx"), /<ThreadUsagePanel usage=\{thread.usage\} language=\{language\}/)
   assert.match(link, /<ThreadUsageSummary usage=\{thread.usage\}/)
   assert.match(link, /<ThreadUsageDetails usage=\{thread.usage\}/)
   assert.doesNotMatch(link, /fetch\(|useQuery/)

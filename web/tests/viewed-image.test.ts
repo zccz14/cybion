@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
+import { readPackageSource } from "./package-source.ts"
 import { viewedImageSource } from "../src/lib/history-payload.ts"
 
 const image = `data:image/png;base64,${"A".repeat(8)}`
@@ -27,7 +28,7 @@ test("failed or malformed view_image outputs keep the ordinary tool output", () 
 })
 
 test("thread view renders viewed images through the shared image dialog", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const source = readPackageSource("components/history-message.tsx")
   assert.match(source, /const viewed = viewedImageSource\(record\.payload\)/)
   assert.match(source, /<ViewedOutput language=\{language\} source=\{viewed\} \/>/)
 })

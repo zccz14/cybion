@@ -13,7 +13,15 @@ export default defineConfig({
   // 那样这行导入会交给 Node 的加载器，而 Node 不认识 .css——单元测试（ssrLoadModule）会因此报
   // ERR_UNKNOWN_FILE_EXTENSION。把该包内联，样式表仍然走 Vite 的 CSS 管线。
   ssr: { noExternal: ['@zccz14/ux'] },
-  resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+  // 组件包就在同一个仓库里：宿主直接消费包自己的构建产物，与 Tickets 从 npm 拿到的东西
+  // 完全一致；包内的 react 等运行时去重到宿主这一份，避免第二份 React。
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+      '@zccz14/cybion-components': path.resolve(__dirname, '../packages/cybion-components/dist/index.js'),
+    },
+    dedupe: ['react', 'react-dom', '@zccz14/ux', '@shadcn/react', 'lucide-react', 'radix-ui', '@base-ui/react', 'embla-carousel-react', 'class-variance-authority', 'clsx', 'tailwind-merge'],
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

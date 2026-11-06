@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
 import { composerAction, handleChatInputKeyDown } from "../src/lib/chat-input.ts"
+import { readPackageSource } from "./package-source.ts"
 
 type ChatKeyEvent = Parameters<typeof handleChatInputKeyDown>[0]
 
@@ -57,12 +58,17 @@ test("the composer action slot merges send, continue, and stop", () => {
 })
 
 test("both composers use the shared handler and drop shortcut hint copy", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-  for (const id of ["new-thread-input", "thread-input"]) {
-    const composer = source.split("\n").find((line) => line.includes(`<Textarea id="${id}"`))
-    assert.ok(composer?.includes("onKeyDown={handleChatInputKeyDown}"))
-    assert.ok(composer?.includes("onPaste={attachments.paste}"))
+  const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const view = readPackageSource("thread-view.tsx")
+  const newThread = main.split("\n").find((line) => line.includes('<Textarea id="new-thread-input"'))
+  assert.ok(newThread?.includes("onKeyDown={handleChatInputKeyDown}"))
+  assert.ok(newThread?.includes("onPaste={attachments.paste}"))
+  // The conversation composer belongs to the package now, so its wiring is guarded there.
+  const thread = view.split("\n").find((line) => line.includes("<Textarea id={`cybion-thread-input-"))
+  assert.ok(thread?.includes("onKeyDown={handleChatInputKeyDown}"))
+  assert.ok(thread?.includes("onPaste={attachments.paste}"))
+  for (const source of [main, view]) {
+    assert.doesNotMatch(source, /sendShortcut|startThreadShortcut/)
+    assert.doesNotMatch(source, /Shift \+ Enter|⌘ \/ Ctrl \+ Enter/)
   }
-  assert.doesNotMatch(source, /sendShortcut|startThreadShortcut/)
-  assert.doesNotMatch(source, /Shift \+ Enter|⌘ \/ Ctrl \+ Enter/)
 })

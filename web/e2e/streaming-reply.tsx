@@ -1,7 +1,8 @@
 import { StrictMode, useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { AssistantMessage } from "../src/components/assistant-message"
+
 import "../src/styles.css"
+import { AssistantMessage } from "@zccz14/cybion-components"
 
 /*
  * The controller hands the browser a whole snapshot of a running reply, and the browser polls it.

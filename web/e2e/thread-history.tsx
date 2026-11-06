@@ -1,13 +1,13 @@
 import { StrictMode, useMemo, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { AssistantMessage } from "../src/components/assistant-message"
-import { ThreadHistory } from "../src/components/thread-history"
+
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
 import { historyPayloadText } from "../src/lib/history-payload"
 import type { HistoryRecord } from "../src/lib/thread-history"
 import { formattedTime } from "../src/lib/time"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response"
 import "../src/styles.css"
+import { AssistantMessage, ThreadHistory } from "@zccz14/cybion-components"
 
 // 11 列的宽表格，且单元格里是不可断行的 id 与哈希：对话栏放不下，
 // 只能靠表格自己的横向滚动看全。

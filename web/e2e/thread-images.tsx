@@ -1,10 +1,11 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { ThreadHistory } from "../src/components/thread-history"
+
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
 import { historyPayloadText } from "../src/lib/history-payload"
 import { threadImage, type HistoryRecord } from "../src/lib/thread-history"
 import "../src/styles.css"
+import { ThreadHistory } from "@zccz14/cybion-components"
 
 const base = 1_800_000_000
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6OZ0AAAAASUVORK5CYII="

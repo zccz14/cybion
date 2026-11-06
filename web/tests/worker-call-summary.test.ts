@@ -4,6 +4,7 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { createTestServer } from "./vite-server.ts"
+import { readPackageSource } from "./package-source.ts"
 
 test("Worker call cards show the model's intent summary", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
@@ -19,7 +20,7 @@ test("Worker call cards show the model's intent summary", async () => {
     await server.close()
   }
   for (const file of ["bash-command.tsx", "browser-control-call.tsx", "computer-use-call.tsx", "view-image-call.tsx"]) {
-    const source = readFileSync(new URL(`../src/components/${file}`, import.meta.url), "utf8")
+    const source = readPackageSource(`components/${file}`)
     assert.ok(source.includes("<WorkerCallSummary summary={call.summary} />"), file)
   }
 })

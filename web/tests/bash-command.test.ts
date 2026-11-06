@@ -4,13 +4,14 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { createTestServer } from "./vite-server.ts"
+import { readPackageSource } from "./package-source.ts"
 
 const now = Math.floor(Date.now() / 1000)
 
 test("bash commands render Worker names, language, command text and raw details", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { BashCommand } = await server.ssrLoadModule("/src/components/bash-command.tsx")
+    const { BashCommand } = await server.ssrLoadModule("@zccz14/cybion-components")
     const call = { callId: "call-1", workerId: "worker-1", summary: "检查 <script>alert(1)</script> 工作区", command: 'pwd\necho "<script>alert(1)</script>"', delaySeconds: null, timeoutSeconds: null }
     const render = (language: string, workers: { id: string; label: string }[] | undefined) => renderToStaticMarkup(createElement(BashCommand, {
       language, call, workers, time: "12:34:56", startedAt: now, inFlight: false, children: createElement("details", null, "Raw protocol"),
@@ -38,7 +39,7 @@ test("bash commands render Worker names, language, command text and raw details"
 test("a call in flight counts the controller delay down and then the Worker timeout", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { BashCommand } = await server.ssrLoadModule("/src/components/bash-command.tsx")
+    const { BashCommand } = await server.ssrLoadModule("@zccz14/cybion-components")
     const call = (delaySeconds: number | null, timeoutSeconds: number | null) => ({ callId: "call-1", workerId: "worker-1", summary: null, command: "pwd", delaySeconds, timeoutSeconds })
     // The countdown reads the browser clock, so each case is anchored far enough from
     // a phase boundary that the second it renders in cannot change the phase.
@@ -72,13 +73,15 @@ test("a call in flight counts the controller delay down and then the Worker time
 })
 
 test("persisted and live protocol messages receive Worker updates through memoization", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-  assert.equal(source.match(/<HistoryMessage language=\{language\} record=\{record\} workers=\{workers.data\}/g)?.length, 1)
-  assert.match(source, /<ThreadHistory records=\{records\}/)
-  assert.match(source, /pendingResponseRecords\(liveResponse.data, durableRecords, threadId\)/)
-  assert.match(source, /previous.workers === next.workers/)
-  assert.match(source, /inFlightCallIds\(running \? durableRecords : \[\]\)/)
-  assert.match(source, /inFlight=\{recordInFlight\(record, inFlightCalls\)\}/)
-  assert.ok(source.indexOf("const bashCall = bashFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))
-  assert.match(source, /<BashCommand[^>]*>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/BashCommand>/)
+  const view = readPackageSource("thread-view.tsx")
+  const message = readPackageSource("components/history-message.tsx")
+  assert.match(view, /<HistoryMessage language=\{language\} record=\{record\} workers=\{workers\} manuals=\{manuals\}/)
+  assert.match(view, /<ThreadHistory records=\{records\}/)
+  assert.match(view, /pendingResponseRecords\(liveResponse, durable, threadId\)/)
+  assert.match(message, /previous.workers === next.workers/)
+  assert.match(view, /inFlightCallIds\(running \? records\.filter\(\(record\) => record\.id > 0\) : \[\]\)/)
+  assert.match(view, /inFlight=\{inFlight\}/)
+  assert.ok(message.indexOf("const bashCall = bashFunctionCall(payload)") < message.indexOf('if (typeof payload?.type === "string" &&'))
+  assert.match(message, /<BashCommand[^>]*>[\s\S]*?<PayloadDetails language=\{language\} record=\{record\} label=\{t\("recordPayload"\)\} \/>[\s\S]*?<\/BashCommand>/)
+  assert.match(message, /<HistoryRecordPayload language=\{language\} record=\{record\} \/>/)
 })

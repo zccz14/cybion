@@ -1,4 +1,4 @@
-import { memo, StrictMode, createContext, useContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { StrictMode, createContext, useContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { createRoot } from "react-dom/client"
 import {
   HashRouter,
@@ -23,27 +23,22 @@ import { AuthMiniProvider, useAuthMini, type AuthMiniVerificationFailure } from 
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitProvider, useLinkit } from "linkit-react-components"
 import { AppLayout, Markdown, type AppNavGroup } from "@zccz14/ux"
+import { CybionThreadProvider, CybionThreadView, HistoryMessage } from "@zccz14/cybion-components"
 import {
-  ActivityIcon,
   ArchiveIcon,
   ArchiveRestoreIcon,
   ArrowLeftIcon,
   ChartColumnIcon,
   GaugeIcon,
   CheckIcon,
-  CalendarDaysIcon,
   ChevronDownIcon,
   CircleAlertIcon,
   CircleHelpIcon,
   CopyIcon,
   CpuIcon,
-  Minimize2Icon,
-  PlayIcon,
-  SquareIcon,
   StickyNoteIcon,
   DatabaseIcon,
   ScanSearchIcon,
-  DownloadIcon,
   ExternalLinkIcon,
   FileKey2Icon,
   FileSearchIcon,
@@ -63,7 +58,6 @@ import {
   Settings2Icon,
   SettingsIcon,
   Share2Icon,
-  SparklesIcon,
   TerminalSquareIcon,
   Trash2Icon,
   WrenchIcon,
@@ -73,28 +67,23 @@ import toolCatalog from "../../tools.json"
 import { onboardingCopy, needsFirstConversationCheck } from "@/lib/onboarding"
 import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } from "@/components/onboarding"
 
-import { generatedImageSource, pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@/lib/thread-response"
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
-import { bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText, imageGenerationFunctionCall, screenshotImageSource, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall, audioTranscriptionFunctionCall, type AudioTranscriptionFunctionCall } from "@/lib/history-payload"
+import { historyPayloadObject, historyPayloadText, type AudioTranscriptionFunctionCall } from "@/lib/history-payload"
 import { formatBytes } from "@/lib/format"
 import { formattedTime } from "@/lib/time"
-import { inFlightCallIds, loadedThreadRecords, oldestRecordId, pollThreadHistory, recordInFlight, type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
-import { manualLoadNotice, type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
-import { composerAction, handleChatInputKeyDown } from "@/lib/chat-input"
+import { type HistoryRecord } from "@/lib/thread-history"
+import { type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
+import { handleChatInputKeyDown } from "@/lib/chat-input"
 import { defaultsChanged } from "@/lib/thread-defaults"
 import { useComposerDraft } from "@/hooks/use-composer-draft"
+import { composerDraftKey } from "@/lib/composer-drafts"
 import { useComposerImages } from "@/hooks/use-composer-images"
 import { useComposerAudio } from "@/hooks/use-composer-audio"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
 import { ComposerAttachments } from "@/components/composer-attachments"
 import { ComposerAudio } from "@/components/composer-audio"
 import { ComposerDraftNotice } from "@/components/composer-draft-notice"
-import { AssistantMessage } from "@/components/assistant-message"
 import { CybionMark } from "@/components/cybion-mark"
-import { UserInputMessage } from "@/components/user-input-message"
-import { ScreenshotOutput } from "@/components/screenshot-output"
-import { ViewedOutput } from "@/components/viewed-output"
-import { ViewImageCall } from "@/components/view-image-call"
 import { auditCacheRate, gatewayAuditUrl } from "@/lib/reasoning-audit"
 
 import "./styles.css"
@@ -118,26 +107,15 @@ import { AdminUsers } from "@/components/admin-users"
 import { LinkitNotifications } from "@/components/linkit-notifications"
 import { SystemConfiguration } from "@/components/system-configuration"
 import { HistoryTable } from "@/components/history-table"
-import { HistoryRecordPayload } from "@/components/history-record-payload"
-import { BashCommand } from "@/components/bash-command"
-import { ImageGenerationCall } from "@/components/image-generation-call"
-import { WebSearchCall } from "@/components/web-search-call"
-import { BrowserControlCall } from "@/components/browser-control-call"
-import { ComputerUseCall } from "@/components/computer-use-call"
-import { CybionToolCall, type ManualSummary } from "@/components/cybion-tool-call"
-import { CheckpointMessage } from "@/components/checkpoint-message"
+import { type ManualSummary } from "@/components/cybion-tool-call"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core"
 import { collectSubtreeIds, commonAncestorIds, manualAncestorIds, manualCurrentPlacement, manualPlacementFor, manualTreeIndex, flattenTree, trashedRoots, visibleManuals, type ManualDropZone } from "@/lib/manuals-tree"
 import { manualDraft, draftsMatch, shouldAutosave, type ManualDraft } from "@/lib/manual-drafts"
-import { ThreadHistory } from "@/components/thread-history"
 import { ThreadListPane } from "@/components/thread-list"
 import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@/components/thread-settings-popover"
-import { ThreadStatusBadge, ThreadStatusSummary } from "@/components/thread-status"
-import { ManualLoadNotice } from "@/components/manual-load-notice"
 import { ThreadManualLoads } from "@/components/thread-manual-loads"
 import { ThreadNotes } from "@/components/thread-notes"
-import { ThreadContextUsage, ThreadUsagePanel } from "@/components/thread-usage"
 import type { ThreadUsage } from "@/lib/thread-usage"
 import { errorMessage } from "@/lib/utils"
 import type { ThreadDisplayStatus } from "@/lib/thread-status"
@@ -152,19 +130,6 @@ import {
 } from "@/components/ui/dialog"
 import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import {
-  Message,
-  MessageContent,
-  MessageFooter,
-} from "@/components/ui/message"
-import {
-  MessageScroller,
-  MessageScrollerButton,
-  MessageScrollerContent,
-  MessageScrollerItem,
-  MessageScrollerProvider,
-  MessageScrollerViewport,
-} from "@/components/ui/message-scroller"
 import { Progress } from "@/components/ui/progress"
 import {
   Select,
@@ -1525,81 +1490,32 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   </main>
 }
 
-function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: AuthMiniApi; userId: string; olderPages: ThreadHistoryWindow[]; onOlderPage: (threadId: string, page: ThreadHistoryWindow) => void }) {
+// The conversation is the package's thread view: this page only supplies what the
+// host owns — sharing, archive, delete, the open notes and the loaded Manuals that
+// sit under the transcript — plus the lookups the record cards resolve.
+function ThreadConversation({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
   const location = useLocation()
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
-  // The list already holds this Thread's row — the server sends whole Threads, not summaries —
-  // so the header and the composer render from it while the detail read is still in flight, and
-  // only the transcript waits.
-  const listedThread = useCallback(() => client
-    .getQueriesData<ThreadPage>({ queryKey: ["threads", sdk.session.getState().sessionId] })
-    .flatMap(([, page]) => page?.items ?? [])
-    .find((item) => item.id === threadId), [client, sdk, threadId])
-  const thread = useQuery({
-    queryKey: ["thread", threadId, userId],
-    queryFn: () => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`),
-    placeholderData: listedThread,
-    refetchInterval: 1500,
-    enabled: Boolean(threadId),
-  })
+  const [current, setCurrent] = useState<Thread | null>(null)
   const workers = useQuery({
     queryKey: ["workers", userId],
     queryFn: () => api<Worker[]>(sdk, "/api/workers"),
     refetchInterval: 5000,
   })
-  const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const models = useUpstreamModels(sdk)
-  const imageModels = useImageModels(sdk)
-  const audioModels = useAudioModels(sdk)
-  // The conversation opens on the window that starts at the most recent user input instead of
-  // the whole thread; older pages load on demand, each one a whole turn that starts at the
-  // previous input record, until `has_older` clears.
-  const fetchHistoryWindow = (before?: number) => api<{ records: HistoryRecord[]; has_older: boolean }>(
-    sdk,
-    `/api/threads/${encodeURIComponent(threadId)}/history/window${before === undefined ? "" : `?before=${before}`}`,
-  ).then((page) => ({ records: page.records, hasOlder: page.has_older }))
-  const history = useQuery({
-    queryKey: ["history", threadId, userId],
-    queryFn: () => pollThreadHistory(
-      client.getQueryData<ThreadHistoryWindow>(["history", threadId, userId]),
-      () => fetchHistoryWindow(),
-      (after) => api<HistoryRecord[]>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history?after=${after}`),
-    ),
-    refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
-    enabled: Boolean(threadId),
-  })
-  const liveResponse = useQuery({
-    queryKey: ["thread-response", threadId, thread.data?.status, userId],
-    queryFn: () => api<ThreadResponseView | null>(sdk, `/api/threads/${encodeURIComponent(threadId)}/response`),
-    refetchInterval: thread.data?.status === "running" ? 750 : false,
-    enabled: Boolean(threadId),
-  })
-  const durableRecords = useMemo(() => loadedThreadRecords(olderPages, history.data), [olderPages, history.data])
-  const records = useMemo(() => [
-    ...durableRecords,
-    ...pendingResponseRecords(liveResponse.data, durableRecords, threadId),
-  ], [durableRecords, liveResponse.data, threadId])
   // The Manuals this Thread keeps loaded: the endpoint reports the bindings plus
   // the range that replays, so a Manual whose copy sits behind the head shows up
   // again once the controller has delivered it.
   const manualLoads = useQuery({
     queryKey: ["thread-manual-loads", threadId, userId],
     queryFn: ({ signal }) => api<ThreadManualLoadsView>(sdk, `/api/threads/${encodeURIComponent(threadId)}/history/loaded`, { signal }),
-    refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
+    refetchInterval: current?.status === "running" ? 1200 : 2500,
     enabled: Boolean(threadId),
   })
-  // A load/unload or `write_manual` card resolves the Manual's title and Use
-  // When description through the same caches the Manuals page fills; the
-  // fetches only start when the loaded history actually touches a Manual.
-  const loadsManuals = useMemo(() => (manualLoads.data?.loaded.length ?? 0) > 0 || records.some((record) => {
-    const payload = historyPayloadObject(record.payload)
-    if (payload?.type === "manual_loaded" || payload?.type === "manual_unloaded") return true
-    return payload?.type === "function_call" && payload.name === "write_manual"
-  }), [manualLoads.data, records])
+  const loadsManuals = (manualLoads.data?.loaded.length ?? 0) > 0
   const manuals = useQuery({ queryKey: ["manuals"], queryFn: () => api<Manual[]>(sdk, "/api/manuals"), enabled: loadsManuals })
   const commonManuals = useQuery({ queryKey: ["common-manuals", language], queryFn: () => api<{ revision: number; root: CommonManualNode }>(sdk, `/api/common-manuals?lang=${language}`), enabled: loadsManuals })
   const manualLookup = useMemo(() => {
@@ -1609,93 +1525,19 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     if (root) for (const node of flattenTree(root)) lookup.set(node.id, { name: node.name, description: node.description })
     return lookup
   }, [manuals.data, commonManuals.data])
-  const hasOlder = olderPages[0]?.hasOlder ?? history.data?.hasOlder ?? false
-  const loadEarlier = useMutation({
-    mutationFn: async () => {
-      const before = oldestRecordId(durableRecords)
-      if (before === null) return null
-      return { threadId, page: await fetchHistoryWindow(before) }
-    },
-    onSuccess: (loaded) => {
-      if (loaded) onOlderPage(loaded.threadId, loaded.page)
-    },
-  })
-  const composer = useComposerDraft(userId, threadId)
-  const { input, setInput, clearSubmitted } = composer
-  const attachments = useComposerImages()
-  const audio = useComposerAudio()
-  const loadAudio = useCallback((reference: string, mediaType: string | null) => audioObjectUrl(sdk, reference, mediaType), [sdk])
-  const [editing, setEditing] = useState(false)
-  const [title, setTitle] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
-  // The Thread's open notes are one list with two readers: the row above the
-  // loaded manuals, and the delete confirmation that has to say exactly which
-  // notes leave with the Thread. The model writes and crosses them out
-  // mid-turn, so the query polls instead of waiting for a reload.
+  // The Thread's open notes have two readers: the row under the transcript, and
+  // the delete confirmation that has to say exactly which notes leave with the
+  // Thread. The model writes and crosses them out mid-turn, so the query polls
+  // instead of waiting for a reload.
   const threadNotes = useQuery({ queryKey: ["notes"], queryFn: () => api<{ open: Note[]; done: Note[] }>(sdk, "/api/notes"), refetchInterval: 3000 })
   const openThreadNotes = (threadNotes.data?.open ?? []).filter((note) => note.thread_id === threadId)
-  useEffect(() => {
-    setTitle(thread.data?.title ?? "")
-    setEditing(false)
-  }, [threadId, thread.data?.title])
-  const submit = useMutation({
-    mutationFn: (value: { input: string; images: string[]; audios: string[] }) => api<RequestAck>(sdk, `/api/threads/${encodeURIComponent(threadId)}/inputs`, {
-      method: "POST",
-      body: JSON.stringify({ input: value.input.trim(), images: value.images, audios: value.audios }),
-    }),
-    onSuccess: (_request, submitted) => {
-      clearSubmitted(submitted.input)
-      attachments.clear()
-      audio.clear()
-      void client.invalidateQueries({ queryKey: ["history", threadId] })
-      void client.invalidateQueries({ queryKey: ["thread", threadId] })
-      void client.invalidateQueries({ queryKey: ["threads"] })
-      void client.invalidateQueries({ queryKey: ["reasoning-audits"] })
-    },
-  })
-  const control = useMutation({
-    mutationFn: (action: "cancel" | "continue" | "compact") => api<unknown>(sdk, `/api/threads/${encodeURIComponent(threadId)}/${action}`, { method: "POST" }),
-    onSuccess: async () => {
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ["history", threadId] }),
-        client.invalidateQueries({ queryKey: ["thread", threadId] }),
-        client.invalidateQueries({ queryKey: ["thread-response", threadId] }),
-        client.invalidateQueries({ queryKey: ["threads"] }),
-        client.invalidateQueries({ queryKey: ["reasoning-audits"] }),
-        client.invalidateQueries({ queryKey: ["worker-calls", sdk.session.getState().sessionId] }),
-      ])
-    },
-  })
-  const rename = useMutation({
-    mutationFn: (nextTitle: string) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ title: nextTitle }),
-    }),
-    onSuccess: () => {
-      setEditing(false)
-      void client.invalidateQueries({ queryKey: ["thread", threadId] })
-      void client.invalidateQueries({ queryKey: ["threads"] })
-    },
-  })
-  const generateTitle = useMutation({
-    mutationFn: () => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}/title`, { method: "POST" }),
-    onSuccess: (thread: Thread) => {
-      setTitle(thread.title)
-      setEditing(false)
-      void client.invalidateQueries({ queryKey: ["thread", threadId] })
-      void client.invalidateQueries({ queryKey: ["threads"] })
-      void client.invalidateQueries({ queryKey: ["reasoning-audits"] })
-    },
-  })
-  const settings = useMutation({
-    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null; audio_transcription_model?: string | null; max_loaded_manuals?: number | null }) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
-    onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
-  })
   const remove = useMutation({
     mutationFn: () => api<unknown>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" }),
     onSuccess: () => {
       setDeleteOpen(false)
-      composer.clear()
+      // The deleted Thread's draft has no owner left to return to.
+      try { localStorage.removeItem(composerDraftKey(userId, threadId)) } catch { /* storage can be unavailable */ }
       void client.invalidateQueries({ queryKey: ["threads"] })
       void client.invalidateQueries({ queryKey: ["notes"] })
       navigate({ pathname: "/threads", search: location.search })
@@ -1705,120 +1547,45 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     mutationFn: (archived: boolean) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify({ archived }) }),
     onSuccess: (_thread, archived) => {
       void client.invalidateQueries({ queryKey: ["threads"] })
-      void client.invalidateQueries({ queryKey: ["thread", threadId] })
       if (archived) navigate({ pathname: "/threads", search: location.search })
     },
   })
   const backToThreads = () => navigate({ pathname: "/threads", search: location.search })
-  const running = thread.data?.status === "running"
-  // Only stored records prove a call is still on the device: a streamed item the
-  // preview renders carries the request's start time, not the call's own.
-  // Every hook sits above the placeholders below: a Thread opened from its URL has no
-  // list row to render from, so the first render is the placeholder and this memo would
-  // only be reached one render later — React then throws #310 ("Rendered more hooks
-  // than during the previous render") and the column dies instead of opening.
-  const inFlightCalls = useMemo(() => inFlightCallIds(running ? durableRecords : []), [durableRecords, running])
-  // Only this column settles into a placeholder; the Thread List is a sibling that already
-  // rendered, so opening a Thread never blanks the layout around it.
-  if (thread.isLoading) return <ThreadPending desktop={desktop} onBack={backToThreads} />
-  if (thread.isError || !thread.data) return <ThreadUnavailable error={thread.error} desktop={desktop} onBack={backToThreads} onRetry={() => void thread.refetch()} />
-  const current = thread.data
-  const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
-  const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
-  const archived = current.archived_at !== null
+  const archived = (current?.archived_at ?? null) !== null
   const archiveAction = archived
     ? { label: t("restoreThread"), icon: <ArchiveRestoreIcon className="size-4" />, next: false }
     : { label: t("archiveThread"), icon: <ArchiveIcon className="size-4" />, next: true }
-  const busy = submit.isPending || control.isPending
-  const submitInput = (recorded: string[] = []) => {
-    const audios = [...audio.audios, ...recorded]
-    if (busy || (!input.trim() && attachments.images.length === 0 && audios.length === 0)) return
-    submit.mutate({ input, images: attachments.images, audios })
-  }
-  const hasHistory = durableRecords.some((record) => record.kind !== "activity")
-  const action = composerAction(input, attachments.images.length, running)
-  return <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
-      {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={backToThreads}><ArrowLeftIcon /></Button>}
-      {editing ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
-        <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
-        <Button size="sm" disabled={rename.isPending || generateTitle.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
-      </form> : <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div className="flex min-w-0 items-center gap-1">
-          <h1 className="min-w-0 truncate text-base font-semibold">{current.title}</h1>
-          {archived && <Badge variant="outline" className="shrink-0 text-muted-foreground">{t("archived")}</Badge>}
-          {current.created_by === "api" && <Badge variant="outline" className="shrink-0 text-muted-foreground" title={current.external_ref ? `${t("apiOriginHint")} · ${current.external_ref}` : t("apiOriginHint")}>{t("apiOrigin")}</Badge>}
-          <Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
-          <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button>
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
-          <ThreadStatusSummary status={current.display_status} runningSummary={current.running_summary} language={language} />
-          {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
-        </div>
-      </div>}
-      <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
-      <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
-      <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
-    </div>
-    <ThreadUsagePanel usage={current.usage} language={language} />
-    {submit.error && <div className="shrink-0 p-3"><RequestError error={submit.error} onRetry={() => submitInput()} /></div>}
-    {control.error && <div className="shrink-0 p-3"><RequestError error={control.error} /></div>}
-    {generateTitle.error && <div className="shrink-0 p-3"><RequestError error={generateTitle.error} onRetry={() => generateTitle.mutate()} /></div>}
-    <MessageScrollerProvider autoScroll defaultScrollPosition="end">
-      <MessageScroller className="min-h-0 flex-1">
-        {/* The load-earlier control floats over the viewport instead of rendering as a transcript row:
-            the scroller preserves the visible row on prepend only while the previous first content
-            child moves down, and a control row kept at index 0 would defeat that detection. */}
-        <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex flex-col items-center gap-2 px-6">
-          {hasOlder && <Button className="pointer-events-auto shadow-sm" type="button" size="sm" variant="outline" disabled={loadEarlier.isPending} onClick={() => loadEarlier.mutate()}>
-            {loadEarlier.isPending && <Spinner data-icon="inline-start" />}
-            {loadEarlier.isPending ? t("loadingEarlierMessages") : t("loadEarlierMessages")}
-          </Button>}
-          {loadEarlier.error && <div className="pointer-events-auto w-full max-w-lg"><RequestError error={loadEarlier.error} onRetry={() => loadEarlier.mutate()} /></div>}
-        </div>
-        <MessageScrollerViewport>
-          <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
-            {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
-            {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={workers.data} manuals={manualLookup} inFlight={recordInFlight(record, inFlightCalls)} loadAudio={loadAudio} />} />
-            {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
-            {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
-            {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} runningSummary={current.running_summary} language={language} /></div></MessageScrollerItem>}
-            {openThreadNotes.length > 0 && <div className="border-t pt-3"><ThreadNotes notes={openThreadNotes} language={language} /></div>}
-            {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
-          </MessageScrollerContent>
-        </MessageScrollerViewport>
-        <MessageScrollerButton behavior="auto" />
-      </MessageScroller>
-    </MessageScrollerProvider>
-    <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submitInput() }}>
-      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} onRemove={attachments.remove} onRemoveAudio={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /></Field>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} audioTranscription={defaults.data ? { override: current.audio_transcription_model, fallback: defaults.data.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (audio_transcription_model) => settings.mutate({ audio_transcription_model }) } : undefined} />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
-            <ComposerAudio language={language} recording={audio.recording} disabled={busy} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submitInput([dataUrl]) })} onCancel={audio.cancel} />
-            {action === "send"
-              ? <Button disabled={busy || audio.recording}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
-              : action === "stop"
-                ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
-                : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
-          </div>
-        </div>
-      </FieldGroup>
-    </form>
+  return <>
+    <CybionThreadProvider baseUrl={window.location.origin} getToken={() => accessToken(sdk)} identity={userId} language={language}>
+      <CybionThreadView
+        threadId={threadId}
+        onThreadChange={setCurrent}
+        workers={workers.data}
+        manuals={manualLookup}
+        headerLeading={desktop ? undefined : <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={backToThreads}><ArrowLeftIcon /></Button>}
+        headerActions={<>
+          <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
+          <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending || current === null} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>
+          <Button variant="ghost" size="icon-sm" aria-label={t("delete")} onClick={() => setDeleteOpen(true)}><Trash2Icon /></Button>
+        </>}
+        transcriptFooter={<>
+          {openThreadNotes.length > 0 && <div className="border-t pt-3"><ThreadNotes notes={openThreadNotes} language={language} /></div>}
+          {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
+        </>}
+      />
+    </CybionThreadProvider>
     <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent><DialogHeader><DialogTitle>{t("deleteTitle")}</DialogTitle><DialogDescription>{t("deleteDescription")}</DialogDescription></DialogHeader>
       {openThreadNotes.length > 0 && <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
         <p className="font-medium">{t("deleteThreadNotes")}</p>
         <ul className="mt-1 list-disc space-y-1 pl-4">{openThreadNotes.map((note) => <li key={note.id} className="break-words">{note.text}</li>)}</ul>
       </div>}
       {remove.error && <RequestError error={remove.error} onRetry={() => remove.mutate()} />}<DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("cancel")}</Button><Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? <Spinner /> : <Trash2Icon data-icon="inline-start" />}{t("delete")}</Button></DialogFooter></DialogContent></Dialog>
-  </section>
+  </>
 }
 
-// The shell keeps the two columns apart: the Thread List is the conversation's sibling, so
-// the list renders from its own cached rows, polls on its own, and never unmounts when the
-// conversation it sits beside switches to another Thread.
+// The shell keeps the two columns apart: the Thread List is the conversation's
+// sibling, so the list renders from its own cached rows, polls on its own, and
+// never unmounts when the conversation beside it switches to another Thread.
 function ThreadConversationPage({ sdk, userId, filters, onFiltersChange }: ThreadListRouteProps & { userId: string }) {
   const { threadId = "" } = useParams()
   const { language } = useUi()
@@ -1826,42 +1593,12 @@ function ThreadConversationPage({ sdk, userId, filters, onFiltersChange }: Threa
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const request = useApiRequest(sdk)
-  // Older history pages outlive a Thread switch, so coming back to a Thread still shows the
-  // pages it had already loaded instead of paging them in again.
-  const [olderPagesByThread, setOlderPagesByThread] = useState<Record<string, ThreadHistoryWindow[]>>({})
-  const olderPages = useMemo(() => olderPagesByThread[threadId] ?? [], [olderPagesByThread, threadId])
-  const rememberOlderPage = useCallback((id: string, page: ThreadHistoryWindow) => {
-    setOlderPagesByThread((current) => ({ ...current, [id]: [page, ...(current[id] ?? [])] }))
-  }, [])
   return <main className="flex h-full flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <ThreadListPane layout="sidebar" sessionId={sdk.session.getState().sessionId} request={request} language={language} filters={filters} onFiltersChange={onFiltersChange} onCreate={() => navigate({ pathname: "/threads", search: location.search })} />
     </aside>}
-    <ThreadConversation key={threadId} sdk={sdk} userId={userId} olderPages={olderPages} onOlderPage={rememberOlderPage} />
+    <ThreadConversation key={threadId} sdk={sdk} userId={userId} />
   </main>
-}
-
-// The conversation column alone while the Thread record is still on its way: the header keeps
-// its place and the transcript fills in, without a page-sized skeleton.
-function ThreadPending({ desktop, onBack }: { desktop: boolean; onBack: () => void }) {
-  const { t } = useUi()
-  return <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-    <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
-      {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={onBack}><ArrowLeftIcon /></Button>}
-      <Skeleton className="h-5 w-56" />
-    </div>
-    <div className="flex flex-col gap-3 px-4 py-5"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>
-  </section>
-}
-
-function ThreadUnavailable({ error, desktop, onBack, onRetry }: { error: unknown; desktop: boolean; onBack: () => void; onRetry: () => void }) {
-  const { t } = useUi()
-  return <section className="flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col">
-    <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
-      {!desktop && <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={onBack}><ArrowLeftIcon /></Button>}
-    </div>
-    <div className="p-4"><RequestError error={error} onRetry={onRetry} /></div>
-  </section>
 }
 
 function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
@@ -1888,246 +1625,6 @@ function AudioTranscriptionCall({ language, call, time }: { language: Language; 
   </div>
 }
 
-function SafetyBufferingAlert({ language, view, running }: { language: Language; view: ThreadResponseView; running: boolean }) {
-  const response = view.response
-  const buffering = response.safety_buffering
-  if (!running || response.completed || !buffering?.show_buffering_ui) return null
-  return <MessageScrollerItem><Alert><Spinner /><AlertTitle>{language === "zh" ? "正在等待安全检查" : "Waiting for safety checks"}</AlertTitle><AlertDescription>{buffering.reasons.join(" · ")}</AlertDescription></Alert></MessageScrollerItem>
-}
-
-const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals, inFlight, loadAudio }: { language: Language; record: HistoryRecord; workers: Worker[] | undefined; manuals: ReadonlyMap<string, ManualSummary> | undefined; inFlight: boolean; loadAudio?: (reference: string, mediaType: string | null) => Promise<string> }) {
-  const { t } = useUi()
-  const time = formattedTime(language, record.created_at)
-  const action = threadControlAction(record)
-  if (action) {
-    const label = action === "cancel" ? t("threadStopped") : action === "continue" ? t("threadContinued") : t("threadCompactionRequested")
-    return <Message><MessageContent><MessageFooter>{label} · {time}</MessageFooter></MessageContent></Message>
-  }
-  const imageSource = generatedImageSource(record.payload)
-  if (imageSource) {
-    return <Message>
-      <MessageContent className="max-w-[75ch]">
-        <img src={imageSource} alt={t("generatedImage")} loading="lazy" decoding="async" className="block h-auto max-w-full rounded-lg" />
-        <MessageFooter>{t("generatedImage")} · #{record.id} · {time}</MessageFooter>
-      </MessageContent>
-    </Message>
-  }
-  if (record.kind === "input") {
-    return <Message align="end">
-      <MessageContent>
-        <UserInputMessage language={language} payload={record.payload} footer={`#${record.id} · ${time}`} loadAudio={loadAudio} />
-      </MessageContent>
-    </Message>
-  }
-  // A loaded Manual is Thread state the controller maintains; the record is the
-  // same notice the compiler replays upstream as a developer message.
-  const loadNotice = manualLoadNotice(record)
-  if (loadNotice) {
-    return <ManualLoadNotice notice={loadNotice} lookup={manuals} language={language} time={time} recordId={record.id} />
-  }
-
-  const text = historyRecordText(record)
-
-  if (isReasoningRecord(record)) {
-    const summary = reasoningSummary(record)
-    return <div className="relative flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-3 py-3 dark:border-border dark:bg-card">
-      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
-        <SparklesIcon className="size-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-sm font-medium text-primary">{t("recordReasoning")}</span>
-          <time className="text-xs text-muted-foreground">{time}</time>
-        </div>
-        {summary ? <div className="mt-2 break-words text-sm"><Markdown content={summary} /></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
-        <details className="group mt-2">
-          <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-            <span>{t("recordPayload")}</span>
-            <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-          </summary>
-          <HistoryRecordPayload language={language} record={record} />
-        </details>
-      </div>
-    </div>
-  }
-
-  const payload = historyPayloadObject(record.payload)
-  if (record.kind === "response_output" && payload?.type === "message") {
-    return <AssistantMessage language={language} streaming={record.id < 0} text={text} time={time} />
-  }
-
-  if (record.kind === "tool_output") {
-    const screenshot = record.screenshot ? screenshotImageSource(record.payload) : null
-    const viewed = viewedImageSource(record.payload)
-    return <div className="relative flex items-start gap-3 px-1">
-      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground ring-1 ring-border">
-        <TerminalSquareIcon className="size-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-sm font-medium">{t("recordToolOutput")}</span>
-          <Badge variant="secondary" className="h-5 gap-1 px-1.5 text-[0.68rem]">
-            <span aria-hidden="true" className="size-1.5 rounded-full bg-primary" />
-            {t("worker")}
-          </Badge>
-          <time className="text-xs text-muted-foreground">{time}</time>
-        </div>
-        {viewed !== null
-          ? <ViewedOutput language={language} source={viewed} />
-          : screenshot !== null
-            ? <ScreenshotOutput language={language} source={screenshot} />
-            : <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>}
-        <details className="group mt-2">
-          <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-            <span>{t("recordPayload")}</span>
-            <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-          </summary>
-          <HistoryRecordPayload language={language} record={record} />
-        </details>
-      </div>
-    </div>
-  }
-
-  const bashCall = bashFunctionCall(payload)
-  if (bashCall) {
-    return <BashCommand language={language} call={bashCall} workers={workers} time={time} startedAt={record.created_at} inFlight={inFlight}>
-      <details className="group mt-2">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-          <span>{t("recordPayload")}</span>
-          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <HistoryRecordPayload language={language} record={record} />
-      </details>
-    </BashCommand>
-  }
-
-  const transcriptionCall = audioTranscriptionFunctionCall(payload)
-  if (transcriptionCall) {
-    return <AudioTranscriptionCall language={language} call={transcriptionCall} time={time} />
-  }
-
-  const searchCall = webSearchFunctionCall(payload)
-  if (searchCall) {
-    return <WebSearchCall language={language} call={searchCall} time={time}>
-      <details className="group mt-2">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-          <span>{t("recordPayload")}</span>
-          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <HistoryRecordPayload language={language} record={record} />
-      </details>
-    </WebSearchCall>
-  }
-
-  const imageCall = imageGenerationFunctionCall(payload)
-  if (imageCall) {
-    return <ImageGenerationCall language={language} call={imageCall} time={time}>
-      <details className="group mt-2">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-          <span>{t("recordPayload")}</span>
-          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <HistoryRecordPayload language={language} record={record} />
-      </details>
-    </ImageGenerationCall>
-  }
-
-  const browserCall = browserControlFunctionCall(payload)
-  if (browserCall) {
-    return <BrowserControlCall language={language} call={browserCall} time={time}>
-      <details className="group mt-2">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-          <span>{t("recordPayload")}</span>
-          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <HistoryRecordPayload language={language} record={record} />
-      </details>
-    </BrowserControlCall>
-  }
-
-  const computerCall = computerUseFunctionCall(payload)
-  if (computerCall) {
-    return <ComputerUseCall language={language} call={computerCall} time={time}>
-      <details className="group mt-2">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-          <span>{t("recordPayload")}</span>
-          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <HistoryRecordPayload language={language} record={record} />
-      </details>
-    </ComputerUseCall>
-  }
-
-  const viewImageCall = viewImageFunctionCall(payload)
-  if (viewImageCall) {
-    return <ViewImageCall language={language} call={viewImageCall} time={time}>
-      <details className="group mt-2">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-          <span>{t("recordPayload")}</span>
-          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <HistoryRecordPayload language={language} record={record} />
-      </details>
-    </ViewImageCall>
-  }
-
-  const cybionCall = cybionToolFunctionCall(payload)
-  if (cybionCall) {
-    return <CybionToolCall language={language} call={cybionCall} workers={workers} manuals={manuals} time={time}>
-      <details className="group mt-2">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-          <span>{t("recordPayload")}</span>
-          <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <HistoryRecordPayload language={language} record={record} />
-      </details>
-    </CybionToolCall>
-  }
-
-  if (record.kind === "checkpoint") {
-    return <CheckpointMessage language={language} record={record} />
-  }
-
-  if (typeof payload?.type === "string" && (payload.type !== "message" || !text.trim())) {
-    return <div className="relative flex items-start gap-3 px-1">
-      <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border/80">
-        <ActivityIcon className="size-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-sm font-medium text-muted-foreground">{historyRecordLabel(record, t)}</span>
-          <Badge variant="outline" className="h-5 px-1.5 text-[0.68rem] text-muted-foreground">{t("recordHidden")}</Badge>
-          <time className="text-xs text-muted-foreground">{time}</time>
-        </div>
-        <p className="mt-1 truncate text-sm text-muted-foreground">{historyRecordSummary(text)}</p>
-        <details className="group mt-2">
-          <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-            <span>{t("recordPayload")}</span>
-            <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-          </summary>
-          <HistoryRecordPayload language={language} record={record} />
-        </details>
-      </div>
-    </div>
-  }
-
-  const isFailure = record.kind === "activity" && payload?.role === "system" && text.startsWith("Request failed:")
-  return <div className={`flex items-start gap-3 rounded-xl border px-3 py-3 ${isFailure ? "border-destructive/35 bg-destructive/5" : "border-border/70 bg-card/70"}`}>
-    <div aria-hidden="true" className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg ring-1 ${isFailure ? "bg-destructive/10 text-destructive ring-destructive/20" : "bg-muted text-muted-foreground ring-border/80"}`}>
-      {isFailure ? <CircleAlertIcon className="size-4" /> : <ActivityIcon className="size-4" />}
-    </div>
-    <div className="min-w-0 flex-1">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className={`text-sm font-medium ${isFailure ? "text-destructive" : ""}`}>{historyRecordLabel(record, t)}</span>
-        <time className="text-xs text-muted-foreground">{time}</time>
-      </div>
-      <div className="mt-1 whitespace-pre-wrap break-words text-sm leading-6">{text}</div>
-      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.68rem] text-muted-foreground">
-        <span className="font-mono">#{record.id}</span>
-      </div>
-    </div>
-  </div>
-}, (previous, next) => previous.workers === next.workers && previous.manuals === next.manuals && previous.inFlight === next.inFlight && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
 
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")

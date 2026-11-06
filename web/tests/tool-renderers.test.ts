@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
 import { audioTranscriptionFunctionCall, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, imageGenerationFunctionCall, viewImageFunctionCall, webSearchFunctionCall } from "../src/lib/history-payload.ts"
 
@@ -49,7 +50,7 @@ test("every built-in tool in the catalog has exactly one renderer matcher", () =
 })
 
 test("thread view dispatches every tool renderer before the generic protocol fallback", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const source = readPackageSource("components/history-message.tsx")
   const generic = source.indexOf('if (typeof payload?.type === "string" &&')
   assert.ok(generic > 0)
   for (const matcher of ["bashFunctionCall(payload)", "webSearchFunctionCall(payload)", "imageGenerationFunctionCall(payload)", "browserControlFunctionCall(payload)", "computerUseFunctionCall(payload)", "viewImageFunctionCall(payload)", "cybionToolFunctionCall(payload)"]) {
