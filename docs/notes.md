@@ -103,6 +103,12 @@ ordinal and the open count), hands the model a runtime nudge and lets the turn
 go on — at most three times per input, then it stops with a
 `notes_continuation_stopped` record that says how many debts remain.
 
+Extending a turn re-arms its runtime state in the same transaction that records
+the continuation. A settled response has already finalized the Thread back to
+`idle`, and the next iteration recompiles the replay and refuses to run a Thread
+that is not `running` — without the re-arm the hand-back is cancelled before the
+second request is ever sent.
+
 The nudge rides the request copy only, appended after the notes block, and is
 never written as a user message: adding a fake user turn would read as the
 person speaking and would outlive the one moment it was meant for. It names who

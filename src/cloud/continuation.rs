@@ -91,6 +91,14 @@ pub(super) fn decide_in(
             "open": open,
         }),
     )?;
+    // The upstream response that just settled already finalized the turn, so the
+    // Thread is idle again. Extending it means re-arming the runtime state in the
+    // same transaction: the next iteration recompiles the replay and refuses to
+    // run a Thread that is not `running`, so a half-extended turn would end here.
+    connection.execute(
+        "UPDATE threads SET status='running' WHERE id=?",
+        [thread_id],
+    )?;
     Ok(Some(nudge_text(nudge, open)))
 }
 
