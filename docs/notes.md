@@ -94,6 +94,29 @@ Deleting a Thread tears off its notes, open and crossed, and answers
 means nothing outside it, so it goes with the Thread; the delete confirmation
 lists the open ones before the Thread goes.
 
+## Continuation
+
+A Thread does not end its turn while it still owes open notes. When a response
+settles with no tool calls and notes remain open, the kernel records an
+`activity` (`notes_continuation`, carrying the turn's input record id, the
+ordinal and the open count), hands the model a runtime nudge and lets the turn
+go on — at most three times per input, then it stops with a
+`notes_continuation_stopped` record that says how many debts remain.
+
+The nudge rides the request copy only, appended after the notes block, and is
+never written as a user message: adding a fake user turn would read as the
+person speaking and would outlive the one moment it was meant for. It names who
+is speaking, states the fact, names the two legal moves (finish it, or
+`block_thread`) and forbids the three things a forced loop invites — crossing
+out work that was not done, restating the plan, and redoing recorded work.
+
+Two bounds make the loop honest. A blocked Thread is never handed back, so a
+model that cannot finish has a legal exit instead of a reason to fake a cross
+out. And the administrator's *Keep going until the notes are done* switch
+(`notes.continuation`, on by default) turns the whole loop off for the
+deployment, in which case every turn ends at the model's first stop and nothing
+is recorded.
+
 ## Pages
 
 `#/notes` (Work → Governed contexts → Notes) is the owner's review surface and

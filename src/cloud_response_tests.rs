@@ -3554,6 +3554,11 @@ fn a_barrier_that_did_not_move_the_replay_target_keeps_envelopes() {
 #[tokio::test]
 async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     let (_root, state) = test_state();
+    // This test is about where the notes block sits in one request. The loop
+    // that would otherwise hand the turn back needs a second response from the
+    // mock upstream, so it is switched off here and covered by the continuation
+    // tests instead.
+    set_admin_meta_int_sync(&state.admin_db_path, notes::CONTINUATION_KEY, 0).unwrap();
     let user = user_for_subject(&state, "notes-injection-user").unwrap();
     let thread = create_test_thread(&state, &user).await;
     let thread_id = thread.id.clone();

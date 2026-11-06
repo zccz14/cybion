@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test"
 async function fixture(page: Page) {
   const state = {
     features: { thread_id_header: false, session_id_header: false },
-    notes: { thread_max_chars: 120 },
+    notes: { thread_max_chars: 120, continuation: true },
     accessGate: Promise.resolve(),
     failAccess: false,
     failFeatureSave: false,
@@ -56,7 +56,7 @@ test("a direct non-admin visit waits for identity and never fetches system setti
 test("the administrator page exposes only experimental controls, which save and survive refresh", async ({ page }) => {
   const state = await fixture(page)
   await page.goto(url)
-  await expect(page.getByRole("switch")).toHaveCount(2)
+  await expect(page.getByRole("switch")).toHaveCount(3)
   await expect(page.getByLabel("User-Agent", { exact: true })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "保存请求头", exact: true })).toHaveCount(0)
   const labels = ["发送 Thread ID 请求头", "发送 Session ID 请求头"]
@@ -66,6 +66,15 @@ test("the administrator page exposes only experimental controls, which save and 
     await expect(control).toBeChecked()
   }
   expect(state.calls.filter((call) => call.method === "PUT").every((call) => call.path === "/api/experimental-features")).toBe(true)
+  // The notes continuation switch is deployment configuration, so it belongs to
+  // the notes card and saves with that card's button.
+  const continuation = page.getByRole("switch", { name: "做不完便签就不许结束", exact: true })
+  await expect(continuation).toBeChecked()
+  await continuation.click()
+  await expect(continuation).not.toBeChecked()
+  await page.getByRole("button", { name: "保存上限", exact: true }).click()
+  await expect.poll(() => state.calls.filter((call) => call.path === "/api/note-settings" && call.method === "PUT").length).toBe(1)
+  expect(state.calls.find((call) => call.path === "/api/note-settings" && call.method === "PUT")?.body).toMatchObject({ continuation: false })
   await page.reload()
   for (const label of labels) await expect(page.getByRole("switch", { name: label, exact: true })).toBeChecked()
 })
@@ -78,7 +87,7 @@ test("access and save failures expose recovery without false success", async ({ 
   expect(state.calls.every((call) => call.path === "/api/me")).toBe(true)
   state.failAccess = false
   await page.getByRole("button", { name: "重试", exact: true }).click()
-  await expect(page.getByRole("switch")).toHaveCount(2)
+  await expect(page.getByRole("switch")).toHaveCount(3)
   state.failFeatureSave = true
   const control = page.getByRole("switch", { name: "发送 Thread ID 请求头", exact: true })
   await control.click()
@@ -92,19 +101,19 @@ test("access and save failures expose recovery without false success", async ({ 
 test("switching accounts cannot display cached administrator controls", async ({ page }) => {
   const state = await fixture(page)
   await page.goto(url)
-  await expect(page.getByRole("switch")).toHaveCount(2)
+  await expect(page.getByRole("switch")).toHaveCount(3)
   await page.getByRole("button", { name: "Ordinary user", exact: true }).click()
   await expect(page.getByText("仅管理员可查看和修改系统配置。")).toBeVisible()
   await expect(page.getByRole("switch")).toHaveCount(0)
   expect(state.calls.filter((call) => call.session === "user").every((call) => call.path === "/api/me")).toBe(true)
   await page.getByRole("button", { name: "Administrator", exact: true }).click()
-  await expect(page.getByRole("switch")).toHaveCount(2)
+  await expect(page.getByRole("switch")).toHaveCount(3)
 })
 
 test("bilingual system controls remain usable in dark mode and narrow layouts", async ({ page }) => {
   await fixture(page)
   await page.goto(url)
-  await expect(page.getByRole("switch")).toHaveCount(2)
+  await expect(page.getByRole("switch")).toHaveCount(3)
   await page.getByRole("button", { name: "Theme", exact: true }).click()
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 })

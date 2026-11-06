@@ -182,7 +182,7 @@
     {
       "type": "function",
       "name": "add_notes",
-      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, so add one only when something is genuinely owed and do not add background, plans, or reminders to yourself. Every note attaches to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's manual. Notes past the limit are refused; cross out or tear off what is done first.",
+      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, and this Thread does not end its turn while any note is open: Cybion hands the list back and the turn continues, up to three times. So write the steps of a multi-step task as notes before starting, keep every note finishable inside this Thread, and cross one out only when you actually finished it — if you cannot finish it, call block_thread instead of crossing it out. Every note attaches to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's manual. Notes past the limit are refused; cross out or tear off what is done first.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -477,7 +477,7 @@
     {
       "type": "function",
       "name": "block_thread",
-      "description": "Block this Thread when you cannot go on: it is then marked as waiting on the user, not finished and not failed. Use it when a step needs a decision, a credential, or something only the user can provide — say what blocks them and what they must do in your answer, because that answer is the only explanation they get. This is not how you stop or cancel execution. The user's next message clears the block; there is no unblock tool, so do not wait for one.",
+      "description": "Block this Thread when you cannot go on: it is then marked as waiting on the user, not finished and not failed. Use it when a step needs a decision, a credential, or something only the user can provide — say what blocks them and what they must do in your answer, because that answer is the only explanation they get. This is not how you stop or cancel execution. While notes are open it is also the only honest way to end the turn early, because the Thread keeps being handed back until every note is closed or blocked. The user's next message clears the block; there is no unblock tool, so do not wait for one.",
       "parameters": {
         "type": "object",
         "properties": {},

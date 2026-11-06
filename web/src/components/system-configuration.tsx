@@ -14,7 +14,7 @@ type Language = "en" | "zh"
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 type Props = { language: Language; sessionId: string | null | undefined; request: Request }
 type ExperimentalFeatures = { thread_id_header: boolean; session_id_header: boolean }
-type NoteSettings = { thread_max_chars: number }
+type NoteSettings = { thread_max_chars: number; continuation: boolean }
 const NOTE_CHAR_CEILING = 2000
 const copy = {
   en: {
@@ -28,6 +28,8 @@ const copy = {
     notesTitle: "Sticky notes",
     notesDescription: "Character limits the service enforces when a note is added. A longer note is refused with a message that asks the model to condense it, so the note is rewritten instead of silently truncated.",
     threadMaxChars: "Note limit",
+    notesContinuation: "Keep going until the notes are done",
+    notesContinuationDescription: "While a Thread still owes open notes, Cybion hands the list back and lets the turn continue instead of ending it — at most three times per message. Off, every turn ends at the model's first stop. A blocked Thread is never continued either way.",
     threadMaxCharsDescription: "Characters allowed in a note. A note belongs to one Thread, so it may lean on that Thread's manual.",
     saveNotes: "Save limits",
     saveNotesError: "Could not save the note limits",
@@ -49,6 +51,8 @@ const copy = {
     notesTitle: "便签",
     notesDescription: "服务在添加便签时执行的字符上限。超长会被拒绝并提示模型精简内容，因此便签会被重写，而不是被静默截断。",
     threadMaxChars: "便签上限",
+    notesContinuation: "做不完便签就不许结束",
+    notesContinuationDescription: "线程还有没划掉的便签时，Cybion 会把清单递回去让它继续，而不是就此结束——每条消息最多三次。关闭后，模型第一次停下就结束。无论开关如何，受阻的线程都不会被续跑。",
     threadMaxCharsDescription: "每条便签允许的字符数。便签只属于一个线程，因此可以依赖该线程的上下文。",
     saveNotes: "保存上限",
     saveNotesError: "无法保存便签上限",
@@ -120,9 +124,13 @@ function NoteLimitsCard({ language, sessionId, request }: Props) {
   const value = draft ?? settings.data ?? null
   const valid = value !== null
     && Number.isInteger(value.thread_max_chars) && value.thread_max_chars >= 1 && value.thread_max_chars <= NOTE_CHAR_CEILING
-  const change = (key: keyof NoteSettings) => (event: ChangeEvent<HTMLInputElement>) => {
+    && typeof value.continuation === "boolean"
+  const change = (event: ChangeEvent<HTMLInputElement>) => {
     const next = Number.parseInt(event.target.value, 10)
-    if (value !== null) setDraft({ ...value, [key]: Number.isNaN(next) ? 0 : next })
+    if (value !== null) setDraft({ ...value, thread_max_chars: Number.isNaN(next) ? 0 : next })
+  }
+  const changeContinuation = (continuation: boolean) => {
+    if (value !== null) setDraft({ ...value, continuation })
   }
   return <Card><CardHeader><CardTitle>{t.notesTitle}</CardTitle><CardDescription>{t.notesDescription}</CardDescription></CardHeader><CardContent>
     {settings.error && <SettingsError error={settings.error} title={t.loadError} retryLabel={t.retry} onRetry={() => void settings.refetch()} />}
@@ -130,7 +138,11 @@ function NoteLimitsCard({ language, sessionId, request }: Props) {
     {value !== null && <FieldGroup className="max-w-xl">
       <Field orientation="horizontal">
         <FieldContent><FieldLabel htmlFor="note-thread-max-chars">{t.threadMaxChars}</FieldLabel><FieldDescription id="note-thread-max-chars-description">{t.threadMaxCharsDescription}</FieldDescription></FieldContent>
-        <Input id="note-thread-max-chars" aria-describedby="note-thread-max-chars-description" className="w-28" type="number" min={1} max={NOTE_CHAR_CEILING} value={value.thread_max_chars} disabled={save.isPending} onChange={change("thread_max_chars")} />
+        <Input id="note-thread-max-chars" aria-describedby="note-thread-max-chars-description" className="w-28" type="number" min={1} max={NOTE_CHAR_CEILING} value={value.thread_max_chars} disabled={save.isPending} onChange={change} />
+      </Field>
+      <Field orientation="horizontal">
+        <FieldContent><FieldLabel htmlFor="note-continuation">{t.notesContinuation}</FieldLabel><FieldDescription id="note-continuation-description">{t.notesContinuationDescription}</FieldDescription></FieldContent>
+        <Switch id="note-continuation" aria-describedby="note-continuation-description" checked={value.continuation} disabled={save.isPending} onCheckedChange={changeContinuation} />
       </Field>
       <div className="flex items-center gap-2">
         <Button size="sm" disabled={!valid || save.isPending || draft === null} onClick={() => { if (value !== null) save.mutate(value) }}>{save.isPending ? <Spinner /> : null}{t.saveNotes}</Button>
