@@ -744,7 +744,10 @@ async fn schema_48_upgrade_adds_reasoning_cost_columns_and_keeps_the_audits() {
     let user = user_for_subject(&state, "cost-upgrade-user").unwrap();
     user_db(&state, &user, true, move |connection| {
         connection.execute_batch(
-            "ALTER TABLE reasoning_audits DROP COLUMN cost_usd_nanos;
+            // A schema 48 database predates the cost-settlement index too, and
+            // SQLite refuses to drop a column an index still references.
+            "DROP INDEX IF EXISTS reasoning_audits_cost_pending;
+             ALTER TABLE reasoning_audits DROP COLUMN cost_usd_nanos;
              ALTER TABLE reasoning_audits DROP COLUMN cost_attempts;
              INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('t','T','m','idle',1,1);
              INSERT INTO reasoning_audits(id,thread_id,model,status,started_at,request_id)

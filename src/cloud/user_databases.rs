@@ -10,7 +10,7 @@
 //! setup or a close-time checkpoint ever again.
 
 use super::*;
-use std::panic::AssertUnwindSafe;
+use std::panic::{AssertUnwindSafe, Location};
 use std::sync::Mutex as BlockingMutex;
 
 /// One operation holding its database's queue longer than this is worth a log
@@ -55,66 +55,78 @@ impl UserDatabases {
 
     /// Runs one operation against a user database, queued behind whatever was
     /// already admitted for that file.
-    pub(super) async fn run<T, F>(
+    ///
+    /// Deliberately not an `async fn`: `#[track_caller]` names the caller only
+    /// when the location is read in a synchronous body, and naming the caller is
+    /// the point of the slow-operation warning below. `user_db` carries
+    /// `#[track_caller]` as well, so the line reported is the handler that asked
+    /// for the work, not this queue.
+    #[track_caller]
+    pub(super) fn run<T, F>(
         &self,
         path: &Path,
         create: bool,
         operation: F,
-    ) -> Result<T, ApiError>
+    ) -> impl std::future::Future<Output = Result<T, ApiError>>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
     {
+        let caller = Location::caller();
         let slot = self.slot(path);
         let path = path.to_path_buf();
-        // The admission moves into the blocking task, so the queue reopens only
-        // once the operation has committed or rolled back.
-        let admission = slot.queue.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
-            let _admission = admission;
-            let mut connection = slot
-                .connection
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            // A cached connection is only trusted while the file still reports
-            // the schema this process serves; an administrator reset or a tool
-            // that recreated the file makes the next operation reopen instead of
-            // writing through a stale handle.
-            if connection
-                .as_ref()
-                .is_some_and(|existing| !connection_is_current(existing))
-            {
-                *connection = None;
-            }
-            if connection.is_none() {
-                *connection = Some(open_user(&path, create)?);
-            }
-            let started = std::time::Instant::now();
-            let outcome = {
-                let connection = connection.as_mut().expect("connection opened above");
-                std::panic::catch_unwind(AssertUnwindSafe(|| operation(connection)))
-            };
-            // The queue is per file, so a slow operation delays this user's other
-            // work. Surface it instead of leaving the stall unexplained.
-            if started.elapsed() > SLOW_OPERATION {
-                tracing::warn!(
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "slow user database operation"
-                );
-            }
-            match outcome {
-                Ok(result) => result,
-                Err(_) => {
-                    // The interrupted transaction rolled back while unwinding, so
-                    // reopening leaves the next operation a clean connection
-                    // instead of one wedged mid-transaction.
+        async move {
+            // The admission moves into the blocking task, so the queue reopens only
+            // once the operation has committed or rolled back.
+            let admission = slot.queue.clone().lock_owned().await;
+            let joined = tokio::task::spawn_blocking(move || {
+                let _admission = admission;
+                let mut connection = slot
+                    .connection
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                // A cached connection is only trusted while the file still reports
+                // the schema this process serves; an administrator reset or a tool
+                // that recreated the file makes the next operation reopen instead of
+                // writing through a stale handle.
+                if connection
+                    .as_ref()
+                    .is_some_and(|existing| !connection_is_current(existing))
+                {
                     *connection = None;
-                    Err(ApiError::internal("user database operation panicked"))
                 }
-            }
-        })
-        .await
-        .map_err(ApiError::internal)?
+                if connection.is_none() {
+                    *connection = Some(open_user(&path, create)?);
+                }
+                let started = std::time::Instant::now();
+                let outcome = {
+                    let connection = connection.as_mut().expect("connection opened above");
+                    std::panic::catch_unwind(AssertUnwindSafe(|| operation(connection)))
+                };
+                // The queue is per file, so a slow operation delays this user's other
+                // work. Surface it — with the call site that asked for it — instead of
+                // leaving the stall unexplained.
+                if started.elapsed() > SLOW_OPERATION {
+                    tracing::warn!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        caller = %caller,
+                        "slow user database operation"
+                    );
+                }
+                match outcome {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // The interrupted transaction rolled back while unwinding, so
+                        // reopening leaves the next operation a clean connection
+                        // instead of one wedged mid-transaction.
+                        *connection = None;
+                        Err(ApiError::internal("user database operation panicked"))
+                    }
+                }
+            })
+            .await;
+            joined.map_err(ApiError::internal)?
+        }
     }
 }
 

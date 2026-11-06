@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::{Json, Router, extract::State as Parts, routing::post};
 
-use super::cost::{MAX_ATTEMPTS, run_pass};
+use super::cost::{MAX_ATTEMPTS, PENDING_SQL, run_pass};
 use super::tests::{create_test_thread, insert_upstream, test_state};
 use super::*;
 
@@ -228,4 +228,29 @@ async fn a_deleted_upstream_spends_an_attempt_without_asking() {
     run_pass(&state).await.unwrap();
 
     assert_eq!(read_cost(&state, &user, "req-1").await, (None, 1));
+}
+
+/// The settlement pass runs every five seconds against every user database, on
+/// the same single connection that account's requests queue behind. Walking the
+/// audit table to find a handful of unsettled rows made that pass cost the whole
+/// history; the partial index is what keeps it proportional to the lookback
+/// window, so the plan is worth pinning.
+#[tokio::test]
+async fn the_settlement_scan_answers_from_the_pending_index() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "cost-plan").unwrap();
+    let plan: Vec<String> = user_db(&state, &user, true, |connection| {
+        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", PENDING_SQL))?;
+        let rows = statement.query_map(params![now() - 3600, MAX_ATTEMPTS, 200], |row| {
+            row.get::<_, String>(3)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    })
+    .await
+    .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("reasoning_audits_cost_pending")),
+        "the settlement scan must answer from its partial index, plan was {plan:?}"
+    );
 }
