@@ -36,6 +36,10 @@ jobs:
       - run: python3 scripts/check-worker-release.py
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: pnpm --dir packages/cybion-components install --frozen-lockfile
+      - run: pnpm --dir packages/cybion-components run typecheck
+      - run: pnpm --dir packages/cybion-components test
+      - run: pnpm --dir packages/cybion-components run build
       - run: pnpm --dir web install --frozen-lockfile
       - run: pnpm --dir web run build
       - run: cross build --release --locked --target x86_64-unknown-linux-gnu
