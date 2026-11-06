@@ -4,11 +4,12 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { createTestServer } from "./vite-server.ts"
+import { readPackageSource } from "./package-source.ts"
 
 test("image generation calls render the prompt and reference positions in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { ImageGenerationCall } = await server.ssrLoadModule("/src/components/image-generation-call.tsx")
+    const { ImageGenerationCall } = await server.ssrLoadModule("@zccz14/cybion-components")
     const render = (language: string, referenceImages: number[]) => renderToStaticMarkup(createElement(ImageGenerationCall, {
       language, call: { prompt: "柴犬 <script>alert(1)</script>", referenceImages }, time: "12:34:56",
       children: createElement("details", null, "Raw protocol"),
@@ -31,7 +32,7 @@ test("image generation calls render the prompt and reference positions in both l
 })
 
 test("thread view renders image generation calls before the generic protocol renderer", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const source = readPackageSource("components/history-message.tsx")
   assert.ok(source.indexOf("const imageCall = imageGenerationFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))
-  assert.match(source, /<ImageGenerationCall[^>]*>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/ImageGenerationCall>/)
+  assert.match(source, /<ImageGenerationCall[^>]*>[\s\S]*?<PayloadDetails language=\{language\} record=\{record\} label=\{t\("recordPayload"\)\} \/>[\s\S]*?<\/ImageGenerationCall>/)
 })

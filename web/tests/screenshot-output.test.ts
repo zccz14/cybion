@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
+import { readPackageSource } from "./package-source.ts"
 import { screenshotImageSource } from "../src/lib/history-payload.ts"
 
 const png = `iVBORw0KGgo${"A".repeat(64)}`
@@ -27,7 +28,7 @@ test("failed, malformed or non-PNG screenshot results keep the ordinary tool out
 })
 
 test("thread view renders marked screenshots through the shared image dialog", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const source = readPackageSource("components/history-message.tsx")
   assert.match(source, /const screenshot = record\.screenshot \? screenshotImageSource\(record\.payload\) : null/)
   assert.match(source, /<ScreenshotOutput language=\{language\} source=\{screenshot\} \/>/)
   assert.match(source, /previous\.record\.screenshot === next\.record\.screenshot/)

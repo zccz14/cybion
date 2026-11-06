@@ -4,11 +4,12 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { createTestServer } from "./vite-server.ts"
+import { readPackageSource } from "./package-source.ts"
 
 test("browser control calls render action details with escaped text in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { BrowserControlCall } = await server.ssrLoadModule("/src/components/browser-control-call.tsx")
+    const { BrowserControlCall } = await server.ssrLoadModule("@zccz14/cybion-components")
     const render = (language: string, call: Record<string, unknown>) => renderToStaticMarkup(createElement(BrowserControlCall, {
       language, call: { summary: null, ...call }, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
@@ -38,7 +39,7 @@ test("browser control calls render action details with escaped text in both lang
 })
 
 test("thread view renders browser control calls before the generic protocol renderer", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const source = readPackageSource("components/history-message.tsx")
   assert.ok(source.indexOf("const browserCall = browserControlFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))
-  assert.match(source, /<BrowserControlCall[^>]*>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/BrowserControlCall>/)
+  assert.match(source, /<BrowserControlCall[^>]*>[\s\S]*?<PayloadDetails language=\{language\} record=\{record\} label=\{t\("recordPayload"\)\} \/>[\s\S]*?<\/BrowserControlCall>/)
 })

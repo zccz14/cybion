@@ -7,7 +7,7 @@ import { createTestServer } from "./vite-server.ts"
 test("process groups are native closed disclosures with bilingual counts, elapsed time and original children", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { ThreadProcessGroup } = await server.ssrLoadModule("/src/components/thread-process-group.tsx")
+    const { ThreadProcessGroup } = await server.ssrLoadModule("@zccz14/cybion-components")
     for (const language of ["zh", "en"]) {
       const html = renderToStaticMarkup(createElement(ThreadProcessGroup, {
         language, count: 8, startedAt: 1_000, finishedAt: 1_135, running: false, children: createElement("pre", null, "Original <payload>"),
@@ -32,7 +32,7 @@ test("process groups are native closed disclosures with bilingual counts, elapse
 test("a running group renders the span up to the clock and says the run is still writing", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { ThreadProcessGroup } = await server.ssrLoadModule("/src/components/thread-process-group.tsx")
+    const { ThreadProcessGroup } = await server.ssrLoadModule("@zccz14/cybion-components")
     const { formatThreadProcessDuration } = await server.ssrLoadModule("/src/lib/thread-history.ts")
     const startedAt = Math.floor(Date.now() / 1000) - 100
     for (const language of ["zh", "en"]) {

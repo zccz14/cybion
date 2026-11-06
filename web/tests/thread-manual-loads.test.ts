@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
+import { readPackageSource } from "./package-source.ts"
 import { manualLoadNotice } from "../src/lib/thread-manual-loads.ts"
 import type { HistoryRecord } from "../src/lib/thread-history.ts"
 
@@ -31,13 +32,15 @@ test("a retired context_dirty record is not a load notice", () => {
 
 test("the transcript row reads the loaded bindings and nothing re-reads them", () => {
   const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const history = readPackageSource("components/history-message.tsx")
   const indicator = readFileSync(new URL("../src/components/thread-manual-loads.tsx", import.meta.url), "utf8")
   assert.match(main, /\/history\/loaded`/)
   assert.match(main, /<ThreadManualLoads view=\{manualLoads.data\}/)
-  // The row is a transcript row, not header chrome: loading more Manuals scrolls away instead of shrinking the conversation.
-  assert.ok(main.indexOf("<MessageScrollerContent") < main.indexOf("<ThreadManualLoads view="))
-  assert.match(main, /<ManualLoadNotice notice=\{loadNotice\}/)
-  assert.match(main, /manualLoadNotice\(record\)/)
+  // The row is a transcript row, not header chrome: the host hands it to the view's
+  // transcript slot, so loading more Manuals scrolls away instead of shrinking the conversation.
+  assert.ok(main.indexOf("transcriptFooter") < main.indexOf("<ThreadManualLoads view="))
+  assert.match(history, /<ManualLoadNotice notice=\{loadNotice\}/)
+  assert.match(history, /manualLoadNotice\(record\)/)
   // The retired read tool and its stale-copy notices are gone from the client.
   assert.doesNotMatch(main, /read_context/)
   assert.doesNotMatch(main, /history\/reads/)

@@ -17,7 +17,7 @@ test("voice bars label their length and leave an unknown one open", () => {
 test("a sent voice message renders as one playable bar instead of text", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { UserInputMessage } = await server.ssrLoadModule("/src/components/user-input-message.tsx")
+    const { UserInputMessage } = await server.ssrLoadModule("@zccz14/cybion-components")
     const voice = "data:audio/webm;base64,CCCC"
     const text = (payload: unknown) => renderToStaticMarkup(createElement(UserInputMessage, { language: "zh", payload, footer: "#1 · 12:00:00" }))
     const audioOnly = text({ role: "user", content: [{ type: "input_audio", audio_url: voice }] })

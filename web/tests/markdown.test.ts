@@ -1,15 +1,16 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
+import { readPackageSource } from "./package-source.ts"
 
 // Every Markdown surface in the app, in the order they appear in the transcript.
-const surfaces = [
-  "../src/main.tsx",
-  "../src/components/assistant-message.tsx",
-  "../src/components/checkpoint-message.tsx",
-  "../src/components/markdown-editor.tsx",
+// Replies and checkpoints are the package's; the app keeps the composer and editor.
+const sources = [
+  readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8"),
+  readPackageSource("components/assistant-message.tsx"),
+  readPackageSource("components/checkpoint-message.tsx"),
+  readFileSync(new URL("../src/components/markdown-editor.tsx", import.meta.url), "utf8"),
 ]
-const sources = surfaces.map((surface) => readFileSync(new URL(surface, import.meta.url), "utf8"))
 
 test("every Markdown surface renders through the shared renderer", () => {
   for (const source of sources) assert.match(source, /from "@zccz14\/ux"/)
@@ -19,7 +20,7 @@ test("every Markdown surface renders through the shared renderer", () => {
   for (const source of sources) {
     assert.doesNotMatch(source, /react-markdown|ReactMarkdown|remark-gfm|remarkGfm|rehype-katex|katex/)
   }
-  assert.equal(sources[0].match(/<Markdown content=/g)?.length, 2)
+  assert.equal(sources[0].match(/<Markdown content=/g)?.length, 1)
   assert.equal(sources[1].match(/<Markdown content=/g)?.length, 1)
   assert.equal(sources[2].match(/<Markdown content=/g)?.length, 1)
   assert.equal(sources[3].match(/<MarkdownPreview content=/g)?.length, 1)

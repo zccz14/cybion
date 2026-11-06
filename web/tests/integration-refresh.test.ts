@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
@@ -20,13 +21,17 @@ test("personal configuration manages multiple Responses-compatible upstreams wit
 })
 
 test("each upstream owns its model catalog and the model pickers group by upstream", () => {
+  const view = readPackageSource("thread-view.tsx")
   assert.match(source, /"\/api\/integrations\/upstreams\/models"/)
   assert.match(source, /function useUpstreamModels/)
   assert.match(source, /modelGroups\(models\.data\?\.upstreams, value\.upstream_id, value\.model\)/)
-  assert.equal(source.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 2)
+  // The new-Thread composer picks from the polled account catalog; the
+  // conversation composer picks from the catalog the view fetched itself.
+  assert.equal(source.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 1)
+  assert.equal(view.match(/catalogs=\{catalogs\?\.upstreams\}/g)?.length, 1)
   assert.match(source, /upstreamId=\{value\.upstream_id\}/)
-  assert.match(source, /upstreamId=\{current\.upstream_id\}/)
-  assert.match(source, /onModelChange=\{\(upstream_id, model\) => settings\.mutate\(\{ upstream_id, model \}\)\}/)
+  assert.match(view, /upstreamId=\{thread\.upstream_id\}/)
+  assert.match(view, /onModelChange=\{\(upstream_id, model\) => void updateSettings\(\{ upstream_id, model \}\)\}/)
   assert.match(source, /availableModels: "Available models"/)
   assert.match(source, /availableModels: "可用模型"/)
   assert.match(popover, /<SelectGroup key=\{group\.id\}>/)

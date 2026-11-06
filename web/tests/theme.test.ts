@@ -1,12 +1,13 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
+import { readPackageSource } from "./package-source.ts"
 
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-const inputMessageSource = readFileSync(new URL("../src/components/user-input-message.tsx", import.meta.url), "utf8")
-const assistantMessageSource = readFileSync(new URL("../src/components/assistant-message.tsx", import.meta.url), "utf8")
-const checkpointMessageSource = readFileSync(new URL("../src/components/checkpoint-message.tsx", import.meta.url), "utf8")
+const inputMessageSource = readPackageSource("components/user-input-message.tsx")
+const assistantMessageSource = readPackageSource("components/assistant-message.tsx")
+const checkpointMessageSource = readPackageSource("components/checkpoint-message.tsx")
 const design = readFileSync(new URL("../../DESIGN.md", import.meta.url), "utf8")
 const lightBlock = css.match(/:root \{([\s\S]*?)\n\}/)![1]
 const darkBlock = css.match(/\.dark \{([\s\S]*?)\n\}/)![1]
@@ -77,7 +78,7 @@ test("message surfaces are separated from primary actions and Markdown carries n
   assert.notEqual(resolve("user-message"), resolve("primary"))
   assert.match(css, /--color-user-message: var\(--user-message\)/)
   assert.match(inputMessageSource, /bg-user-message[^"\n]+text-user-message-foreground/)
-  assert.match(source, /border-primary\/20 bg-primary\/5[^"\n]+dark:border-border dark:bg-card/)
+  assert.match(readPackageSource("components/history-message.tsx"), /border-primary\/20 bg-primary\/5[^"\n]+dark:border-border dark:bg-card/)
   // 排版与配色都由 @zccz14/ux 的 .ux-markdown 提供，对话面不再携带自己的 prose 调色板。
   for (const text of [source, assistantMessageSource, checkpointMessageSource]) assert.doesNotMatch(text, /\bprose\b/)
   assert.match(lightBlock, /color-scheme: light;/)

@@ -4,11 +4,12 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { createTestServer } from "./vite-server.ts"
+import { readPackageSource } from "./package-source.ts"
 
 test("web search calls render the query with escaped text in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { WebSearchCall } = await server.ssrLoadModule("/src/components/web-search-call.tsx")
+    const { WebSearchCall } = await server.ssrLoadModule("@zccz14/cybion-components")
     const call = { query: "最新版 Rust 发布了吗 <script>alert(1)</script>" }
     const render = (language: string) => renderToStaticMarkup(createElement(WebSearchCall, {
       language, call, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
@@ -27,7 +28,7 @@ test("web search calls render the query with escaped text in both languages", as
 })
 
 test("thread view renders web search calls before the generic protocol renderer", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const source = readPackageSource("components/history-message.tsx")
   assert.ok(source.indexOf("const searchCall = webSearchFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))
-  assert.match(source, /<WebSearchCall[^>]*>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/WebSearchCall>/)
+  assert.match(source, /<WebSearchCall[^>]*>[\s\S]*?<PayloadDetails language=\{language\} record=\{record\} label=\{t\("recordPayload"\)\} \/>[\s\S]*?<\/WebSearchCall>/)
 })

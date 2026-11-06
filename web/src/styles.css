@@ -4,6 +4,7 @@
 @import "@fontsource-variable/geist";
 @import "@zccz14/ux/styles.css";
 @source "../node_modules/auth-mini-react-components/dist";
+@source "../../packages/cybion-components/src";
 
 @custom-variant dark (&:is(.dark *));
 

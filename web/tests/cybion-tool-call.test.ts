@@ -5,6 +5,7 @@ import { createElement, type ReactElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { MemoryRouter } from "react-router-dom"
 import { createTestServer } from "./vite-server.ts"
+import { readPackageSource } from "./package-source.ts"
 
 const renderInRouter = (element: ReactElement) => renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ["/"] }, element))
 
@@ -119,22 +120,24 @@ test("write manual calls link to the manual, flag the trash, and show creates", 
 })
 
 test("thread view renders cybion tool calls before the generic protocol renderer", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-  assert.ok(source.indexOf("const cybionCall = cybionToolFunctionCall(payload)") < source.indexOf('if (typeof payload?.type === "string" &&'))
-  assert.match(source, /<CybionToolCall language=\{language\} call=\{cybionCall\} workers=\{workers\} manuals=\{manuals\} time=\{time\}>[\s\S]*?<HistoryRecordPayload language=\{language\} record=\{record\} \/>[\s\S]*?<\/CybionToolCall>/)
+  const message = readPackageSource("components/history-message.tsx")
+  assert.ok(message.indexOf("const cybionCall = cybionToolFunctionCall(payload)") < message.indexOf('if (typeof payload?.type === "string" &&'))
+  assert.match(message, /<CybionToolCall language=\{language\} call=\{cybionCall\} workers=\{workers\} manuals=\{manuals\} time=\{time\}>[\s\S]*?<PayloadDetails language=\{language\} record=\{record\} label=\{t\("recordPayload"\)\} \/>[\s\S]*?<\/CybionToolCall>/)
 })
 
 test("loaded manual titles resolve through gated manual caches", () => {
-  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
+  const view = readPackageSource("thread-view.tsx")
+  const message = readPackageSource("components/history-message.tsx")
   for (const needle of [
-    "const loadsManuals = useMemo",
+    "const loadsManuals =",
     'queryKey: ["manuals"]',
     'queryKey: ["common-manuals", language]',
     "manuals={manualLookup}",
-    "manuals={undefined}",
     "previous.manuals === next.manuals",
   ]) {
-    assert.ok(source.includes(needle), needle)
+    assert.ok(main.includes(needle) || message.includes(needle), needle)
   }
-  assert.equal(source.match(/enabled: loadsManuals/g)?.length, 2)
+  assert.match(view, /manuals=\{manuals\}/)
+  assert.equal(main.match(/enabled: loadsManuals/g)?.length, 2)
 })

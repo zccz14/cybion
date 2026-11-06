@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
@@ -92,15 +93,20 @@ test("the Manuals page is an edge-to-edge tree beside a full-width reading pane"
 })
 
 test("every thread renders through the shared chat primitives", () => {
-  assert.match(source, /<MessageScrollerProvider autoScroll defaultScrollPosition="end">/)
-  assert.match(source, /<MessageScrollerViewport>/)
-  assert.match(source, /<MessageScrollerContent/)
-  assert.match(source, /<MessageScrollerButton behavior="auto"/)
-  assert.match(source, /<Message align="end">/)
-  assert.match(source, /record\.kind === "input"/)
-  assert.doesNotMatch(source, /record\.(request_input_id|role|content|visible)/)
-  assert.doesNotMatch(source, /<MessageAvatar/)
-  assert.doesNotMatch(source, /<MessageHeader/)
+  // The conversation surface — scroller, transcript, record renderer — is the package's.
+  const view = readPackageSource("thread-view.tsx")
+  const message = readPackageSource("components/history-message.tsx")
+  assert.match(view, /<MessageScrollerProvider autoScroll defaultScrollPosition="end">/)
+  assert.match(view, /<MessageScrollerViewport>/)
+  assert.match(view, /<MessageScrollerContent/)
+  assert.match(view, /<MessageScrollerButton behavior="auto"/)
+  assert.match(message, /<Message align="end">/)
+  assert.match(message, /record\.kind === "input"/)
+  for (const text of [view, message]) {
+    assert.doesNotMatch(text, /record\.(request_input_id|role|content|visible)/)
+    assert.doesNotMatch(text, /<MessageAvatar/)
+    assert.doesNotMatch(text, /<MessageHeader/)
+  }
 })
 
 test("history renders reasoning summaries", () => {
@@ -110,9 +116,12 @@ test("history renders reasoning summaries", () => {
 })
 
 test("thread settings live in the composer popover and the image tool follows its configured model", () => {
-  const popover = readFileSync(new URL("../src/components/thread-settings-popover.tsx", import.meta.url), "utf8")
+  const popover = readPackageSource("components/thread-settings-popover.tsx")
+  const view = readPackageSource("thread-view.tsx")
   assert.match(source, /import \{ ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection \} from "@\/components\/thread-settings-popover"/)
-  assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 2)
+  // One picker for the new-Thread composer, one for the conversation composer.
+  assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 1)
+  assert.equal(view.match(/<ThreadSettingsPopover /g)?.length, 1)
   assert.match(popover, /REASONING_EFFORTS = \["low", "medium", "high", "xhigh", "max"\]/)
   assert.match(popover, /ZapIcon/)
   assert.match(popover, /<Switch aria-label=\{t\.fastMode\}/)
@@ -124,7 +133,7 @@ test("thread settings live in the composer popover and the image tool follows it
   // Web search stays always-on; image generation follows the model chosen at
   // the Thread and account levels, read from the upstream image catalogs.
   assert.match(source, /"\/api\/integrations\/upstreams\/models\?kind=image"/)
-  assert.match(source, /imageGeneration=\{defaults\.data \?/)
+  assert.match(view, /imageGeneration=\{defaults \?/)
   assert.match(popover, /imageModelOptions/)
 })
 
@@ -224,14 +233,16 @@ test("archived threads get their own view chip instead of a collapsed group", ()
   assert.match(list, /archived: false/)
   assert.match(list, /restoreThread: "恢复"/)
   assert.doesNotMatch(list, /ArchivedThreadGroup/)
-  assert.match(source, /archived_at !== null/)
+  assert.match(readPackageSource("thread-view.tsx"), /archived_at !== null/)
 })
 
 test("integration-created threads keep their origin chip and external reference", () => {
   const status = readFileSync(new URL("../src/components/thread-status.tsx", import.meta.url), "utf8")
+  const view = readPackageSource("thread-view.tsx")
+  const copy = readPackageSource("copy.ts")
   assert.match(source, /created_by: "web" \| "api"/)
-  assert.match(source, /apiOriginHint/)
-  assert.match(source, /created_by === "api"/)
+  assert.match(copy, /apiOriginHint/)
+  assert.match(view, /created_by === "api"/)
   assert.match(status, /created_by === "api"/)
   assert.match(status, /external_ref/)
 })
