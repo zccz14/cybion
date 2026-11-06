@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { HashRouter, Routes, Route, useLocation } from "react-router-dom"
 import { RoutePerformance } from "../src/components/route-performance"
+import { SqlPerformance } from "../src/components/sql-performance"
 import { WorkerAudit } from "../src/components/worker-audit"
 import { WorkerConnections } from "../src/components/worker-connections"
 import { InsightsView } from "../src/components/insights"
@@ -18,7 +19,8 @@ function Draft() { const location=useLocation();return <pre data-testid="draft">
 function Fixture() {
   const [language,setLanguage]=useState<"zh"|"en">("zh")
   const [sessionId, setSessionId] = useState("test-session")
+  const [allowed, setAllowed] = useState(true)
   const sessionRequest = <T,>(path: string, init?: RequestInit) => request<T>(sessionId, path, init)
-  return <><button onClick={()=>setLanguage(language==="zh"?"en":"zh")}>Language</button><button onClick={() => setSessionId(sessionId === "test-session" ? "other-session" : "test-session")}>Switch account</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button><Routes><Route path="/worker-audit" element={<WorkerAudit language={language} request={sessionRequest} sessionId={sessionId} />} /><Route path="/route-performance" element={<RoutePerformance language={language} request={sessionRequest} sessionId={sessionId} />} /><Route path="/insights" element={<main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><InsightsView language={language} sessionId={sessionId} request={sessionRequest} /></main>} /><Route path="/threads/new" element={<Draft/>}/><Route path="*" element={<WorkerConnections language={language} request={sessionRequest} sessionId={sessionId}/>}/></Routes></>
+  return <><button onClick={()=>setLanguage(language==="zh"?"en":"zh")}>Language</button><button onClick={() => setSessionId(sessionId === "test-session" ? "other-session" : "test-session")}>Switch account</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button><button onClick={() => setAllowed(!allowed)}>Access</button><Routes><Route path="/worker-audit" element={<WorkerAudit language={language} request={sessionRequest} sessionId={sessionId} />} /><Route path="/route-performance" element={<main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><RoutePerformance language={language} request={sessionRequest} sessionId={sessionId} allowed={allowed} /></main>} /><Route path="/sql-performance" element={<main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><SqlPerformance language={language} request={sessionRequest} sessionId={sessionId} allowed={allowed} /></main>} /><Route path="/insights" element={<main className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6"><InsightsView language={language} sessionId={sessionId} request={sessionRequest} /></main>} /><Route path="/threads/new" element={<Draft/>}/><Route path="*" element={<WorkerConnections language={language} request={sessionRequest} sessionId={sessionId}/>}/></Routes></>
 }
 createRoot(document.getElementById("root")!).render(<StrictMode><QueryClientProvider client={client}><TooltipProvider><HashRouter><Fixture/></HashRouter></TooltipProvider></QueryClientProvider></StrictMode>)

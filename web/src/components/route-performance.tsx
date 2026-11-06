@@ -28,6 +28,7 @@ import { formattedTime } from "@/lib/time"
 const copy = {
   en: {
     title: "Interface performance",
+    required: "Only an administrator reads interface performance.",
     description: "Every API route's requests, latency and outcomes, recorded while serving and read back from the shared database. The minute still running is read from memory, so the newest numbers are live.",
     window: "Window",
     hours1: "Last hour",
@@ -84,6 +85,7 @@ const copy = {
   },
   zh: {
     title: "接口性能",
+    required: "接口性能仅管理员可见。",
     description: "按接口路由统计请求量、延迟与结果。数据在服务请求时计量，写入公共数据库后读回；正在进行的这一分钟直接读内存，所以最新数字是实时的。",
     window: "时间范围",
     hours1: "最近 1 小时",
@@ -144,6 +146,9 @@ type Props = {
   language: "en" | "zh"
   sessionId: string | null | undefined
   request: <T>(path: string, init?: RequestInit) => Promise<T>
+  /** The audit is cross-tenant, so the page says so instead of firing a query
+   * the server will refuse when a non-administrator reaches it by URL. */
+  allowed: boolean
 }
 
 const windowLabels: Record<RoutePerformanceWindow, keyof typeof copy.en> = {
@@ -171,11 +176,11 @@ const columns: RouteColumn[] = [
   { key: "max_us", label: "max", numeric: true },
 ]
 
-export function RoutePerformance({ language, sessionId, request }: Props) {
-  return <RoutePerformanceSession key={sessionId} language={language} sessionId={sessionId} request={request} />
+export function RoutePerformance({ language, sessionId, request, allowed }: Props) {
+  return <RoutePerformanceSession key={sessionId} language={language} sessionId={sessionId} request={request} allowed={allowed} />
 }
 
-function RoutePerformanceSession({ language, sessionId, request }: Props) {
+function RoutePerformanceSession({ language, sessionId, request, allowed }: Props) {
   const t = copy[language]
   const [window, setWindow] = useState<RoutePerformanceWindow>("24h")
   const [sortKey, setSortKey] = useState<RouteSortKey>("requests")
@@ -183,6 +188,7 @@ function RoutePerformanceSession({ language, sessionId, request }: Props) {
   const query = useQuery({
     queryKey: ["route-performance", sessionId, window],
     queryFn: ({ signal }) => request<RoutePerformance>(`/api/route-performance?window=${window}`, { signal }),
+    enabled: allowed,
     refetchInterval: 10_000,
   })
   const number = (value: number) => value.toLocaleString(language === "zh" ? "zh-CN" : "en")
@@ -199,6 +205,7 @@ function RoutePerformanceSession({ language, sessionId, request }: Props) {
     () => (query.data ? sortRoutes(query.data.routes, sortKey, descending) : []),
     [query.data, sortKey, descending],
   )
+  if (!allowed) return <p className="text-sm text-muted-foreground">{t.required}</p>
   if (query.error) {
     return <Alert variant="destructive">
       <AlertTitle>{t.loadError}</AlertTitle>

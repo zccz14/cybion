@@ -42,6 +42,7 @@ import {
   SquareIcon,
   StickyNoteIcon,
   DatabaseIcon,
+  ScanSearchIcon,
   DownloadIcon,
   ExternalLinkIcon,
   FileKey2Icon,
@@ -108,6 +109,7 @@ import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads
 import { InsightsView } from "@/components/insights"
 import { sharedThreadReturnHash } from "@/lib/thread-sharing"
 import { RoutePerformance } from "@/components/route-performance"
+import { SqlPerformance } from "@/components/sql-performance"
 import { WorkerAudit } from "@/components/worker-audit"
 import { WorkerConnections } from "@/components/worker-connections"
 import { UltimateMachines } from "@/components/ultimate-machines"
@@ -499,6 +501,8 @@ const copy = {
     workerAudit: "Worker call audit",
     routePerformance: "Interface performance",
     routePerformanceDescription: "Requests, latency percentiles and outcomes per API route, measured while serving from the shared database. Only an administrator reads this page, because it covers every account's traffic without naming a caller.",
+    sqlPerformance: "SQL performance",
+    sqlPerformanceDescription: "Every statement the user databases run, timed inside SQLite with the rows it scanned. A statement that walks a table holds up every request queued behind it, so this page ranks by cumulative time and scan steps, not by average. Only an administrator reads it, because a statement is not attributable to one account.",
     workerAuditDescription: "Calls on Workers you own, including calls from people you granted access to. Shared Worker results remain in your Threads.",
     workerAuditEmpty: "No Worker calls yet.",
     workerCall: "Call",
@@ -817,6 +821,8 @@ const copy = {
     workerAudit: "Worker 调用审计",
     routePerformance: "接口性能",
     routePerformanceDescription: "按接口路由统计请求量、延迟分位与结果，数据来自公共数据库。这个页面覆盖所有账号的流量且不标注调用者，因此仅管理员可见。",
+    sqlPerformance: "SQL 性能",
+    sqlPerformanceDescription: "用户数据库执行的每一条语句，在 SQLite 内部计量，连同它扫过的行数。一条走全表的语句会把它后面排队的请求一起按住，所以这个页面按累计耗时与扫描步数排序，而不是按平均值。语句无法归属到某个账号，因此仅管理员可见。",
     workerAuditDescription: "展示自有 Worker 上的调用，包括被授权用户发起的任务。使用他人共享设备的结果请在对应 Thread 中查看。",
     workerAuditEmpty: "尚无 Worker 调用。",
     workerCall: "调用",
@@ -1307,7 +1313,10 @@ function WorkspaceShell({
     { to: "/insights", label: t("usageStats"), icon: ChartColumnIcon },
     { to: "/reasoning-audit", label: t("audit"), icon: FileSearchIcon },
     { to: "/worker-audit", label: t("workerAudit"), icon: LogsIcon },
-    ...(isAdmin ? [{ to: "/route-performance", label: t("routePerformance"), icon: GaugeIcon }] : []),
+    ...(isAdmin ? [
+      { to: "/route-performance", label: t("routePerformance"), icon: GaugeIcon },
+      { to: "/sql-performance", label: t("sqlPerformance"), icon: ScanSearchIcon },
+    ] : []),
   ]
   const administrationNav = isAdmin
     ? [
@@ -1364,7 +1373,8 @@ function WorkspaceShell({
             <Route path="/insights" element={<InsightsPage sdk={sdk} />} />
             <Route path="/reasoning-audit" element={<ReasoningAuditPage sdk={sdk} />} />
             <Route path="/worker-audit" element={<WorkerAuditPage sdk={sdk} />} />
-            <Route path="/route-performance" element={<RoutePerformancePage sdk={sdk} />} />
+            <Route path="/route-performance" element={<RoutePerformancePage sdk={sdk} isAdmin={isAdmin} />} />
+            <Route path="/sql-performance" element={<SqlPerformancePage sdk={sdk} isAdmin={isAdmin} />} />
             <Route path="/archive" element={<HistoryPage sdk={sdk} />} />
             <Route path="/admin/users" element={<Page title={t("users")} description={t("usersDescription")}><AdminUsers language={language} allowed={isAdmin} sessionId={sdk.session.getState().sessionId} request={(signal) => api(sdk, "/api/admin/users", { signal })} /></Page>} />
             <Route path="/admin/resources" element={<SystemPage sdk={sdk} />} />
@@ -1391,6 +1401,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/reasoning-audit")) return t("audit")
   if (pathname.startsWith("/worker-audit")) return t("workerAudit")
   if (pathname.startsWith("/route-performance")) return t("routePerformance")
+  if (pathname.startsWith("/sql-performance")) return t("sqlPerformance")
   if (pathname.startsWith("/archive")) return t("history")
   if (pathname.startsWith("/machines")) return t("machines")
   if (pathname.startsWith("/admin/users")) return t("users")
@@ -3006,9 +3017,14 @@ function WorkerAuditPage({ sdk }: { sdk: AuthMiniApi }) {
   return <Page title={t("workerAudit")} description={t("workerAuditDescription")}><WorkerAudit language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
 }
 
-function RoutePerformancePage({ sdk }: { sdk: AuthMiniApi }) {
+function RoutePerformancePage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolean }) {
   const { t, language } = useUi()
-  return <Page title={t("routePerformance")} description={t("routePerformanceDescription")}><RoutePerformance language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} /></Page>
+  return <Page title={t("routePerformance")} description={t("routePerformanceDescription")}><RoutePerformance language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} allowed={isAdmin} /></Page>
+}
+
+function SqlPerformancePage({ sdk, isAdmin }: { sdk: AuthMiniApi; isAdmin: boolean }) {
+  const { t, language } = useUi()
+  return <Page title={t("sqlPerformance")} description={t("sqlPerformanceDescription")}><SqlPerformance language={language} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} allowed={isAdmin} /></Page>
 }
 
 function UltimateMachinesPage({ sdk }: { sdk: AuthMiniApi }) {
