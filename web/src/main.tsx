@@ -1938,7 +1938,7 @@ const HistoryMessage = memo(function HistoryMessage({ language, record, workers,
 
   const payload = historyPayloadObject(record.payload)
   if (record.kind === "response_output" && payload?.type === "message") {
-    return <AssistantMessage language={language} text={text} time={time} />
+    return <AssistantMessage language={language} streaming={record.id < 0} text={text} time={time} />
   }
 
   if (record.kind === "tool_output") {
