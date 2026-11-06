@@ -152,8 +152,13 @@ test("a peak is never zero, so an idle window still has a scale", () => {
 test("the page is wired as an administrator-only audit page", () => {
   assert.match(source, /routePerformance: "Interface performance"/)
   assert.match(source, /routePerformance: "接口性能"/)
-  // Both audit pages read every account, so both live behind the same isAdmin gate.
-  assert.match(source, /isAdmin \? \[\s*\{ to: "\/route-performance", label: t\("routePerformance"\), icon: GaugeIcon \},\s*\{ to: "\/sql-performance", label: t\("sqlPerformance"\), icon: ScanSearchIcon \},\s*\] : \[\]/)
+  // Both audit pages read every account, so they are administrator pages and
+  // never appear in the audit group a signed-in user can read.
+  const administration = source.match(/const administrationNav = isAdmin\s+\? \[([\s\S]*?)\n  \]/)![1]
+  assert.match(administration, /to: "\/route-performance", label: t\("routePerformance"\)/)
+  assert.match(administration, /to: "\/sql-performance", label: t\("sqlPerformance"\)/)
+  const audit = source.match(/const auditNav = \[([\s\S]*?)\n  \]/)![1]
+  assert.doesNotMatch(audit, /route-performance|sql-performance/)
   assert.match(source, /<Route path="\/route-performance" element=\{<RoutePerformancePage sdk=\{sdk\} isAdmin=\{isAdmin\} \/>\} \/>/)
   assert.match(source, /<Route path="\/sql-performance" element=\{<SqlPerformancePage sdk=\{sdk\} isAdmin=\{isAdmin\} \/>\} \/>/)
   assert.match(source, /if \(pathname\.startsWith\("\/sql-performance"\)\) return t\("sqlPerformance"\)/)

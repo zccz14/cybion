@@ -10,6 +10,8 @@ export async function stubWorkspace(page: Page, options: {
   language?: "zh" | "en"; theme?: "light" | "dark"; activeTotal?: number; webTotal?: number; archivedTotal?: number;
   countFails?: boolean; connectionFails?: boolean; startFails?: boolean; fallbackReady?: boolean;
   manuals?: { id: string; name: string; parent_id?: string | null; trashed_at?: number; locked?: boolean }[];
+  /** Reads the shell as the root administrator, which reveals every nav group. */
+  admin?: boolean;
   notes?: { id: string; thread_id: string; thread_title: string | null; text: string; created_at: number; done_at: number | null }[];
 } = {}) {
   const language = options.language ?? "zh", theme = options.theme ?? "light"
@@ -68,7 +70,7 @@ export async function stubWorkspace(page: Page, options: {
     if (url.hostname === "127.0.0.1" && path.startsWith("/api/")) {
       requests.push(path + url.search)
       if (!["GET", "HEAD"].includes(request.method())) writes.push({ path, body: request.postDataJSON() ?? {} })
-      if (path === "/api/me") return json({ user_id: profile.user_id, hosted: true, is_admin: false })
+      if (path === "/api/me") return json({ user_id: profile.user_id, hosted: true, is_admin: options.admin ?? false })
       if (path === "/api/thread-defaults") return json(defaults)
       if (path === "/api/integrations/normai") {
         if (state.connectionFails) return json({ error: "Fixture: model connection unavailable" }, 503)
