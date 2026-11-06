@@ -59,6 +59,10 @@ const HOUR_RETENTION_SECONDS: i64 = 30 * 24 * 3600;
 const MINUTE_TABLE: &str = "sql_perf_minute";
 const HOUR_TABLE: &str = "sql_perf_hour";
 const SLOW_TABLE: &str = "sql_perf_slow";
+/// One row per flush: what the recorder itself cost in that interval, so the
+/// overhead is history the operator can read back rather than a number that
+/// only exists while a page is open.
+const OVERHEAD_TABLE: &str = "sql_perf_overhead";
 const TEXT_TABLE: &str = "sql_perf_text";
 
 /// One in this many statements is timed end to end, and the average is scaled
@@ -109,6 +113,16 @@ static RECORDER_SAMPLED: AtomicU64 = AtomicU64::new(0);
 static RECORDER_NS: AtomicU64 = AtomicU64::new(0);
 static UNATTRIBUTED: AtomicU64 = AtomicU64::new(0);
 static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+/// Snapshots the flusher keeps so the share of wall time is a five-second
+/// interval rather than a lifetime average. A lifetime average never recovers
+/// from the first interval, which is where every first-touch page fault and
+/// every one-off claim lands.
+static LAST_STATEMENTS: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMED: AtomicU64 = AtomicU64::new(0);
+static LAST_RECORDER_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_AT_NS: AtomicU64 = AtomicU64::new(0);
+static RECENT_PPM: AtomicU64 = AtomicU64::new(0);
+static WORST_PPM: AtomicU64 = AtomicU64::new(0);
 
 /// Where a statement was issued from. `Caller` is a handler reached through
 /// `UserDatabases::run`; `Named` covers the patrols that open their own
@@ -578,7 +592,14 @@ CREATE TABLE IF NOT EXISTS {SLOW_TABLE} (
   latency_us INTEGER NOT NULL,
   fullscan_steps INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS sql_perf_slow_at ON {SLOW_TABLE} (sampled_at DESC);"
+CREATE INDEX IF NOT EXISTS sql_perf_slow_at ON {SLOW_TABLE} (sampled_at DESC);
+CREATE TABLE IF NOT EXISTS {OVERHEAD_TABLE} (
+  bucket_start INTEGER PRIMARY KEY,
+  statements INTEGER NOT NULL,
+  timed INTEGER NOT NULL,
+  recorder_us INTEGER NOT NULL,
+  share_ppm INTEGER NOT NULL
+);"
     )
 }
 
@@ -626,17 +647,17 @@ impl Monitor {
     }
 
     pub(super) fn persist(&self) -> Result<()> {
-        notice_overhead();
         self.persist_at(now() / 60)
     }
 
     pub(super) fn persist_at(&self, now_minute: i64) -> Result<()> {
         let differences = differences(true);
+        let overhead = overhead_tick();
         let slow = {
             let mut slow = slow_window().lock().unwrap_or_else(|p| p.into_inner());
             slow.drain(..).collect::<Vec<_>>()
         };
-        if differences.is_empty() && slow.is_empty() {
+        if differences.is_empty() && slow.is_empty() && overhead.is_none() {
             return Ok(());
         }
         let mut connection = Connection::open(&self.path)?;
@@ -686,6 +707,21 @@ impl Monitor {
                 ],
             )?;
         }
+        if let Some(sample) = &overhead {
+            transaction.execute(
+                &format!(
+                    "INSERT INTO {OVERHEAD_TABLE}(bucket_start,statements,timed,recorder_us,share_ppm)
+                     VALUES(?1,?2,?3,?4,?5)"
+                ),
+                params![
+                    now(),
+                    sample.statements,
+                    sample.timed,
+                    sample.recorder_us,
+                    sample.share_ppm
+                ],
+            )?;
+        }
         prune(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -705,22 +741,61 @@ impl Monitor {
     }
 }
 
-/// The recorder is a metric; if it ever costs more than a ten-thousandth of
-/// wall time it has stopped being one. Says so once per crossing rather than
-/// every flush, and says so again after recovering and crossing a second time.
-fn notice_overhead() {
-    static NOTICED: AtomicBool = AtomicBool::new(false);
-    let share = overhead().share_ppm as f64;
-    if share > OVERHEAD_NOTICE_PPM {
-        if !NOTICED.swap(true, Ordering::Relaxed) {
-            tracing::warn!(
-                share_ppm = share as i64,
-                "SQL profiler is costing more than a ten-thousandth of wall time"
-            );
-        }
-    } else {
-        NOTICED.store(false, Ordering::Relaxed);
+/// Closes one measuring interval and answers what the recorder cost inside it.
+/// The first call only records a baseline: the interval that starts at process
+/// start is dominated by first-touch page faults and one-off claims, and letting
+/// it into the average is what made the first version of this report 18% when
+/// the hot path measures 380 ns.
+fn overhead_tick() -> Option<IntervalSample> {
+    let statements = STATEMENTS.load(Ordering::Relaxed);
+    let timed = RECORDER_SAMPLED.load(Ordering::Relaxed);
+    let recorder_ns = RECORDER_NS.load(Ordering::Relaxed);
+    let started = STARTED.get()?;
+    let at_ns = started.elapsed().as_nanos() as u64;
+    let previous = (
+        LAST_STATEMENTS.swap(statements, Ordering::Relaxed),
+        LAST_TIMED.swap(timed, Ordering::Relaxed),
+        LAST_RECORDER_NS.swap(recorder_ns, Ordering::Relaxed),
+        LAST_AT_NS.swap(at_ns, Ordering::Relaxed),
+    );
+    let (was_statements, was_timed, was_recorder_ns, was_at_ns) = previous;
+    if was_at_ns == 0 {
+        return None;
     }
+    let wall_ns = at_ns.saturating_sub(was_at_ns);
+    let timed = timed.saturating_sub(was_timed);
+    if wall_ns == 0 || timed == 0 {
+        return None;
+    }
+    let recorder_ns = recorder_ns.saturating_sub(was_recorder_ns);
+    let statements = statements.saturating_sub(was_statements);
+    // Scale the timed average over every statement in the interval, then divide
+    // by the wall time the same interval covered.
+    let estimated_ns = (recorder_ns / timed).saturating_mul(statements);
+    let share_ppm = estimated_ns.saturating_mul(1_000_000) / wall_ns;
+    RECENT_PPM.store(share_ppm, Ordering::Relaxed);
+    WORST_PPM.fetch_max(share_ppm, Ordering::Relaxed);
+    // The recorder is a metric; past a ten-thousandth of wall time it has
+    // stopped being one and the operator should know without reading a page.
+    if share_ppm as f64 > OVERHEAD_NOTICE_PPM {
+        tracing::warn!(
+            share_ppm,
+            "SQL profiler is costing more than a ten-thousandth of wall time"
+        );
+    }
+    Some(IntervalSample {
+        statements: statements as i64,
+        timed: timed as i64,
+        recorder_us: (estimated_ns / 1_000) as i64,
+        share_ppm: share_ppm as i64,
+    })
+}
+
+struct IntervalSample {
+    statements: i64,
+    timed: i64,
+    recorder_us: i64,
+    share_ppm: i64,
 }
 
 fn values_of(at: i64, key: u64, counter: &Counter) -> Vec<rusqlite::types::Value> {
@@ -795,9 +870,13 @@ pub(super) struct SqlOverhead {
     /// statement and therefore the share below are estimated.
     pub timed_statements: i64,
     pub recorder_us: i64,
-    /// The recorder's own cost as parts per million of wall time: the number
-    /// that has to stay near zero for this to be worth running.
+    /// The recorder's own cost over the last completed five-second interval, in
+    /// parts per million of wall time: the number that has to stay near zero
+    /// for this to be worth running.
     pub share_ppm: i64,
+    /// The worst interval since the process started, which is what an operator
+    /// reads when asking whether it ever spiked.
+    pub worst_ppm: i64,
     /// Statements that found no free slot in the fixed table. A non-zero value
     /// means the table is too small for the statement mix, not that a
     /// measurement was skipped.
@@ -933,19 +1012,12 @@ fn overhead() -> SqlOverhead {
         (timed, true) => recorder_ns / timed as i64 * statements as i64,
         _ => 0,
     };
-    let wall_ns = STARTED
-        .get()
-        .map(|started| started.elapsed().as_nanos() as i64)
-        .unwrap_or(0);
     SqlOverhead {
         statements: statements as i64,
         timed_statements: timed as i64,
         recorder_us: estimated_recorder_ns / 1_000,
-        share_ppm: if wall_ns > 0 {
-            estimated_recorder_ns.saturating_mul(1_000_000) / wall_ns
-        } else {
-            0
-        },
+        share_ppm: RECENT_PPM.load(Ordering::Relaxed) as i64,
+        worst_ppm: WORST_PPM.load(Ordering::Relaxed) as i64,
         unattributed: UNATTRIBUTED.load(Ordering::Relaxed) as i64,
     }
 }
