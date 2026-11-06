@@ -1313,15 +1313,15 @@ function WorkspaceShell({
     { to: "/insights", label: t("usageStats"), icon: ChartColumnIcon },
     { to: "/reasoning-audit", label: t("audit"), icon: FileSearchIcon },
     { to: "/worker-audit", label: t("workerAudit"), icon: LogsIcon },
-    ...(isAdmin ? [
-      { to: "/route-performance", label: t("routePerformance"), icon: GaugeIcon },
-      { to: "/sql-performance", label: t("sqlPerformance"), icon: ScanSearchIcon },
-    ] : []),
   ]
+  // Both performance pages read every account's traffic, so they are
+  // administrator pages by the same gate that hides the group itself.
   const administrationNav = isAdmin
     ? [
       { to: "/admin/users", label: t("users"), icon: UsersIcon },
       { to: "/system", label: t("systemResources"), icon: CpuIcon },
+      { to: "/route-performance", label: t("routePerformance"), icon: GaugeIcon },
+      { to: "/sql-performance", label: t("sqlPerformance"), icon: ScanSearchIcon },
       { to: "/admin/configuration", label: t("systemConfiguration"), icon: SettingsIcon },
     ]
     : []
