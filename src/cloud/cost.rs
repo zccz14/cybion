@@ -35,6 +35,16 @@ pub(super) const MAX_ATTEMPTS: i64 = 12;
 const LOOKBACK_SECONDS: i64 = 3600;
 /// Budget of one cost query.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Newest audits that can still be asked about, one pass at a time. Kept named
+/// so the plan test in `cloud_cost_tests` proves this exact statement still
+/// answers from `reasoning_audits_cost_pending`: without the index the id-ordered
+/// LIMIT cannot terminate early, so every five-second pass read the account's
+/// entire audit history on the connection its requests queue behind.
+pub(super) const PENDING_SQL: &str = "SELECT id,request_id,upstream_id FROM reasoning_audits
+      WHERE cost_usd_nanos IS NULL AND request_id IS NOT NULL
+        AND upstream_id IS NOT NULL AND status <> 'in_flight'
+        AND finished_at IS NOT NULL AND finished_at > ? AND cost_attempts < ?
+      ORDER BY id DESC LIMIT ?";
 
 pub(super) async fn supervise(state: AppState) {
     loop {
@@ -82,13 +92,7 @@ async fn settle_user(state: &AppState, user: &User) -> Result<(), ApiError> {
             .into_iter()
             .map(|upstream| (upstream.id.clone(), upstream))
             .collect::<HashMap<_, _>>();
-        let mut statement = connection.prepare(
-            "SELECT id,request_id,upstream_id FROM reasoning_audits
-              WHERE cost_usd_nanos IS NULL AND request_id IS NOT NULL
-                AND upstream_id IS NOT NULL AND status <> 'in_flight'
-                AND finished_at IS NOT NULL AND finished_at > ? AND cost_attempts < ?
-              ORDER BY id DESC LIMIT ?",
-        )?;
+        let mut statement = connection.prepare(PENDING_SQL)?;
         let rows = statement
             .query_map(
                 params![now() - LOOKBACK_SECONDS, MAX_ATTEMPTS, SCAN_LIMIT],

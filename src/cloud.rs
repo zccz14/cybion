@@ -161,7 +161,9 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // History: 51 shipped `max_loaded_manuals`; the audio input columns were added
 // without a bump, so hosted databases at 51 never gained them and every thread
 // query failed with `no such column: t.audio_transcription_model` until 52.
-const USER_SCHEMA_VERSION: i64 = 55;
+// 56 added no column: it exists so `reasoning_audits_cost_pending` reaches every
+// hosted database, because the index batches below only run on a version change.
+const USER_SCHEMA_VERSION: i64 = 56;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1317,20 +1319,22 @@ fn open_user(path: &Path, create: bool) -> Result<Connection, ApiError> {
     Ok(connection)
 }
 
-async fn user_db<T, F>(
+/// Runs one operation on a user's database, queueing behind whatever already
+/// holds it. Not an `async fn` because `#[track_caller]` has to chain through to
+/// `UserDatabases::run`, which reports the calling handler when an operation is
+/// slow enough to stall everything else that account queued.
+#[track_caller]
+fn user_db<T, F>(
     state: &AppState,
     user: &User,
     create: bool,
     operation: F,
-) -> Result<T, ApiError>
+) -> impl std::future::Future<Output = Result<T, ApiError>>
 where
     T: Send + 'static,
     F: FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
 {
-    state
-        .user_databases
-        .run(&user.path, create, operation)
-        .await
+    state.user_databases.run(&user.path, create, operation)
 }
 
 fn admin_user_sync(path: &Path, user_id: &str, bootstrap: bool) -> Result<bool, ApiError> {
@@ -1739,6 +1743,21 @@ CREATE INDEX IF NOT EXISTS reasoning_audits_thread_id
   ON reasoning_audits(thread_id,id);
 "#;
 
+// Reasoning-cost settlement asks every five seconds for the newest audits that
+// still owe an amount, on the one connection every request for that account
+// queues behind. Nothing indexed that predicate, and the planner prefers the
+// rowid order its `ORDER BY id DESC` already has, so each pass walked the
+// account's whole audit history newest-to-oldest hoping to fill a LIMIT 200 it
+// could not fill — 141,568 rows read to find 9 on the hosted database. A partial
+// index holding only audits that can still be asked about keeps that walk
+// proportional to what is actually owed, and `id` first keeps the order the
+// query asks for.
+const USER_COST_PENDING_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS reasoning_audits_cost_pending
+  ON reasoning_audits(id DESC)
+  WHERE cost_usd_nanos IS NULL AND request_id IS NOT NULL AND upstream_id IS NOT NULL;
+"#;
+
 // The administrator snapshot asks, per running Thread, whether a shared
 // device still owes a tool result. A local call answers from `worker_calls`
 // (through the status-first `worker_calls_status_created` the sharing migration
@@ -2036,6 +2055,11 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
     )?;
+    // Unconditional on purpose: `migrate_user_schema_through_53` only runs for a
+    // database below 53, so an index added there never reaches one already at a
+    // later version. This one has to land on every hosted database, so it sits
+    // beside the version bump where each upgrade passes.
+    transaction.execute_batch(USER_COST_PENDING_INDEXES)?;
     transaction.pragma_update(None, "user_version", USER_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -10168,11 +10192,18 @@ async fn worker_heartbeat(
     let boot = worker_protocol::boot_header(&headers)?;
     user_db(&state, &user, false, move |connection| {
         if !worker_protocol::liveness_report_is_current(connection, &worker_id, boot.as_deref())? {return Ok(());}
-        connection.execute(
+        // Both statements are one heartbeat. Committing them separately makes
+        // the account's only database connection pay two WAL fsyncs where one
+        // will do, and this is the most frequent route in the service: at a
+        // couple of milliseconds per fsync it was the largest single line item
+        // in the account's request latency.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
             "UPDATE workers SET status='online',last_seen_at=?,hostname=?,version=? WHERE id=?",
             params![now(), input.hostname, input.version, &worker_id],
         )?;
-        connection.execute("UPDATE workers SET upgrade_status='completed',upgrade_error=NULL WHERE id=? AND upgrade_version IS NOT NULL AND ltrim(upgrade_version,'v')=ltrim(version,'v')", [&worker_id])?;
+        transaction.execute("UPDATE workers SET upgrade_status='completed',upgrade_error=NULL WHERE id=? AND upgrade_version IS NOT NULL AND ltrim(upgrade_version,'v')=ltrim(version,'v')", [&worker_id])?;
+        transaction.commit()?;
         Ok(())
     })
     .await?;
@@ -12442,7 +12473,10 @@ mod tests {
         let connection = open_user(&path, true).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE reasoning_audits DROP COLUMN upstream_id;
+                // A schema 39 database predates the cost-settlement index too, and
+                // SQLite refuses to drop a column an index still references.
+                "DROP INDEX IF EXISTS reasoning_audits_cost_pending;
+                 ALTER TABLE reasoning_audits DROP COLUMN upstream_id;
                  ALTER TABLE reasoning_audits DROP COLUMN cost_usd_nanos;
                  ALTER TABLE reasoning_audits DROP COLUMN cost_attempts;
                  PRAGMA user_version = 39;",

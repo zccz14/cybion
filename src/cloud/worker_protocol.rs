@@ -37,6 +37,9 @@ pub(super) fn allow_report(
 }
 
 // Doctor authenticates without claiming to be the running Worker process.
+// This is the Worker poll path — heartbeat and resources both call it on every
+// cycle — so it reads `boot_id` once and applies `allow_report`'s rule itself
+// instead of paying a second identical query.
 pub(super) fn liveness_report_is_current(
     c: &Connection,
     worker: &str,
@@ -50,7 +53,12 @@ pub(super) fn liveness_report_is_current(
     if current.is_some() && boot.is_none() {
         return Ok(false);
     }
-    allow_report(c, worker, boot)?;
+    if current
+        .as_deref()
+        .is_some_and(|current| Some(current) != boot)
+    {
+        return Err(ApiError::conflict("report from an obsolete Worker process"));
+    }
     Ok(true)
 }
 
