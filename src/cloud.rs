@@ -50,6 +50,7 @@ mod objects;
 mod recovery;
 mod route_performance;
 mod run_phase;
+mod sql_performance;
 mod stats;
 mod thread_controls;
 mod thread_sharing;
@@ -205,6 +206,9 @@ struct AppState {
     stats: Arc<stats::Patrol>,
     /// Per-route request performance, recorded off the request path.
     route_performance: Arc<route_performance::Monitor>,
+    /// Per-statement SQLite cost, measured inside SQLite and folded off the
+    /// request path.
+    sql_performance: Arc<sql_performance::Monitor>,
 }
 
 #[derive(Clone)]
@@ -410,6 +414,15 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
     tokio::spawn(traffic.clone().persist_periodically());
     let route_performance = Arc::new(route_performance::Monitor::open(&admin_db_path)?);
     tokio::spawn(route_performance.clone().persist_periodically());
+    let sql_performance = Arc::new(sql_performance::Monitor::open(&admin_db_path)?);
+    tokio::spawn(sql_performance.clone().persist_periodically());
+    // The tracer is on by default: without it the next slow statement costs an
+    // afternoon of inference. CYBION_SQL_TRACE=off starts it quiet, and the
+    // endpoints below switch it at runtime without a release.
+    sql_performance::set_enabled(!matches!(
+        std::env::var("CYBION_SQL_TRACE").as_deref(),
+        Ok("off") | Ok("0") | Ok("false")
+    ));
     let state = AppState {
         data_dir: Arc::new(data_dir),
         admin_db_path: Arc::new(admin_db_path.clone()),
@@ -432,6 +445,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         traffic,
         stats: stats::Patrol::new(),
         route_performance,
+        sql_performance,
     };
     tracing::info!(%address, "Cybion Cloud listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -997,6 +1011,10 @@ fn app(state: AppState) -> Router {
         .route("/api/worker-calls", get(worker_call_audits))
         .route("/api/worker-calls/{id}", get(worker_sharing::call_detail))
         .route("/api/route-performance", get(route_performance_view))
+        .route(
+            "/api/sql-performance",
+            get(sql_performance_view).post(set_sql_performance),
+        )
         .route("/api/workers/{id}/grants", get(worker_sharing::list_grants))
         .route(
             "/api/workers/{id}/grants/{grantee}",
@@ -1311,6 +1329,9 @@ fn open_user(path: &Path, create: bool) -> Result<Connection, ApiError> {
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(ApiError::internal)?;
     ensure_user_schema(&mut connection)?;
+    // Every statement this connection runs is measured from here on. The
+    // profiler is installed once per open, never per statement.
+    sql_performance::install(&connection)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -4222,6 +4243,51 @@ fn insight_range(value: Option<&str>) -> Result<String, ApiError> {
 #[derive(Deserialize)]
 struct RoutePerformanceQuery {
     window: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SqlPerformanceQuery {
+    window: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SqlPerformanceToggle {
+    enabled: bool,
+}
+
+/// Which statements cost what, read inside SQLite. Cross-tenant like the
+/// interface audit — a statement is not attributable to one user — so only an
+/// administrator reads it.
+async fn sql_performance_view(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Query(query): Query<SqlPerformanceQuery>,
+) -> Result<Json<sql_performance::SqlPerformance>, ApiError> {
+    if !is_admin(&state, &identity.user.id, false).await? {
+        return Err(ApiError::forbidden("administrator access is required"));
+    }
+    let window = sql_performance::window(query.window.as_deref())?;
+    let monitor = state.sql_performance.clone();
+    tokio::task::spawn_blocking(move || monitor.load(window))
+        .await
+        .map_err(ApiError::internal)?
+        .map(Json)
+}
+
+/// Switches the profiler without a release. Turning it off leaves the callback
+/// installed and makes it return on its first load: the few nanoseconds that
+/// costs are visible in the page's own overhead block, which is the point of
+/// reporting it.
+async fn set_sql_performance(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    Json(input): Json<SqlPerformanceToggle>,
+) -> Result<Json<Value>, ApiError> {
+    if !is_admin(&state, &identity.user.id, false).await? {
+        return Err(ApiError::forbidden("administrator access is required"));
+    }
+    sql_performance::set_enabled(input.enabled);
+    Ok(Json(json!({ "enabled": sql_performance::is_enabled() })))
 }
 
 /// The interface audit is cross-tenant: it reports every route's latency and
@@ -10542,6 +10608,10 @@ mod traffic_tests;
 mod route_performance_tests;
 
 #[cfg(test)]
+#[path = "cloud_sql_performance_tests.rs"]
+mod sql_performance_tests;
+
+#[cfg(test)]
 #[path = "cloud_machine_tests.rs"]
 mod machine_tests;
 
@@ -10658,6 +10728,7 @@ mod tests {
                 route_performance: Arc::new(
                     route_performance::Monitor::open(&admin_db_path).unwrap(),
                 ),
+                sql_performance: Arc::new(sql_performance::Monitor::open(&admin_db_path).unwrap()),
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
                 user_databases: Arc::new(user_databases::UserDatabases::new()),
                 stats: stats::Patrol::new(),

@@ -1365,6 +1365,7 @@ fn open_stats(path: &Path) -> Result<Option<Connection>, ApiError> {
     if version != USER_SCHEMA_VERSION {
         return Ok(None);
     }
+    sql_performance::install(&connection)?;
     Ok(Some(connection))
 }
 
@@ -1436,6 +1437,9 @@ fn process_database(
     interest: Option<i64>,
     last_refresh: &mut [i64; 4],
 ) -> Result<(), ApiError> {
+    // This patrol opens its own connection on a user file, so its statements
+    // carry the patrol's name rather than a handler's.
+    let _label = sql_performance::enter_named("cloud::stats::patrol");
     let Some(mut connection) = open_stats(path)? else {
         return Ok(());
     };
