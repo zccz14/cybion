@@ -55,3 +55,15 @@ pnpm run build   # dist/index.js + dist/index.d.ts + dist/styles.css
 - `threadId` 改变会重建本地输入/录音状态，草稿仍按用户和 Thread 隔离。切换账号时，宿主应像 Cybion 一样以用户 ID key 工作区/Provider。
 
 回归基准为提取前 `bc67cc6`（PR #697 的父提交），不是已经发生变化的组件实现。`web/e2e/thread-view-parity.spec.ts` 在两份实现上运行同一组黑盒交互测试；其它端到端用例继续守护记录渲染、图片、滚动、设置、分享等行为。
+
+## npm 发布
+
+在 npm 上把 Trusted Publisher 指向 `zccz14/cybion` 的 `release.yml`，并启用仓库变量 `NPM_COMPONENTS_PUBLISH=true`。发布任务使用 `id-token: write`、npm 11 与 provenance，不需要 npm token。
+
+正常 `v*` 标签发布同时发布尚未存在的组件版本。只需发布 npm 包时（不重新部署控制器），在已通过 CI 的主干执行：
+
+```sh
+gh workflow run release.yml --ref main -f components_only=true
+```
+
+发布前须先通过 PR 更新包版本；已存在的版本会跳过，不能覆盖 npm 的不可变版本。

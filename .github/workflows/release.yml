@@ -2,6 +2,11 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      components_only:
+        description: Publish only the npm component package (no controller release/deployment)
+        type: boolean
+        default: false
   push:
     tags: ['v*']
 
@@ -14,6 +19,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !inputs.components_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -57,9 +63,9 @@ jobs:
             *.tar.gz
             *.tar.gz.sha256
   components:
-    # Publishing waits for the npm trusted publisher to be configured for this
-    # repository; flip the NPM_COMPONENTS_PUBLISH variable once it is.
-    if: vars.NPM_COMPONENTS_PUBLISH == 'true'
+    # A manual npm-only run skips the controller build; normal releases still
+    # require it to succeed. Keep this job in release.yml for the npm OIDC trust.
+    if: ${{ !cancelled() && vars.NPM_COMPONENTS_PUBLISH == 'true' && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.components_only)) }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -77,11 +83,15 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: packages/cybion-components/pnpm-lock.yaml
+      - name: Install npm with Trusted Publishing support
+        run: npm install --global npm@11
       - run: pnpm --dir packages/cybion-components install --frozen-lockfile
       - run: pnpm --dir packages/cybion-components run typecheck
       - run: pnpm --dir packages/cybion-components test
       - run: pnpm --dir packages/cybion-components run build
       - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ""
         run: |
           cd packages/cybion-components
           package_name="$(node -p "require('./package.json').name")"
@@ -89,7 +99,7 @@ jobs:
           if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
             echo "${package_name}@${package_version} is already published; skipping."
           else
-            npm publish
+            npm publish --provenance --access public
           fi
 
   publish:
