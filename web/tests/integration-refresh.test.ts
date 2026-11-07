@@ -28,10 +28,10 @@ test("each upstream owns its model catalog and the model pickers group by upstre
   // The new-Thread composer picks from the polled account catalog; the
   // conversation composer picks from the catalog the view fetched itself.
   assert.equal(source.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 1)
-  assert.equal(view.match(/catalogs=\{catalogs\?\.upstreams\}/g)?.length, 1)
+  assert.equal(view.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 1)
   assert.match(source, /upstreamId=\{value\.upstream_id\}/)
-  assert.match(view, /upstreamId=\{thread\.upstream_id\}/)
-  assert.match(view, /onModelChange=\{\(upstream_id, model\) => void updateSettings\(\{ upstream_id, model \}\)\}/)
+  assert.match(view, /upstreamId=\{current\.upstream_id\}/)
+  assert.match(view, /onModelChange=\{\(upstream_id, model\) => settings\.mutate\(\{ upstream_id, model \}\)\}/)
   assert.match(source, /availableModels: "Available models"/)
   assert.match(source, /availableModels: "可用模型"/)
   assert.match(popover, /<SelectGroup key=\{group\.id\}>/)

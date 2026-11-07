@@ -10,7 +10,7 @@ test("the title row offers generating a title from the full thread manual", () =
   const view = readPackageSource("thread-view.tsx")
   const copy = readPackageSource("copy.ts")
   assert.match(api, /return this\.request<Thread>\(`\/api\/threads\/\$\{encodeURIComponent\(id\)\}\/title`, \{ method: "POST" \}\)/)
-  assert.match(view, /const generateTitle = useCallback/)
+  assert.match(view, /const generateTitle = useMutation/)
   assert.match(view, /<Button type="button" size="icon-sm" variant="outline" aria-label=\{t\("generateTitle"\)\}/)
   assert.match(copy, /generateTitle: \{ en: "Generate a title from the full conversation"/)
   assert.match(copy, /zh: "引用全部重放内容生成标题"/)
@@ -18,10 +18,10 @@ test("the title row offers generating a title from the full thread manual", () =
 
 test("a generated title replaces the saved one and refreshes thread views", () => {
   const view = readPackageSource("thread-view.tsx")
-  const generate = view.slice(view.indexOf("const generateTitle = useCallback"), view.indexOf("const updateSettings = useCallback"))
-  assert.match(generate, /setThread\(await client\.generateTitle\(threadId\)\)/)
+  const generate = view.slice(view.indexOf("const generateTitle = useMutation"), view.indexOf("const settings = useMutation"))
+  assert.match(generate, /setTitle\(thread\.title\)/)
   assert.match(generate, /setEditing\(false\)/)
   // The host mirrors the stored title, so every other view of this Thread follows it.
-  assert.match(view, /onTitleChange\?\.\(thread\.title\)/)
-  assert.match(view, /onThreadChange\?\.\(thread\)/)
+  assert.match(view, /onTitleChange\?\.\(thread\.data\.title\)/)
+  assert.match(view, /onThreadChange\?\.\(thread\.data\)/)
 })

@@ -1,3 +1,4 @@
+import { useCybionLink } from "../provider"
 import type { ReactNode } from "react"
 import { WrenchIcon } from "lucide-react"
 import type { CybionToolFunctionCall } from "../lib/history-payload"
@@ -70,6 +71,7 @@ function CybionToolDetail({ language, call, workers, manuals }: {
   workers: readonly { id: string; label: string }[] | undefined
   manuals: ReadonlyMap<string, ManualSummary> | undefined
 }) {
+  const Link = useCybionLink()
   const text = copy[language]
   switch (call.tool) {
     case "load_manual":
@@ -77,7 +79,7 @@ function CybionToolDetail({ language, call, workers, manuals }: {
       const manual = manuals?.get(call.manualId) ?? null
       if (manual === null) return <pre className={monoBlock}>{call.manualId}</pre>
       return <>
-        <a className="mt-2 block w-fit text-sm font-medium hover:underline" title={call.manualId} href={`/manuals?manual=${encodeURIComponent(call.manualId)}`}>{manual.name}</a>
+        <Link className="mt-2 block w-fit text-sm font-medium hover:underline" title={call.manualId} href={`/manuals?manual=${encodeURIComponent(call.manualId)}`}>{manual.name}</Link>
         {manual.description !== "" && <p className="mt-1.5 text-xs text-muted-foreground">{manual.description}</p>}
       </>
     }
@@ -88,14 +90,14 @@ function CybionToolDetail({ language, call, workers, manuals }: {
           {call.name !== null && <p className="mt-2 text-sm font-medium">{call.name}</p>}
           {call.parentId !== null && (parent === null
             ? <pre className={monoBlock}>{call.parentId}</pre>
-            : <a className="mt-1.5 block w-fit text-xs text-muted-foreground hover:underline" href={`/manuals?manual=${encodeURIComponent(call.parentId)}`}>{text.parent}{language === "zh" ? "：" : ": "}{parent.name}</a>)}
+            : <Link className="mt-1.5 block w-fit text-xs text-muted-foreground hover:underline" href={`/manuals?manual=${encodeURIComponent(call.parentId)}`}>{text.parent}{language === "zh" ? "：" : ": "}{parent.name}</Link>)}
         </>
       }
       const manual = manuals?.get(call.manualId) ?? null
       return <>
         {manual === null
           ? <pre className={monoBlock}>{call.manualId}</pre>
-          : <a className="mt-2 block w-fit text-sm font-medium hover:underline" title={call.manualId} href={`/manuals?manual=${encodeURIComponent(call.manualId)}`}>{manual.name}</a>}
+          : <Link className="mt-2 block w-fit text-sm font-medium hover:underline" title={call.manualId} href={`/manuals?manual=${encodeURIComponent(call.manualId)}`}>{manual.name}</Link>}
         {manual !== null && manual.description !== "" && <p className="mt-1.5 text-xs text-muted-foreground">{manual.description}</p>}
         {call.trashed && <p className="mt-1.5 text-xs text-muted-foreground">{text.movedToTrash}</p>}
       </>

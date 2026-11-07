@@ -22,7 +22,7 @@ import {
 } from "../lib/history-payload"
 import { threadControlAction, generatedImageSource } from "../lib/thread-response"
 import { manualLoadNotice } from "../lib/thread-manual-loads"
-import { threadHistoryRecordKey, type HistoryRecord } from "../lib/thread-history"
+import { type HistoryRecord } from "../lib/thread-history"
 import { Badge } from "../ui/badge"
 import { Message, MessageContent, MessageFooter } from "../ui/message"
 import { AssistantMessage } from "./assistant-message"
@@ -262,7 +262,6 @@ export const HistoryMessage = memo(function HistoryMessage({ language, record, w
       <div className="mt-1 whitespace-pre-wrap break-words text-sm leading-6">{text}</div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.68rem] text-muted-foreground">
         <span className="font-mono">#{record.id}</span>
-        <span className="sr-only">{threadHistoryRecordKey(record)}</span>
       </div>
     </div>
   </div>

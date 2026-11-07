@@ -71,7 +71,7 @@ import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilt
 import { historyPayloadObject, historyPayloadText, type AudioTranscriptionFunctionCall } from "@/lib/history-payload"
 import { formatBytes } from "@/lib/format"
 import { formattedTime } from "@/lib/time"
-import { type HistoryRecord } from "@/lib/thread-history"
+import { type HistoryRecord, type ThreadHistoryWindow } from "@/lib/thread-history"
 import { type ThreadManualLoadsView } from "@/lib/thread-manual-loads"
 import { handleChatInputKeyDown } from "@/lib/chat-input"
 import { defaultsChanged } from "@/lib/thread-defaults"
@@ -1493,7 +1493,9 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
 // The conversation is the package's thread view: this page only supplies what the
 // host owns — sharing, archive, delete, the open notes and the loaded Manuals that
 // sit under the transcript — plus the lookups the record cards resolve.
-function ThreadConversation({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
+const ThreadRouterLink: import("@zccz14/cybion-components").CybionLink = ({ href, ...props }) => <Link to={href} {...props} />
+
+function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: AuthMiniApi; userId: string; olderPages: ThreadHistoryWindow[]; onOlderPage: (id: string, page: ThreadHistoryWindow) => void }) {
   const { threadId = "" } = useParams()
   const { t, language } = useUi()
   const location = useLocation()
@@ -1501,6 +1503,8 @@ function ThreadConversation({ sdk, userId }: { sdk: AuthMiniApi; userId: string 
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
   const [current, setCurrent] = useState<Thread | null>(null)
+  const [records, setRecords] = useState<HistoryRecord[]>([])
+  const loadAudio = useCallback((reference: string, mediaType: string | null) => audioObjectUrl(sdk, reference, mediaType), [sdk])
   const workers = useQuery({
     queryKey: ["workers", userId],
     queryFn: () => api<Worker[]>(sdk, "/api/workers"),
@@ -1515,7 +1519,11 @@ function ThreadConversation({ sdk, userId }: { sdk: AuthMiniApi; userId: string 
     refetchInterval: current?.status === "running" ? 1200 : 2500,
     enabled: Boolean(threadId),
   })
-  const loadsManuals = (manualLoads.data?.loaded.length ?? 0) > 0
+  const loadsManuals = useMemo(() => (manualLoads.data?.loaded.length ?? 0) > 0 || records.some((record) => {
+    const payload = historyPayloadObject(record.payload)
+    if (payload?.type === "manual_loaded" || payload?.type === "manual_unloaded") return true
+    return payload?.type === "function_call" && payload.name === "write_manual"
+  }), [manualLoads.data, records])
   const manuals = useQuery({ queryKey: ["manuals"], queryFn: () => api<Manual[]>(sdk, "/api/manuals"), enabled: loadsManuals })
   const commonManuals = useQuery({ queryKey: ["common-manuals", language], queryFn: () => api<{ revision: number; root: CommonManualNode }>(sdk, `/api/common-manuals?lang=${language}`), enabled: loadsManuals })
   const manualLookup = useMemo(() => {
@@ -1547,6 +1555,7 @@ function ThreadConversation({ sdk, userId }: { sdk: AuthMiniApi; userId: string 
     mutationFn: (archived: boolean) => api<Thread>(sdk, `/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify({ archived }) }),
     onSuccess: (_thread, archived) => {
       void client.invalidateQueries({ queryKey: ["threads"] })
+      void client.invalidateQueries({ queryKey: ["thread", threadId] })
       if (archived) navigate({ pathname: "/threads", search: location.search })
     },
   })
@@ -1556,10 +1565,14 @@ function ThreadConversation({ sdk, userId }: { sdk: AuthMiniApi; userId: string 
     ? { label: t("restoreThread"), icon: <ArchiveRestoreIcon className="size-4" />, next: false }
     : { label: t("archiveThread"), icon: <ArchiveIcon className="size-4" />, next: true }
   return <>
-    <CybionThreadProvider baseUrl={window.location.origin} getToken={() => accessToken(sdk)} identity={userId} language={language}>
+    <CybionThreadProvider queryClient={client} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={window.location.origin} getToken={() => accessToken(sdk)} identity={userId} language={language}>
       <CybionThreadView
         threadId={threadId}
         onThreadChange={setCurrent}
+        onRecordsChange={setRecords}
+        olderPages={olderPages}
+        onOlderPage={onOlderPage}
+        loadAudio={loadAudio}
         workers={workers.data}
         manuals={manualLookup}
         headerLeading={desktop ? undefined : <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={backToThreads}><ArrowLeftIcon /></Button>}
@@ -1593,21 +1606,29 @@ function ThreadConversationPage({ sdk, userId, filters, onFiltersChange }: Threa
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const request = useApiRequest(sdk)
+  // Older history pages outlive a Thread switch, so coming back to a Thread still shows the
+  // pages it had already loaded instead of paging them in again.
+  const [olderPagesByThread, setOlderPagesByThread] = useState<Record<string, ThreadHistoryWindow[]>>({})
+  const olderPages = useMemo(() => olderPagesByThread[threadId] ?? [], [olderPagesByThread, threadId])
+  const rememberOlderPage = useCallback((id: string, page: ThreadHistoryWindow) => {
+    setOlderPagesByThread((current) => ({ ...current, [id]: [page, ...(current[id] ?? [])] }))
+  }, [])
   return <main className="flex h-full flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
       <ThreadListPane layout="sidebar" sessionId={sdk.session.getState().sessionId} request={request} language={language} filters={filters} onFiltersChange={onFiltersChange} onCreate={() => navigate({ pathname: "/threads", search: location.search })} />
     </aside>}
-    <ThreadConversation key={threadId} sdk={sdk} userId={userId} />
+    <ThreadConversation key={threadId} sdk={sdk} userId={userId} olderPages={olderPages} onOlderPage={rememberOlderPage} />
   </main>
 }
 
 function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
   const { ownerId = "", threadId = "" } = useParams()
   const { language } = useUi()
+  const client = useQueryClient()
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
   const loadAudio = useCallback((reference: string, mediaType: string | null) => audioObjectUrl(sdk, reference, mediaType), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
-  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} loadAudio={loadAudio} />} />
+  return <CybionThreadProvider queryClient={client} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={window.location.origin} getToken={() => accessToken(sdk)} identity={userId} language={language}><SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} loadAudio={loadAudio} />} /></CybionThreadProvider>
 }
 
 function AudioTranscriptionCall({ language, call, time }: { language: Language; call: AudioTranscriptionFunctionCall; time: string }) {
