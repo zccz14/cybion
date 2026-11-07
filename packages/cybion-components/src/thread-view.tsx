@@ -34,10 +34,14 @@ import { Textarea } from "./ui/textarea"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Skeleton } from "./ui/skeleton"
 import { errorMessage } from "./lib/utils"
+import { threadRootClass } from "./lib/thread-root"
 
 export type CybionThreadViewProps = {
   /** The only required input: the thread to show. */
   threadId: string
+  /** Extra classes on the view's root. The default minimum height is the
+   * full-page shell; an embedder that gives the view its own box passes
+   * `min-h-0` and takes over. */
   className?: string
   /** A first message the host already holds outside the thread (a ticket body, an email). */
   intro?: { body: string; createdAt: number }
@@ -233,7 +237,7 @@ function ThreadConversation({ threadId, className, intro, onTitleChange, onThrea
   }
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
   const action = composerAction(input, attachments.images.length, running)
-  return <section className={`flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col ${className ?? ""}`}>
+  return <section className={threadRootClass(className)}>
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
       {headerLeading}
       {editing && !readOnly ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
@@ -311,7 +315,7 @@ function ThreadConversation({ threadId, className, intro, onTitleChange, onThrea
   </section>
 }
 function ThreadPending({ headerLeading, className }: { headerLeading?: ReactNode; className?: string }) {
-  return <section className={`flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col ${className ?? ""}`}>
+  return <section className={threadRootClass(className)}>
     <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
       {headerLeading}
       <Skeleton className="h-5 w-56" />
@@ -321,7 +325,7 @@ function ThreadPending({ headerLeading, className }: { headerLeading?: ReactNode
 }
 
 function ThreadUnavailable({ error, headerLeading, className, onRetry }: { error: unknown; headerLeading?: ReactNode; className?: string; onRetry: () => void }) {
-  return <section className={`flex min-h-[calc(100svh-3.5rem)] min-w-0 flex-1 flex-col ${className ?? ""}`}>
+  return <section className={threadRootClass(className)}>
     <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
       {headerLeading}
     </div>

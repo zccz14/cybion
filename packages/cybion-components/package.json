@@ -1,6 +1,6 @@
 {
   "name": "@zccz14/cybion-components",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Embeddable Cybion thread view: conversation history, composer, model settings, compaction, usage and voice over the Cybion browser API.",
   "license": "MIT",
   "repository": {
