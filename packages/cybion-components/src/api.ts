@@ -126,9 +126,11 @@ export class CybionThreadClient {
     return this.request<HistoryRecord[]>(`/api/threads/${encodeURIComponent(id)}/history?after=${after}`)
   }
 
-  historyWindow(id: string, before?: number) {
+  /** One page of the transcript, oldest first. The wire field is `has_older`. */
+  async historyWindow(id: string, before?: number): Promise<HistoryWindow> {
     const query = before === undefined ? "" : `?before=${before}`
-    return this.request<HistoryWindow>(`/api/threads/${encodeURIComponent(id)}/history/window${query}`)
+    const page = await this.request<{ records: HistoryRecord[]; has_older: boolean }>(`/api/threads/${encodeURIComponent(id)}/history/window${query}`)
+    return { records: page.records, hasOlder: page.has_older }
   }
 
   response(id: string) {
