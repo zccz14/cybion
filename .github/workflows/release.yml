@@ -80,7 +80,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: packages/cybion-components/pnpm-lock.yaml
       - name: Install npm with Trusted Publishing support
@@ -90,9 +89,11 @@ jobs:
       - run: pnpm --dir packages/cybion-components test
       - run: pnpm --dir packages/cybion-components run build
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ""
+        # No setup-node registry-url or NODE_AUTH_TOKEN: even an empty token
+        # configuration can shadow npm's automatic OIDC credential exchange.
         run: |
+          unset NODE_AUTH_TOKEN NPM_TOKEN
+          npm --version
           cd packages/cybion-components
           package_name="$(node -p "require('./package.json').name")"
           package_version="$(node -p "require('./package.json').version")"
