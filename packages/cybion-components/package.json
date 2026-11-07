@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zccz14/Cybion.git",
+    "url": "git+https://github.com/zccz14/cybion.git",
     "directory": "packages/cybion-components"
   },
   "type": "module",
