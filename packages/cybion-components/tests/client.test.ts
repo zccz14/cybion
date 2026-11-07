@@ -29,6 +29,15 @@ describe("CybionThreadClient", () => {
     await expect(client.thread("missing")).rejects.toBeInstanceOf(CybionApiError)
   })
 
+  it("loads one page of history and carries the server's older-records flag into the view", async () => {
+    // The wire field is `has_older`; the view asks `hasOlder` to decide whether
+    // the load-earlier control exists at all.
+    const fetch = vi.fn(async () => json({ records: [{ id: 7 }], has_older: true }))
+    const client = new CybionThreadClient({ baseUrl: "https://cybion.example", getToken: () => "jwt", fetch })
+    await expect(client.historyWindow("t1", 9)).resolves.toEqual({ records: [{ id: 7 }], hasOlder: true })
+    expect((fetch.mock.calls[0] as unknown as [string])[0]).toBe("https://cybion.example/api/threads/t1/history/window?before=9")
+  })
+
   it("asks for history newer than the newest loaded record", async () => {
     const fetch = vi.fn(async () => json([]))
     const client = new CybionThreadClient({ baseUrl: "https://cybion.example", getToken: () => "jwt", fetch })
