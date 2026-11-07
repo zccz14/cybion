@@ -41,3 +41,17 @@ pnpm run typecheck
 pnpm test
 pnpm run build   # dist/index.js + dist/index.d.ts + dist/styles.css
 ```
+
+## 宿主适配与提取等价性
+
+组件保留提取前的独立 React Query 查询、缓存键、失效规则和轮询节奏：Thread 1500ms，历史在运行时 1200ms / 空闲时 2500ms，流式响应运行时 750ms。模型目录失败不会阻塞对话，操作错误不会被下一次成功轮询抹掉。
+
+- React、React DOM、`@tanstack/react-query` 和 `@zccz14/ux` 是宿主共享的 peer dependencies，必须解析到同一份运行时。
+- 宿主已有 React Query 时，把同一个 `queryClient` 和 `sessionId` 交给 Provider；发送、控制、改标题及设置继续使列表、历史、审计等原查询失效。不传时 Provider 自带缓存。
+- `link` 注入宿主路由链接（如 `({ href, ...props }) => <Link to={href} {...props} />`），同时覆盖手册加载通知与工具卡片。
+- `olderPages` / `onOlderPage` 让路由外壳保留已加载页（**最老页在前**）；不传则保存在 Provider 缓存中。
+- `onThreadChange` / `onRecordsChange` 用于宿主的归档、手册查询等联动；`headerLeading` / `headerActions` / `transcriptFooter` 只放宿主自己的导航和面板。
+- `loadAudio` 可复用宿主的会话级音频 URL 缓存；默认客户端也会按引用缓存下载，失败可重试。
+- `threadId` 改变会重建本地输入/录音状态，草稿仍按用户和 Thread 隔离。切换账号时，宿主应像 Cybion 一样以用户 ID key 工作区/Provider。
+
+回归基准为提取前 `bc67cc6`（PR #697 的父提交），不是已经发生变化的组件实现。`web/e2e/thread-view-parity.spec.ts` 在两份实现上运行同一组黑盒交互测试；其它端到端用例继续守护记录渲染、图片、滚动、设置、分享等行为。

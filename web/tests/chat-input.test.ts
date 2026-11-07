@@ -64,7 +64,7 @@ test("both composers use the shared handler and drop shortcut hint copy", () => 
   assert.ok(newThread?.includes("onKeyDown={handleChatInputKeyDown}"))
   assert.ok(newThread?.includes("onPaste={attachments.paste}"))
   // The conversation composer belongs to the package now, so its wiring is guarded there.
-  const thread = view.split("\n").find((line) => line.includes("<Textarea id={`cybion-thread-input-"))
+  const thread = view.split("\n").find((line) => line.includes('<Textarea id="thread-input"'))
   assert.ok(thread?.includes("onKeyDown={handleChatInputKeyDown}"))
   assert.ok(thread?.includes("onPaste={attachments.paste}"))
   for (const source of [main, view]) {

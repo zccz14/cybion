@@ -44,8 +44,8 @@ test("both thread lists and conversation status use the same server-derived pres
   assert.equal(list.match(/<ThreadLink /g)?.length, 1)
   assert.match(list, /function ThreadRow\(/)
   assert.equal(source.match(/<ThreadLink /g), null)
-  assert.equal(view.match(/<ThreadStatusBadge status=\{thread.display_status\} runningSummary=\{thread.running_summary\}/g)?.length, 1)
-  assert.match(view, /<ThreadStatusSummary status=\{thread.display_status\} runningSummary=\{thread.running_summary\} language=\{language\} \/>/)
+  assert.equal(view.match(/<ThreadStatusBadge status=\{current.display_status\} runningSummary=\{current.running_summary\}/g)?.length, 1)
+  assert.match(view, /<ThreadStatusSummary status=\{current.display_status\} runningSummary=\{current.running_summary\} language=\{language\} \/>/)
   assert.doesNotMatch(source, /StatusDot|statusLabel|latestThreadAction/)
 })
 

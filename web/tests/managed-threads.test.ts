@@ -133,7 +133,7 @@ test("thread settings live in the composer popover and the image tool follows it
   // Web search stays always-on; image generation follows the model chosen at
   // the Thread and account levels, read from the upstream image catalogs.
   assert.match(source, /"\/api\/integrations\/upstreams\/models\?kind=image"/)
-  assert.match(view, /imageGeneration=\{defaults \?/)
+  assert.match(view, /imageGeneration=\{defaults\.data \?/)
   assert.match(popover, /imageModelOptions/)
 })
 

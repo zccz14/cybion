@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 // Everything the host already owns stays external so the package never ships a
 // second copy of React, the Markdown surface, or the UI runtime.
 const externalPackages = [
+  "@tanstack/react-query",
   "@base-ui/react",
   "@shadcn/react",
   "@zccz14/ux",

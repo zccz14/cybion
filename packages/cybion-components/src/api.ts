@@ -92,6 +92,17 @@ export class CybionThreadClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis)
   }
 
+  private readonly audioObjectUrls = new Map<string, Promise<string>>()
+  audioObjectUrl = (reference: string, mediaType: string | null): Promise<string> => {
+    const key = `${reference}:${mediaType ?? ""}`
+    const cached = this.audioObjectUrls.get(key)
+    if (cached) return cached
+    const pending = this.object(reference, mediaType).then((blob) => URL.createObjectURL(blob))
+    this.audioObjectUrls.set(key, pending)
+    pending.catch(() => this.audioObjectUrls.delete(key))
+    return pending
+  }
+
   private url(path: string) {
     return `${this.baseUrl}${path}`
   }
