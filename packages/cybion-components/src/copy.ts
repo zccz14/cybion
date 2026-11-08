@@ -30,6 +30,7 @@ const copy = {
   recordToolOutput: { en: "Worker result", zh: "Worker 结果" },
   recordReasoning: { en: "Reasoning", zh: "推理 (Reasoning)" },
   recordActivity: { en: "Activity", zh: "活动记录" },
+  recordContext: { en: "Injected context", zh: "注入的上下文" },
   recordProtocol: { en: "Protocol event", zh: "协议事件" },
   generatedImage: { en: "Generated image", zh: "生成的图片" },
   recordHidden: { en: "Internal", zh: "内部记录" },
