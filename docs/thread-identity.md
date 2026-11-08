@@ -19,12 +19,15 @@ the answer it needs.
   "iss": "https://cybion.ntnl.io",
   "sub": "5b2e4f9a-6c3d-4a1e-9f00-1d2c3b4a5e6f",
   "iat": 1780000000,
-  "exp": 1780000900
+  "exp": 1780000060
 }
 ```
 
 `sub` is always the Thread that called the tool — it is not an argument, so a
-model cannot name another Thread. `exp` is fifteen minutes after `iat`.
+model cannot name another Thread. `exp` is sixty seconds after `iat`, and that
+one minute is the whole reason the token is safe to show: a copy quoted in the
+conversation, in a shared Thread, or in a log is worthless before anyone can use
+it. A caller that needs a second call mints a second token.
 
 The header names the signing key:
 
@@ -106,6 +109,8 @@ finish, then deletes it:
   already had;
 - drop the stored secret and its column once no live Thread depends on it.
 
-The Thread's history still shows the issued tokens, so keep them short-lived:
-the point of the change is that a token found in an archive months later is
-worthless, not that the archive is clean.
+The Thread's history still shows the issued tokens, and with a one-minute life
+that is harmless: a token found in an archive months later is worthless by
+construction rather than by hope. Do not lengthen the life to save a few tool
+calls — the archive is shared, exported, and replayed, and the token's only job
+is the request that is already being made.
