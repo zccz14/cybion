@@ -34,14 +34,14 @@ test("the Manuals page keeps an edge-to-edge tree beside a full-width reading pa
   await expect(page.locator(".ux-app-header__title")).toHaveText("手册")
 
   // unified tree: both sources as top-level sections
-  await expect(page.getByText("Cybion 公共手册", { exact: true }).first()).toBeVisible()
+  await expect(page.getByText("Cybion 用户帮助手册", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("你的手册", { exact: true })).toBeVisible()
 
   // node labels stack the name over the purpose instead of squeezing both into one row
-  const commonNode = page.getByRole("button", { name: /Cybion 公共手册/ }).first()
+  const commonNode = page.getByRole("button", { name: /Cybion 用户帮助手册/ }).first()
   const nameSpan = commonNode.locator("span span").nth(0)
   const purposeSpan = commonNode.locator("span span").nth(1)
-  await expect(nameSpan).toHaveText("Cybion 公共手册")
+  await expect(nameSpan).toHaveText("Cybion 用户帮助手册")
   await expect(purposeSpan).toContainText("随 Cybion 源码编译发布")
   const nameBox = await nameSpan.boundingBox()
   const purposeBox = await purposeSpan.boundingBox()
@@ -61,7 +61,7 @@ test("the Manuals page keeps an edge-to-edge tree beside a full-width reading pa
   await page.screenshot({ path: "test-results/layout-default.png" })
 
   // common manual selected -> read-only preview
-  await page.getByRole("button", { name: /Cybion 公共手册/ }).first().click()
+  await page.getByRole("button", { name: /Cybion 用户帮助手册/ }).first().click()
   await expect(page.getByText("只读", { exact: true }).first()).toBeVisible()
   await expect(page.getByText("随 Cybion 版本编译发布", { exact: false })).toBeVisible()
   expect(await page.locator(".markdown-editor[aria-readonly=true]").count()).toBe(1)
@@ -366,8 +366,8 @@ test("the common manual copy follows the UI language", async ({ page }) => {
   await page.goto("/#/manuals")
 
   // the tree, the node purpose and the reading pane all serve the English copy
-  await expect(page.getByText("Cybion Common Manual", { exact: true }).first()).toBeVisible()
-  const commonNode = page.getByRole("button", { name: /Cybion Common Manual/ }).first()
+  await expect(page.getByText("Cybion User Help Manual", { exact: true }).first()).toBeVisible()
+  const commonNode = page.getByRole("button", { name: /Cybion User Help Manual/ }).first()
   await expect(commonNode.locator("span span").nth(1)).toContainText("Compiled into Cybion")
   await commonNode.click()
   await expect(page.getByText("Read-only", { exact: true }).first()).toBeVisible()

@@ -437,7 +437,7 @@ const copy = {
     manualDeleted: "Manual deleted",
     manualCollapse: "Collapse manual",
     manualExpand: "Expand manual",
-    commonManualTitle: "Cybion Common Manual",
+    commonManualTitle: "Cybion User Help Manual",
     commonManualHint: "Compiled into Cybion from its source tree and shared by every user, read-only. Threads read it progressively through the Manuals tools; it changes only with releases.",
     navAudit: "Audit",
     usageStats: "Usage statistics",
@@ -757,7 +757,7 @@ const copy = {
     manualDeleted: "手册已删除",
     manualCollapse: "收起手册",
     manualExpand: "展开手册",
-    commonManualTitle: "Cybion 公共手册",
+    commonManualTitle: "Cybion 用户帮助手册",
     commonManualHint: "随 Cybion 源码编译发布、所有用户共享、只读；Thread 通过手册工具按需渐进阅读，内容只随版本变化。",
     navAudit: "审计",
     usageStats: "用量统计",
@@ -1687,7 +1687,7 @@ type CommonManualNode = {
   children: CommonManualNode[]
 }
 
-// The Cybion Common Manual is compiled into the controller from
+// The built-in Cybion user help manual is compiled into the controller from
 // `common-manuals/`; this card shows users exactly what Threads can read.
 
 function CommonManualBranch({ node, selectedId, onSelect, collapseLabel, expandLabel }: { node: CommonManualNode; selectedId: string | null; onSelect: (node: CommonManualNode) => void; collapseLabel: string; expandLabel: string }) {

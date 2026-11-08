@@ -146,15 +146,15 @@ export async function stubWorkspace(page: Page, options: {
         revision: 1,
         root: url.searchParams.get("lang") === "zh" ? {
           id: "common-root",
-          name: "Cybion 公共手册",
+          name: "Cybion 用户帮助手册",
           description: "随 Cybion 源码编译发布、所有用户共享、只读",
-          content: "# Cybion 公共手册\n\n夹具内容。",
+          content: "# Cybion 用户帮助手册\n\n夹具内容。",
           children: [],
         } : {
           id: "common-root",
-          name: "Cybion Common Manual",
+          name: "Cybion User Help Manual",
           description: "Compiled into Cybion from its source tree, shared by every user, read-only",
-          content: "# Cybion Common Manual\n\nFixture content.",
+          content: "# Cybion User Help Manual\n\nFixture content.",
           children: [],
         },
       })

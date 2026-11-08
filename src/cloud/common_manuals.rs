@@ -1,4 +1,5 @@
-//! The Cybion Common Manual: product usage guidance compiled into the binary.
+//! The built-in Cybion manual ("Cybion User Help Manual"): product usage
+//! guidance compiled into the binary as one read-only manual.
 //!
 //! INVARIANT: user-readable common content is compiled in from `common-manuals/`
 //! as bilingual (en/zh) copy; the controller never stores, mutates, or
@@ -66,52 +67,12 @@ static TREE: LazyLock<CommonTree> = LazyLock::new(|| {
 /// file is listed here; a test pins the list against the tree.
 const CONTENT: &[(&str, &str)] = &[
     (
-        "nodes/en/overview.md",
-        include_str!("../../common-manuals/nodes/en/overview.md"),
+        "nodes/en/manual.md",
+        include_str!("../../common-manuals/nodes/en/manual.md"),
     ),
     (
-        "nodes/en/ultimate-machine.md",
-        include_str!("../../common-manuals/nodes/en/ultimate-machine.md"),
-    ),
-    (
-        "nodes/en/linkit.md",
-        include_str!("../../common-manuals/nodes/en/linkit.md"),
-    ),
-    (
-        "nodes/en/project-index.md",
-        include_str!("../../common-manuals/nodes/en/project-index.md"),
-    ),
-    (
-        "nodes/en/value-bias.md",
-        include_str!("../../common-manuals/nodes/en/value-bias.md"),
-    ),
-    (
-        "nodes/en/manual-format.md",
-        include_str!("../../common-manuals/nodes/en/manual-format.md"),
-    ),
-    (
-        "nodes/zh/overview.md",
-        include_str!("../../common-manuals/nodes/zh/overview.md"),
-    ),
-    (
-        "nodes/zh/ultimate-machine.md",
-        include_str!("../../common-manuals/nodes/zh/ultimate-machine.md"),
-    ),
-    (
-        "nodes/zh/linkit.md",
-        include_str!("../../common-manuals/nodes/zh/linkit.md"),
-    ),
-    (
-        "nodes/zh/project-index.md",
-        include_str!("../../common-manuals/nodes/zh/project-index.md"),
-    ),
-    (
-        "nodes/zh/value-bias.md",
-        include_str!("../../common-manuals/nodes/zh/value-bias.md"),
-    ),
-    (
-        "nodes/zh/manual-format.md",
-        include_str!("../../common-manuals/nodes/zh/manual-format.md"),
+        "nodes/zh/manual.md",
+        include_str!("../../common-manuals/nodes/zh/manual.md"),
     ),
 ];
 
@@ -250,18 +211,19 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_the_node_with_its_parent_and_children() {
+    fn read_returns_the_single_manual_without_children() {
         let root = read(&TREE.root.id, "zh").expect("the root reads");
         assert_eq!(root.manual.parent_id, None);
-        assert_eq!(root.manual.name, "Cybion 公共手册");
-        assert_eq!(root.children.len(), TREE.root.children.len());
-        let child = read(&TREE.root.children[0].id, "en").expect("a child reads");
+        assert_eq!(root.manual.name, "Cybion 用户帮助手册");
+        assert!(root.children.is_empty(), "the tree is one manual");
+        assert!(!root.manual.content.is_empty());
         assert_eq!(
-            child.manual.parent_id.as_deref(),
-            Some(TREE.root.id.as_str())
+            read(&TREE.root.id, "en")
+                .expect("the root reads in English")
+                .manual
+                .name,
+            "Cybion User Help Manual"
         );
-        assert_eq!(child.manual.name, "Ultimate Machine");
-        assert!(!child.manual.content.is_empty());
         assert!(read("00000000-0000-4000-8000-000000000000", "zh").is_none());
     }
 
@@ -278,17 +240,17 @@ mod tests {
     fn root_summary_is_the_listed_common_entry() {
         let summary = root_summary("zh");
         assert_eq!(summary["source"], "common");
-        assert_eq!(summary["name"], "Cybion 公共手册");
+        assert_eq!(summary["name"], "Cybion 用户帮助手册");
         assert_eq!(summary["manual_id"], TREE.root.id.as_str());
-        assert_eq!(root_summary("en")["name"], "Cybion Common Manual");
+        assert_eq!(root_summary("en")["name"], "Cybion User Help Manual");
     }
 
     #[test]
     fn tree_view_serves_each_language_with_its_own_copy() {
         let zh = tree_view("zh");
         let en = tree_view("en");
-        assert_eq!(zh["root"]["name"], "Cybion 公共手册");
-        assert_eq!(en["root"]["name"], "Cybion Common Manual");
+        assert_eq!(zh["root"]["name"], "Cybion 用户帮助手册");
+        assert_eq!(en["root"]["name"], "Cybion User Help Manual");
         assert!(zh["root"]["content"].as_str().unwrap().contains("操作指南"));
         assert!(
             en["root"]["content"]

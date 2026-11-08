@@ -102,9 +102,10 @@ the first authenticated browser session initializes that key atomically.
 - `tools.json` is the single source for the upstream tool catalog. The request
   builder sends it and the Configuration → Tools page renders it, so the
   capability list cannot drift from the tools a Thread can actually use.
-- The Cybion Common Manual is compiled into the controller from
-  `common-manuals/` (a `tree.json` skeleton plus Markdown nodes, each node in
-  English and Simplified Chinese). Every user reads the same read-only tree:
+- The Cybion User Help Manual is compiled into the controller from
+  `common-manuals/` (a `tree.json` skeleton plus one Markdown body per
+  language — a single manual with no child nodes, in English and Simplified
+  Chinese). Every user reads the same read-only tree:
   `list_manuals` lists its root first with `source: "common"`,
   `load_manual` resolves it after local Manuals, and Configuration → Manuals
   renders it from `GET /api/common-manuals?lang=` in the UI language. The
