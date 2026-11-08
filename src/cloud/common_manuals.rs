@@ -251,12 +251,12 @@ mod tests {
         let en = tree_view("en");
         assert_eq!(zh["root"]["name"], "Cybion 用户帮助手册");
         assert_eq!(en["root"]["name"], "Cybion User Help Manual");
-        assert!(zh["root"]["content"].as_str().unwrap().contains("操作指南"));
+        assert!(zh["root"]["content"].as_str().unwrap().contains("基本术语"));
         assert!(
             en["root"]["content"]
                 .as_str()
                 .unwrap()
-                .contains("operating guide")
+                .contains("Basic terms")
         );
     }
 }
