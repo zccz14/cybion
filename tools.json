@@ -182,7 +182,7 @@
     {
       "type": "function",
       "name": "add_notes",
-      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, and this Thread does not end its turn while any note is open: Cybion hands the list back and the turn continues, up to three times. So write the steps of a multi-step task as notes before starting, keep every note finishable inside this Thread, and cross one out only when you actually finished it — if you cannot finish it, call block_thread instead of crossing it out. Every note attaches to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's manual. Notes past the limit are refused; cross out or tear off what is done first.",
+      "description": "Add sticky notes on the user's notes list: one line per note, one action per note. A note is a debt — it stays there until it is crossed out, and this Thread does not end its turn while any note is open: Cybion hands the list back and the turn continues, for a bounded number of times per input (currently 12); whatever is still open comes back with the next input. So write the steps of a multi-step task as notes before starting, keep every note finishable inside this Thread, and cross one out only when you actually finished it — if you cannot finish it, call block_thread instead of crossing it out. Every note attaches to this Thread: only this Thread sees it and only this Thread can cross it out, so it may lean on this conversation's manual. Notes past the limit are refused; cross out or tear off what is done first.",
       "parameters": {
         "type": "object",
         "properties": {

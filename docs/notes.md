@@ -100,7 +100,8 @@ A Thread does not end its turn while it still owes open notes. When a response
 settles with no tool calls and notes remain open, the kernel records an
 `activity` (`notes_continuation`, carrying the turn's input record id, the
 ordinal and the open count), hands the model a runtime nudge and lets the turn
-go on — at most three times per input, then it stops with a
+go on — at most `MAX_PER_TURN` (12) times per input — a defensive
+cap, not a product rule — then it stops with a
 `notes_continuation_stopped` record that says how many debts remain.
 
 Extending a turn re-arms its runtime state in the same transaction that records
