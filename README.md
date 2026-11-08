@@ -330,11 +330,27 @@ curl -X POST https://cybion.ntnl.io/v1/threads \
 | `GET` | `/v1/threads/{id}` | Read thread metadata and request state. |
 | `GET` | `/v1/threads/{id}/history` | Read every durable record in index order. |
 | `POST` | `/v1/threads/{id}/inputs` | Append input and start inference. |
+| `POST` | `/v1/threads/{id}/context` | Append integration context as a folded developer message; starts no turn. |
 
 `POST /v1/threads/{id}/inputs` accepts
 `{"input":"...","images":["data:image/png;base64,..."]}` and returns the new
 `record_idx`; `images` is optional, and each entry must be a png/jpeg/webp/gif
 base64 data URL. Poll the thread and history endpoints for the result.
+
+`POST /v1/threads/{id}/context` accepts `{"content":"..."}` and appends
+background the integration already holds. The conversation shows it folded,
+the model reads it as a developer message, and it starts no turn — so the
+supported shape of an integration is create the Thread empty, append its
+context, then send the first human message as input:
+
+```sh
+curl -X POST "https://cybion.ntnl.io/v1/threads/$THREAD_ID/context" \
+  -H "Authorization: Bearer $CYBION_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"content":"Ticket #12 · checkout times out · reporter CZ"}'
+curl -X POST "https://cybion.ntnl.io/v1/threads/$THREAD_ID/inputs" \
+  -H "Authorization: Bearer $CYBION_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"The checkout page hangs after I press pay."}'
+```
 
 ## Documentation
 

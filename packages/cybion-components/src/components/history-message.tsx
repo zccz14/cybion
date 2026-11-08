@@ -47,7 +47,9 @@ export type ManualSummary = { name: string; description: string }
 function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) {
   if (isReasoningRecord(record)) return t("recordReasoning")
   if (record.kind === "tool_output") return t("recordToolOutput")
-  if (record.kind === "activity") return t("recordActivity")
+  if (record.kind === "activity") {
+    return historyPayloadObject(record.payload)?.type === "context" ? t("recordContext") : t("recordActivity")
+  }
   return t("recordProtocol")
 }
 

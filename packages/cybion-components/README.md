@@ -24,7 +24,6 @@ import "@zccz14/cybion-components/styles.css"
 
 | 参数 | 用途 |
 | --- | --- |
-| `intro` | 宿主已有、尚未写进 Thread 的第一条消息（例如工单正文） |
 | `onTitleChange` | Thread 改标题时同步到宿主自己的记录 |
 | `renderRecord` | 用宿主自己的记录渲染替换默认卡片 |
 | `readOnly` | 只读浏览，不渲染输入区 |

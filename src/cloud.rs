@@ -1106,6 +1106,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/threads/{id}/history", get(external_thread_history))
         .route("/v1/threads/{id}/response", get(external_thread_response))
         .route("/v1/threads/{id}/inputs", post(external_thread_input))
+        .route("/v1/threads/{id}/context", post(external_thread_context))
         .route_layer(from_fn_with_state(state.clone(), api_key_auth));
 
     let worker_api = Router::new()
@@ -3133,6 +3134,19 @@ struct InputRequest {
     images: Vec<String>,
     #[serde(default)]
     audios: Vec<String>,
+}
+
+/// Background an integration already holds, appended without starting a turn.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadContextInput {
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ContextView {
+    thread_id: String,
+    record_idx: i64,
 }
 
 #[derive(Deserialize)]
@@ -6127,7 +6141,7 @@ impl CompiledThreadContext {
 /// replay barrier, not an upstream item: it counts as a protocol record so it
 /// advances the replay tail, and it marks where the Thread started replaying
 /// with another `(upstream, model)` pair.
-const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','manual_loaded','manual_unloaded')))";
+const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','manual_loaded','manual_unloaded','context')))";
 
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     connection
@@ -6521,6 +6535,9 @@ fn load_protocol_items(
         if let Some(notice) = manual_loads::notice_message(&item) {
             item = notice;
         }
+        if let Some(message) = context_message(&item) {
+            item = message;
+        }
         if reinjected.contains(&id) {
             screenshot_replay_item(&mut item);
         } else {
@@ -6531,6 +6548,16 @@ fn load_protocol_items(
         records.push((id, created_at, kind, item));
     }
     Ok(records)
+}
+
+/// A `context` activity replays as the developer message it stands for: the
+/// folded card in the conversation is the same text the model reads.
+fn context_message(payload: &Value) -> Option<Value> {
+    if payload.get("type").and_then(Value::as_str)? != "context" {
+        return None;
+    }
+    let content = payload.get("content").and_then(Value::as_str)?;
+    Some(json!({ "role": "developer", "content": content }))
 }
 
 fn compile_thread_context(
@@ -10219,6 +10246,51 @@ async fn external_thread_input(
     ))
 }
 
+/// Appends context an integration already holds — a Ticket, a room, an email
+/// thread — as a folded `activity` record. The compiler replays it as a
+/// developer message, so the model reads it as background while the UI keeps it
+/// folded. It starts no turn: the Thread begins when a real input arrives,
+/// which is why an integration creates the Thread, appends its context, and
+/// then sends the first human message.
+async fn external_thread_context(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<ThreadContextInput>,
+) -> Result<Json<ContextView>, ApiError> {
+    let content = input.content.trim();
+    if content.is_empty() || content.chars().count() > 100_000 {
+        return Err(ApiError::bad_request(
+            "content must contain 1-100000 characters",
+        ));
+    }
+    let id = thread_id(&id)?;
+    let payload = json!({ "type": "context", "content": content });
+    let thread_id = id.clone();
+    let record_idx = user_db(&state, &identity.user, false, move |connection| {
+        load_thread(connection, &thread_id)?;
+        let record = persist_history_record(
+            connection,
+            HistoryRecordInsert {
+                thread_id: &thread_id,
+                kind: "activity",
+                payload: &payload,
+                created_at: now(),
+            },
+        )?;
+        connection.execute(
+            "UPDATE threads SET updated_at=? WHERE id=?",
+            params![now(), &thread_id],
+        )?;
+        Ok(record)
+    })
+    .await?;
+    Ok(Json(ContextView {
+        thread_id: id,
+        record_idx,
+    }))
+}
+
 async fn worker_identity(
     state: &AppState,
     headers: &HeaderMap,
@@ -11880,6 +11952,113 @@ mod tests {
         assert_eq!(web.external_ref, None);
 
         server.abort();
+    }
+
+    fn api_identity(user: &User) -> axum::Extension<ApiIdentity> {
+        axum::Extension(ApiIdentity {
+            user: user.clone(),
+            key_id: "test-key".to_owned(),
+        })
+    }
+
+    async fn context_error(
+        state: &AppState,
+        user: &User,
+        thread_id: &str,
+        content: &str,
+    ) -> ApiError {
+        match external_thread_context(
+            State(state.clone()),
+            api_identity(user),
+            AxumPath(thread_id.to_owned()),
+            Json(ThreadContextInput {
+                content: content.to_owned(),
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("context must be refused"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_context_is_folded_and_replays_as_the_developer_message_before_the_first_input()
+     {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "context-user").unwrap();
+        let other = user_for_subject(&state, "context-other").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+
+        let ack = external_thread_context(
+            State(state.clone()),
+            api_identity(&user),
+            AxumPath(thread.id.clone()),
+            Json(ThreadContextInput {
+                content: "工单 #7：结算页偶发超时".to_owned(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(ack.thread_id, thread.id);
+        assert!(ack.record_idx > 0);
+
+        // Context is background, not a turn: the Thread stays idle, and the
+        // record is a folded activity rather than a message the UI would show
+        // as the person's words.
+        let current = read_thread_for(&state, &user, thread.id.clone())
+            .await
+            .unwrap();
+        assert_eq!(current.status, "idle");
+        let records = history_for(&state, &user, thread.id.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, "activity");
+        assert_eq!(records[0].payload["type"], json!("context"));
+        assert_eq!(
+            records[0].payload["content"],
+            json!("工单 #7：结算页偶发超时")
+        );
+
+        assert_eq!(
+            context_error(&state, &user, &thread.id, "   ").await.status,
+            StatusCode::BAD_REQUEST
+        );
+        user_db(&state, &other, true, |_| Ok(())).await.unwrap();
+        assert_eq!(
+            context_error(&state, &other, &thread.id, "别人的上下文")
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+
+        // The first input replays the context as a developer message and then
+        // the person's own words as the user turn.
+        let thread_id = thread.id.clone();
+        let idx_tail = user_db(&state, &user, false, move |connection| {
+            Ok(insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"请修"}),
+            ))
+        })
+        .await
+        .unwrap();
+        let data_dir = state.data_dir.clone();
+        let thread_id = thread.id.clone();
+        let compiled = user_db(&state, &user, false, move |connection| {
+            compile_thread_context(connection, &data_dir, &thread_id, idx_tail)
+        })
+        .await
+        .unwrap();
+        assert_eq!(compiled.len(), 2);
+        assert_eq!(compiled[0]["role"], json!("developer"));
+        assert_eq!(compiled[0]["content"], json!("工单 #7：结算页偶发超时"));
+        assert_eq!(compiled[1]["role"], json!("user"));
+        assert_eq!(compiled[1]["content"], json!("请修"));
     }
 
     fn record_ids(records: &[HistoryRecord]) -> Vec<i64> {

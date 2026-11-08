@@ -49,6 +49,17 @@ browser downsizes larger pastes before sending, and the estimate prices each
 stored image - inline or referenced - at a bounded token cost instead of its
 base64 length.
 
+An integration can also hand a Thread background it already holds without
+starting a turn: `POST /v1/threads/{id}/context` with `{"content":"..."}`
+stores an `activity` record of type `context`, and the compiler replays it as
+a developer message. The conversation folds it like any other activity, so the
+host's own state (a Ticket, a chat room, an email thread) stays out of the
+human bubbles while remaining part of what the model reads. The first user
+input after it starts inference, which is why the supported integration shape
+is: create the Thread empty, append the context, then send the person's
+message. Context records are ordinary append-only history; a compaction
+summarizes them with the rest of the conversation.
+
 The UI exposes `idle`, `running`, and `failed` thread states. Failures append
 an activity record and leave the thread ready for a later input. While a Thread
 runs, its view also carries `running_summary`: the one-sentence intent of the

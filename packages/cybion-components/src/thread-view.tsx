@@ -43,8 +43,6 @@ export type CybionThreadViewProps = {
    * full-page shell; an embedder that gives the view its own box passes
    * `min-h-0` and takes over. */
   className?: string
-  /** A first message the host already holds outside the thread (a ticket body, an email). */
-  intro?: { body: string; createdAt: number }
   /** Called whenever the stored title changes, so a host can mirror it. */
   onTitleChange?: (title: string) => void
   /** Called after every thread read, for chrome the view does not own (archive state, sharing). */
@@ -78,7 +76,7 @@ export function CybionThreadView(props: CybionThreadViewProps) {
   return <ThreadConversation key={`${identity}:${props.threadId}`} {...props} />
 }
 
-function ThreadConversation({ threadId, className, intro, onTitleChange, onThreadChange, onRecordsChange, workers, manuals, loadAudio: loadAudioOverride, renderRecord, headerActions, headerLeading, transcriptFooter, olderPages: hostOlderPages, onOlderPage, readOnly = false }: CybionThreadViewProps) {
+function ThreadConversation({ threadId, className, onTitleChange, onThreadChange, onRecordsChange, workers, manuals, loadAudio: loadAudioOverride, renderRecord, headerActions, headerLeading, transcriptFooter, olderPages: hostOlderPages, onOlderPage, readOnly = false }: CybionThreadViewProps) {
   const { client: transport, language, identity: userId, sessionId, t } = useCybion()
   const client = useQueryClient()
   const cachedOlderPages = useQuery<ThreadHistoryWindow[]>({ queryKey: ["history-older", threadId, userId], initialData: [], enabled: false })
@@ -278,14 +276,6 @@ function ThreadConversation({ threadId, className, intro, onTitleChange, onThrea
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
             {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
             {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-            {intro && <MessageScrollerItem>
-              <Message align="end">
-                <MessageContent>
-                  <Markdown content={intro.body} />
-                  <MessageFooter>{new Date(intro.createdAt * 1000).toLocaleString(language === "zh" ? "zh-CN" : "en")}</MessageFooter>
-                </MessageContent>
-              </Message>
-            </MessageScrollerItem>}
             <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => renderRecord ? renderRecord(record, { inFlight: recordInFlight(record, inFlightCalls) }) : <HistoryMessage language={language} record={record} workers={workers} manuals={manuals} inFlight={recordInFlight(record, inFlightCalls)} loadAudio={loadAudio} />} />
             {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
             {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
