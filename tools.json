@@ -476,6 +476,16 @@
   "thread": [
     {
       "type": "function",
+      "name": "create_thread_token",
+      "description": "Sign a short-lived JWT that proves which Thread this is: `sub` is this Thread's id, `iss` is https://cybion.ntnl.io, and the public key is published at https://cybion.ntnl.io/.well-known/jwks.json, so a service that created this Thread verifies the token itself and never holds a Cybion secret. Use it when you must call such a service as this Thread; send the token as `Authorization: Bearer`. It grants nothing on its own — the verifier decides what its record of this Thread id may do. The token stays in this Thread's history, so mint it just before the call that needs it, never write it to a file, and never repeat it in your answer.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
       "name": "block_thread",
       "description": "Block this Thread when you cannot go on: it is then marked as waiting on the user, not finished and not failed. Use it when a step needs a decision, a credential, or something only the user can provide — say what blocks them and what they must do in your answer, because that answer is the only explanation they get. This is not how you stop or cancel execution. While notes are open it is also the only honest way to end the turn early, because the Thread keeps being handed back until every note is closed or blocked. The user's next message clears the block; there is no unblock tool, so do not wait for one.",
       "parameters": {
