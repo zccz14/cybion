@@ -1,5 +1,5 @@
 {
-  "revision": 10,
+  "revision": 11,
   "root": {
     "id": "2b7b2b90-00a7-4c92-8b10-bee31b246e3a",
     "name": {
@@ -7,8 +7,8 @@
       "zh": "Cybion 用户帮助手册"
     },
     "description": {
-      "en": "Read when using Cybion: the built-in operating guide (ships with the source, shared by every user, read-only) — Ultimate Machines, Linkit notifications, loaded Manuals, and the two standing user Manuals (project index, value bias) with their formats. One manual, no child nodes.",
-      "zh": "使用 Cybion 时需要查看：自带的操作指南（随源码发布、所有用户共享、只读）——终极机器、Linkit 通知、加载手册，以及两份常备用户手册（项目索引、价值偏置）与它们的格式。只有这一份，不分设子节点。"
+      "en": "Read when using Cybion: what the product is, the basic terms (Thread / Manual / Note), the two user-level manuals worth maintaining, Ultimate Machines, the NormAI multimodal tools and the Thread Token. Ships with the source, shared by every user, read-only, one manual with no child nodes.",
+      "zh": "使用 Cybion 时需要查看：产品是什么、基本术语（线程 / 手册 / 便签）、应当长期维护的两份用户级手册、终极机器、NormAI 多模态工具与 Thread Token。随源码发布、所有用户共享、只读，只有这一份，不分设子节点。"
     },
     "content_file": {
       "en": "nodes/en/manual.md",

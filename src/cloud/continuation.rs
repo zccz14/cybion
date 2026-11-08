@@ -15,8 +15,10 @@
 use super::*;
 
 /// Automatic continuations one turn may receive. The cap bounds what a single
-/// input can cost before a human looks at it again.
-pub(super) const MAX_PER_TURN: i64 = 3;
+/// input can cost before a human looks at it again: it is a defensive limit, not
+/// a product rule — a Thread that still owes notes comes back with the next
+/// input, so nothing here forces the work into one turn.
+pub(super) const MAX_PER_TURN: i64 = 12;
 const TYPE_CONTINUE: &str = "notes_continuation";
 const TYPE_STOPPED: &str = "notes_continuation_stopped";
 
@@ -141,6 +143,13 @@ fn nudge_text(nudge: i64, open: i64) -> String {
     } else {
         ("notes", "are")
     };
+    // Escalate before the budget is gone, not only on the last hand-back: a run
+    // that is burning continuations should hear it while blocking is still cheap.
+    let running_out = if nudge * 2 > MAX_PER_TURN && nudge < MAX_PER_TURN {
+        "\n             The continuation budget for this input is more than half spent: finish the\n             remaining work now, or call block_thread and say what the user must do."
+    } else {
+        ""
+    };
     if nudge >= MAX_PER_TURN {
         format!(
             "[Runtime continuation {nudge} of {MAX_PER_TURN}, the last one — not the user; the user has not replied]\n\
@@ -156,7 +165,7 @@ fn nudge_text(nudge: i64, open: i64) -> String {
              Work the next one now. Cross a note out only in the turn you actually finished it;\n\
              do not restate this plan; do not redo work already recorded above; do not add a new\n\
              note unless one of these genuinely has to be split.\n\
-             If a note cannot be finished, call block_thread once and say what the user must do."
+             If a note cannot be finished, call block_thread once and say what the user must do.{running_out}"
         )
     }
 }

@@ -83,7 +83,10 @@ fn open_notes_hand_the_turn_back_with_the_runtime_nudge() {
     let nudge = continuation::decide_in(&mut connection, "thread-a", 7)
         .unwrap()
         .unwrap();
-    assert!(nudge.starts_with("[Runtime continuation 1 of 3"));
+    assert!(nudge.starts_with(&format!(
+        "[Runtime continuation 1 of {}",
+        continuation::MAX_PER_TURN
+    )));
     assert!(nudge.contains("The 1 note above is still open"));
     assert!(nudge.contains("not the user"));
     assert!(nudge.contains("block_thread"));
@@ -103,7 +106,7 @@ fn the_last_continuation_says_the_thread_stops_after_it() {
         "thread-a",
         &["pay the rent", "book the room"],
     );
-    for _ in 0..2 {
+    for _ in 1..continuation::MAX_PER_TURN {
         continuation::decide_in(&mut connection, "thread-a", 7)
             .unwrap()
             .unwrap();
@@ -111,9 +114,38 @@ fn the_last_continuation_says_the_thread_stops_after_it() {
     let nudge = continuation::decide_in(&mut connection, "thread-a", 7)
         .unwrap()
         .unwrap();
-    assert!(nudge.starts_with("[Runtime continuation 3 of 3, the last one"));
+    assert!(nudge.starts_with(&format!(
+        "[Runtime continuation {0} of {0}, the last one",
+        continuation::MAX_PER_TURN
+    )));
     assert!(nudge.contains("the Thread stops after this turn"));
     assert!(nudge.contains("the remaining 2 notes"));
+}
+
+#[test]
+fn the_nudge_warns_before_the_budget_runs_out() {
+    let mut connection = continuation_connection();
+    insert_thread(&connection, "thread-a");
+    open_notes(&mut connection, "thread-a", &["pay the rent"]);
+    let mut warned = 0;
+    for _ in 1..continuation::MAX_PER_TURN {
+        let nudge = continuation::decide_in(&mut connection, "thread-a", 7)
+            .unwrap()
+            .unwrap();
+        if nudge.contains("more than half spent") {
+            warned += 1;
+            assert!(
+                !nudge.contains("the last one"),
+                "the warning is not the last word"
+            );
+        }
+    }
+    // Exactly the hand-backs past half the budget warn; the last one escalates
+    // instead of warning.
+    assert_eq!(
+        warned,
+        continuation::MAX_PER_TURN - continuation::MAX_PER_TURN / 2 - 1
+    );
 }
 
 #[test]
@@ -121,7 +153,7 @@ fn the_budget_stops_the_turn_and_records_that_once() {
     let mut connection = continuation_connection();
     insert_thread(&connection, "thread-a");
     open_notes(&mut connection, "thread-a", &["pay the rent"]);
-    for _ in 0..3 {
+    for _ in 0..continuation::MAX_PER_TURN {
         assert!(
             continuation::decide_in(&mut connection, "thread-a", 7)
                 .unwrap()
@@ -170,7 +202,10 @@ fn a_finished_note_frees_the_turn_and_another_input_gets_its_own_budget() {
     let nudge = continuation::decide_in(&mut connection, "thread-a", 8)
         .unwrap()
         .unwrap();
-    assert!(nudge.starts_with("[Runtime continuation 1 of 3"));
+    assert!(nudge.starts_with(&format!(
+        "[Runtime continuation 1 of {}",
+        continuation::MAX_PER_TURN
+    )));
 }
 
 #[test]

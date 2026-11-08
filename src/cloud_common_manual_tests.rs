@@ -128,9 +128,15 @@ async fn load_tool_delivers_the_single_common_manual() {
         "a sibling key is not the Thread's business"
     );
     let body = copy["content"].as_str().unwrap();
-    assert!(
-        body.contains("common-manuals/"),
-        "the copy names its source"
+    // The delivered body is the compiled common text, verbatim: its wording is the
+    // product's to change, so hold the copy against its source instead of looking
+    // for a phrase inside it.
+    let compiled = common_manuals::read(&root_id, common_manuals::SOURCE_LANGUAGE)
+        .expect("the compiled common body");
+    assert_eq!(
+        body,
+        compiled.manual.content.as_str(),
+        "the copy is the compiled body"
     );
     assert!(
         body.contains("终极机器"),
@@ -198,7 +204,7 @@ async fn browser_reads_serve_the_requested_language() {
     .await
     .unwrap();
     assert_eq!(view.manual.name, "Cybion User Help Manual");
-    assert!(view.manual.content.contains("operating guide"));
+    assert!(view.manual.content.contains("Basic terms"));
     assert!(
         view.children.is_empty(),
         "the common manual carries no child nodes"
@@ -219,6 +225,6 @@ async fn browser_reads_serve_the_requested_language() {
         tree["root"]["content"]
             .as_str()
             .unwrap()
-            .contains("操作指南")
+            .contains("基本术语")
     );
 }

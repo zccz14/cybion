@@ -3839,7 +3839,13 @@ async fn a_turn_that_still_owes_a_note_is_sent_back_with_the_runtime_nudge() {
     let last = items.last().unwrap();
     assert_eq!(last["role"], "developer");
     let nudge = last["content"].as_str().unwrap();
-    assert!(nudge.starts_with("[Runtime continuation 1 of 3"), "{nudge}");
+    assert!(
+        nudge.starts_with(&format!(
+            "[Runtime continuation 1 of {}",
+            continuation::MAX_PER_TURN
+        )),
+        "{nudge}"
+    );
     // The nudge is the last thing the model reads; the turn's own words and the
     // assistant message it just wrote stay above it.
     assert!(items.iter().any(|item| item["role"] == "user"));
