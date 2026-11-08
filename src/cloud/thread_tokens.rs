@@ -12,10 +12,12 @@
 //! grants nothing by itself: permission stays with the verifier, which decides
 //! what its own record of that Thread id may do.
 //!
-//! The scheme is Auth Mini's, one layer down: an Ed25519 key, an `EdDSA` JWT
-//! carrying a `kid`, and a JWKS document a verifier caches and refreshes. What it
-//! is *not* is an account: a Thread has no session, so a verifier checks
-//! `iss`/`exp`/signature here rather than handing the token to `auth-mini-axum`.
+//! The scheme is Auth Mini's, one layer down: two Ed25519 keys in a `current`
+//! and a `standby` slot inside the operator database, an `EdDSA` JWT carrying a
+//! `kid`, and a JWKS document that publishes *both* slots so a verifier already
+//! holds the next key before it starts signing. What it is *not* is an account: a
+//! Thread has no session, so a verifier checks `iss`/`exp`/signature here rather
+//! than handing the token to `auth-mini-axum`.
 
 use super::*;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -30,40 +32,20 @@ pub(super) const ISSUER: &str = "https://cybion.ntnl.io";
 /// that a copy left in a Thread's archive is worthless before anyone reads it —
 /// which is what makes it safe to show in the conversation or hand to a command.
 const TTL_SECONDS: i64 = 60;
-const KEY_FILE_NAME: &str = "thread-token.key";
 
-/// The one key that signs Thread tokens.
-///
-/// It lives beside the user databases, so it adds no exposure *inside* the host:
-/// whoever reads that directory already reads every Thread. What it does extend
-/// is the blast radius *outside* the host — a verifier trusts anything this key
-/// signs about a Thread id — which is why the file is 0600, generated locally,
-/// and never enters the repository.
-pub(super) struct Issuer {
+/// One signing key. The private half never leaves the operator database, and the
+/// `kid` is derived from the public half so a verifier never sees a silent swap.
+struct Key {
     signing: SigningKey,
-    /// Derived from the public key, so a verifier never sees a silent key change.
     kid: String,
     public: String,
 }
 
-impl Issuer {
-    /// Reads `<data_dir>/thread-token.key`, creating it on first boot. A file
-    /// that exists but cannot be parsed is an error, not a rotation: minting a
-    /// fresh key behind a verifier's back would invalidate tokens it still holds
-    /// and publish a `kid` nobody asked for.
-    pub(super) fn load_or_create(data_dir: &Path) -> Result<Self> {
-        let path = data_dir.join(KEY_FILE_NAME);
-        let seed = match fs::read_to_string(&path) {
-            Ok(text) => parse_seed(text.trim())?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut seed = [0u8; 32];
-                OsRng.fill_bytes(&mut seed);
-                write_seed(&path, &seed)?;
-                seed
-            }
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Self::from_seed(seed))
+impl Key {
+    fn generate() -> Self {
+        let mut seed = [0u8; 32];
+        OsRng.fill_bytes(&mut seed);
+        Self::from_seed(seed)
     }
 
     fn from_seed(seed: [u8; 32]) -> Self {
@@ -76,11 +58,80 @@ impl Issuer {
         }
     }
 
-    /// Signs one token for one Thread and reports when it dies.
+    fn jwk(&self) -> Value {
+        json!({
+            "kid": self.kid,
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "alg": "EdDSA",
+            "use": "sig",
+            "x": self.public,
+        })
+    }
+}
+
+/// The signing keys, read from the operator database at startup and replaced in
+/// place when an administrator rotates them.
+///
+/// They live beside the user databases rather than in a file of their own: the
+/// operator database is already the one table every deployment backs up, and the
+/// keys belong to the deployment, not to any user. Keeping them there adds no
+/// exposure *inside* the host — whoever reads that directory already reads every
+/// Thread — and what it does extend is the blast radius *outside* the host, which
+/// is why both slots are 0600 by way of the database file and never enter the
+/// repository.
+pub(super) struct Issuer {
+    current: Key,
+    /// Published, trusted, and not signing — so a rollover invalidates nothing
+    /// that a verifier has cached.
+    standby: Key,
+}
+
+impl Issuer {
+    /// Reads both slots from `<admin_db>`, creating whichever is missing. This is
+    /// the only place a key is ever generated implicitly; everything after it is
+    /// explicit rotation.
+    pub(super) fn load_or_create(path: &Path) -> Result<Self> {
+        let connection = open_admin_db(path)?;
+        let current = insert_key_if_missing(&connection, "current")?;
+        let standby = insert_key_if_missing(&connection, "standby")?;
+        Ok(Self { current, standby })
+    }
+
+    /// Promotes `standby` to `current` and generates a fresh `standby`, which is
+    /// exactly what Auth Mini does: a verifier that cached the document already
+    /// holds the key that will sign next.
+    ///
+    /// The key that signed until now is dropped, so a token minted in the minute
+    /// before a rollover may reach a verifier that has already refreshed. That is
+    /// the deliberate cost of never keeping retired material around.
+    pub(super) fn rotate(path: &Path) -> Result<Self> {
+        let mut connection = open_admin_db(path)?;
+        insert_key_if_missing(&connection, "current")?;
+        let promoted = insert_key_if_missing(&connection, "standby")?;
+        let replacement = Key::generate();
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM thread_token_keys WHERE slot='current'", [])?;
+        transaction.execute(
+            "UPDATE thread_token_keys SET slot='current' WHERE slot='standby'",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO thread_token_keys(slot,kid,seed,created_at) VALUES('standby',?,?,?)",
+            params![replacement.kid, replacement.seed_hex(), now()],
+        )?;
+        transaction.commit()?;
+        Ok(Self {
+            current: promoted,
+            standby: replacement,
+        })
+    }
+
+    /// Signs one token for one Thread with the current key.
     pub(super) fn issue(&self, thread_id: &str) -> (String, i64) {
         let issued_at = now();
         let expires_at = issued_at + TTL_SECONDS;
-        let header = json!({"alg":"EdDSA","kid":self.kid,"typ":"JWT"}).to_string();
+        let header = json!({"alg":"EdDSA","kid":self.current.kid,"typ":"JWT"}).to_string();
         let claims = json!({
             "iss": ISSUER,
             "sub": thread_id,
@@ -93,7 +144,7 @@ impl Issuer {
             URL_SAFE_NO_PAD.encode(header),
             URL_SAFE_NO_PAD.encode(claims)
         );
-        let signature = self.signing.sign(signing_input.as_bytes());
+        let signature = self.current.signing.sign(signing_input.as_bytes());
         let token = format!(
             "{signing_input}.{}",
             URL_SAFE_NO_PAD.encode(signature.to_bytes())
@@ -101,42 +152,56 @@ impl Issuer {
         (token, expires_at)
     }
 
-    /// The published half. `kty`/`crv`/`alg`/`use` are spelled the way every
-    /// Ed25519 JWKS spells them, which is also what `auth-mini-axum` accepts.
+    /// The published half: both slots, current first. `kty`/`crv`/`alg`/`use` are
+    /// spelled the way every Ed25519 JWKS spells them, which is also what
+    /// `auth-mini-axum` accepts.
     pub(super) fn jwks(&self) -> Value {
-        json!({"keys": [{
-            "kid": self.kid,
-            "kty": "OKP",
-            "crv": "Ed25519",
-            "alg": "EdDSA",
-            "use": "sig",
-            "x": self.public,
-        }]})
+        json!({"keys": [self.current.jwk(), self.standby.jwk()]})
     }
 }
 
-fn parse_seed(text: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(text).context("thread token key is not hex")?;
+impl Key {
+    fn seed_hex(&self) -> String {
+        hex::encode(self.signing.to_bytes())
+    }
+}
+
+fn open_admin_db(path: &Path) -> Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    Ok(connection)
+}
+
+fn insert_key_if_missing(connection: &Connection, slot: &str) -> Result<Key> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_token_keys WHERE slot=?)",
+        [slot],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        let key = Key::generate();
+        connection.execute(
+            "INSERT OR IGNORE INTO thread_token_keys(slot,kid,seed,created_at) VALUES(?,?,?,?)",
+            params![slot, key.kid, key.seed_hex(), now()],
+        )?;
+        return stored_key(connection, slot);
+    }
+    stored_key(connection, slot)
+}
+
+fn stored_key(connection: &Connection, slot: &str) -> Result<Key> {
+    let seed: String = connection.query_row(
+        "SELECT seed FROM thread_token_keys WHERE slot=?",
+        [slot],
+        |row| row.get(0),
+    )?;
+    let bytes = hex::decode(&seed).context("thread token key is not hex")?;
     let len = bytes.len();
-    bytes
+    let seed: [u8; 32] = bytes
         .try_into()
-        .map_err(|_| anyhow::anyhow!("thread token key is {len} bytes, not 32"))
-}
-
-fn write_seed(path: &Path, seed: &[u8; 32]) -> Result<()> {
-    use std::io::Write;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(hex::encode(seed).as_bytes())?;
-    file.sync_all()?;
-    Ok(())
+        .map_err(|_| anyhow::anyhow!("thread token key is {len} bytes, not 32"))?;
+    Ok(Key::from_seed(seed))
 }
 
 #[derive(Deserialize)]
@@ -156,7 +221,7 @@ pub(super) async fn tool_output(
             ApiError::bad_request(format!("create_thread_token takes no arguments: {error}"))
         })?;
     }
-    let (token, expires_at) = state.thread_tokens.issue(thread_id);
+    let (token, expires_at) = state.thread_tokens.lock().await.issue(thread_id);
     Ok(json!({
         "token": token,
         "expires_at": expires_at,
@@ -166,5 +231,24 @@ pub(super) async fn tool_output(
 }
 
 pub(super) async fn jwks_document(State(state): State<AppState>) -> Json<Value> {
-    Json(state.thread_tokens.jwks())
+    Json(state.thread_tokens.lock().await.jwks())
+}
+
+/// Administrator-only. Promotes the standby key and publishes a new one, so the
+/// next mint signs with material verifiers already trust.
+pub(super) async fn rotate(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<Value>, ApiError> {
+    if !is_admin(&state, &identity.user.id, false).await? {
+        return Err(ApiError::forbidden("administrator access is required"));
+    }
+    let path = state.admin_db_path.as_path().to_path_buf();
+    let rotated = tokio::task::spawn_blocking(move || Issuer::rotate(&path))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    let jwks = rotated.jwks();
+    *state.thread_tokens.lock().await = rotated;
+    Ok(Json(jwks))
 }
