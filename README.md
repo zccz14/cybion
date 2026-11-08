@@ -290,7 +290,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, and Windows, with Android and iOS apps in early development; pairing, remote upgrades, and worker sharing. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
 | Models & tools | NormAI upstream out of the box; fallback upstreams with per-upstream model catalogs; web search, image generation, and audio transcription tools; per-thread model, reasoning effort, context budget, and speech-to-text model. | [Service overview](docs/introduction.md) · [Audio input](docs/audio-input.md) |
-| Integration API | Per-user API keys; create Threads, append inputs, and read history; `external_ref` mapping for integrations. | [Integration API](#integration-api) |
+| Integration API | Per-user API keys; create Threads, append inputs, and read history; `external_ref` mapping for integrations; short-lived Thread identity tokens the Thread presents to the service that created it. | [Integration API](#integration-api) · [Thread identity](docs/thread-identity.md) |
 | Isolation & audit | One SQLite database per user with owner-only permissions; append-only history; usage statistics; system resource monitor for the root user. | [History](docs/history.md) · [Usage](docs/usage-statistics.md) · [Boundary](docs/product-boundary.md) |
 
 ## How it fits together
@@ -352,6 +352,27 @@ curl -X POST "https://cybion.ntnl.io/v1/threads/$THREAD_ID/inputs" \
   -d '{"input":"The checkout page hangs after I press pay."}'
 ```
 
+### Thread identity
+
+A Thread can prove which Thread it is. `create_thread_token` signs a
+fifteen-minute EdDSA JWT whose `sub` is the calling Thread, and publishes the
+public key at `/.well-known/jwks.json` — so the service that created the Thread
+verifies the token itself, without holding a Cybion secret and without putting
+one in the conversation:
+
+```ts
+const { payload } = await jwtVerify(token, jwks, {
+  issuer: 'https://cybion.ntnl.io',
+  algorithms: ['EdDSA'],
+});
+// payload.sub is the Thread id you recorded when you created it
+```
+
+The token says *which* Thread is calling and nothing else; what that Thread may
+do stays in the verifier's own tables. The tool takes no arguments, so a model
+cannot name another Thread, and a token found in an archive later is expired.
+See [Thread identity](docs/thread-identity.md).
+
 ## Documentation
 
 - [First-use guidance](docs/onboarding.md) — Threads, Manuals, and Workers.
@@ -365,6 +386,8 @@ curl -X POST "https://cybion.ntnl.io/v1/threads/$THREAD_ID/inputs" \
 - [Math rendering](docs/math.md) — how formulas reach every Markdown surface through the shared renderer.
 - [Worker onboarding](docs/worker-onboarding.md) and [worker sharing](docs/worker-sharing.md).
 - [Ultimate machines](docs/machines.md).
+- [Thread identity](docs/thread-identity.md) — the token a Thread presents to the
+  service that created it, and what a verifier must check.
 - [History table](docs/history.md) and [usage statistics](docs/usage-statistics.md).
 - [Service overview](docs/introduction.md) and [Responses parity notes](docs/responses-codex-parity.md).
 - [Product boundary](docs/product-boundary.md) — detailed behavior, delivery,

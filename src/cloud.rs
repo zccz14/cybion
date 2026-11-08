@@ -55,6 +55,7 @@ mod sql_performance;
 mod stats;
 mod thread_controls;
 mod thread_sharing;
+mod thread_tokens;
 mod traffic;
 mod upstreams;
 mod user_databases;
@@ -210,6 +211,8 @@ struct AppState {
     /// Per-statement SQLite cost, measured inside SQLite and folded off the
     /// request path.
     sql_performance: Arc<sql_performance::Monitor>,
+    /// The signer behind `create_thread_token` and `/.well-known/jwks.json`.
+    thread_tokens: Arc<thread_tokens::Issuer>,
 }
 
 #[derive(Clone)]
@@ -424,6 +427,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         std::env::var("CYBION_SQL_TRACE").as_deref(),
         Ok("off") | Ok("0") | Ok("false")
     ));
+    let thread_tokens = Arc::new(thread_tokens::Issuer::load_or_create(&data_dir)?);
     let state = AppState {
         data_dir: Arc::new(data_dir),
         admin_db_path: Arc::new(admin_db_path.clone()),
@@ -447,6 +451,7 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         stats: stats::Patrol::new(),
         route_performance,
         sql_performance,
+        thread_tokens,
     };
     tracing::info!(%address, "Cybion Cloud listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -1163,6 +1168,7 @@ fn app(state: AppState) -> Router {
         )
         .route("/health", get(health))
         .route("/api/config", get(public_config))
+        .route("/.well-known/jwks.json", get(thread_tokens::jwks_document))
         .merge(browser_api)
         .merge(external_api)
         .merge(worker_api)
@@ -9746,6 +9752,7 @@ async fn controller_tool_output(
         "add_notes" => notes::add_tool_output(state, user, thread_id, input).await,
         "cross_out_notes" => notes::cross_out_tool_output(state, user, thread_id, input).await,
         "block_thread" => blocked::tool_output(state, user, thread_id, input).await,
+        "create_thread_token" => thread_tokens::tool_output(state, thread_id, input).await,
         "cybion_list_ultimate_machines" => machines::list_tool_output(state, user).await,
         "cybion_get_ultimate_machine" => machines::get_tool_output(state, user, input).await,
         "cybion_set_ultimate_machine" => machines::set_tool_output(state, user, input).await,
@@ -10710,6 +10717,10 @@ mod context_sort_tests;
 mod blocked_tests;
 
 #[cfg(test)]
+#[path = "cloud_thread_token_tests.rs"]
+mod thread_token_tests;
+
+#[cfg(test)]
 #[path = "cloud_continuation_tests.rs"]
 mod continuation_tests;
 
@@ -10784,6 +10795,7 @@ mod tests {
         let data_dir = root.path().to_path_buf();
         let admin_db_path = data_dir.join("default.sqlite3");
         prepare_admin_db(&admin_db_path).unwrap();
+        let thread_tokens = Arc::new(thread_tokens::Issuer::load_or_create(&data_dir).unwrap());
         (
             root,
             AppState {
@@ -10810,6 +10822,7 @@ mod tests {
                 resources: Arc::new(Mutex::new(resources::ResourceMonitor::new(admin_db_path))),
                 user_databases: Arc::new(user_databases::UserDatabases::new()),
                 stats: stats::Patrol::new(),
+                thread_tokens,
             },
         )
     }
@@ -12842,7 +12855,7 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 18);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 19);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -13408,7 +13421,7 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true, false);
-        assert_eq!(tools.as_array().unwrap().len(), 14);
+        assert_eq!(tools.as_array().unwrap().len(), 15);
         assert_eq!(tools[0]["name"], "list_manuals");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "load_manual");
@@ -13427,20 +13440,22 @@ mod tests {
         assert_eq!(tools[9]["parameters"]["required"], json!(["items"]));
         assert_eq!(tools[10]["name"], "cross_out_notes");
         assert_eq!(tools[10]["parameters"]["required"], json!(["note_ids"]));
-        assert_eq!(tools[11]["name"], "block_thread");
+        assert_eq!(tools[11]["name"], "create_thread_token");
         assert_eq!(tools[11]["parameters"]["required"], json!(null));
-        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[12]["name"], "block_thread");
+        assert_eq!(tools[12]["parameters"]["required"], json!(null));
+        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[14], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true, false);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 18);
-        assert_eq!(worker_and_native[12]["name"], "bash");
-        assert_eq!(worker_and_native[15]["name"], "view_image");
-        assert_eq!(worker_and_native[16]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[17]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 19);
+        assert_eq!(worker_and_native[13]["name"], "bash");
+        assert_eq!(worker_and_native[16]["name"], "view_image");
+        assert_eq!(worker_and_native[17]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[18]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 13);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 14);
         assert_eq!(
-            web_search_only[12],
+            web_search_only[13],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false, false);
@@ -13463,6 +13478,7 @@ mod tests {
                 "cybion_delete_ultimate_machine",
                 "add_notes",
                 "cross_out_notes",
+                "create_thread_token",
                 "block_thread"
             ]
         );
@@ -13497,7 +13513,10 @@ mod tests {
             ]
         );
         assert_eq!(names(note_tools()), ["add_notes", "cross_out_notes"]);
-        assert_eq!(names(thread_tools()), ["block_thread"]);
+        assert_eq!(
+            names(thread_tools()),
+            ["create_thread_token", "block_thread"]
+        );
         assert_eq!(
             names(worker_tools()),
             ["bash", "browser_control", "computer_use", "view_image"]
@@ -13772,7 +13791,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
         assert_eq!(tools[0], TOOL_CATALOG["kernel"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["kernel"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["kernel"][2]);
@@ -13783,8 +13802,9 @@ mod tests {
         assert_eq!(tools[9], TOOL_CATALOG["note"][0]);
         assert_eq!(tools[10], TOOL_CATALOG["note"][1]);
         assert_eq!(tools[11], TOOL_CATALOG["thread"][0]);
-        assert_eq!(tools[12], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[12], TOOL_CATALOG["thread"][1]);
+        assert_eq!(tools[13], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[14], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(
