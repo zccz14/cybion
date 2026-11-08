@@ -42,12 +42,12 @@ the first authenticated browser session initializes that key atomically.
   caller-supplied `external_ref` can map the Thread to the integration's own
   identifier. The web UI marks API Threads in the thread list and header.
 - A Thread can prove its own identity. `create_thread_token` signs a
-  fifteen-minute EdDSA JWT whose `sub` is that Thread's id, and the public half
+  sixty-second EdDSA JWT whose `sub` is that Thread's id, and the public half
   is published at `GET /.well-known/jwks.json` (one Ed25519 key; the header names
   its `kid`). The tool takes no arguments, so `sub` can never name another
   Thread, and the token carries no `aud`: it is an identity, not a capability, so
   a verifier authorizes only from its own record of that Thread id. Issued
-  tokens are ordinary history, which is why they live minutes. See
+  tokens are ordinary history, which is why they live one minute. See
   [Thread identity](thread-identity.md).
 - Threads are independent. A user can create, rename, inspect, archive, and
   delete them from the web UI. Archiving hides a Thread from the thread list

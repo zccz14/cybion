@@ -355,7 +355,7 @@ curl -X POST "https://cybion.ntnl.io/v1/threads/$THREAD_ID/inputs" \
 ### Thread identity
 
 A Thread can prove which Thread it is. `create_thread_token` signs a
-fifteen-minute EdDSA JWT whose `sub` is the calling Thread, and publishes the
+sixty-second EdDSA JWT whose `sub` is the calling Thread, and publishes the
 public key at `/.well-known/jwks.json` — so the service that created the Thread
 verifies the token itself, without holding a Cybion secret and without putting
 one in the conversation:

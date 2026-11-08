@@ -8,7 +8,7 @@
 //! of the answer it needs.
 //!
 //! Two rules keep the token narrow. `sub` is *always* the Thread that called the
-//! tool — there is no argument for it — and it expires in minutes. The token
+//! tool — there is no argument for it — and it expires in a minute. The token
 //! grants nothing by itself: permission stays with the verifier, which decides
 //! what its own record of that Thread id may do.
 //!
@@ -26,9 +26,10 @@ use rand::rngs::OsRng;
 /// What a verifier compares `iss` against: the origin this deployment answers
 /// on, and the same one pairing hands a Worker as its Controller.
 pub(super) const ISSUER: &str = "https://cybion.ntnl.io";
-/// Fifteen minutes: long enough for one call chain, short enough that a token
-/// copied into a Thread's archive is worthless by the time anyone reads it.
-const TTL_SECONDS: i64 = 15 * 60;
+/// One minute: long enough for the request the model mints it for, short enough
+/// that a copy left in a Thread's archive is worthless before anyone reads it —
+/// which is what makes it safe to show in the conversation or hand to a command.
+const TTL_SECONDS: i64 = 60;
 const KEY_FILE_NAME: &str = "thread-token.key";
 
 /// The one key that signs Thread tokens.
@@ -160,7 +161,7 @@ pub(super) async fn tool_output(
         "token": token,
         "expires_at": expires_at,
         "issuer": ISSUER,
-        "note": "Short-lived proof of which Thread this is. Send it as `Authorization: Bearer` to the service that created this Thread. It authorizes nothing on its own, and it stays in this Thread's history, so mint it just before the call that needs it.",
+        "note": "Proof of which Thread this is, valid for 60 seconds. Send it as `Authorization: Bearer` to the service that created this Thread. It grants nothing on its own, and it is short enough to show or hand off safely: it expires before anyone could reuse it.",
     }))
 }
 

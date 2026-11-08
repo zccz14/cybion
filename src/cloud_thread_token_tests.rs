@@ -67,7 +67,7 @@ async fn the_token_names_the_thread_that_called_the_tool() {
     assert_eq!(claims["sub"], thread_id.as_str());
     assert_eq!(claims["exp"], expires_at);
     let ttl = expires_at - claims["iat"].as_i64().unwrap();
-    assert_eq!(ttl, 15 * 60, "a token lives exactly fifteen minutes");
+    assert_eq!(ttl, 60, "a token lives exactly one minute");
     assert!(
         (claims["iat"].as_i64().unwrap() - now()).abs() < 5,
         "iat is the moment of signing"
