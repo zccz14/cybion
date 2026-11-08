@@ -134,12 +134,18 @@ fn the_nudge_warns_before_the_budget_runs_out() {
             .unwrap();
         if nudge.contains("more than half spent") {
             warned += 1;
-            assert!(!nudge.contains("the last one"), "the warning is not the last word");
+            assert!(
+                !nudge.contains("the last one"),
+                "the warning is not the last word"
+            );
         }
     }
     // Exactly the hand-backs past half the budget warn; the last one escalates
     // instead of warning.
-    assert_eq!(warned, continuation::MAX_PER_TURN - continuation::MAX_PER_TURN / 2 - 1);
+    assert_eq!(
+        warned,
+        continuation::MAX_PER_TURN - continuation::MAX_PER_TURN / 2 - 1
+    );
 }
 
 #[test]
