@@ -43,8 +43,11 @@ the first authenticated browser session initializes that key atomically.
   identifier. The web UI marks API Threads in the thread list and header.
 - A Thread can prove its own identity. `create_thread_token` signs a
   sixty-second EdDSA JWT whose `sub` is that Thread's id, and the public half
-  is published at `GET /.well-known/jwks.json` (one Ed25519 key; the header names
-  its `kid`). The tool takes no arguments, so `sub` can never name another
+  is published at `GET /.well-known/jwks.json`. The two signing keys live in the
+  operator database in a `current` and a `standby` slot, both published, current
+  first; `POST /api/admin/thread-token/rotate` (root only) promotes the standby
+  and publishes a fresh one, so a rollover invalidates nothing a verifier has
+  cached. The tool takes no arguments, so `sub` can never name another
   Thread, and the token carries no `aud`: it is an identity, not a capability, so
   a verifier authorizes only from its own record of that Thread id. Issued
   tokens are ordinary history, which is why they live one minute. See

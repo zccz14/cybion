@@ -212,7 +212,8 @@ struct AppState {
     /// request path.
     sql_performance: Arc<sql_performance::Monitor>,
     /// The signer behind `create_thread_token` and `/.well-known/jwks.json`.
-    thread_tokens: Arc<thread_tokens::Issuer>,
+    /// Behind a lock because an administrator can rotate the pair in place.
+    thread_tokens: Arc<Mutex<thread_tokens::Issuer>>,
 }
 
 #[derive(Clone)]
@@ -427,7 +428,9 @@ async fn serve_at(address: SocketAddr) -> Result<()> {
         std::env::var("CYBION_SQL_TRACE").as_deref(),
         Ok("off") | Ok("0") | Ok("false")
     ));
-    let thread_tokens = Arc::new(thread_tokens::Issuer::load_or_create(&data_dir)?);
+    let thread_tokens = Arc::new(Mutex::new(thread_tokens::Issuer::load_or_create(
+        &admin_db_path,
+    )?));
     let state = AppState {
         data_dir: Arc::new(data_dir),
         admin_db_path: Arc::new(admin_db_path.clone()),
@@ -488,6 +491,16 @@ fn prepare_admin_db(path: &Path) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS app_meta (
            key TEXT PRIMARY KEY,
            value TEXT NOT NULL
+         );
+         -- The two Ed25519 keys `create_thread_token` signs with. `current` signs,
+         -- `standby` is published so a rollover invalidates nothing a verifier has
+         -- cached. Both live here rather than in a file of their own: this is the
+         -- one database the deployment already backs up.
+         CREATE TABLE IF NOT EXISTS thread_token_keys (
+           slot TEXT PRIMARY KEY CHECK (slot IN ('current', 'standby')),
+           kid TEXT NOT NULL UNIQUE,
+           seed TEXT NOT NULL,
+           created_at INTEGER NOT NULL
          );",
     )?;
     #[cfg(unix)]
@@ -1047,6 +1060,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/common-manuals", get(common_manuals::documents))
         .route("/api/admin/users", get(admin_users::list))
+        .route(
+            "/api/admin/thread-token/rotate",
+            post(thread_tokens::rotate),
+        )
         .route("/api/system/resources", get(system_resources))
         .route("/api/status", get(status))
         .route(
@@ -10795,7 +10812,9 @@ mod tests {
         let data_dir = root.path().to_path_buf();
         let admin_db_path = data_dir.join("default.sqlite3");
         prepare_admin_db(&admin_db_path).unwrap();
-        let thread_tokens = Arc::new(thread_tokens::Issuer::load_or_create(&data_dir).unwrap());
+        let thread_tokens = Arc::new(Mutex::new(
+            thread_tokens::Issuer::load_or_create(&admin_db_path).unwrap(),
+        ));
         (
             root,
             AppState {
