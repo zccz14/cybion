@@ -8,7 +8,7 @@ type CommonNode = { name: Localized; description: Localized; content_file: Local
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const tree = JSON.parse(readFileSync(new URL("../../common-manuals/tree.json", import.meta.url), "utf8")) as { root: CommonNode }
 
-test("the Manuals page renders the compiled-in Cybion Common Manual read-only", () => {
+test("the Manuals page renders the compiled-in Cybion user help manual read-only", () => {
   const manuals = source.slice(source.indexOf("function ManualsPage("), source.indexOf("function ManualEditorForm("))
   assert.match(manuals, /<CommonBranch node=\{commonRoot\}/)
   assert.match(manuals, /content=\{commonSelected\.content\}/)
@@ -19,8 +19,8 @@ test("the Manuals page renders the compiled-in Cybion Common Manual read-only", 
 })
 
 test("every common manual node ships en and zh markdown content", () => {
-  assert.equal(tree.root.name.en, "Cybion Common Manual")
-  assert.equal(tree.root.name.zh, "Cybion 公共手册")
+  assert.equal(tree.root.name.en, "Cybion User Help Manual")
+  assert.equal(tree.root.name.zh, "Cybion 用户帮助手册")
   const visit = (node: CommonNode) => {
     for (const language of ["en", "zh"] as const) {
       assert.ok(node.name[language].trim().length > 0, `${language}: ${node.content_file[language]}`)

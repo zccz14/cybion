@@ -1,95 +1,19 @@
 {
-  "revision": 9,
+  "revision": 10,
   "root": {
     "id": "2b7b2b90-00a7-4c92-8b10-bee31b246e3a",
     "name": {
-      "en": "Cybion Common Manual",
-      "zh": "Cybion 公共手册"
+      "en": "Cybion User Help Manual",
+      "zh": "Cybion 用户帮助手册"
     },
     "description": {
-      "en": "Cybion's built-in operating guide (shipped with the source, shared by every user, read-only): how to work with features like the Ultimate Machine. Read this first when you need operating guidance; the two standing user Manuals (Project Index, Value Bias) and their format live in the nodes of the same name.",
-      "zh": "Cybion 自带的操作指南（随源码发布、所有用户共享、只读）：如何用终极机器等功能干活。需要操作指导时先读这里；两个常备用户手册（项目索引、价值偏置）的钩子与格式见同名节点。"
+      "en": "Read when using Cybion: the built-in operating guide (ships with the source, shared by every user, read-only) — Ultimate Machines, Linkit notifications, loaded Manuals, and the two standing user Manuals (project index, value bias) with their formats. One manual, no child nodes.",
+      "zh": "使用 Cybion 时需要查看：自带的操作指南（随源码发布、所有用户共享、只读）——终极机器、Linkit 通知、加载手册，以及两份常备用户手册（项目索引、价值偏置）与它们的格式。只有这一份，不分设子节点。"
     },
     "content_file": {
-      "en": "nodes/en/overview.md",
-      "zh": "nodes/zh/overview.md"
+      "en": "nodes/en/manual.md",
+      "zh": "nodes/zh/manual.md"
     },
-    "children": [
-      {
-        "id": "1eb7b1ea-d9fe-4348-8873-574b5b1c5c58",
-        "name": {
-          "en": "Ultimate Machine",
-          "zh": "终极机器"
-        },
-        "description": {
-          "en": "The Ultimate Machine: runs one bash check on a Worker on schedule and asks its bound Thread to repair failures; quiet otherwise.",
-          "zh": "终极机器：在 Worker 上按期执行一条 bash 检查命令，失败时请绑定的 Thread 修复；平时保持沉默。"
-        },
-        "content_file": {
-          "en": "nodes/en/ultimate-machine.md",
-          "zh": "nodes/zh/ultimate-machine.md"
-        }
-      },
-      {
-        "id": "1056ab49-33dd-4fda-9e54-3286e7afa943",
-        "name": {
-          "en": "Linkit",
-          "zh": "Linkit"
-        },
-        "description": {
-          "en": "Linkit's role in Cybion: identity, notifications and reach; why there are no linkit_* tools on the model side.",
-          "zh": "Linkit 在 Cybion 中的角色：身份、通知与触达；为什么模型侧没有 linkit_* 工具。"
-        },
-        "content_file": {
-          "en": "nodes/en/linkit.md",
-          "zh": "nodes/zh/linkit.md"
-        }
-      },
-      {
-        "id": "f1791d9f-331b-4bcd-9db0-eda7137b3992",
-        "name": {
-          "en": "Project Index",
-          "zh": "项目索引"
-        },
-        "description": {
-          "en": "Project Index: the user's projects as routing blocks of project / location (Worker label:path or remote URL) / summary; maintained while you work.",
-          "zh": "项目索引：把用户的项目记成「项目 / 位置 / 简介」的路由清单（位置是 Worker 标签:路径或远端地址），干活时顺手维护。"
-        },
-        "content_file": {
-          "en": "nodes/en/project-index.md",
-          "zh": "nodes/zh/project-index.md"
-        }
-      },
-      {
-        "id": "cef27ef8-9cab-4073-961f-eab87cad0700",
-        "name": {
-          "en": "Value Bias",
-          "zh": "价值偏置"
-        },
-        "description": {
-          "en": "Value Bias: four-field blocks (scenario / tension / choice / evidence) recording what the user chose under a real trade-off; apply it first, then let him overrule.",
-          "zh": "价值偏置：四段式块（场景 / 张力 / 选择 / 依据）记录用户在真实取舍上的选择；下次冲突时先用，用完给他推翻的机会。"
-        },
-        "content_file": {
-          "en": "nodes/en/value-bias.md",
-          "zh": "nodes/zh/value-bias.md"
-        }
-      },
-      {
-        "id": "776350aa-c311-49a8-b792-53358f2b45a9",
-        "name": {
-          "en": "Manual Format",
-          "zh": "用户手册格式"
-        },
-        "description": {
-          "en": "Manual Format: the default layout of agent-maintained user Manuals — one block per entry, fields ending with a colon, a blank line between blocks, converge near 60 lines.",
-          "zh": "用户手册格式：这类由 Agent 维护的用户手册的默认排版——一条一个块、字段名以冒号结尾、块间空行、收敛到约 60 行。"
-        },
-        "content_file": {
-          "en": "nodes/en/manual-format.md",
-          "zh": "nodes/zh/manual-format.md"
-        }
-      }
-    ]
+    "children": []
   }
 }

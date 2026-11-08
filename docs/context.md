@@ -52,7 +52,7 @@ record range above. The compiler uses `kind` to select protocol records;
 
 Registered Manuals and Workers are disclosed through controller-answered
 tools instead of a replayed prefix. `list_manuals` returns only
-top-level Manual metadata, ordered by source: the Cybion Common Manual root
+top-level Manual metadata, ordered by source: the built-in Cybion user help manual root
 first, then the user's local Manuals by name and ID. Every item carries a
 `source` field: `common` or `local`. `cybion_list_workers`
 returns the registered Worker identities (`worker_id`, `label`), ordered by
@@ -77,7 +77,7 @@ trash: the Manual and its subtree disappear from every Manual tool
 `GET /api/manuals` still
 returns the row, so the Manuals page shows each trashed root under Trash.
 `POST /api/manuals/{id}/restore` clears the marker and the row returns to its
-original place. The read-only Cybion Common Manual cannot be written, and a
+original place. The read-only Cybion User Help Manual cannot be written, and a
 hidden Manual cannot be written until it is restored.
 
 A Manual its owner **locked** on the Manuals page refuses every
@@ -141,7 +141,7 @@ unknown, so the model can clean up before continuing.
 ## Progressive Manual discovery
 
 `list_manuals` lists only top-level Manual metadata. `load_manual`
-resolves local Manuals first, then the compiled Cybion Common Manual;
+resolves local Manuals first, then the compiled Cybion User Help Manual;
 `GET /api/manuals/{id}?lang=` resolves the same local and common nodes for the
 browser, with `lang` selecting the common copy (`zh` when absent). Both return
 the current node's existing `id`, `name`, `description`, `content`, and
@@ -256,12 +256,12 @@ A Thread with no binding and no protocol record reports `head` and `tail` as
 count beside the cap it counts against (`3 / 12`), because those copies travel
 in every request whether or not the Thread did anything else in the window.
 
-## Cybion Common Manual
+## Cybion User Help Manual
 
-`common-manuals/` at the repository root holds the Cybion Common Manual: a
-`tree.json` skeleton (each node carries a UUID, plus `name`, `description`,
-and `content_file` as `{en, zh}` pairs, under a `revision`) and one Markdown
-file per node per language. Rust embeds both via `include_str!`, so the content
+`common-manuals/` at the repository root holds the built-in Cybion User Help
+Manual: a `tree.json` skeleton (a root carrying a UUID, plus `name`,
+`description`, and `content_file` as `{en, zh}` pairs, under a `revision`;
+the tree has no child nodes) and one Markdown file per language. Rust embeds both via `include_str!`, so the content
 is compiled into the controller, is identical for every user of a build, and is
 never stored, mutated, or synthesized at runtime; changes ship with releases.
 `list_manuals` lists the root first with `source: "common"`, and

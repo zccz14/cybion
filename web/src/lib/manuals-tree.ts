@@ -1,4 +1,4 @@
-// Pure tree helpers for the unified Manuals page: the Cybion Common Manual
+// Pure tree helpers for the unified Manuals page: the built-in Cybion user help manual
 // and the user's local Manuals render as top-level branches of one tree,
 // ordered common, then local. Local siblings keep the fractional sort keys the
 // drag interaction writes, the same ordering model the CTX document tree uses.

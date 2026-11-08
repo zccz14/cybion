@@ -3,7 +3,7 @@
     {
       "type": "function",
       "name": "list_manuals",
-      "description": "List top-level Manuals (manual_id, name, description, source) from the controller: first the read-only Cybion Common Manual (source \"common\"; product usage guidance compiled into the controller), then the user's own Manuals (source \"local\"). Content is intentionally omitted; use load_manual to bring a Manual and its direct children into the Thread.",
+      "description": "List top-level Manuals (manual_id, name, description, source) from the controller: first the read-only Cybion user help manual (source \"common\"; product usage guidance compiled into the controller), then the user's own Manuals (source \"local\"). Content is intentionally omitted; use load_manual to bring a Manual and its direct children into the Thread.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -23,7 +23,7 @@
     {
       "type": "function",
       "name": "load_manual",
-      "description": "Bind a Manual to this Thread so the Controller keeps it loaded. The full Manual JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Manual changes or a compaction replaces the history, so the Thread never opens it again to stay current. The copy already carries the Manual, its Use When description, its body, and its direct children. Use it for material the Thread must keep working from across manual windows; list_manuals stays the way to find what exists. Resolves local Manuals first, then the read-only Cybion Common Manual. A Thread holds 12 loaded Manuals by default; its own setting or the account default may allow more or fewer, and a load past the cap is refused with the count and the cap — unload_manual releases one.",
+      "description": "Bind a Manual to this Thread so the Controller keeps it loaded. The full Manual JSON arrives in a developer message right after this call, and the Controller delivers a newer copy by itself whenever the Manual changes or a compaction replaces the history, so the Thread never opens it again to stay current. The copy already carries the Manual, its Use When description, its body, and its direct children. Use it for material the Thread must keep working from across manual windows; list_manuals stays the way to find what exists. Resolves local Manuals first, then the read-only Cybion user help manual. A Thread holds 12 loaded Manuals by default; its own setting or the account default may allow more or fewer, and a load past the cap is refused with the count and the cap — unload_manual releases one.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -59,7 +59,7 @@
     {
       "type": "function",
       "name": "write_manual",
-      "description": "Create or edit one of the user's local Manuals from the controller — title, Use When description, body, and parent. Omit manual_id — or send null or an empty string, which count as omitted — to create a new Manual: name is required and it starts at the top level or under parent_id. Pass manual_id to edit that Manual; omitted fields keep their current values, and parent_id takes an exact manual_id, null for the top level, or the special value \"TRASH\" to move the Manual into the trash (updates only). A trashed Manual disappears from every Manual tool, while the user still sees it in the Manuals page and can restore it. Returns the Manual metadata. The read-only Cybion Common Manual cannot be written, and a Manual hidden by the trash cannot be written until it is restored. A Manual its owner locked refuses every write_manual change — title, Use When description, body, parent, and TRASH — and answers with its child Manuals, which stay writable.",
+      "description": "Create or edit one of the user's local Manuals from the controller — title, Use When description, body, and parent. Omit manual_id — or send null or an empty string, which count as omitted — to create a new Manual: name is required and it starts at the top level or under parent_id. Pass manual_id to edit that Manual; omitted fields keep their current values, and parent_id takes an exact manual_id, null for the top level, or the special value \"TRASH\" to move the Manual into the trash (updates only). A trashed Manual disappears from every Manual tool, while the user still sees it in the Manuals page and can restore it. Returns the Manual metadata. The read-only Cybion user help manual cannot be written, and a Manual hidden by the trash cannot be written until it is restored. A Manual its owner locked refuses every write_manual change — title, Use When description, body, parent, and TRASH — and answers with its child Manuals, which stay writable.",
       "parameters": {
         "type": "object",
         "properties": {

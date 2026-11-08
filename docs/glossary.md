@@ -100,5 +100,5 @@ qualifier, in UI copy and in prompts:
 | kind 2 | Note | 便签 | plural Notes; `/notes` |
 | kind 3 | Archive | 档案 | singular; `/archive`; verb is "archive a Thread" (归档) |
 | kind 4 | World | 世界 | uncountable; never an object |
-| shipped read-only tree | Cybion Common Manual | Cybion 公共手册 | `common-contexts/tree.json`; source `common` |
+| shipped read-only manual | Cybion User Help Manual | Cybion 用户帮助手册 | `common-manuals/tree.json`; one manual, no child nodes; source `common` |
 | routing condition | Use When | 何时需要 | the Manual's description field |

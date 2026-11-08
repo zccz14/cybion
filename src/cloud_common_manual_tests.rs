@@ -110,7 +110,7 @@ async fn list_tool_lists_the_common_root_before_local_manuals() {
 }
 
 #[tokio::test]
-async fn load_tool_delivers_common_nodes_with_parent_and_children() {
+async fn load_tool_delivers_the_single_common_manual() {
     let (_root, state) = test_state();
     let user = user_for_subject(&state, "common-manual-reader").unwrap();
     let thread = create_test_thread(&state, &user).await;
@@ -121,46 +121,24 @@ async fn load_tool_delivers_common_nodes_with_parent_and_children() {
     assert_eq!(answer["loaded"], json!(true));
 
     let copy = loaded_copy(&state, &user, &thread.id).await;
-    assert_eq!(copy["name"], "Cybion 公共手册");
+    assert_eq!(copy["name"], "Cybion 用户帮助手册");
     assert_eq!(copy["parent_id"], Value::Null);
     assert!(
         copy.get("sort_key").is_none(),
         "a sibling key is not the Thread's business"
     );
+    let body = copy["content"].as_str().unwrap();
     assert!(
-        copy["content"]
-            .as_str()
-            .unwrap()
-            .contains("common-manuals/")
+        body.contains("common-manuals/"),
+        "the copy names its source"
     );
-    let children = copy["children"].as_array().unwrap();
-    let root_copy =
-        common_manuals::read(&root_id, common_manuals::SOURCE_LANGUAGE).expect("the root reads");
-    assert_eq!(
-        children.len(),
-        root_copy.children.len(),
-        "the load carries every direct child of the root"
-    );
-    assert_eq!(children[0]["name"], "终极机器");
-    assert_eq!(children[1]["name"], "Linkit");
-
-    let child_id = children[0]["manual_id"].as_str().unwrap().to_owned();
-    load(&state, &user, &thread.id, &child_id).await;
-    let child = loaded_copy(&state, &user, &thread.id).await;
-    assert_eq!(child["parent_id"], Value::String(root_id.clone()));
-    assert_eq!(child["children"].as_array().unwrap().len(), 0);
-    assert!(child["content"].as_str().unwrap().contains("终极机器"));
-
-    let linkit_id = children[1]["manual_id"].as_str().unwrap().to_owned();
-    load(&state, &user, &thread.id, &linkit_id).await;
-    let linkit = loaded_copy(&state, &user, &thread.id).await;
-    assert_eq!(linkit["parent_id"], Value::String(root_id));
-    assert_eq!(linkit["children"].as_array().unwrap().len(), 0);
     assert!(
-        linkit["content"]
-            .as_str()
-            .unwrap()
-            .contains("linkit.ntnl.io")
+        body.contains("终极机器"),
+        "the merged body covers every topic"
+    );
+    assert!(
+        copy["children"].as_array().unwrap().is_empty(),
+        "the common manual has no child nodes"
     );
 }
 
@@ -195,7 +173,7 @@ async fn browser_read_resolves_common_nodes() {
     )
     .await
     .unwrap();
-    assert_eq!(view.manual.name, "Cybion 公共手册");
+    assert_eq!(view.manual.name, "Cybion 用户帮助手册");
     let source = common_manuals::read(&common_root_id(), common_manuals::SOURCE_LANGUAGE)
         .expect("the root reads");
     assert_eq!(view.children.len(), source.children.len());
@@ -219,9 +197,12 @@ async fn browser_reads_serve_the_requested_language() {
     )
     .await
     .unwrap();
-    assert_eq!(view.manual.name, "Cybion Common Manual");
+    assert_eq!(view.manual.name, "Cybion User Help Manual");
     assert!(view.manual.content.contains("operating guide"));
-    assert_eq!(view.children[0].name, "Ultimate Machine");
+    assert!(
+        view.children.is_empty(),
+        "the common manual carries no child nodes"
+    );
 
     let Json(tree) = common_manuals::documents(
         axum::Extension(BrowserIdentity {
@@ -233,7 +214,7 @@ async fn browser_reads_serve_the_requested_language() {
         }),
     )
     .await;
-    assert_eq!(tree["root"]["name"], "Cybion 公共手册");
+    assert_eq!(tree["root"]["name"], "Cybion 用户帮助手册");
     assert!(
         tree["root"]["content"]
             .as_str()

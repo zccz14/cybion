@@ -285,7 +285,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | Area | What it does | Docs |
 | --- | --- | --- |
 | Threads | Durable conversations with full execution history; server-side filters and search; archive, restore, and delete; read-only sharing with other Cybion users. | [Threads](docs/threads.md) · [Sharing](docs/thread-sharing.md) · [Recovery](docs/thread-recovery.md) |
-| Manuals | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_manual`, and lock from the UI so a Thread cannot rewrite a hand-written manual; ships with a read-only Common Manual. | [Manuals](docs/context.md) · [Compaction](docs/context_compacting.md) |
+| Manuals | An explicit knowledge tree read on demand; create, edit, and trash from the UI or `write_manual`, and lock from the UI so a Thread cannot rewrite a hand-written manual; ships with a read-only user help manual. | [Manuals](docs/context.md) · [Compaction](docs/context_compacting.md) |
 | Notes | Short items that clear to zero: written by a Thread and visible only there, injected into every request it runs, crossed out by that Thread and torn off only by you. | [Sticky notes](docs/notes.md) |
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, and Windows, with Android and iOS apps in early development; pairing, remote upgrades, and worker sharing. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |

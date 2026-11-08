@@ -9192,7 +9192,7 @@ async fn edit_manual_tool_output(
     let Some(summary) = summary else {
         if common_manuals::read(&requested_id, common_manuals::SOURCE_LANGUAGE).is_some() {
             return Err(ApiError::bad_request(
-                "the Cybion Common Manual is read-only",
+                "the built-in Cybion user help manual is read-only",
             ));
         }
         return Err(ApiError::not_found("manual not found"));
