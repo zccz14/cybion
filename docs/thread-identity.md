@@ -53,16 +53,28 @@ Two rules follow, and both are the verifier's:
 
 ## Verifying
 
-The public key is one Ed25519 key, published at
-`https://cybion.ntnl.io/.well-known/jwks.json`:
+Two Ed25519 keys are published at
+`https://cybion.ntnl.io/.well-known/jwks.json`, the signing one first:
 
 ```json
-{"keys":[{
-  "kid":"9f2a6c1b8e4d7053",
-  "kty":"OKP","crv":"Ed25519","alg":"EdDSA","use":"sig",
-  "x":"<base64url of the 32-byte public key>"
-}]}
+{"keys":[
+  {"kid":"9f2a6c1b8e4d7053","kty":"OKP","crv":"Ed25519","alg":"EdDSA","use":"sig",
+   "x":"<base64url of the 32-byte public key>"},
+  {"kid":"4b7e1d90c6a2f583","kty":"OKP","crv":"Ed25519","alg":"EdDSA","use":"sig",
+   "x":"<base64url of the next public key>"}
+]}
 ```
+
+The second key is a standby: it signs nothing yet, and it exists so that a
+rollover changes nothing for you. `POST /api/admin/thread-token/rotate` — an
+administrator action, root user only — promotes the standby to signer and
+publishes a fresh standby beside it. A verifier that cached the document already
+holds the key that will sign next; no refresh, no window, no action.
+
+The key that signed until now leaves the document immediately, so a token minted
+in the sixty seconds before a rollover can reach you after you have refreshed and
+fail. That is deliberate: retired material is never kept around, and the only
+victim is a one-minute credential.
 
 Four steps, in this order:
 
