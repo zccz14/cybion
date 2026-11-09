@@ -437,3 +437,80 @@ async fn supplied_response_regression_replays_all_338_events() {
     assert_eq!(arguments["command"], "printf fixture");
     assert_eq!(arguments["padding"].as_str().unwrap().len(), 3200);
 }
+
+/// The provider behind "provider reused a tool call ID with different content" restates
+/// every call inside `response.completed` under a fresh item id — same call, same
+/// arguments, new item id. That is the call already in the output, not a second one.
+#[test]
+fn a_snapshot_copy_with_a_new_item_id_is_the_same_call() {
+    let mut state = ResponseState::default();
+    state
+        .apply(&ResponseEvent::OutputItemDone(item(json!({
+            "type": "function_call",
+            "id": "item_done",
+            "call_id": "call_00_x",
+            "name": "list_manuals",
+            "arguments": "{\"a\":1}"
+        }))))
+        .unwrap();
+    let completed = state
+        .apply(&snapshot(json!([{
+            "type": "function_call",
+            "id": "item_snapshot",
+            "call_id": "call_00_x",
+            "name": "list_manuals",
+            "arguments": "{ \"a\" : 1 }"
+        }])))
+        .unwrap();
+    assert_eq!(state.output.len(), 1, "one call keeps one slot");
+    assert_eq!(completed, vec![0], "the copy adds no record of its own");
+    assert_eq!(state.output[0].item.id(), Some("item_done"));
+}
+
+/// A call id that comes back asking for something else is a second call. It moves to an
+/// id of its own; carrying it to history under the first call's id would either collide
+/// with that record or silently swallow a request the model made.
+#[test]
+fn a_call_id_reused_for_another_request_moves_to_an_id_of_its_own() {
+    let mut state = ResponseState::default();
+    state
+        .apply(&ResponseEvent::OutputItemDone(item(json!({
+            "type": "function_call",
+            "id": "item_a",
+            "call_id": "call_00_x",
+            "name": "bash",
+            "arguments": "{\"cmd\":\"ls\"}"
+        }))))
+        .unwrap();
+    state
+        .apply(&snapshot(json!([{
+            "type": "function_call",
+            "id": "item_b",
+            "call_id": "call_00_x",
+            "name": "bash",
+            "arguments": "{\"cmd\":\"pwd\"}"
+        }])))
+        .unwrap();
+    assert_eq!(state.output.len(), 2, "both requests stay");
+    assert_eq!(state.output[0].item.call_id(), Some("call_00_x"));
+    assert_eq!(state.output[1].item.call_id(), Some("call_00_x_2"));
+    assert!(
+        state.output[0].item.same_call(&state.output[0].item),
+        "a call is the same as itself"
+    );
+    assert!(
+        !state.output[0].item.same_call(&state.output[1].item),
+        "different arguments are not the same call"
+    );
+}
+
+fn snapshot(output: Value) -> ResponseEvent {
+    ResponseEvent::Completed(
+        serde_json::from_value::<ResponseCompleted>(json!({
+            "id": "resp_fixture",
+            "end_turn": true,
+            "output": output,
+        }))
+        .unwrap(),
+    )
+}

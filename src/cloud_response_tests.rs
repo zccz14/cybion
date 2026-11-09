@@ -3860,3 +3860,50 @@ async fn a_turn_that_still_owes_a_note_is_sent_back_with_the_runtime_nudge() {
     .unwrap();
     assert_eq!(stored, 1);
 }
+
+/// The shape that used to end a turn with "provider reused a tool call ID with different
+/// content": the final snapshot repeats a call under another item id. The history keeps
+/// the one record, so the call is not lost and the turn survives.
+#[tokio::test]
+async fn a_repeated_call_in_the_final_snapshot_is_one_history_record() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "reused-call-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = input_record(&state, &user, &thread).await;
+    let done = ResponseItem::from_value(json!({
+        "type": "function_call",
+        "id": "item_done",
+        "call_id": "call_00_x",
+        "name": "list_manuals",
+        "arguments": "{}"
+    }))
+    .unwrap();
+    let copy = ResponseItem::from_value(json!({
+        "type": "function_call",
+        "id": "item_snapshot",
+        "call_id": "call_00_x",
+        "name": "list_manuals",
+        "arguments": "{}"
+    }))
+    .unwrap();
+    let ids = append_response_output_items(&state, &user, &thread, input, &[done])
+        .await
+        .unwrap();
+    let again = append_response_output_items(&state, &user, &thread, input, &[copy])
+        .await
+        .unwrap();
+    assert_eq!(
+        ids, again,
+        "the copy names the record of the call it repeats"
+    );
+    let records = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.kind == "response_output")
+            .count(),
+        1
+    );
+}
