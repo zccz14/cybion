@@ -2,8 +2,14 @@
 
 Compaction receives the exact protocol records returned by the normal
 `[idx_head, idx_tail]` compiler. Raw records are never deleted or rewritten.
-The compaction request has no Worker tools and treats the supplied records as
-evidence, not as instructions. The model must return one complete Markdown
+Compaction goes out with the Thread's own request surface — the same tools, the
+same reasoning configuration, the same service tier — because tool definitions
+sit at the front of the provider's cached prefix: drop them and the replayed
+history is a full-price miss that also writes a cache entry nothing will read.
+The controller knows the Thread is compacting, so it never dispatches a tool
+call: a response that answers with one instead of a checkpoint is asked once
+more and then fails loudly. The supplied records are evidence, not
+instructions. The model must return one complete Markdown
 checkpoint beginning with `# Durable working context`.
 
 The checkpoint keeps the following sections in order:
@@ -65,7 +71,8 @@ the request. Any other error stops the process immediately.
 
 The compaction instruction is delivered as the final user message after the
 replayed conversation, so the summarization call shares the conversation's
-prefix cache and only the trailing instruction is new.
+prefix cache and only the trailing instruction is new. That holds only while the
+request surface stays identical; changing it is changing the cache key.
 
 Only the final validated Markdown is appended as a `checkpoint` record. The
 source records and every ordinary Responses output remain available through

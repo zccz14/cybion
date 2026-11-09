@@ -4743,6 +4743,7 @@ async fn request_thread_title(
         false,
         false,
         false,
+        false,
         None,
     )
     .await?;
@@ -7069,11 +7070,15 @@ async fn request_agent(
             .map_err(|e| (thread.clone(), Box::new(e)))?;
             if estimate > budget {
                 proactive_compactions += 1;
+                let surface = RequestSurface::resolve(state, user, thread)
+                    .await
+                    .map_err(|e| (thread.clone(), Box::new(e)))?;
                 compact_thread_context(
                     state,
                     user,
                     thread,
                     &manual,
+                    &surface,
                     upstream,
                     source_record_idx,
                     cancellation,
@@ -7095,9 +7100,7 @@ async fn request_agent(
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let has_workers = !workers.is_empty();
-        let image_generation = effective_image_generation_model(thread, &defaults).is_some();
-        let audio_transcription =
-            effective_audio_transcription_model(Some(thread), &defaults).is_some();
+        let surface = RequestSurface::of(thread, &defaults, has_workers);
         let mut request_items = std::mem::take(&mut manual.items);
         if let Some(block) = note_block.as_deref() {
             // The notes block lives only in the request copy: history records
@@ -7121,16 +7124,17 @@ async fn request_agent(
             manual.idx_tail,
             upstream,
             &thread.model,
-            Some(&thread.reasoning_effort),
-            thread.service_tier_fast,
+            surface.reasoning_effort.as_deref(),
+            surface.service_tier_fast,
             Value::Array(request_items),
-            has_workers,
+            surface.worker_tools,
+            surface.manual_tools,
             // Thread turns always inject the native web search tool; the
             // intercepted image generation tool follows the configured image
             // model (an empty choice keeps it out of the request).
-            true,
-            image_generation,
-            audio_transcription,
+            surface.web_search,
+            surface.image_generation,
+            surface.audio_transcription,
             Some(cancellation.clone()),
         )
         .await
@@ -7149,11 +7153,15 @@ async fn request_agent(
                 })
                 .await
                 .map_err(|error| (thread.clone(), Box::new(error)))?;
+                let surface = RequestSurface::resolve(state, user, thread)
+                    .await
+                    .map_err(|e| (thread.clone(), Box::new(e)))?;
                 compact_thread_context(
                     state,
                     user,
                     thread,
                     &manual,
+                    &surface,
                     upstream,
                     source_record_idx,
                     cancellation,
@@ -7396,11 +7404,58 @@ async fn append_image_generation_output(
     .await
 }
 
+/// Everything a request's cached prefix is built from besides the replay
+/// itself: the tools it declares, the reasoning configuration, the service
+/// tier. Tool definitions sit at the front of the provider's cached prefix, so a
+/// request that replays a Thread's records has to reproduce the same surface —
+/// drop the tools and the whole replay is a full-price miss.
+#[derive(Clone, Debug, PartialEq)]
+struct RequestSurface {
+    reasoning_effort: Option<String>,
+    service_tier_fast: bool,
+    worker_tools: bool,
+    manual_tools: bool,
+    web_search: bool,
+    image_generation: bool,
+    audio_transcription: bool,
+}
+
+impl RequestSurface {
+    /// The surface a Thread's own turns are sent with. Compaction replays those
+    /// turns, so it goes out with this same surface.
+    fn of(thread: &ThreadView, defaults: &ThreadDefaults, has_workers: bool) -> Self {
+        Self {
+            reasoning_effort: Some(thread.reasoning_effort.clone()),
+            service_tier_fast: thread.service_tier_fast,
+            worker_tools: has_workers,
+            manual_tools: true,
+            web_search: true,
+            image_generation: effective_image_generation_model(thread, defaults).is_some(),
+            audio_transcription: effective_audio_transcription_model(Some(thread), defaults)
+                .is_some(),
+        }
+    }
+
+    /// Resolves a Thread's surface outside a turn's compiled context.
+    async fn resolve(state: &AppState, user: &User, thread: &ThreadView) -> Result<Self, ApiError> {
+        let (defaults, has_workers) = user_db(state, user, false, |connection| {
+            Ok((
+                load_thread_defaults(connection)?,
+                !registered_workers(connection)?.is_empty(),
+            ))
+        })
+        .await?;
+        Ok(Self::of(thread, &defaults, has_workers))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn compact_thread_context(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
     manual: &CompiledThreadContext,
+    surface: &RequestSurface,
     upstream: &Upstream,
     source_record_idx: i64,
     cancellation: &mut watch::Receiver<bool>,
@@ -7422,6 +7477,7 @@ async fn compact_thread_context(
         manual.idx_tail,
         upstream,
         &thread.model,
+        surface,
         &manual.items,
         &manual.record_metadata,
         cancellation.clone(),
@@ -7521,6 +7577,7 @@ async fn compact_protocol_context(
     idx_tail: i64,
     upstream: &Upstream,
     model: &str,
+    surface: &RequestSurface,
     items: &[Value],
     metadata: &[ProtocolRecordMetadata],
     cancellation: watch::Receiver<bool>,
@@ -7545,6 +7602,7 @@ async fn compact_protocol_context(
             idx_tail,
             upstream,
             model,
+            surface,
             compaction_input(prefix.as_ref(), raw_items, raw_metadata, language),
             Some(cancellation.clone()),
         )
@@ -7562,6 +7620,7 @@ async fn compact_protocol_context(
                         idx_tail,
                         upstream,
                         model,
+                        surface,
                         prefix.as_ref(),
                         &raw_items[0],
                         &raw_metadata[0],
@@ -7582,6 +7641,7 @@ async fn compact_protocol_context(
                         idx_tail,
                         upstream,
                         model,
+                        surface,
                         compaction_input(
                             prefix.as_ref(),
                             &raw_items[..left_len],
@@ -7611,6 +7671,7 @@ async fn compact_protocol_context(
                                 idx_tail,
                                 upstream,
                                 model,
+                                surface,
                                 prefix.as_ref(),
                                 &raw_items[0],
                                 &raw_metadata[0],
@@ -7643,32 +7704,48 @@ async fn summarize_context_once(
     idx_tail: i64,
     upstream: &Upstream,
     model: &str,
+    surface: &RequestSurface,
     items: Vec<Value>,
     cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<String, ApiError> {
-    let response = responses_request_with_options(
-        state,
-        user,
-        thread_id,
-        Some(input_record_idx),
-        request_kind,
-        idx_head,
-        idx_tail,
-        upstream,
-        model,
-        None,
-        false,
-        Value::Array(items),
-        false,
-        false,
-        false,
-        false,
-        cancellation,
-    )
-    .await?;
-    let summary = response_text(&response.value)
-        .filter(|summary| !summary.trim().is_empty())
-        .ok_or_else(|| ApiError::unavailable("checkpoint response has no text"))?;
+    // The request repeats the Thread's own surface so the replayed records hit
+    // their warm prefix cache; a compaction therefore still *declares* tools.
+    // It never dispatches one: the Thread is known to be compacting here, so a
+    // response that answers with a tool call is asked once more and then fails
+    // instead of quietly reshaping the context.
+    let mut attempt = 0;
+    let summary = loop {
+        let response = responses_request_with_options(
+            state,
+            user,
+            thread_id,
+            Some(input_record_idx),
+            request_kind,
+            idx_head,
+            idx_tail,
+            upstream,
+            model,
+            surface.reasoning_effort.as_deref(),
+            surface.service_tier_fast,
+            Value::Array(items.clone()),
+            surface.worker_tools,
+            surface.manual_tools,
+            surface.web_search,
+            surface.image_generation,
+            surface.audio_transcription,
+            cancellation.clone(),
+        )
+        .await?;
+        match response_text(&response.value).filter(|text| !text.trim().is_empty()) {
+            Some(summary) => break summary,
+            None if attempt == 0 => attempt += 1,
+            None => {
+                return Err(ApiError::unavailable(
+                    "checkpoint response carried no text: a tool call is never dispatched during compaction",
+                ));
+            }
+        }
+    };
     validate_checkpoint_text(&summary).map_err(|error| ApiError::unavailable(error.to_string()))?;
     Ok(summary)
 }
@@ -7860,6 +7937,7 @@ async fn compact_oversized_record(
     idx_tail: i64,
     upstream: &Upstream,
     model: &str,
+    surface: &RequestSurface,
     prefix: Option<&Value>,
     item: &Value,
     metadata: &ProtocolRecordMetadata,
@@ -7913,6 +7991,7 @@ async fn compact_oversized_record(
                 idx_tail,
                 upstream,
                 model,
+                surface,
                 compaction_input(
                     fragment_prefix.as_ref(),
                     raw_fragments,
@@ -7948,6 +8027,7 @@ async fn compact_oversized_record(
                     idx_tail,
                     upstream,
                     model,
+                    surface,
                     compaction_input(
                         fragment_prefix.as_ref(),
                         &raw_fragments[..left_len],
@@ -8052,6 +8132,7 @@ async fn responses_request_with_options(
     service_tier_fast: bool,
     input: Value,
     include_worker_tools: bool,
+    include_manual_tools: bool,
     web_search: bool,
     image_generation: bool,
     audio_transcription: bool,
@@ -8082,7 +8163,7 @@ async fn responses_request_with_options(
         service_tier_fast,
         input,
         include_worker_tools,
-        request_kind == "inference",
+        include_manual_tools,
         web_search,
         image_generation,
         audio_transcription,
@@ -13773,6 +13854,7 @@ mod tests {
             false,
             true,
             true,
+            true,
             false,
             None,
         )
@@ -13911,6 +13993,7 @@ mod tests {
                         Some(&thread.reasoning_effort),
                         thread.service_tier_fast,
                         json!([{"role":"user","content":"hello"}]),
+                        false,
                         false,
                         false,
                         false,

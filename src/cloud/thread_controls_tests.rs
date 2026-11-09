@@ -555,8 +555,13 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
         !request["input"].to_string().contains(offline_worker),
         "compaction requests must not replay a registry prefix: {request}"
     );
-    assert!(request.get("tools").is_none());
-    assert_eq!(request["tool_choice"], "none");
+    assert!(
+        request["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "compaction declares the Thread's tools so its replay hits the cached prefix: {request}"
+    );
+    assert_eq!(request["tool_choice"], "auto");
     assert!(!request.to_string().contains("thread_control"));
     let history = history_for(&state, &user, thread.id.clone(), 0)
         .await
@@ -1358,6 +1363,86 @@ async fn proactive_compaction_checkpoints_the_context_before_an_oversized_infere
             .status,
         "idle"
     );
+}
+
+/// A provider caches tool definitions as part of the request prefix, so a
+/// compaction that dropped them would re-bill the whole replay. It goes out with
+/// the Thread's own surface instead, and the controller — which knows the Thread
+/// is compacting — never dispatches the tool call that surface allows.
+#[tokio::test]
+async fn compaction_keeps_the_thread_request_surface_for_the_cached_prefix() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "surface-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    user_db(&state, &user, false, {
+        let thread_id = thread.id.clone();
+        move |connection| {
+            connection.execute(
+                "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens)
+                 VALUES(1,'test-model','medium',0,1000)
+                 ON CONFLICT(id) DO UPDATE SET context_budget_tokens=1000",
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO workers(id,label,token_hash,created_at) VALUES('surface-worker','fixture','surface-fixture',0)",
+                [],
+            )?;
+            insert_record(
+                connection,
+                &thread_id,
+                "input",
+                json!({"role":"user","content":"x".repeat(8_000)}),
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut socket).await;
+            if index == 0 {
+                reply(&mut socket, &checkpoint_body("surface")).await;
+            } else {
+                reply_completed(&mut socket, "done").await;
+            }
+            requests.push(request);
+        }
+        requests
+    });
+    enqueue(
+        state.clone(),
+        user.clone(),
+        thread.id.clone(),
+        RequestInput::Prompt(user_text("please continue")),
+    )
+    .await
+    .unwrap();
+    wait_finished(&state, &user, &thread).await;
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2, "the oversized manual must compact first");
+    let (compaction, inference) = (&requests[0], &requests[1]);
+    assert!(
+        !compaction["tools"].as_array().unwrap().is_empty(),
+        "compaction must declare the Thread's tools or its replay misses the cached prefix"
+    );
+    for field in [
+        "tools",
+        "tool_choice",
+        "reasoning",
+        "service_tier",
+        "include",
+    ] {
+        assert_eq!(
+            compaction.get(field),
+            inference.get(field),
+            "compaction must reproduce the inference surface: {field}"
+        );
+    }
 }
 
 #[tokio::test]

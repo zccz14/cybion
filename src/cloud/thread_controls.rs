@@ -258,11 +258,13 @@ pub(super) async fn compact_request(
                 }
             })
             .await?;
+            let surface = RequestSurface::resolve(state, user, thread).await?;
             compact_thread_context(
                 state,
                 user,
                 thread,
                 &manual,
+                &surface,
                 upstream,
                 record_idx,
                 cancellation,
