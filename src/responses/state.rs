@@ -162,9 +162,19 @@ impl ResponseState {
         mut item: ResponseItem,
         done: bool,
     ) -> Result<usize, ResponsesStreamError> {
+        if done {
+            self.settle_repeated_call(&mut item);
+        }
         let index = item
             .id()
             .and_then(|id| self.output.iter().position(|v| v.item.id() == Some(id)))
+            // A provider may renumber the item id between the delta stream and the final
+            // snapshot; the call it describes is still the one already in a slot.
+            .or_else(|| {
+                self.output
+                    .iter()
+                    .position(|existing| existing.done && existing.item.same_call(&item))
+            })
             .or_else(|| {
                 if item.id().is_none() {
                     self.output
@@ -198,6 +208,28 @@ impl ResponseState {
                 record_id: None,
             });
             Ok(self.output.len() - 1)
+        }
+    }
+
+    /// A provider hands the same call twice — once as `output_item.done`, once inside the
+    /// final snapshot — and is free to renumber the item id while doing it. A call id that
+    /// comes back with different content is a second call: a Thread's history cannot hold
+    /// one call id twice, so the new one moves to an id of its own instead of failing the
+    /// whole turn.
+    fn settle_repeated_call(&mut self, item: &mut ResponseItem) {
+        let Some(call_id) = item.call_id().map(str::to_owned) else {
+            return;
+        };
+        let repeated = self
+            .output
+            .iter()
+            .filter(|existing| existing.done)
+            .any(|existing| {
+                existing.item.call_id() == Some(call_id.as_str()) && !existing.item.same_call(item)
+            });
+        if repeated {
+            let call_id = format!("{call_id}_{}", self.output.len() + 1);
+            item.rename_call(call_id);
         }
     }
 

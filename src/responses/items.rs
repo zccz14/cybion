@@ -133,6 +133,74 @@ response_items! {
     ContextCompaction("context_compaction") { encrypted_content: Option<String> },
 }
 
+impl ResponseItem {
+    /// The provider's id for a tool call: the key that pairs a call with its output.
+    /// Unlike [`ResponseItem::id`] it survives a provider renumbering item ids between
+    /// the delta stream and the final snapshot.
+    pub(crate) fn call_id(&self) -> Option<&str> {
+        match self {
+            Self::FunctionCall(item) => Some(&item.call_id),
+            Self::CustomToolCall(item) => Some(&item.call_id),
+            Self::LocalShellCall(item) => item.call_id.as_deref(),
+            Self::FunctionCallOutput(item) => item.call_id.as_deref(),
+            Self::CustomToolCallOutput(item) => Some(&item.call_id),
+            Self::ToolSearchCall(item) => item.call_id.as_deref(),
+            Self::ToolSearchOutput(item) => item.call_id.as_deref(),
+            Self::Other { fields, .. } => fields.get("call_id").and_then(Value::as_str),
+            _ => None,
+        }
+    }
+
+    /// Whether both items are the same tool call: one call id, one request. Providers may
+    /// renumber `id`, restate `status`, and reserialize `arguments` in the final snapshot,
+    /// so none of those decide it.
+    pub(crate) fn same_call(&self, other: &Self) -> bool {
+        let Some(call_id) = self.call_id() else {
+            return false;
+        };
+        self.kind() == other.kind()
+            && other.call_id() == Some(call_id)
+            && comparable_call(self) == comparable_call(other)
+    }
+
+    /// Moves the call to another id, keeping the request it was issued with.
+    pub(crate) fn rename_call(&mut self, call_id: String) {
+        match self {
+            Self::FunctionCall(item) => item.call_id = call_id,
+            Self::CustomToolCall(item) => item.call_id = call_id,
+            Self::LocalShellCall(item) => item.call_id = Some(call_id),
+            Self::FunctionCallOutput(item) => item.call_id = Some(call_id),
+            Self::CustomToolCallOutput(item) => item.call_id = call_id,
+            Self::ToolSearchCall(item) => item.call_id = Some(call_id),
+            Self::ToolSearchOutput(item) => item.call_id = Some(call_id),
+            Self::Other { fields, .. } => {
+                fields.insert("call_id".to_owned(), Value::String(call_id));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// [`ResponseItem::value`] with everything a provider may rewrite between the delta stream
+/// and the final snapshot removed, and with JSON arguments compared as JSON, not as text.
+fn comparable_call(item: &ResponseItem) -> Value {
+    let mut value = item.value();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("id");
+        object.remove("status");
+        for key in ["arguments", "input"] {
+            let parsed = object
+                .get(key)
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok());
+            if let Some(parsed) = parsed {
+                object.insert(key.to_owned(), parsed);
+            }
+        }
+    }
+    value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ContentItem {

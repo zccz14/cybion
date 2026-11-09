@@ -7268,7 +7268,12 @@ async fn append_response_output_items(
             if !superseded && let Some(call)=payload.get("call_id").and_then(Value::as_str) {
                 let existing:Option<(i64,String)>=transaction.query_row("SELECT id,payload FROM history_records WHERE thread_id=? AND id>? AND kind='response_output' AND json_extract(payload,'$.call_id')=? ORDER BY id LIMIT 1",params![thread_id,input_record_id,call],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
                 if let Some((id,previous))=existing {
-                    if serde_json::from_str::<Value>(&previous).map_err(ApiError::internal)? != payload {return Err(ApiError::unavailable("provider reused a tool call ID with different content"));}
+                    // The same call may arrive twice — a snapshot copy carries another
+                    // item id but asks for the same thing — and that is one record. Only
+                    // a call id reused for a different request is a provider fault.
+                    let previous:Value=serde_json::from_str(&previous).map_err(ApiError::internal)?;
+                    let same=previous==payload||matches!((ResponseItem::from_value(previous),ResponseItem::from_value(payload.clone())),(Ok(a),Ok(b)) if a.same_call(&b));
+                    if !same {return Err(ApiError::unavailable("provider reused a tool call ID with different content"));}
                     ids.push(id);continue;
                 }
             }
