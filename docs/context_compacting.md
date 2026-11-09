@@ -12,23 +12,18 @@ The checkpoint keeps the following sections in order:
 2. authoritative resources and exact locations;
 3. a causally relevant chronicle;
 4. active decisions and constraints;
-5. the Manuals worth re-reading;
-6. the current objective and next step;
-7. unfinished work and evidence routes.
+5. the current objective and next step;
+6. unfinished work and evidence routes.
 
-Manual detail is not replayed after a checkpoint: a detail the checkpoint
-drops is recoverable only by loading that Manual again. The fifth section
-therefore carries one bullet per Manual the thread still needs and whose detail
-the checkpoint does not restate — the exact `manual_id`, then why it must be
-opened again and which decision or next step depends on it — so the next request
-loads instead of trusting a memory of a Manual it no longer holds. Asking the
-model for that judgment keeps it the model's decision which Manuals stop
-mattering; a Manual body is never pinned into the checkpoint.
-
-A loaded Manual is the exception. The controller delivers its current copy again
-after the checkpoint, so the fifth section never lists a loaded Manual and the
-model never restates its content: `load_manual` is what carries material across
-a compaction.
+A checkpoint carries no Manual content: no body, no bullet, no quoted excerpt,
+and no restatement of a Manual's detail. Loading is Thread state rather than
+message state (`thread_manual_loads` below), so the controller re-delivers a
+loaded Manual's current copy after every checkpoint without a tool call, and a
+Manual the Thread does not hold is reopened with `load_manual` at the moment it
+is needed. Asking the model which Manuals stay worth reopening would decide
+something the binding table already decides, and a pre-committed list has no
+reader: the prompt therefore states the rule positively and tells consolidation
+to drop Manual content an earlier checkpoint still carries.
 
 The final section contains a fenced JSON array with `topic_key`, `status`,
 `message_range`, and `search_keywords`. Calendar times are copied only when
