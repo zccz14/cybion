@@ -7821,10 +7821,9 @@ Use terse bullets rather than prose paragraphs, and keep every heading in this e
 ## Current objective and next step
 ## Open work and evidence routes
 
-The final section must include a fenced JSON array whose entries contain `topic_key`, `status`,
-`message_range`, and `search_keywords`. Exact calendar times are allowed only when present in the
-source records; otherwise use record-order anchors marked as inferred. Write the checkpoint in
-English. Do not mention this summarization request or that the manual was compacted."#;
+Exact calendar times are allowed only when present in the source records; otherwise use
+record-order anchors marked as inferred. Write the checkpoint in English. Do not mention this
+summarization request or that the context was compacted."#;
 
 const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 
@@ -7843,7 +7842,7 @@ const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 ## Current objective and next step
 ## Open work and evidence routes
 
-最后一个小节必须包含一段围栏 JSON 数组，条目含 `topic_key`、`status`、`message_range`、`search_keywords`。只有来源记录里明确出现的日历时间才可写入，否则用以记录序号为锚的相对时序并标注为推断。检查点正文用简体中文书写。不要提及这次摘要请求，也不要提及上下文被压缩过。"#;
+只有来源记录里明确出现的日历时间才可写入，否则用以记录序号为锚的相对时序并标注为推断。检查点正文用简体中文书写。不要提及这次摘要请求，也不要提及上下文被压缩过。"#;
 
 /// The user's Linkit language preference decides the language of the checkpoints
 /// written for their threads. It is one local row lookup; an unconfigured
