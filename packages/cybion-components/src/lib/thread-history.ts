@@ -40,13 +40,32 @@ export function isRetryNotice(record: HistoryRecord) {
   return typeof historyPayloadObject(record.payload)?.next_retry_at === "number"
 }
 
+// A restart notice is the same kind of bookkeeping: the controller stopped while the request
+// was open and closed it on the way back, so the turn produced nothing and this is not its
+// answer. Records written since carry a type; the append-only history still holds earlier
+// ones, which carry the single wording the controller ever used for it.
+const RESTART_NOTICE_CONTENT = "Request interrupted by a Cybion restart"
+
+export function isRestartNotice(record: HistoryRecord) {
+  if (record.kind !== "activity") return false
+  const payload = historyPayloadObject(record.payload)
+  if (payload === null) return false
+  return payload.type === "request_interrupted" || payload.content === RESTART_NOTICE_CONTENT
+}
+
+// Every notice the controller writes about its own machinery between requests: a Manual load
+// or unload, a scheduled retry, and a request it closed across a restart. None of them is
+// something the turn produced, so all of them fold into the process group around them.
+export function isControllerNotice(record: HistoryRecord) {
+  return isManualNotice(record) || isRetryNotice(record) || isRestartNotice(record)
+}
+
 function isStandaloneRecord(record: HistoryRecord) {
   if (record.kind === "input") return true
-  // Every other activity is a status the turn itself produced. A Manual load or
-  // unload and a scheduled retry are the controller's own bookkeeping between
-  // requests, so they belong to the process around them and stay folded with the
-  // request that carried them.
-  if (record.kind === "activity") return !isManualNotice(record) && !isRetryNotice(record)
+  // Every other activity is a status the turn itself produced; only the controller's own
+  // notices are bookkeeping, so they belong to the process around them and stay folded with
+  // the request that carried them.
+  if (record.kind === "activity") return !isControllerNotice(record)
   // A checkpoint is a compression boundary, not process: it stays in the conversation like a
   // reply, ends the group before it, and starts none.
   if (record.kind === "checkpoint") return true
@@ -142,10 +161,9 @@ export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHis
 // Minimal mode keeps one tail candidate per turn: the last activity or message record.
 // Earlier activities, earlier replies, tool turns, and checkpoints all fold around it: a
 // checkpoint keeps its own card only where the turn shows it, so minimal mode still folds it.
-// A Manual or retry notice is never a candidate: it reports controller bookkeeping, not the
-// turn's outcome.
+// A controller notice is never a candidate: it reports bookkeeping, not the turn's outcome.
 function threadHistoryTailCandidate(record: HistoryRecord) {
-  if (record.kind === "activity") return !isManualNotice(record) && !isRetryNotice(record)
+  if (record.kind === "activity") return !isControllerNotice(record)
   return record.kind === "response_output"
     && record.payload !== null && typeof record.payload === "object"
     && "type" in record.payload && record.payload.type === "message"

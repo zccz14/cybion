@@ -542,12 +542,15 @@ fn recover_user_requests(path: &Path) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for thread_id in interrupted {
         let content = "Request interrupted by a Cybion restart";
+        // The type marks this record as the controller's own bookkeeping: the
+        // browser folds it into the process group instead of letting it read as
+        // the answer to the request the restart closed.
         persist_history_record(
             &transaction,
             HistoryRecordInsert {
                 thread_id: &thread_id,
                 kind: "activity",
-                payload: &json!({"role":"system","content":content}),
+                payload: &json!({"type":"request_interrupted","role":"system","content":content}),
                 created_at: finished_at,
             },
         )
