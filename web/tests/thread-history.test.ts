@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, isRetryNotice, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, isRestartNotice, isRetryNotice, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id, screenshot = false): HistoryRecord {
@@ -132,6 +132,31 @@ test("a retry notice is recognised by the attempt it scheduled, not by its wordi
   assert.equal(isRetryNotice({ ...notice, payload: { role: "system", content: "Request failed: exhausted" } }), false)
   assert.equal(isRetryNotice({ ...notice, payload: { next_retry_at: "4" } }), false)
   assert.equal(isRetryNotice({ ...notice, payload: null }), false)
+})
+
+test("a request the controller closed across a restart is bookkeeping, so it folds into the process group", () => {
+  const restart = (id: number, payload: Record<string, unknown> = {}) => record(id, "activity", { role: "system", content: "Request interrupted by a Cybion restart", ...payload })
+  // A restart closes the request before the turn answers, so the notice sits with the process
+  // instead of standing where the reply would have been.
+  assert.deepEqual(shape(groupThreadHistory([
+    record(1, "input"),
+    restart(2, { type: "request_interrupted" }),
+    record(3, "response_output", { type: "message", content: [] }),
+  ])), [1, [2], 3])
+  // The records written before the payload carried a type are still in append-only history.
+  assert.deepEqual(shape(groupThreadHistory([
+    record(1, "input"),
+    restart(2),
+    record(3, "tool_output"),
+  ])), [1, [2, 3]])
+  assert.equal(isRestartNotice(restart(2)), true)
+  assert.equal(isRestartNotice(restart(2, { type: "request_interrupted" })), true)
+  // A failure the turn gave up on is its outcome, so it keeps a card of its own.
+  assert.equal(isRestartNotice(record(4, "activity", { role: "system", content: "Request failed: restart" })), false)
+  assert.equal(isRestartNotice(record(5, "input", { role: "system", content: "Request interrupted by a Cybion restart" })), false)
+  assert.equal(isRestartNotice(record(6, "activity", null)), false)
+  // Minimal mode never keeps it as the turn's outcome either: it folds with the process.
+  assert.deepEqual(shape(groupThreadHistoryMinimal([record(1, "input"), restart(2)])), [1, [2]])
 })
 
 test("a checkpoint is a compression boundary: it stays in the conversation and splits the groups around it", () => {
