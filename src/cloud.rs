@@ -7722,16 +7722,14 @@ timeline, active decisions and constraints, current objective, next step, unfini
 evidence routes. Keep raw history durable by citing its record IDs; do not retain credentials,
 tokens, passwords, cookies, API keys, or secrets. Preserve distinct causal events and only merge
 duplicate reports of the same event. When the source already contains a prior `# Durable working
-manual` checkpoint, consolidate it: carry still-true facts forward, drop stale ones, and merge
+context` checkpoint, consolidate it: carry still-true facts forward, drop stale ones, and merge
 newer information into one checkpoint instead of copying the old text verbatim.
 
-Manual detail does not travel with this checkpoint: whatever the checkpoint does not restate is
-reachable again only by opening that Manual. So decide which Manuals are still worth opening and
-why, instead of trusting a memory of them.
-
-A Manual the thread keeps loaded is the exception: the controller delivers its current copy again
-after this checkpoint without any tool call, so never list a loaded Manual in
-`## Manuals worth re-reading` and never restate its content.
+The checkpoint carries no Manual content: never write a Manual body, bullet, or quoted excerpt into
+it, and never restate a Manual's detail. A Manual this thread keeps loaded is delivered again by
+the controller after this checkpoint without any tool call; a Manual that is not loaded is reopened
+with `load_manual` when the thread needs it. Drop any Manual content an earlier checkpoint in the
+source still carries instead of passing it forward.
 
 Use terse bullets rather than prose paragraphs, and keep every heading in this exact order. Write
 `(none)` for an empty section; never drop a section.
@@ -7740,14 +7738,8 @@ Use terse bullets rather than prose paragraphs, and keep every heading in this e
 ## Resources and authoritative locations
 ## Chronicle timeline
 ## Active decisions and constraints
-## Manuals worth re-reading
 ## Current objective and next step
 ## Open work and evidence routes
-
-`## Manuals worth re-reading` lists one bullet per Manual this thread still needs and whose
-detail the rest of the checkpoint does not carry: the exact `manual_id`, then why it must be
-opened again and which decision or next step depends on it. Point at the Manual; never copy its
-content, and never list Workers, files, or URLs there. Write `(none)` when no detail is missing.
 
 The final section must include a fenced JSON array whose entries contain `topic_key`, `status`,
 `message_range`, and `search_keywords`. Exact calendar times are allowed only when present in the
@@ -7760,9 +7752,7 @@ const CHECKPOINT_PROMPT_ZH: &str = r#"# 上下文检查点压缩
 
 这份检查点会在下一次请求里取代此前的历史。要保留：概念与术语、权威资源与精确位置、有因果关系的时序、生效中的决策与约束、当前目标与下一步、未完成的工作与取证路径。原始历史靠引用记录 ID 保持可追溯；不要把凭证、令牌、口令、Cookie、API Key 或密钥写进来。保留彼此独立的因果事件，只合并同一事件的重复报告。如果来源里已经有一份 `# Durable working context` 检查点，就把它合并进来：仍然成立的事实向前带、过时的丢掉，与新信息合成一份，不要照抄旧文本。
 
-Manual 的细节不会随这份检查点一起走下去：检查点没有复述的部分，只能重新打开那个 Manual 才能拿回来。所以要判断哪些 Manual 仍然值得打开、并说明理由，而不是凭对它们的记忆办事。
-
-本 Thread 加载着的 Manual 是例外：检查点之后控制器会自动把它的最新副本重新送达，不需要任何工具调用。所以已加载的 Manual 不要写进 `## Manuals worth re-reading`，也不要复述它的正文。
+检查点不承载 Manual 的内容：不要把任何 Manual 的正文、条目或原文摘录写进来，也不要复述它们的细节。本 Thread 加载着的 Manual 由控制器在检查点之后自动重投最新副本，不需要任何工具调用；没有加载的 Manual 到需要时用 `load_manual` 重新打开即可。来源里较早的检查点如果带着 Manual 正文，合并时删掉它，不要向前带。
 
 用小圆点短句，不要写散文段落；各小节标题必须按下面的顺序、逐字使用英文原文，不要翻译。空小节写 `(none)`，任何小节都不许省略。
 
@@ -7770,11 +7760,8 @@ Manual 的细节不会随这份检查点一起走下去：检查点没有复述�
 ## Resources and authoritative locations
 ## Chronicle timeline
 ## Active decisions and constraints
-## Manuals worth re-reading
 ## Current objective and next step
 ## Open work and evidence routes
-
-`## Manuals worth re-reading` 一行一个 Manual，只列 Thread 之后还需要、而细节没有被检查点其余部分带走的那些：写精确的 `manual_id`，随后写为什么必须重新打开、哪项决策或下一步依赖它。只指向 Manual，不要复制其正文；Worker、文件、URL 不属于这一节。没有丢失的细节就写 `(none)`。
 
 最后一个小节必须包含一段围栏 JSON 数组，条目含 `topic_key`、`status`、`message_range`、`search_keywords`。只有来源记录里明确出现的日历时间才可写入，否则用以记录序号为锚的相对时序并标注为推断。检查点正文用简体中文书写。不要提及这次摘要请求，也不要提及上下文被压缩过。"#;
 
@@ -7816,22 +7803,28 @@ fn checkpoint_developer_prompt_with_metadata(
     )
 }
 
+/// The skeleton every checkpoint carries: the H1 the text starts with, then the
+/// sections in the order the prompt asks for. The prompt and the validator read
+/// one list, so a section cannot leave one without leaving the other.
+const CHECKPOINT_HEADINGS: [&str; 7] = [
+    "# Durable working context",
+    "## Concepts and terminology",
+    "## Resources and authoritative locations",
+    "## Chronicle timeline",
+    "## Active decisions and constraints",
+    "## Current objective and next step",
+    "## Open work and evidence routes",
+];
+
 fn validate_checkpoint_text(text: &str) -> Result<(), anyhow::Error> {
-    let required = [
-        "# Durable working context",
-        "## Concepts and terminology",
-        "## Resources and authoritative locations",
-        "## Chronicle timeline",
-        "## Active decisions and constraints",
-        "## Manuals worth re-reading",
-        "## Current objective and next step",
-        "## Open work and evidence routes",
-    ];
-    if !text.trim_start().starts_with(required[0])
-        || required.iter().any(|section| !text.contains(section))
+    if !text.trim_start().starts_with(CHECKPOINT_HEADINGS[0])
+        || CHECKPOINT_HEADINGS
+            .iter()
+            .skip(1)
+            .any(|section| !text.contains(section))
     {
         return Err(anyhow::anyhow!(
-            "checkpoint output does not satisfy the durable working-manual contract"
+            "checkpoint output does not satisfy the durable working-context contract"
         ));
     }
     Ok(())
@@ -11032,7 +11025,7 @@ mod tests {
 
     fn valid_checkpoint(summary: &str) -> String {
         format!(
-            "# Durable working context\n\n## Concepts and terminology\n- {summary}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1 inferred {summary}\n\n## Active decisions and constraints\n- preserve raw history\n\n## Manuals worth re-reading\n- 6bf29f77 — reload the operating rules\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
+            "# Durable working context\n\n## Concepts and terminology\n- {summary}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1 inferred {summary}\n\n## Active decisions and constraints\n- preserve raw history\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
         )
     }
 
@@ -12946,30 +12939,22 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_prompt_asks_for_manuals_to_reread() {
+    fn checkpoint_prompt_matches_the_validated_skeleton() {
         for language in [CheckpointLanguage::En, CheckpointLanguage::Zh] {
             let prompt = checkpoint_developer_prompt(language);
             assert!(!prompt.contains("read_context"), "{language:?}");
-            for heading in [
-                "# Durable working context",
-                "## Concepts and terminology",
-                "## Resources and authoritative locations",
-                "## Chronicle timeline",
-                "## Active decisions and constraints",
-                "## Manuals worth re-reading",
-                "## Current objective and next step",
-                "## Open work and evidence routes",
-            ] {
-                assert!(
-                    prompt.contains(heading),
-                    "{heading} missing from {language:?}"
-                );
+            let mut at = 0;
+            for heading in CHECKPOINT_HEADINGS {
+                let offset = prompt[at..]
+                    .find(heading)
+                    .unwrap_or_else(|| panic!("{heading} missing from {language:?}"));
+                at += offset + heading.len();
             }
-            assert!(
-                prompt.find("## Manuals worth re-reading")
-                    < prompt.find("## Current objective and next step"),
-                "{language:?}"
-            );
+            // Loading is Thread state: the controller re-delivers a loaded Manual
+            // after the checkpoint, so the checkpoint never carries one.
+            assert!(!prompt.contains("Manuals worth re-reading"), "{language:?}");
+            assert!(!prompt.contains("working manual"), "{language:?}");
+            assert!(!prompt.contains("working-manual"), "{language:?}");
         }
     }
 
@@ -12996,12 +12981,12 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_validation_requires_the_reload_section() {
+    fn checkpoint_validation_requires_every_section() {
         let complete = valid_checkpoint("state");
         assert!(validate_checkpoint_text(&complete).is_ok());
-        let dropped = "## Manuals worth re-reading\n- 6bf29f77 — reload the operating rules\n\n";
+        let dropped = "## Active decisions and constraints\n- preserve raw history\n\n";
         let missing = complete.replace(dropped, "");
-        assert!(!missing.contains("## Manuals worth re-reading"));
+        assert!(!missing.contains("## Active decisions and constraints"));
         assert!(validate_checkpoint_text(&missing).is_err());
     }
 

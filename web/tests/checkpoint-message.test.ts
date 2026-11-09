@@ -4,7 +4,7 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { createTestServer } from "./vite-server.ts"
 
-const checkpoint = `# Durable working manual
+const checkpoint = `# Durable working context
 
 ## 概念与术语
 
@@ -40,7 +40,7 @@ test("checkpoint cards stay in the conversation with their body folded behind th
     assert.ok(zh.includes("#6"))
     assert.ok(zh.includes("&quot;role&quot;: &quot;developer&quot;"))
     // The full Markdown is not truncated: every heading, list item and code block is intact.
-    assert.ok(zh.includes("<h1>Durable working manual</h1>"))
+    assert.ok(zh.includes("<h1>Durable working context</h1>"))
     assert.ok(zh.includes("<h2>概念与术语</h2>"))
     assert.ok(zh.includes("<li>"))
     assert.ok(zh.includes("<pre>") && zh.includes("checkpoint-rendering"))
@@ -57,11 +57,11 @@ test("a checkpoint without a prose line previews the hint while its body still c
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
     const { CheckpointMessage } = await server.ssrLoadModule("@zccz14/cybion-components")
-    const record = { id: 7, thread_id: "thread-a", kind: "checkpoint", payload: { role: "developer", content: "# Durable working manual\n\n```json\n[]\n```\n" }, created_at: 1_800_003_681 }
+    const record = { id: 7, thread_id: "thread-a", kind: "checkpoint", payload: { role: "developer", content: "# Durable working context\n\n```json\n[]\n```\n" }, created_at: 1_800_003_681 }
     const render = (language: string) => renderToStaticMarkup(createElement(CheckpointMessage, { language, record }))
     assert.ok(render("zh").includes(">上下文已压缩为 Markdown，点开可读<"))
     assert.ok(render("en").includes(">Manual compressed into Markdown — open to read it<"))
-    assert.ok(render("zh").includes("<h1>Durable working manual</h1>"))
+    assert.ok(render("zh").includes("<h1>Durable working context</h1>"))
   } finally {
     await server.close()
   }
