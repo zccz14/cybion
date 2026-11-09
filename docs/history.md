@@ -116,14 +116,24 @@ already names the Manuals the Thread keeps loaded (see
 everything it showed before — name, timestamp, record id — so the evidence is
 still one disclosure away.
 
-A scheduled retry and a request the controller closed across a restart are the
-same kind of notice, so they fold the same way. `next_retry_at` marks the
-attempt a retry scheduled; `type: request_interrupted` marks the request a
-restart closed, and records written before that type existed are recognised by
-their exact wording, `Request interrupted by a Cybion restart`. Neither one is
-the turn's answer: a restart closed the request before it produced anything, and
-a retry means the Thread will answer later. A request that ends in a failure the
-Thread gave up on is different — it is the turn's outcome and keeps a card.
+The controller's other notices fold the same way, because none of them is
+something the turn produced:
+
+| Record | What it reports |
+| --- | --- |
+| `type: request_interrupted` | a request the controller closed across a restart. Records written before that type existed are recognised by the exact wording the controller ever used, `Request interrupted by a Cybion restart`. |
+| `next_retry_at` | a retry the Thread scheduled for itself, so its answer comes later |
+| `type: context` | background a host appended with `POST /v1/threads/{id}/context` |
+| `type: thread_share` | a grant or revoke of viewer access |
+| `type: thread_control` | a Stop, Continue or Compact request |
+| `type: late_worker_result`, or an activity carrying a `call_id` | a Worker result stored as activity because the call it answers had already settled or been superseded |
+
+Folding is display only: an injected `context` still compiles into a developer
+message, and a control request is still an execution boundary. A request that
+ends in a failure the Thread gave up on is different — it is the turn's outcome
+and keeps a card of its own. The image exemption is checked before the fold, so
+a collapsed group never hides a picture, not even the one inside a superseded
+Worker result.
 
 A `checkpoint` is a compression boundary, so it ends the group before it and
 starts none: the Markdown it stores never hides behind a group the reader must
