@@ -31,10 +31,8 @@ something the binding table already decides, and a pre-committed list has no
 reader: the prompt therefore states the rule positively and tells consolidation
 to drop Manual content an earlier checkpoint still carries.
 
-The final section contains a fenced JSON array with `topic_key`, `status`,
-`message_range`, and `search_keywords`. Calendar times are copied only when
-they are explicit in the source metadata; record-order references are used for
-relative chronology.
+Calendar times are copied only when they are explicit in the source metadata;
+record-order references are used for relative chronology.
 
 ## Trigger
 
