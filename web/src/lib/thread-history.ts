@@ -53,15 +53,33 @@ export function isRestartNotice(record: HistoryRecord) {
   return payload.type === "request_interrupted" || payload.content === RESTART_NOTICE_CONTENT
 }
 
-// Every notice the controller writes about its own machinery between requests: a Manual load
-// or unload, a scheduled retry, and a request it closed across a restart. None of them is
-// something the turn produced, so all of them fold into the process group around them.
+// The activity types the controller writes about the Thread's machinery rather than about what
+// the turn produced: a host's injected context, a sharing grant or revoke, and a Stop, Continue
+// or Compact request. Each one is a fact about the Thread, not something the conversation is
+// supposed to answer with.
+const CONTROLLER_ACTIVITY_TYPES = new Set(["context", "thread_share", "thread_control", "late_worker_result"])
+
+// Every notice the controller writes about its own machinery: a Manual load or unload, a
+// scheduled retry, a request it closed across a restart, injected context, a sharing change, a
+// control request, and a Worker result it stored as activity because the call it answers had
+// already settled or been superseded. None of them is something the turn produced, so all of
+// them fold into the process group around them.
 export function isControllerNotice(record: HistoryRecord) {
-  return isManualNotice(record) || isRetryNotice(record) || isRestartNotice(record)
+  if (record.kind !== "activity") return false
+  if (isManualNotice(record) || isRetryNotice(record) || isRestartNotice(record)) return true
+  const payload = historyPayloadObject(record.payload)
+  if (payload === null) return false
+  if (typeof payload.type === "string" && CONTROLLER_ACTIVITY_TYPES.has(payload.type)) return true
+  // A Worker result stored as activity rather than as a tool output: the call it answers is no
+  // longer the turn's, so its output is bookkeeping the process group can keep.
+  return typeof payload.call_id === "string"
 }
 
 function isStandaloneRecord(record: HistoryRecord) {
   if (record.kind === "input") return true
+  // Image records never join a process group, so a collapsed group cannot hide one — not even
+  // when a superseded Worker result carries the image as bookkeeping.
+  if (threadImage(record) !== null) return true
   // Every other activity is a status the turn itself produced; only the controller's own
   // notices are bookkeeping, so they belong to the process around them and stay folded with
   // the request that carried them.
@@ -69,8 +87,6 @@ function isStandaloneRecord(record: HistoryRecord) {
   // A checkpoint is a compression boundary, not process: it stays in the conversation like a
   // reply, ends the group before it, and starts none.
   if (record.kind === "checkpoint") return true
-  // Image records never join a process group, so a collapsed group cannot hide one.
-  if (threadImage(record) !== null) return true
   const payload = record.payload
   return record.kind === "response_output" && payload !== null && typeof payload === "object"
     && "type" in payload && payload.type === "message"

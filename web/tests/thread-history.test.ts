@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, isRestartNotice, isRetryNotice, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
+import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, isControllerNotice, isRestartNotice, isRetryNotice, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id, screenshot = false): HistoryRecord {
@@ -34,7 +34,7 @@ test("empty histories and histories containing only standalone messages do not c
     record(1, "input", { role: "user", content: "Hello" }),
     record(2, "response_output", { type: "message", role: "assistant", content: [] }),
     record(3, "activity", { role: "system", content: "Request failed: error" }),
-    record(4, "activity", { type: "thread_control", action: "continue" }),
+    record(4, "checkpoint", { role: "developer", content: "Checkpoint" }),
   ]
   const entries = groupThreadHistory(records)
   assert.deepEqual(entries.map((entry) => entry.type), ["message", "message", "message", "message"])
@@ -157,6 +157,34 @@ test("a request the controller closed across a restart is bookkeeping, so it fol
   assert.equal(isRestartNotice(record(6, "activity", null)), false)
   // Minimal mode never keeps it as the turn's outcome either: it folds with the process.
   assert.deepEqual(shape(groupThreadHistoryMinimal([record(1, "input"), restart(2)])), [1, [2]])
+})
+
+test("injected context, sharing changes, control requests and Worker results stored as activity fold into the process", () => {
+  const bookkeeping = (id: number, payload: Record<string, unknown>) => record(id, "activity", payload)
+  const records = [
+    record(1, "input"),
+    bookkeeping(2, { type: "context", content: "Ticket #42 is open" }),
+    bookkeeping(3, { type: "thread_share", action: "grant", role: "system", content: "Thread sharing: grant viewer access" }),
+    bookkeeping(4, { type: "thread_control", action: "compact" }),
+    bookkeeping(5, { type: "late_worker_result", call_id: "call-late", result: "ok" }),
+    // A result the controller stored as activity because its call had already settled.
+    bookkeeping(6, { type: "function_call_output", call_id: "call-old", output: "stale" }),
+    record(7, "response_output", { type: "message", content: [] }),
+    // A failure the turn gave up on is its outcome, so it keeps a card of its own.
+    record(8, "activity", { role: "system", content: "Request failed: tls" }),
+  ]
+  assert.deepEqual(shape(groupThreadHistory(records)), [1, [2, 3, 4, 5, 6], 7, 8])
+  for (const index of [1, 2, 3, 4, 5]) assert.equal(isControllerNotice(records[index]), true)
+  assert.equal(isControllerNotice(records[7]), false)
+  // The image exemption wins over the fold: a superseded view_image result stays visible.
+  const viewed = { type: "function_call_output", call_id: "call-view", output: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }] }
+  assert.deepEqual(shape(groupThreadHistory([record(1, "input"), bookkeeping(2, viewed)])), [1, 2])
+  // Minimal mode folds them around the turn's own outcome too.
+  assert.deepEqual(shape(groupThreadHistoryMinimal([
+    record(1, "input"),
+    bookkeeping(2, { type: "thread_control", action: "cancel" }),
+    record(3, "response_output", { type: "message", content: [] }),
+  ])), [1, [2], 3])
 })
 
 test("a checkpoint is a compression boundary: it stays in the conversation and splits the groups around it", () => {
@@ -366,7 +394,10 @@ test("minimal activities fold unless they are the turn's tail candidate", () => 
     record(5, "tool_output", { output: "late" }),
     record(6, "input"),
     record(7, "response_output", { id: "msg_7", type: "message" }),
+    // A control request is controller bookkeeping: it folds instead of replacing the reply.
     record(8, "activity", { type: "thread_control", action: "cancel" }),
+    // An activity the turn itself produced is still the tail item of its turn.
+    record(9, "activity", { role: "system", content: "Request failed: tls" }),
   ]
   const entries = groupThreadHistoryMinimal(records)
   assert.deepEqual(entries.map((entry) => entry.type), ["message", "process", "message", "process", "message", "process", "message"])
@@ -374,9 +405,8 @@ test("minimal activities fold unless they are the turn's tail candidate", () => 
   assert.equal(entries[2].type === "message" && entries[2].record.id, 4)
   assert.deepEqual(entries[3].type === "process" && entries[3].records.map((item) => item.id), [5])
   assert.equal(entries[4].type === "message" && entries[4].record.id, 6)
-  // The later cancel activity replaces the reply as the only tail candidate of its turn.
-  assert.deepEqual(entries[5].type === "process" && entries[5].records.map((item) => item.id), [7])
-  assert.equal(entries[6].type === "message" && entries[6].record.id, 8)
+  assert.deepEqual(entries[5].type === "process" && entries[5].records.map((item) => item.id), [7, 8])
+  assert.equal(entries[6].type === "message" && entries[6].record.id, 9)
 })
 
 test("a leading partial turn without an input still resolves one tail candidate", () => {

@@ -124,8 +124,9 @@ and loaded pages; this feature does not introduce automatic data retention.
 
 - Grant and manual revoke changes append owner-only `activity` records with actor,
   recipient, grant cycle, action and revision. They do not enter model context,
-  change the current request boundary or start inference. Idempotent operations
-  do not append duplicate audit records.
+  change the current request boundary or start inference, and the conversation
+  folds them into the process group like the rest of the controller's
+  bookkeeping. Idempotent operations do not append duplicate audit records.
 - Revocation commits in A independently of discovery sync. Reads authorized after
   that commit fail immediately. An in-flight read already authorized under an
   earlier SQLite snapshot may complete; transmitted/read/copied material cannot

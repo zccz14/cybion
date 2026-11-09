@@ -52,9 +52,10 @@ base64 length.
 An integration can also hand a Thread background it already holds without
 starting a turn: `POST /v1/threads/{id}/context` with `{"content":"..."}`
 stores an `activity` record of type `context`, and the compiler replays it as
-a developer message. The conversation folds it like any other activity, so the
-host's own state (a Ticket, a chat room, an email thread) stays out of the
-human bubbles while remaining part of what the model reads. The first user
+a developer message. The conversation folds it into the process group with the
+rest of the controller's bookkeeping, so the host's own state (a Ticket, a chat
+room, an email thread) stays out of the human bubbles while remaining part of
+what the model reads. The first user
 input after it starts inference, which is why the supported integration shape
 is: create the Thread empty, append the context, then send the person's
 message. Context records are ordinary append-only history; a compaction
@@ -91,11 +92,17 @@ thread. Stop the running request first. New user input can still supersede a
 running request as before. Control operations are recorded as `activity` with
 `type: "thread_control"` and an `action` of `cancel`, `continue`, or `compact`.
 These records are execution boundaries, never model input. They keep late
-responses and concurrent requests isolated even without a new user message.
+responses and concurrent requests isolated even without a new user message, and
+the view folds them into the process group, so pressing Stop or Compact leaves
+no line standing where the turn's answer would have been.
 
 The conversation view supports a minimal mode. It folds each turn — the span
 from one user input to the next — down to the input plus a single tail item:
-the turn's last AI reply or its last activity line, whichever came later.
+the turn's last AI reply or its last activity the turn itself produced,
+whichever came later. A controller notice — a Manual load, a scheduled retry, a
+restart, injected context, a sharing change, a control request, a Worker result
+stored as activity — never becomes the tail item, because it reports
+bookkeeping rather than the turn's outcome.
 Earlier replies, activities, and protocol records join the collapsed process
 group; a checkpoint keeps its own card only where the turn shows it, so minimal
 mode folds it like every other non-tail record. The turn's images never fold
