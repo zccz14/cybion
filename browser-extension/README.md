@@ -24,3 +24,8 @@ pnpm build                     # 拷进 dist/ 并生成 sidepanel.html
 ## 有意不做
 
 不自动点击、不填表、不截整页；`⌘⇧K` 只做"截一张可见区 + 开一条 Thread"。
+
+## 图标
+
+`icons/` 与站点 favicon 同一份几何（`web/public/cybion-mark.svg`：64 视框、`stroke-width: 9` 的三角描边），
+用 Chrome 无头渲染 16/48/128 三档，透明底。改品牌标记时两边一起改。
