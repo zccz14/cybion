@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Cybion",
-  "version": "0.1.0",
-  "description": "在任意网页上截图，立刻开一个临时 Thread 问 Cybion。",
+  "version": "0.2.0",
+  "description": "在任意网页上截图问 Cybion，答案就在侧边栏里接着聊。",
   "minimum_chrome_version": "116",
-  "permissions": ["activeTab", "storage", "scripting", "contextMenus"],
+  "permissions": ["activeTab", "storage", "contextMenus", "sidePanel"],
   "host_permissions": ["https://cybion.ntnl.io/*", "https://auth.ntnl.io/*"],
   "background": { "service_worker": "src/background.js", "type": "module" },
+  "side_panel": { "default_path": "dist/sidepanel.html" },
   "content_scripts": [
     {
       "matches": ["https://cybion.ntnl.io/*"],
@@ -14,7 +15,7 @@
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_popup": "src/popup.html", "default_title": "Cybion" },
+  "action": { "default_title": "Cybion" },
   "commands": {
     "capture-and-ask": {
       "suggested_key": { "default": "Ctrl+Shift+K", "mac": "Command+Shift+K" },
