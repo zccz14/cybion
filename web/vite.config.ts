@@ -4,6 +4,8 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'node:path';
 
 export default defineConfig({
+  // 插件把同一份 dist 装进侧边栏：相对基址让 chrome-extension:// 下也能加载资源。
+  base: './',
   plugins: [react(), tailwindcss()],
   optimizeDeps: {
     entries: ['index.html', 'e2e/*.html'],
