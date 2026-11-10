@@ -3,7 +3,7 @@
 // manifest 里的 update_url 自己升级。
 //
 // 用法：node scripts/pack.mjs
-// 产出：release/cybion.crx、release/updates.xml、release/manifest.json
+// 产出：release/cybion.crx、release/updates.xml、release/cybion.mobileconfig、release/manifest.json
 //
 // 只用 node 内置模块 + 系统 zip：CRX3 = 「12 字节头 + protobuf 头 + 普通 zip」，签名是
 // RSA-SHA256，所以不需要 Chrome 参与，也不受有没有显示器影响（CI 里很关键）。
@@ -29,6 +29,7 @@ const stage = path.join(release, "stage")
 const archive = path.join(release, "cybion.zip")
 const UPDATE_URL = "https://cybion.ntnl.io/extensions/updates.xml"
 const COBASE_URL = "https://cybion.ntnl.io/extensions/cybion.crx"
+const PROFILE_ID = "io.ntnl.cybion.browser-extension"
 // 打进 CRX 的文件：多一个少一个都会改变插件行为，所以在这里写死，不用通配。
 const ENTRIES = ["manifest.json", "sidepanel.html", "sidepanel.js", "src", "icons"]
 
@@ -76,6 +77,76 @@ function signaturePayload(headerData, archiveData) {
     headerData,
     archiveData,
   ])
+}
+
+/** 固定的 UUID：重复安装时覆盖同一个描述文件，而不是堆一堆。 */
+function stableUuid(seed) {
+  const digest = Buffer.from(createHash("sha256").update(seed).digest().subarray(0, 16))
+  digest[6] = (digest[6] & 0x0f) | 0x40
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const hex = digest.toString("hex").toUpperCase()
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/**
+ * macOS 的安装包：一个配置描述文件，同时把 Edge 与 Chrome 的 ExtensionInstallForcelist 写进
+ * 受管偏好设置。浏览器只认受管（MDM / 描述文件）带来的强制安装，所以「命令行装一次描述文件」
+ * 是自托管扩展能在 macOS 上自动升级的唯一正经路子。
+ */
+function mobileConfig(id) {
+  const browsers = [
+    ["com.microsoft.Edge", "Microsoft Edge"],
+    ["com.google.Chrome", "Google Chrome"],
+  ]
+  const payloads = browsers
+    .map(
+      ([domain, label]) => `    <dict>
+      <key>PayloadType</key>
+      <string>${domain}</string>
+      <key>PayloadIdentifier</key>
+      <string>${PROFILE_ID}.${domain}</string>
+      <key>PayloadUUID</key>
+      <string>${stableUuid(`${PROFILE_ID}.${domain}`)}</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>PayloadDisplayName</key>
+      <string>Cybion（${label}）</string>
+      <key>ExtensionInstallForcelist</key>
+      <array>
+        <string>${id};${UPDATE_URL}</string>
+      </array>
+      <key>ExtensionInstallSources</key>
+      <array>
+        <string>https://cybion.ntnl.io/extensions/*</string>
+      </array>
+    </dict>`,
+    )
+    .join("\n")
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadIdentifier</key>
+  <string>${PROFILE_ID}</string>
+  <key>PayloadUUID</key>
+  <string>${stableUuid(PROFILE_ID)}</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+  <key>PayloadDisplayName</key>
+  <string>Cybion 浏览器插件（自托管，自动升级）</string>
+  <key>PayloadOrganization</key>
+  <string>ntnl.io</string>
+  <key>PayloadDescription</key>
+  <string>让 Edge / Chrome 从 cybion.ntnl.io 安装 Cybion 插件，并跟随更新清单自动升级。</string>
+  <key>PayloadContent</key>
+  <array>
+${payloads}
+  </array>
+</dict>
+</plist>
+`
 }
 
 /** 读回来验证：签名对得上、id 与清单一致，才算打包成功。 */
@@ -193,10 +264,14 @@ const updates = `<?xml version='1.0' encoding='UTF-8'?>
 </gupdate>
 `
 await writeFile(path.join(release, "updates.xml"), updates)
+await writeFile(path.join(release, "cybion.mobileconfig"), mobileConfig(id))
 await cp(manifestPath, path.join(release, "manifest.json"))
 
 console.log(`扩展 id: ${id}`)
 console.log(`版本: ${manifest.version}`)
 console.log("产出: release/cybion.crx, release/updates.xml")
-console.log("\n安装（Edge，需要一次管理员权限，之后自动升级）:")
-console.log(`  sudo defaults write /Library/Preferences/com.microsoft.Edge.plist ExtensionInstallForcelist -array "${id};${UPDATE_URL}"`)
+console.log("\n安装（macOS，一次管理员权限，之后自动升级）:")
+console.log("  curl -fsS https://cybion.ntnl.io/extensions/cybion.mobileconfig -o /tmp/cybion.mobileconfig")
+console.log("  sudo profiles install -path /tmp/cybion.mobileconfig")
+console.log("  然后完全退出并重开 Edge：edge://policy 里应看到 ExtensionInstallForcelist。")
+console.log("  （描述文件同时管 Edge 与 Chrome；卸载：sudo profiles remove -identifier " + PROFILE_ID + "）")
