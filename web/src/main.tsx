@@ -24,6 +24,7 @@ import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitProvider, useLinkit } from "linkit-react-components"
 import { AppLayout, Markdown, type AppNavGroup } from "@zccz14/ux"
 import { CybionThreadProvider, CybionThreadView, HistoryMessage } from "@zccz14/cybion-components"
+import { listenForExtensionAttachments } from "./extension-bridge"
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -1084,6 +1085,8 @@ function useAudioModels(sdk: AuthMiniApi) {
     retry: false,
   })
 }
+
+listenForExtensionAttachments()
 
 function App() {
   return <TooltipProvider delayDuration={0}>

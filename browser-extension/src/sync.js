@@ -1,7 +1,6 @@
-// 在 cybion.ntnl.io 上跑（包括侧边栏里那个 iframe）：替站点把一份"过期但可续"的会话收拾好，
-// 并把现成的 JWT 递给插件——插件不自己登录，它只是同一个人的第二个入口。
+// 在 cybion.ntnl.io 上跑（包括侧边栏里那个 iframe）：替站点把一份"过期但可续"的会话收拾好。
 //
-// 为什么需要这一步：站点的 AuthMiniProvider 启动时会本地校验 JWT 的 exp，过期就直接出
+// 站点的 AuthMiniProvider 启动时会本地校验 JWT 的 exp，过期就直接出
 // "Cybion could not verify this session"，不会替你续。这份代码跑在站点自己的 origin 里，
 // 所以它能就地续期、或者就地清掉，让应用回到登录页而不是停在死卡片上。
 (() => {
@@ -28,18 +27,6 @@
     } catch {
       return 0;
     }
-  }
-
-  let lastPushed = null;
-
-  function push(session) {
-    if (!session?.accessToken) return;
-    if (expiresAt(session.accessToken) <= Date.now()) return;
-    if (session.accessToken === lastPushed) return;
-    lastPushed = session.accessToken;
-    try {
-      void chrome.runtime.sendMessage({ type: "cybion:session", session })?.catch?.(() => {});
-    } catch {}
   }
 
   async function refresh(session) {
@@ -79,17 +66,14 @@
     }
   }
 
+  const session = read();
+  if (!session) return;
+  if (expiresAt(session.accessToken) > Date.now() + 60_000) return;
+
   void (async () => {
-    const session = read();
-    if (!session) return;
-    if (expiresAt(session.accessToken) > Date.now() + 60_000) {
-      push(session);
-      return;
-    }
     const repaired = await refresh(session);
     if (repaired) {
       localStorage.setItem(KEY, JSON.stringify(repaired));
-      push(repaired);
       reloadOnce();
       return;
     }
@@ -100,14 +84,4 @@
       reloadOnce();
     }
   })();
-
-  // 侧边栏里那个 iframe 也是这个站点，但存储是分区过的：你在框里登录之后，
-  // 会话只落在它自己那一格。所以持续盯着，一有新的就递出去。
-  setInterval(() => push(read()), 4000);
-
-  chrome.runtime.onMessage.addListener((message, _sender, respond) => {
-    if (message?.type !== "cybion:read-session") return;
-    respond({ session: read() });
-    return true;
-  });
 })();
