@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Cybion",
-  "version": "0.2.0",
-  "description": "在任意网页上截图问 Cybion，答案就在侧边栏里接着聊。",
+  "version": "0.3.0",
+  "description": "在任意网页上截图问 Cybion，侧边栏里就是完整的 Cybion。",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "storage", "contextMenus", "sidePanel"],
   "host_permissions": ["https://cybion.ntnl.io/*", "https://auth.ntnl.io/*"],

@@ -1,23 +1,26 @@
 # Cybion Browser Extension
 
-Cybion 的第二个 UI：在任意网页上截图，立刻开一个临时 Thread 问一句，答案浮回那个页面。
+Cybion 的第二个宿主：侧边栏里渲染的就是 **GUI 自己的构建产物**（`web/dist`），不是另写的前端。按 `⌘⇧K` 截当前可见区，它会开一条 Thread 并把侧边栏带到那条 Thread 上——你人还在原来的页面上。
 
-它不是设备——没有配对、没有注册、没有长连接，也没有无人值守的调用。它跟 `web/` 那个 GUI 走同一套 `/api`，用同一个 Auth Mini JWT，登录态由 GUI 持有、插件只是取过来用。
+它复用同一个 Auth Mini JWT（从已登录的 `cybion.ntnl.io` 取过来），所以它不是设备：没有配对、没有注册、没有长连接，也没有无人值守的调用。
 
-## 装（开发者模式）
+## 它只补三件事
 
-1. Chrome → `chrome://extensions` → 打开右上角「开发者模式」
-2. 「加载已解压的扩展程序」→ 选这个目录 `browser-extension/`
-3. 在浏览器里打开并登录 `https://cybion.ntnl.io`（插件从这里取登录态）
+`scripts/build.mjs` 把 `web/dist` 拷进 `dist/`，并生成一个引导文件，在 GUI 启动前做三件事：
 
-## 用
+1. `window.__CYBION_API_BASE__ = "https://cybion.ntnl.io"` —— 扩展页的 origin 不是服务端
+2. 把 background 持有的 session 写进 `localStorage['auth-mini.sdk:https://auth.ntnl.io/']` —— 跟 GUI 同一份登录态
+3. 有 pending Thread 就设置 `location.hash = "#/threads/<id>"` —— HashRouter 直接落到那条 Thread
 
-- `⌘⇧K`：截当前可见区 → 建一个临时 Thread 问「这是干什么的」→ 答案浮在页面右上角
-- 右键菜单「问 Cybion：这是干什么的？」：同上，选中文字时会带上选中的那段
-- 点插件图标：看登录态、同步登录态、打开 Cybion
+## 装
 
-## 有意不做的事
+```
+pnpm --dir ../web build        # 先有 GUI 产物
+pnpm build                     # 拷进 dist/ 并生成 sidepanel.html
+```
 
-- 不做 Thread 列表、手册、终极机器、设置——那些留在 GUI
-- 不自动点击、不填表、不批量翻页；这是有人值守的形态，人是那道门
-- 不截整页（`captureVisibleTab` 只能截可见区；整页要上 CDP）
+然后 `chrome://extensions`（或 `edge://extensions`）→ 开发者模式 → 加载已解压的扩展程序 → 选这个目录。
+
+## 有意不做
+
+不自动点击、不填表、不截整页；`⌘⇧K` 只做"截一张可见区 + 开一条 Thread"。

@@ -976,6 +976,10 @@ function useApiRequest(sdk: AuthMiniApi) {
   return useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
 }
 
+// 同一个产物有两个宿主：站点自己，以及浏览器扩展的侧边栏（chrome-extension://）。
+// 后者用 window.__CYBION_API_BASE__ 指回真正的服务端；站点里没有这个全局，行为不变。
+const API_BASE = (globalThis as { __CYBION_API_BASE__?: string }).__CYBION_API_BASE__ || window.location.origin
+
 function callbackUrl() {
   // Preserve only validated, non-secret pairing/share routes across hosted sign-in.
   const route = new URLSearchParams(location.hash.split("?")[1] ?? "")
@@ -1567,7 +1571,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
     ? { label: t("restoreThread"), icon: <ArchiveRestoreIcon className="size-4" />, next: false }
     : { label: t("archiveThread"), icon: <ArchiveIcon className="size-4" />, next: true }
   return <>
-    <CybionThreadProvider queryClient={client} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={window.location.origin} getToken={() => accessToken(sdk)} identity={userId} language={language}>
+    <CybionThreadProvider queryClient={client} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={API_BASE} getToken={() => accessToken(sdk)} identity={userId} language={language}>
       <CybionThreadView
         threadId={threadId}
         onThreadChange={setCurrent}
@@ -1630,7 +1634,7 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
   const loadAudio = useCallback((reference: string, mediaType: string | null) => audioObjectUrl(sdk, reference, mediaType), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
-  return <CybionThreadProvider queryClient={client} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={window.location.origin} getToken={() => accessToken(sdk)} identity={userId} language={language}><SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} loadAudio={loadAudio} />} /></CybionThreadProvider>
+  return <CybionThreadProvider queryClient={client} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={API_BASE} getToken={() => accessToken(sdk)} identity={userId} language={language}><SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} loadAudio={loadAudio} />} /></CybionThreadProvider>
 }
 
 function AudioTranscriptionCall({ language, call, time }: { language: Language; call: AudioTranscriptionFunctionCall; time: string }) {
