@@ -1274,6 +1274,7 @@ async fn static_asset(uri: Uri) -> Response {
                 "text/html; charset=utf-8"
             } else {
                 match requested.rsplit('.').next() {
+                    Some("html") => "text/html; charset=utf-8",
                     Some("js") => "text/javascript; charset=utf-8",
                     Some("css") => "text/css; charset=utf-8",
                     Some("svg") => "image/svg+xml",
