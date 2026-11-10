@@ -25,30 +25,78 @@ window.__CYBION_API_BASE__ = ${JSON.stringify(API_BASE)}
 
 const SESSION_KEY = ${JSON.stringify(SESSION_KEY)}
 
+/** JWT 的 exp 是唯一可靠的"现在还能不能用"，缓存的 expiresAt 字段可能早就不准了。 */
+function expiresAt(token) {
+  try {
+    const payload = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")
+    const decoded = JSON.parse(atob(payload + "=".repeat((4 - (payload.length % 4)) % 4)))
+    return (decoded.exp ?? 0) * 1000
+  } catch {
+    return 0
+  }
+}
+
+function notice(message) {
+  const root = document.getElementById("root")
+  if (!root) return
+  root.innerHTML = ""
+  const card = document.createElement("div")
+  card.style.cssText = "margin:20px;padding:16px 18px;border:1px solid var(--border, #d8d8d8);border-radius:12px;font:13px/1.7 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;color:var(--foreground,#111)"
+  const title = document.createElement("div")
+  title.textContent = "侧边栏还差一次登录"
+  title.style.cssText = "font-weight:600;margin-bottom:6px"
+  const body = document.createElement("div")
+  body.textContent = message
+  body.style.cssText = "color:var(--muted-foreground,#666);margin-bottom:12px"
+  const open = document.createElement("button")
+  open.textContent = "打开 cybion.ntnl.io 登录"
+  open.style.cssText = "margin-right:8px;padding:5px 10px;border:1px solid var(--border,#d8d8d8);border-radius:8px;background:transparent;font:inherit;cursor:pointer;color:inherit"
+  open.onclick = () => chrome.tabs.create({ url: ${JSON.stringify(API_BASE)} })
+  const retry = document.createElement("button")
+  retry.textContent = "登录好了，重试"
+  retry.style.cssText = "padding:5px 10px;border:1px solid var(--border,#d8d8d8);border-radius:8px;background:transparent;font:inherit;cursor:pointer;color:inherit"
+  retry.onclick = () => location.reload()
+  card.append(title, body, open, retry)
+  root.append(card)
+}
+
 async function seed() {
-  const store = await chrome.storage.local.get(["cybion.session", "cybion.pendingThread"])
-  const session = store["cybion.session"]
-  if (session?.accessToken) localStorage.setItem(SESSION_KEY, JSON.stringify(session))
-  const next = store["cybion.pendingThread"]
+  const reply = await chrome.runtime.sendMessage({ type: "cybion:session-now" }).catch(() => null)
+  const session = reply?.session
+  if (!session?.accessToken) {
+    notice("插件还没拿到 Cybion 的登录态。打开站点登录一次，插件会自动取过来。")
+    return false
+  }
+  if (expiresAt(session.accessToken) <= Date.now()) {
+    notice("拿到的那份登录态已经过期，而且没能自动续期。打开站点登录一次就好。")
+    return false
+  }
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+  return true
+}
+
+if (await seed()) {
+  const stored = await chrome.storage.local.get(["cybion.pendingThread"])
+  const next = stored["cybion.pendingThread"]
   if (next?.id) {
     await chrome.storage.local.remove("cybion.pendingThread")
     location.hash = "#/threads/" + encodeURIComponent(next.id)
   }
+
+  chrome.storage.onChanged.addListener((changes) => {
+    const session = changes["cybion.session"]?.newValue
+    if (session?.accessToken && expiresAt(session.accessToken) > Date.now()) {
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+    }
+    const pending = changes["cybion.pendingThread"]?.newValue
+    if (pending?.id) {
+      void chrome.storage.local.remove("cybion.pendingThread")
+      location.hash = "#/threads/" + encodeURIComponent(pending.id)
+    }
+  })
+
+  await import(${JSON.stringify(`./assets/${entry}`)})
 }
-
-await seed()
-
-chrome.storage.onChanged.addListener((changes) => {
-  const session = changes["cybion.session"]?.newValue
-  if (session?.accessToken) localStorage.setItem(SESSION_KEY, JSON.stringify(session))
-  const next = changes["cybion.pendingThread"]?.newValue
-  if (next?.id) {
-    void chrome.storage.local.remove("cybion.pendingThread")
-    location.hash = "#/threads/" + encodeURIComponent(next.id)
-  }
-})
-
-await import(${JSON.stringify(`./assets/${entry}`)})
 `
 await writeFile(path.join(out, "bootstrap.js"), bootstrap)
 

@@ -51,12 +51,18 @@ async function refreshSession(session) {
     const body = await response.json();
     const accessToken = body.access_token ?? body.accessToken;
     if (!accessToken) return null;
+    // auth-mini 的刷新响应是 { access_token, session_id, refresh_token, expires_in }：
+    // 到期时间是相对秒数，不是时间戳；写错的话 expiresAt 永远停在过去。
+    const expiresAt =
+      typeof body.expires_in === "number"
+        ? new Date(Date.now() + body.expires_in * 1000).toISOString()
+        : body.expires_at ?? body.expiresAt ?? session.expiresAt;
     const next = {
       sessionId: body.session_id ?? body.sessionId ?? session.sessionId,
       accessToken,
       refreshToken: body.refresh_token ?? body.refreshToken ?? session.refreshToken,
       receivedAt: new Date().toISOString(),
-      expiresAt: body.expires_at ?? body.expiresAt ?? session.expiresAt,
+      expiresAt,
     };
     await writeSession(next);
     return next;
@@ -146,6 +152,17 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       } catch (error) {
         respond({ error: error?.message ?? String(error) });
       }
+    })();
+    return true;
+  }
+  // 侧边栏要的不只是一份缓存，而是一份"现在就能用"的会话：先刷新，再回落到已登录的页面。
+  if (message?.type === "cybion:session-now") {
+    void (async () => {
+      let session = await readSession();
+      if (!session?.accessToken || message.force || expiringSoon(session)) {
+        session = (await refreshSession(session)) ?? (await syncSessionFromTab()) ?? session;
+      }
+      respond({ session });
     })();
     return true;
   }
