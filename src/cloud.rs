@@ -1250,6 +1250,7 @@ async fn static_asset(uri: Uri) -> Response {
                 let content_type = match name.rsplit('.').next() {
                     Some("xml") => "application/xml; charset=utf-8",
                     Some("crx") => "application/x-chrome-extension",
+                    Some("mobileconfig") => "application/x-apple-aspen-config",
                     Some("json") => "application/json; charset=utf-8",
                     _ => "application/octet-stream",
                 };
