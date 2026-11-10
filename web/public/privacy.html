@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cybion 浏览器扩展 · 隐私政策</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        background: #0a0a0a;
+        color: #e5e5e5;
+        font: 15px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      }
+      main { max-width: 720px; margin: 0 auto; padding: 56px 24px 96px; }
+      h1 { font-size: 24px; line-height: 1.35; margin: 0 0 4px; }
+      h2 { font-size: 16px; margin: 36px 0 10px; }
+      p, li { color: #cfcfcf; }
+      .meta { color: #8a8a8a; font-size: 13px; margin: 0 0 8px; }
+      code, kbd {
+        background: #1c1c1c;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        padding: 1px 5px;
+        font-size: 13px;
+      }
+      ul { padding-left: 20px; }
+      li { margin: 6px 0; }
+      hr { border: 0; border-top: 1px solid #262626; margin: 48px 0 32px; }
+      a { color: #9ecbff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Cybion 浏览器扩展 · 隐私政策</h1>
+      <p class="meta">最后更新 2026-11-11 · 适用于 Microsoft Edge / Google Chrome 上的 Cybion 扩展</p>
+
+      <h2>一句话</h2>
+      <p>
+        扩展不收集任何数据。它只在你主动按下快捷键或右键菜单时，把当前这一屏截图交给你自己已登录的
+        Cybion 账号，作为一条草稿的附件——问什么由你写，发不发由你决定。
+      </p>
+
+      <h2>扩展会接触哪些数据</h2>
+      <ul>
+        <li>
+          <strong>当前标签页的一屏截图</strong>：仅当你按 <kbd>⌘⇧K</kbd>（Windows 为
+          <kbd>Ctrl+Shift+K</kbd>）或选择右键菜单「用这张截图问 Cybion」时抓取，先暂存在你自己的浏览器里
+          （<code>chrome.storage.local</code>），随后交给侧边栏里打开的 cybion.ntnl.io。
+        </li>
+        <li>
+          <strong>登录会话</strong>：侧边栏显示的就是 cybion.ntnl.io 本身，登录由该站点与 auth.ntnl.io
+          完成；扩展不读取、不保存你的密码或令牌。
+        </li>
+        <li>
+          <strong>本地状态</strong>：截图和最近一次错误提示只存在你自己的浏览器里，用来把截图递给面板。
+        </li>
+      </ul>
+
+      <h2>数据去哪里</h2>
+      <p>
+        截图只发送到 <code>https://cybion.ntnl.io</code>，也就是你自己的 Cybion 账号。扩展没有统计、没有广告、
+        不向任何第三方转发数据；它只访问 <code>cybion.ntnl.io</code> 与 <code>auth.ntnl.io</code> 两个域名。
+      </p>
+      <p>
+        截图在服务端保存为你会话里的一条草稿附件，与你在网页端上传图片完全一致；你可以随时在会话里删掉它。
+      </p>
+
+      <h2>权限与用途</h2>
+      <ul>
+        <li><code>activeTab</code>：在你触发快捷键或右键菜单时截取当前标签页。</li>
+        <li><code>storage</code>：在后台与侧边栏之间传递这一张截图。</li>
+        <li><code>contextMenus</code>：提供右键菜单入口。</li>
+        <li><code>sidePanel</code>：显示侧边栏。</li>
+        <li>
+          <code>https://cybion.ntnl.io/*</code>、<code>https://auth.ntnl.io/*</code>：在站点里就地续期过期会话、
+          打开面板；不涉及其他网站。
+        </li>
+      </ul>
+
+      <h2>你的控制</h2>
+      <p>
+        不按快捷键，扩展不会截取任何画面。卸载扩展即删除全部本地数据；服务端的数据可以在 Cybion 里随时删除。
+      </p>
+
+      <h2>联系</h2>
+      <p>support@ntnl.io</p>
+
+      <hr />
+
+      <h1 style="font-size: 20px">Cybion browser extension — Privacy Policy</h1>
+      <p class="meta">Last updated 2026-11-11</p>
+      <h2>The short version</h2>
+      <p>
+        The extension collects nothing. Only when you press the shortcut or use the context menu does it capture the
+        visible tab and hand that one screenshot to the Cybion account you are already signed in to, as an attachment
+        on a new draft. You write the question; you decide whether to send it.
+      </p>
+      <h2>What it touches</h2>
+      <ul>
+        <li>
+          <strong>One screenshot of the active tab</strong>, captured only on <kbd>⌘⇧K</kbd> /
+          <kbd>Ctrl+Shift+K</kbd> or via the context menu. It is held in <code>chrome.storage.local</code> on your
+          machine and then handed to cybion.ntnl.io in the side panel.
+        </li>
+        <li>
+          <strong>Your session</strong> lives in the cybion.ntnl.io panel itself; the extension never reads or stores
+          your password or tokens.
+        </li>
+        <li><strong>Local state</strong> (the pending screenshot and the last error) stays in your browser.</li>
+      </ul>
+      <h2>Where data goes</h2>
+      <p>
+        Screenshots go to <code>https://cybion.ntnl.io</code> and nowhere else. No analytics, no ads, no third-party
+        sharing. The extension only talks to <code>cybion.ntnl.io</code> and <code>auth.ntnl.io</code>, and stores the
+        screenshot as a draft attachment in your own account, where you can delete it at any time.
+      </p>
+      <h2>Permissions</h2>
+      <p>
+        <code>activeTab</code> to capture the tab you are looking at; <code>storage</code> to pass that one image to the
+        panel; <code>contextMenus</code> for the right-click entry; <code>sidePanel</code> for the panel itself; host
+        access to <code>cybion.ntnl.io</code> and <code>auth.ntnl.io</code> so an expired session can be renewed in
+        place.
+      </p>
+      <h2>Contact</h2>
+      <p>support@ntnl.io</p>
+    </main>
+  </body>
+</html>

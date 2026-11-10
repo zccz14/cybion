@@ -58,6 +58,8 @@ jobs:
           printf '%s\n' "$CYBION_EXTENSION_KEY" > browser-extension/.keys/cybion-extension.pem
           chmod 600 browser-extension/.keys/cybion-extension.pem
           node browser-extension/scripts/pack.mjs
+          node browser-extension/scripts/pack.mjs --store
+          cp browser-extension/release/cybion-store.zip ./cybion-store.zip
       - run: cross build --release --locked --target x86_64-unknown-linux-gnu
       - run: |
           mkdir -p dist/cybion-linux-x86_64
@@ -72,6 +74,7 @@ jobs:
           path: |
             *.tar.gz
             *.tar.gz.sha256
+            cybion-store.zip
   components:
     # A manual npm-only run skips the controller build; normal releases still
     # require it to succeed. Keep this job in release.yml for the npm OIDC trust.

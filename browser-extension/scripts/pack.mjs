@@ -2,7 +2,8 @@
 // updates.xml。控制器（cybion.ntnl.io）把这两个文件 Host 在 /extensions/ 下，浏览器就会按
 // manifest 里的 update_url 自己升级。
 //
-// 用法：node scripts/pack.mjs
+// 用法：node scripts/pack.mjs          自托管三件套（CRX + 更新清单 + 描述文件）
+//       node scripts/pack.mjs --store  上传扩展商店用的 zip（商店自己管 id 与更新）
 // 产出：release/cybion.crx、release/updates.xml、release/cybion.mobileconfig、release/manifest.json
 //
 // 只用 node 内置模块 + 系统 zip：CRX3 = 「12 字节头 + protobuf 头 + 普通 zip」，签名是
@@ -199,6 +200,30 @@ function readFields(buffer) {
 }
 
 await mkdir(release, { recursive: true })
+
+/** 打一个干净的暂存目录（别把 release/ 自己打进去）。 */
+async function stageExtension(manifestText) {
+  await rm(stage, { recursive: true, force: true })
+  for (const entry of ENTRIES) {
+    await cp(path.join(root, entry), path.join(stage, entry), { recursive: true })
+  }
+  if (manifestText !== undefined) await writeFile(path.join(stage, "manifest.json"), manifestText)
+}
+
+// 0. 商店包：id 与更新都由商店管，所以把 key 与 update_url 摘掉再打 zip；不需要私钥。
+if (process.argv.includes("--store")) {
+  const storeManifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"))
+  delete storeManifest.key
+  delete storeManifest.update_url
+  await stageExtension(JSON.stringify(storeManifest, null, 2) + "\n")
+  const storeZip = path.join(release, "cybion-store.zip")
+  await rm(storeZip, { force: true })
+  execFileSync("zip", ["-q", "-r", "-X", storeZip, ...ENTRIES], { cwd: stage })
+  await rm(stage, { recursive: true, force: true })
+  console.log(`商店包: ${path.relative(process.cwd(), storeZip)}（版本 ${storeManifest.version}）`)
+  process.exit(0)
+}
+
 await mkdir(keys, { recursive: true })
 
 // 1. 密钥：第一次跑就生成，之后一直用同一把。换了它，扩展 id 就变，老用户就收不到升级。
@@ -235,11 +260,8 @@ manifest.key = publicKeyDer.toString("base64")
 manifest.update_url = UPDATE_URL
 await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n")
 
-// 3. 打个干净的暂存目录（别把 release/ 自己打进去），再用系统 zip 归档。
-await rm(stage, { recursive: true, force: true })
-for (const entry of ENTRIES) {
-  await cp(path.join(root, entry), path.join(stage, entry), { recursive: true })
-}
+// 3. 打个干净的暂存目录，再用系统 zip 归档。
+await stageExtension()
 await rm(archive, { force: true })
 execFileSync("zip", ["-q", "-r", "-X", archive, ...ENTRIES], { cwd: stage })
 const archiveData = await readFile(archive)
