@@ -6,6 +6,24 @@ const RETRY_MS = 400
 const MAX_ATTEMPTS = 25
 
 const frame = document.getElementById("app")
+
+/** 面板角落的状态条：任何一步失败都能一眼看出，也顺便报出当前加载的是哪一版。 */
+const status = document.createElement("div")
+status.style.cssText =
+  "position:fixed;right:8px;bottom:8px;z-index:9;pointer-events:none;" +
+  "padding:2px 9px;border-radius:999px;background:rgba(0,0,0,.72);color:#fff;" +
+  "font:11px/1.7 -apple-system,BlinkMacSystemFont,sans-serif;opacity:0;transition:opacity .18s"
+document.body.append(status)
+
+let statusTimer = 0
+function showStatus(text, sticky = false) {
+  status.textContent = text
+  status.style.opacity = "1"
+  clearTimeout(statusTimer)
+  if (!sticky) statusTimer = setTimeout(() => { status.style.opacity = "0" }, 2600)
+}
+
+showStatus(`Cybion 扩展 v${chrome.runtime.getManifest().version}`)
 let pendingImages = []
 let attempts = 0
 let timer = 0
@@ -22,7 +40,10 @@ function flush() {
       target.postMessage({ type: "cybion:attach-images", images: pendingImages }, APP_ORIGIN)
     } catch {}
   }
-  if (++attempts >= MAX_ATTEMPTS) stopRetry()
+  if (++attempts >= MAX_ATTEMPTS) {
+    stopRetry()
+    showStatus("站点没有回执，截图没送进草稿", true)
+  }
 }
 
 function startRetry() {
@@ -64,6 +85,7 @@ window.addEventListener("message", (event) => {
   if (data?.type === "cybion:attached-images") {
     pendingImages = []
     stopRetry()
+    showStatus("截图已送进草稿")
     return
   }
   if (data?.type === "cybion:capabilities" && data.mediaDevices === false) {
@@ -81,6 +103,7 @@ async function consume() {
   if (!image?.dataUrl) return false
   await chrome.storage.local.remove(IMAGE_KEY)
   pendingImages = [image.dataUrl]
+  showStatus("收到截图，正在送进草稿…", true)
   return true
 }
 
