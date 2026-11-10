@@ -10,7 +10,12 @@
     </style>
   </head>
   <body>
-    <iframe id="app" src="https://cybion.ntnl.io" allow="clipboard-read; clipboard-write"></iframe>
+    <!-- 跨域 iframe 默认拿不到麦克风/摄像头：得由父页面显式委派，否则站点里的录音按钮点了没反应。 -->
+    <iframe
+      id="app"
+      src="https://cybion.ntnl.io"
+      allow="microphone; camera; clipboard-read; clipboard-write"
+    ></iframe>
     <script src="sidepanel.js"></script>
   </body>
 </html>
