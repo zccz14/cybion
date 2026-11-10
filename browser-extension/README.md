@@ -1,31 +1,22 @@
 # Cybion Browser Extension
 
-Cybion 的第二个宿主：侧边栏里渲染的就是 **GUI 自己的构建产物**（`web/dist`），不是另写的前端。按 `⌘⇧K` 截当前可见区，它会开一条 Thread 并把侧边栏带到那条 Thread 上——你人还在原来的页面上。
+Cybion 的第二个宿主：侧边栏里嵌的就是 `https://cybion.ntnl.io` 本身——登录、存储、路由全归站点自己的 origin，插件不种会话、不注入 API 基址、也不打包前端。
 
-它复用同一个 Auth Mini JWT（从已登录的 `cybion.ntnl.io` 取过来），所以它不是设备：没有配对、没有注册、没有长连接，也没有无人值守的调用。
+插件只做两件事：
 
-## 它只补三件事
+1. `⌘⇧K`（或右键菜单）截当前可见区，用同一个 Auth Mini JWT 建一条 Thread 并把截图发进去
+2. 把侧边栏里的框换到那条 Thread 上（`#/threads/<id>`）
 
-`scripts/build.mjs` 把 `web/dist` 拷进 `dist/`，并生成一个引导文件，在 GUI 启动前做三件事：
+它不是设备：没有配对、没有注册、没有长连接，也没有无人值守的调用。
 
-1. `window.__CYBION_API_BASE__ = "https://cybion.ntnl.io"` —— 扩展页的 origin 不是服务端
-2. 把 background 持有的 session 写进 `localStorage['auth-mini.sdk:https://auth.ntnl.io/']` —— 跟 GUI 同一份登录态
-3. 有 pending Thread 就设置 `location.hash = "#/threads/<id>"` —— HashRouter 直接落到那条 Thread
+## 为什么是 iframe 而不是打包产物
+
+打包 `web/dist` 要在扩展 origin 里重建站点的运行环境：种一份会话、把 API 基址指回服务端、还要绕开扩展自己的 Service Worker。这些都是自己给自己找的活，而且每一处都会单独坏一次。iframe 把这些整块省掉，代价只有两条：跨域驱动路由只能换 `src` 的 hash；第三方上下文里的登录归浏览器分区策略管（第一次可能要在框里登一次）。
 
 ## 装
 
-```
-pnpm --dir ../web build        # 先有 GUI 产物
-pnpm build                     # 拷进 dist/ 并生成 sidepanel.html
-```
-
-然后 `chrome://extensions`（或 `edge://extensions`）→ 开发者模式 → 加载已解压的扩展程序 → 选这个目录。
+无构建步骤：`chrome://extensions`（或 `edge://extensions`）→ 开发者模式 → 加载已解压的扩展程序 → 选这个目录。
 
 ## 有意不做
 
-不自动点击、不填表、不截整页；`⌘⇧K` 只做"截一张可见区 + 开一条 Thread"。
-
-## 图标
-
-`icons/` 与站点 favicon 同一份几何（`web/public/cybion-mark.svg`：64 视框、`stroke-width: 9` 的三角描边），
-用 Chrome 无头渲染 16/48/128 三档，透明底。改品牌标记时两边一起改。
+不自动点击、不填表、不截整页；侧边栏里不另做一套 UI——那边就是 GUI。
