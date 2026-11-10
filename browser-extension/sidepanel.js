@@ -6,8 +6,9 @@ const frame = document.getElementById("app")
 
 function go(threadId) {
   const next = threadId ? `${APP_ORIGIN}/#/threads/${encodeURIComponent(threadId)}` : APP_ORIGIN
-  if (frame.src === next) frame.contentWindow?.location.reload?.()
-  else frame.src = next
+  // 跨域：contentWindow.location 一律不可读，只能整份重设 src。
+  // 赋同一个值本身就是一次重载，所以这里不做比较。
+  frame.src = next
 }
 
 void (async () => {
