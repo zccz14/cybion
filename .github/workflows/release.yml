@@ -48,6 +48,16 @@ jobs:
       - run: pnpm --dir packages/cybion-components run build
       - run: pnpm --dir web install --frozen-lockfile
       - run: pnpm --dir web run build
+      - name: Pack the self-hosted browser extension
+        # 控制器用 RustEmbed 把 browser-extension/release/ 编进二进制，所以这一步必须早于 cargo build；
+        # 私钥从 secret 写回工作区，保证每次发布的扩展 id 都一样。
+        env:
+          CYBION_EXTENSION_KEY: ${{ secrets.CYBION_EXTENSION_KEY }}
+        run: |
+          mkdir -p browser-extension/.keys
+          printf '%s\n' "$CYBION_EXTENSION_KEY" > browser-extension/.keys/cybion-extension.pem
+          chmod 600 browser-extension/.keys/cybion-extension.pem
+          node browser-extension/scripts/pack.mjs
       - run: cross build --release --locked --target x86_64-unknown-linux-gnu
       - run: |
           mkdir -p dist/cybion-linux-x86_64
@@ -136,5 +146,9 @@ jobs:
         env:
           EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
         run: bash .github/scripts/send-deploy.sh "$EC2_INSTANCE_ID" "$GITHUB_REF_NAME"
+      - name: Verify the self-hosted extension endpoints
+        run: |
+          curl -fsS https://cybion.ntnl.io/extensions/updates.xml | grep -q '<gupdate'
+          curl -fsSI https://cybion.ntnl.io/extensions/cybion.crx | grep -qi '^content-type: application/x-chrome-extension'
       - name: Verify public onboarding endpoints
         run: python3 scripts/smoke-worker-onboarding.py https://cybion.ntnl.io

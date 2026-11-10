@@ -388,6 +388,12 @@ impl From<reqwest::Error> for ApiError {
 #[folder = "web/dist/"]
 struct Assets;
 
+/// 自托管的浏览器插件：`browser-extension/scripts/pack.mjs` 产出的签名 CRX 与更新清单。
+/// 这个目录由构建流程填充，仓库里只有一个 `.gitkeep`；没有产物时不要编进二进制。
+#[derive(RustEmbed)]
+#[folder = "browser-extension/release/"]
+struct ExtensionRelease;
+
 pub async fn serve() -> Result<()> {
     serve_at("0.0.0.0:1858".parse().expect("constant address is valid")).await
 }
@@ -1237,6 +1243,29 @@ async fn static_asset(uri: Uri) -> Response {
     } else {
         requested
     };
+    // 插件自托管：浏览器只认这两个地址，必须免鉴权、给对 MIME。
+    if let Some(name) = requested.strip_prefix("extensions/") {
+        return match ExtensionRelease::get(name) {
+            Some(asset) => {
+                let content_type = match name.rsplit('.').next() {
+                    Some("xml") => "application/xml; charset=utf-8",
+                    Some("crx") => "application/x-chrome-extension",
+                    Some("json") => "application/json; charset=utf-8",
+                    _ => "application/octet-stream",
+                };
+                (
+                    [(header::CONTENT_TYPE, content_type)],
+                    Body::from(asset.data),
+                )
+                    .into_response()
+            }
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "this build does not host an extension release" })),
+            )
+                .into_response(),
+        };
+    }
     let fallback = Assets::get(requested).is_none();
     match Assets::get(requested).or_else(|| Assets::get("index.html")) {
         Some(asset) => {
