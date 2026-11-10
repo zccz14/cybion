@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Cybion",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "在任意网页上截图问 Cybion，侧边栏里就是 cybion.ntnl.io 本身。",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -49,5 +49,7 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr94d3X1lHyZVOrQL3uo2WZJRmMryc1YkORXub1LxbgnG6VOhxwdcCETwJxgyGBV5KdfK3NzMRePX68qYWBpiF4adqqEB5f0/2oqECdwKbcm6xEvi4/QgU735hZFH9JgG/ZVW+PPcBl0l4vjsd6OyquXG82r0uWsz+k1dYgGrFXBbYgK/4JTLr5sSxArW3LcpLv8t44HyVrHrFL4yISDHMaOv/yk8NZHrMnMyNQCCQilAT0cL1kKJbGIMAtQE2Be2LVnBRkPoRT+y45D7aRatgCrCUWGBJ9dROoOSr1H3R6M1mmmkZBLoLv3X0V18utmzefXP4yzQUEQp8aCvzSpf5wIDAQAB",
+  "update_url": "https://cybion.ntnl.io/extensions/updates.xml"
 }
