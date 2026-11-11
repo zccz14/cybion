@@ -166,7 +166,9 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // query failed with `no such column: t.audio_transcription_model` until 52.
 // 56 added no column: it exists so `reasoning_audits_cost_pending` reaches every
 // hosted database, because the index batches below only run on a version change.
-const USER_SCHEMA_VERSION: i64 = 56;
+// 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
+// with, and the User default that fills the list of a new Thread.
+const USER_SCHEMA_VERSION: i64 = 57;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1049,6 +1051,7 @@ fn app(state: AppState) -> Router {
             axum::routing::put(worker_sharing::grant).delete(worker_sharing::revoke),
         )
         .route("/api/manuals", get(list_manuals).post(create_manual))
+        .route("/api/manual-summaries", get(list_manual_summaries))
         .route("/api/notes", get(notes::list_notes))
         .route("/api/notes/{id}/done", post(notes::cross_out_note))
         .route("/api/notes/{id}", delete(notes::delete_note))
@@ -1628,6 +1631,8 @@ async fn experimental_header_enabled(
         .map_err(ApiError::internal)?
 }
 
+// `initial_manual_ids` holds the Manuals a Thread was created with, bound into
+// `thread_manual_loads` before its first input; NULL follows the User default.
 const THREAD_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
@@ -1645,6 +1650,7 @@ CREATE TABLE IF NOT EXISTS threads (
   image_generation_model TEXT,
   max_loaded_manuals INTEGER,
   audio_transcription_model TEXT,
+  initial_manual_ids TEXT,
   archived_at INTEGER,
   -- Waiting on the user: its own axis, because `status` is written on every
   -- turn boundary and a blocked Thread must survive finalization.
@@ -1655,6 +1661,9 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 "#;
 
+// `thread_defaults.initial_manual_ids` is the Manual list a new Thread starts
+// with: every named Manual is bound at creation, so a Thread needs no tool call
+// to hold them.
 const USER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS thread_defaults (
   id INTEGER PRIMARY KEY CHECK(id=1),
@@ -1666,7 +1675,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   minimal_mode INTEGER NOT NULL DEFAULT 0,
   image_generation_model TEXT NOT NULL DEFAULT '',
   max_loaded_manuals INTEGER NOT NULL DEFAULT 12,
-  audio_transcription_model TEXT
+  audio_transcription_model TEXT,
+  initial_manual_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2136,6 +2146,9 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if version < 55 {
         migrate_thread_blocked(&transaction)?;
     }
+    if version < 57 {
+        migrate_initial_manual_ids(&transaction)?;
+    }
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
@@ -2165,6 +2178,30 @@ fn migrate_thread_blocked(transaction: &rusqlite::Transaction<'_>) -> Result<(),
         transaction.execute_batch(
             "ALTER TABLE threads ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1));",
         )?;
+    }
+    Ok(())
+}
+
+/// Threads and the User default gain `initial_manual_ids`: the Manuals a Thread
+/// starts with, and the account list that fills a new Thread's. A fresh
+/// database already carries both columns from `THREAD_SCHEMA`/`USER_SCHEMA`, so
+/// the upgrade checks before it alters. Retire this upgrade once every user
+/// database is audited at schema 57+; retain the column test.
+fn migrate_initial_manual_ids(transaction: &rusqlite::Transaction<'_>) -> Result<(), ApiError> {
+    for (table, definition) in [
+        ("threads", "TEXT"),
+        ("thread_defaults", "TEXT NOT NULL DEFAULT '[]'"),
+    ] {
+        let exists: bool = transaction.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='initial_manual_ids')"),
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN initial_manual_ids {definition};"
+            ))?;
+        }
     }
     Ok(())
 }
@@ -2488,6 +2525,12 @@ fn migrate_user_schema_through_53(
             "max_loaded_manuals",
             "INTEGER NOT NULL DEFAULT 12",
         ),
+        ("threads", "initial_manual_ids", "TEXT"),
+        (
+            "thread_defaults",
+            "initial_manual_ids",
+            "TEXT NOT NULL DEFAULT '[]'",
+        ),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
         ("worker_calls", "received_at", "INTEGER"),
@@ -2757,6 +2800,9 @@ struct ThreadView {
     /// Per-thread cap on the Manuals this Thread keeps loaded; `None` follows
     /// the user default.
     max_loaded_manuals: Option<i64>,
+    /// The Manuals this Thread started with, bound into `thread_manual_loads`
+    /// before its first input. `None` follows the user default list.
+    initial_manual_ids: Option<Vec<String>>,
     /// Per-thread speech-to-text model override; `None` follows the user
     /// default and null at both levels keeps audio input disabled.
     audio_transcription_model: Option<String>,
@@ -3055,6 +3101,10 @@ struct CreateThreadInput {
     reasoning_effort: Option<String>,
     #[serde(default)]
     service_tier_fast: Option<bool>,
+    /// Manuals the Thread starts with. Omitted or `null` keeps the User default
+    /// list; every named Manual is bound before the first input is compiled.
+    #[serde(default)]
+    initial_manual_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -3093,6 +3143,11 @@ struct ThreadDefaults {
     /// its own. A load past the cap is refused, never truncated.
     #[serde(default = "default_max_loaded_manuals")]
     max_loaded_manuals: i64,
+    /// Manuals a new Thread starts with: every one of them is bound before the
+    /// first input is compiled, so the Thread needs no tool call to hold them.
+    /// Empty starts new Threads with none.
+    #[serde(default)]
+    initial_manual_ids: Vec<String>,
     /// Speech-to-text model for threads without an override; null keeps audio
     /// input disabled until an `sst` model is picked.
     #[serde(default)]
@@ -3118,6 +3173,7 @@ impl Default for ThreadDefaults {
             minimal_mode: false,
             image_generation_model: String::new(),
             max_loaded_manuals: manual_loads::DEFAULT_MAX_LOADED_MANUALS,
+            initial_manual_ids: Vec::new(),
             audio_transcription_model: None,
         }
     }
@@ -3154,6 +3210,10 @@ struct UpdateThreadInput {
     // disables audio input for the thread; a model name enables it.
     #[serde(default, deserialize_with = "deserialize_double_option_string")]
     audio_transcription_model: Option<Option<String>>,
+    // `null` clears the override back to the user default list; an array
+    // replaces it. Either way the Thread's bindings follow the difference.
+    #[serde(default, deserialize_with = "deserialize_double_option_list")]
+    initial_manual_ids: Option<Option<Vec<String>>>,
     /// `true` archives the thread and hides it from the thread list; `false`
     /// restores it. Omitted keeps the current state.
     #[serde(default)]
@@ -3181,6 +3241,15 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Some(Option::<String>::deserialize(deserializer)?))
+}
+
+fn deserialize_double_option_list<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Vec<String>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<Vec<String>>::deserialize(deserializer)?))
 }
 
 #[derive(Deserialize)]
@@ -3426,8 +3495,9 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let missing_cache_requests: i64 = row.get(13)?;
     let max_loaded_manuals: Option<i64> = row.get(22)?;
     let audio_transcription_model: Option<String> = row.get(23)?;
-    let cost_usd_nanos: i64 = row.get(24)?;
-    let cost_settled_requests: i64 = row.get(25)?;
+    let initial_manual_ids: Option<String> = row.get(24)?;
+    let cost_usd_nanos: i64 = row.get(25)?;
+    let cost_settled_requests: i64 = row.get(26)?;
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
@@ -3442,12 +3512,15 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         display_status: row.get(9)?,
-        running_summary: row.get(26)?,
+        running_summary: row.get(27)?,
         context_budget_tokens: row.get(14)?,
         context_tokens: row.get(15)?,
         minimal_mode: row.get(16)?,
         image_generation_model: row.get(21)?,
         max_loaded_manuals,
+        initial_manual_ids: initial_manual_ids
+            .as_deref()
+            .map(|raw| manual_loads::parse_initial_ids(Some(raw))),
         audio_transcription_model,
         archived_at: row.get(18)?,
         usage: ThreadUsage {
@@ -3685,7 +3758,7 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -3699,6 +3772,9 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                     image_generation_model: row.get(6)?,
                     max_loaded_manuals: row.get(7)?,
                     audio_transcription_model: row.get(8)?,
+                    initial_manual_ids: manual_loads::parse_initial_ids(
+                        row.get::<_, Option<String>>(9)?.as_deref(),
+                    ),
                 })
             },
         )
@@ -3734,15 +3810,22 @@ async fn update_thread_defaults(
         minimal_mode: input.minimal_mode,
         image_generation_model: image_generation_model(input.image_generation_model)?,
         max_loaded_manuals: manual_loads::max_loaded_manuals(input.max_loaded_manuals)?,
+        initial_manual_ids: manual_loads::initial_manual_ids(&input.initial_manual_ids)?,
         audio_transcription_model: optional_model(input.audio_transcription_model),
     };
+    // Every Manual the list names is bound when a Thread is created, so the
+    // list has to fit the cap those bindings will count against.
+    manual_loads::initial_ids_within_cap(
+        &defaults.initial_manual_ids,
+        defaults.max_loaded_manuals,
+    )?;
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = defaults.upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model) VALUES(1,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids) VALUES(1,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model,initial_manual_ids=excluded.initial_manual_ids",
             params![
                 defaults.model,
                 defaults.upstream_id,
@@ -3752,7 +3835,8 @@ async fn update_thread_defaults(
                 defaults.minimal_mode,
                 defaults.image_generation_model,
                 defaults.max_loaded_manuals,
-                defaults.audio_transcription_model
+                defaults.audio_transcription_model,
+                manual_loads::encode_initial_ids(&defaults.initial_manual_ids)
             ],
         )?;
         Ok(defaults)
@@ -3893,6 +3977,7 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        t.image_generation_model,
        t.max_loaded_manuals,
        t.audio_transcription_model,
+       t.initial_manual_ids,
        COALESCE(usage.cost_usd_nanos,0),COALESCE(usage.cost_settled_requests,0),
        CASE WHEN t.status='running' THEN COALESCE(
          (
@@ -4008,6 +4093,10 @@ async fn create_thread_for(
         .external_ref
         .map(|value| label(&value, "external_ref", 200))
         .transpose()?;
+    let initial_manual_ids = match input.initial_manual_ids.as_deref() {
+        Some(value) => Some(manual_loads::initial_manual_ids(value)?),
+        None => None,
+    };
     let (created_by, api_key_id) = match origin {
         ThreadOrigin::Web => ("web", None),
         ThreadOrigin::Api { key_id } => ("api", Some(key_id)),
@@ -4015,6 +4104,12 @@ async fn create_thread_for(
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let defaults = load_thread_defaults(&transaction)?;
+        let initial_manual_ids =
+            initial_manual_ids.unwrap_or_else(|| defaults.initial_manual_ids.clone());
+        // The list is a promise the creation keeps: every named Manual is bound
+        // here, so the first input already compiles with the copies in front of
+        // the model. Fitting the cap is what makes that promise affordable.
+        manual_loads::initial_ids_within_cap(&initial_manual_ids, defaults.max_loaded_manuals)?;
         let upstream_id = resolve_thread_upstream(&transaction, upstream_id, defaults.upstream_id)?;
         let thread = ThreadView {
             id: Uuid::now_v7().to_string(),
@@ -4030,6 +4125,7 @@ async fn create_thread_for(
             minimal_mode: None,
             image_generation_model: None,
             max_loaded_manuals: None,
+            initial_manual_ids: Some(initial_manual_ids.clone()),
             audio_transcription_model: None,
             archived_at: None,
             context_tokens: None,
@@ -4041,7 +4137,7 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
@@ -4053,10 +4149,12 @@ async fn create_thread_for(
                 thread.created_by,
                 api_key_id,
                 thread.external_ref,
+                manual_loads::encode_initial_ids(&initial_manual_ids),
                 thread.created_at,
                 thread.updated_at
             ],
         )?;
+        manual_loads::apply_initial(&transaction, &thread.id, &[], &initial_manual_ids)?;
         transaction.commit()?;
         Ok(thread)
     })
@@ -4614,6 +4712,7 @@ async fn start_thread(
             upstream_id: input.upstream_id,
             reasoning_effort: Some(reasoning_effort),
             service_tier_fast: Some(input.service_tier_fast),
+            initial_manual_ids: None,
         },
         ThreadOrigin::Web,
     )
@@ -4663,6 +4762,14 @@ async fn update_thread(
         .max_loaded_manuals
         .map(|value| value.map(manual_loads::max_loaded_manuals).transpose())
         .transpose()?;
+    let initial_manual_ids = input
+        .initial_manual_ids
+        .map(|value| {
+            value
+                .map(|ids| manual_loads::initial_manual_ids(&ids))
+                .transpose()
+        })
+        .transpose()?;
     if title.is_none()
         && model.is_none()
         && upstream_id.is_none()
@@ -4672,18 +4779,38 @@ async fn update_thread(
         && input.minimal_mode.is_none()
         && image_generation_model.is_none()
         && max_loaded_manuals.is_none()
+        && initial_manual_ids.is_none()
         && input.archived.is_none()
     {
         return Err(ApiError::bad_request("thread update is empty"));
     }
     let updated_at = now();
+    let stored_initial = initial_manual_ids.as_ref().map(|value| {
+        value
+            .as_ref()
+            .map(|ids| manual_loads::encode_initial_ids(ids))
+    });
     let thread = user_db(&state, &identity.user, true, move |connection| {
-        load_thread(connection, &id)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        load_thread(&transaction, &id)?;
         if let Some(id) = upstream_id.as_deref() {
-            require_upstream(connection, id)?;
+            require_upstream(&transaction, id)?;
         }
-        let changed = connection.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
+        // The list in force before and after this write: the bindings follow
+        // the difference, so the Thread holds what its settings promise.
+        let reconcile = match initial_manual_ids.as_ref() {
+            Some(value) => {
+                let before = manual_loads::effective_initial_ids(&transaction, &id)?;
+                let after = match value {
+                    Some(ids) => ids.clone(),
+                    None => manual_loads::default_initial_ids(&transaction)?,
+                };
+                Some((before, after))
+            }
+            None => None,
+        };
+        let changed = transaction.execute(
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,initial_manual_ids=CASE WHEN ? THEN ? ELSE initial_manual_ids END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -4698,6 +4825,8 @@ async fn update_thread(
                 image_generation_model.flatten(),
                 max_loaded_manuals.is_some(),
                 max_loaded_manuals.flatten(),
+                initial_manual_ids.is_some(),
+                stored_initial.flatten(),
                 audio_transcription_model.is_some(),
                 audio_transcription_model.flatten(),
                 input.archived.is_some(),
@@ -4709,6 +4838,14 @@ async fn update_thread(
         if changed == 0 {
             return Err(ApiError::not_found("thread not found"));
         }
+        if let Some((before, after)) = &reconcile {
+            // The cap is read after the row is written, so a request that
+            // changes both judges the new list against the new cap.
+            let cap = manual_loads::loaded_manual_cap(&transaction, &id)?;
+            manual_loads::initial_ids_within_cap(after, cap)?;
+            manual_loads::apply_initial(&transaction, &id, before, after)?;
+        }
+        transaction.commit()?;
         load_thread(connection, &id)
     })
     .await?;
@@ -5491,6 +5628,41 @@ async fn list_manuals(
     Ok(Json(manuals))
 }
 
+/// Every Manual a Thread could name as an initial one, as metadata only: the
+/// built-in common tree's root, then the user's own Manuals in tree order.
+/// The settings picker needs names, not bodies, so this stays cheap where
+/// `GET /api/manuals` carries every body for the Manuals page.
+async fn list_manual_summaries(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+) -> Result<Json<Value>, ApiError> {
+    let mut manuals = vec![common_manuals::root_summary(
+        common_manuals::SOURCE_LANGUAGE,
+    )];
+    let local = user_db(&state, &identity.user, false, |connection| {
+        let mut statement = connection.prepare(
+            "SELECT id,name,description FROM manuals WHERE trashed_at IS NULL
+             ORDER BY parent_id IS NOT NULL,parent_id,sort_key,name,id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ManualSummary {
+                manual_id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    })
+    .await?;
+    manuals.extend(
+        local
+            .iter()
+            .map(|summary| context_summary_item(summary, "local")),
+    );
+    Ok(Json(json!({ "manuals": manuals })))
+}
+
 async fn create_manual(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<BrowserIdentity>,
@@ -5916,6 +6088,7 @@ async fn process_request(
                 minimal_mode: None,
                 image_generation_model: None,
                 max_loaded_manuals: None,
+                initial_manual_ids: None,
                 audio_transcription_model: None,
                 archived_at: None,
                 context_tokens: None,
@@ -11101,6 +11274,7 @@ mod tests {
                 upstream_id: Some(upstream.id),
                 reasoning_effort: None,
                 service_tier_fast: None,
+                initial_manual_ids: None,
             },
             ThreadOrigin::Web,
         )
@@ -11624,6 +11798,7 @@ mod tests {
             max_loaded_manuals: None,
             audio_transcription_model: None,
             archived: Some(archived),
+            initial_manual_ids: None,
         }
     }
 
@@ -11770,6 +11945,7 @@ mod tests {
             upstream_id: Some(upstream.id.clone()),
             reasoning_effort: None,
             service_tier_fast: None,
+            initial_manual_ids: None,
         };
         let mine = create_thread_for(
             &state,
@@ -12925,6 +13101,47 @@ mod tests {
         for (table, column) in [
             ("threads", "audio_transcription_model"),
             ("thread_defaults", "audio_transcription_model"),
+        ] {
+            let present: bool = connection
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?)"
+                    ),
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                present,
+                "the schema version must admit every pending column migration: {table}.{column}"
+            );
+        }
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, USER_SCHEMA_VERSION);
+    }
+
+    /// 57 shipped `initial_manual_ids`; a database left at 56 must gain both
+    /// columns before any Thread query names them.
+    #[test]
+    fn a_previous_version_database_receives_the_initial_manual_columns() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("previous.sqlite3");
+        let connection = open_user(&path, true).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE threads DROP COLUMN initial_manual_ids;
+                 ALTER TABLE thread_defaults DROP COLUMN initial_manual_ids;
+                 PRAGMA user_version = 56;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open_user(&path, true).unwrap();
+        for (table, column) in [
+            ("threads", "initial_manual_ids"),
+            ("thread_defaults", "initial_manual_ids"),
         ] {
             let present: bool = connection
                 .query_row(

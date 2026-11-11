@@ -148,6 +148,7 @@ pub(super) async fn create_for(
             upstream_id: None,
             reasoning_effort: None,
             service_tier_fast: None,
+            initial_manual_ids: None,
         },
         ThreadOrigin::Web,
     )

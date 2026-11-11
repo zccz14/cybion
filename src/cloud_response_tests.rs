@@ -2111,6 +2111,7 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
             upstream_id: Some(upstream.id),
             reasoning_effort: None,
             service_tier_fast: None,
+            initial_manual_ids: None,
         },
         ThreadOrigin::Web,
     )

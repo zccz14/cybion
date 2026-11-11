@@ -103,7 +103,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
     assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","audio_transcription_model":null,"max_loaded_manuals":12});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","audio_transcription_model":null,"max_loaded_manuals":12,"initial_manual_ids":[]});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -504,6 +504,7 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
         minimal_mode: false,
         image_generation_model: String::new(),
         max_loaded_manuals: 12,
+        initial_manual_ids: Vec::new(),
     };
     assert_eq!(
         update_thread_defaults(
@@ -720,6 +721,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         minimal_mode: false,
         image_generation_model: String::new(),
         max_loaded_manuals: 12,
+        initial_manual_ids: Vec::new(),
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -773,6 +775,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
                 upstream_id: None,
                 reasoning_effort: None,
                 service_tier_fast: None,
+                initial_manual_ids: None,
             }),
         )
         .await
@@ -802,6 +805,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
         minimal_mode: false,
         image_generation_model: String::new(),
         max_loaded_manuals: 12,
+        initial_manual_ids: Vec::new(),
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -850,6 +854,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         minimal_mode: false,
         image_generation_model: String::new(),
         max_loaded_manuals: 12,
+        initial_manual_ids: Vec::new(),
     };
     let _ = update_thread_defaults(
         State(state.clone()),
@@ -876,6 +881,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 minimal_mode: false,
                 image_generation_model: String::new(),
                 max_loaded_manuals: 12,
+                initial_manual_ids: Vec::new(),
             }),
         )
         .await
@@ -895,6 +901,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             minimal_mode: false,
             image_generation_model: "not a model".to_owned(),
             max_loaded_manuals: 12,
+            initial_manual_ids: Vec::new(),
         }),
     )
     .await
@@ -929,6 +936,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 minimal_mode: false,
                 image_generation_model: String::new(),
                 max_loaded_manuals: 12,
+                initial_manual_ids: Vec::new(),
             }),
         )
         .await
@@ -951,6 +959,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
                 minimal_mode: false,
                 image_generation_model: String::new(),
                 max_loaded_manuals: cap,
+                initial_manual_ids: Vec::new(),
             }),
         )
         .await
@@ -970,6 +979,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             minimal_mode: false,
             image_generation_model: String::new(),
             max_loaded_manuals: 12,
+            initial_manual_ids: Vec::new(),
         }),
     )
     .await
@@ -1042,6 +1052,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
                 minimal_mode: false,
                 image_generation_model: String::new(),
                 max_loaded_manuals: 12,
+                initial_manual_ids: Vec::new(),
             }
         );
     }
@@ -1190,6 +1201,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
                 image_generation_model: None,
                 max_loaded_manuals: None,
                 archived: None,
+                initial_manual_ids: None,
             }),
         )
         .await
@@ -1207,6 +1219,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
         minimal_mode: true,
         image_generation_model: String::new(),
         max_loaded_manuals: 12,
+        initial_manual_ids: Vec::new(),
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -1274,6 +1287,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
                 image_generation_model: override_value,
                 max_loaded_manuals: None,
                 archived: None,
+                initial_manual_ids: None,
             }),
         )
         .await
@@ -1297,6 +1311,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
             image_generation_model: Some(Some("not a model".to_owned())),
             max_loaded_manuals: None,
             archived: None,
+            initial_manual_ids: None,
         }),
     )
     .await
@@ -1312,6 +1327,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
         minimal_mode: false,
         image_generation_model: "gpt-image-2".to_owned(),
         max_loaded_manuals: 12,
+        initial_manual_ids: Vec::new(),
     };
     let saved = update_thread_defaults(
         State(state.clone()),
@@ -1372,6 +1388,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
                 image_generation_model: None,
                 max_loaded_manuals: override_value,
                 archived: None,
+                initial_manual_ids: None,
             }),
         )
         .await
@@ -1396,6 +1413,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
                 image_generation_model: None,
                 max_loaded_manuals: Some(Some(cap)),
                 archived: None,
+                initial_manual_ids: None,
             }),
         )
         .await
@@ -1412,6 +1430,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
         minimal_mode: false,
         image_generation_model: String::new(),
         max_loaded_manuals: 20,
+        initial_manual_ids: Vec::new(),
     };
     let saved = update_thread_defaults(
         State(state.clone()),
