@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Cybion",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "在任意网页上截图问 Cybion，侧边栏里就是 cybion.ntnl.io 本身。",
   "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
     "storage",
     "contextMenus",
-    "sidePanel"
+    "sidePanel",
+    "audioCapture"
   ],
   "host_permissions": [
     "https://cybion.ntnl.io/*",
