@@ -234,6 +234,31 @@ bindings stay, and the Thread releases them itself before it loads another. The
 loaded-context row reports the set beside the record range and the cap it counts
 against (see below), one chip per bound Manual, not one per delivery.
 
+## Initial Manuals
+
+A Thread can also be told which Manuals it must hold from the start. The
+account default lives in `thread_defaults.initial_manual_ids` and is edited
+under Configuration → Personal settings; each Thread carries the list it was
+created with in `threads.initial_manual_ids`, and the thread settings popover
+overrides it for one Thread. Creating a Thread copies the effective list into
+`thread_manual_loads` before the first input compiles, which is the whole
+promise: the first request of the Thread already carries every copy as a
+developer message, and no turn is spent calling `load_manual`. The list is
+stored as a JSON array of ids, and an id that no longer resolves — deleted, or
+hidden by the trash — is skipped instead of failing the creation.
+
+Every named Manual becomes a binding, so the list has to fit the loaded-Manual
+cap in force: a longer list is refused where it is written, never truncated.
+Writing the list on a live Thread reconciles the bindings to the difference —
+what the list gained is loaded, what it left is released — while a Manual the
+Thread loaded on its own keeps its binding. Unloading an initial Manual with
+`unload_manual` still works; the list is a promise about the start, not a pin.
+
+The settings picker reads `GET /api/manual-summaries`: the built-in common
+root, then the user's own Manuals in tree order, each as `manual_id`, `name`,
+`description` and `source` — the same shape `list_manuals` answers with and
+none of the bodies `GET /api/manuals` carries for the Manuals page.
+
 ## Loaded-context indicator
 
 The end of the conversation shows which Manuals the Thread keeps loaded. The row
