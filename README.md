@@ -332,6 +332,12 @@ curl -X POST https://cybion.ntnl.io/v1/threads \
 | `POST` | `/v1/threads/{id}/inputs` | Append input and start inference. |
 | `POST` | `/v1/threads/{id}/context` | Append integration context as a folded developer message; starts no turn. |
 
+`POST /v1/threads` also accepts `initial_manual_ids`, the Manuals the Thread
+must hold from its very first request: every one of them is bound before the
+first input compiles. Omitted, the Thread starts with the account default from
+Configuration → Personal settings. See
+[Initial Manuals](docs/context.md#initial-manuals).
+
 `POST /v1/threads/{id}/inputs` accepts
 `{"input":"...","images":["data:image/png;base64,..."]}` and returns the new
 `record_idx`; `images` is optional, and each entry must be a png/jpeg/webp/gif
