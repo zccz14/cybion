@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "cybion"
-version = "0.6.75"
+version = "0.6.76"
 dependencies = [
  "aes-gcm",
  "anyhow",
