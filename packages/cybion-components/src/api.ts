@@ -23,6 +23,8 @@ export type Thread = {
   /** `null` follows the account default; speech-to-text stays on either way. */
   audio_transcription_model: string | null
   max_loaded_manuals: number | null
+  /** `null` follows the account default; the Manuals this Thread starts with. */
+  initial_manual_ids: string[] | null
   archived_at: number | null
   context_tokens: number | null
   usage: ThreadUsage
@@ -40,6 +42,9 @@ export type ThreadDefaults = {
   image_generation_model: string
   audio_transcription_model: string | null
   max_loaded_manuals: number
+  /** The Manuals a new Thread is created with; every one of them is bound
+   * before its first input. */
+  initial_manual_ids: string[]
 }
 
 export type UpstreamCatalog = { id: string; name: string; models: string[]; error: string | null }
@@ -48,7 +53,7 @@ export type UpstreamModels = { upstreams: UpstreamCatalog[] }
 export type ThreadPatch = Partial<Pick<Thread,
   "title" | "model" | "upstream_id" | "reasoning_effort" | "service_tier_fast" |
   "context_budget_tokens" | "minimal_mode" | "image_generation_model" |
-  "audio_transcription_model" | "max_loaded_manuals">> & { archived?: boolean }
+  "audio_transcription_model" | "max_loaded_manuals" | "initial_manual_ids">> & { archived?: boolean }
 
 export type RequestAck = { thread_id: string; record_idx: number; status: "accepted" }
 

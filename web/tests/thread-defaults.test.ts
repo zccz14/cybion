@@ -14,6 +14,7 @@ const fields = [...typeBody.matchAll(/^ {2}(\w+): (.+)$/gm)].map(([, name, type]
 function sample(type: string, variant: 0 | 1) {
   if (type === "boolean") return variant === 0
   if (type === "number") return variant === 0 ? 12 : 13
+  if (type.endsWith("[]")) return variant === 0 ? ["manual-a"] : ["manual-b"]
   if (type.includes("| null")) return variant === 0 ? "model-a" : "model-b"
   if (type.startsWith("typeof REASONING_EFFORTS")) return variant === 0 ? "low" : "high"
   return variant === 0 ? "model-a" : "model-b"
@@ -31,6 +32,7 @@ test("the defaults dirty check covers every field the server returns", () => {
     "image_generation_model",
     "audio_transcription_model",
     "max_loaded_manuals",
+    "initial_manual_ids",
   ])
 })
 

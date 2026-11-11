@@ -63,6 +63,7 @@ import {
   Trash2Icon,
   WrenchIcon,
   UsersIcon,
+  XIcon,
 } from "lucide-react"
 import toolCatalog from "../../tools.json"
 import { onboardingCopy, needsFirstConversationCheck } from "@/lib/onboarding"
@@ -161,9 +162,12 @@ type ThreadDefaults = {
   audio_transcription_model: string | null
   /** Loaded Manuals a Thread keeps at once unless it overrides the cap. */
   max_loaded_manuals: number
+  /** Manuals a new Thread starts with; every one of them is bound before its
+   * first input. */
+  initial_manual_ids: string[]
 }
 type ThreadStatus = "idle" | "running" | "failed"
-type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals"> & {
+type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "initial_manual_ids"> & {
   created_by: "web" | "api"
   external_ref: string | null
   id: string
@@ -177,6 +181,9 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "i
   image_generation_model: string | null
   /** `null` follows the account default for the loaded-Manual cap. */
   max_loaded_manuals: number | null
+  /** The Manuals this Thread was created with; `null` follows the account
+   * default list. */
+  initial_manual_ids: string[] | null
   archived_at: number | null
   context_tokens: number | null
   usage: ThreadUsage
@@ -193,7 +200,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model"> & { input: string; images: string[]; audios: string[] }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids"> & { input: string; images: string[]; audios: string[] }
 type ApiKey = {
   id: string
   label: string
@@ -538,6 +545,12 @@ const copy = {
     imageGenerationModel: "Image generation model",
     imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
     loadedManualCap: "Loaded manuals",
+    initialManuals: "Initial manuals",
+    initialManualsDescription: "Manuals every new thread loads as it starts, before its first message. They count against the loaded-Manual cap, and each thread can keep its own list.",
+    initialManualsAdd: "Add a manual…",
+    initialManualsEmpty: "No initial manual: a new thread starts empty.",
+    initialManualsUnknown: "Unknown manual",
+    initialManualsRemove: "Remove",
     loadedManualCapDescription: "How many Manuals one thread may keep loaded at once. A further load is refused until the thread unloads one; 12 is the built-in default, 1–64 allowed.",
     imageGenerationDisabled: "Disabled",
     normaiTitle: "NormAI upstream",
@@ -859,6 +872,12 @@ const copy = {
     imageGenerationModel: "图像生成模型",
     imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
     loadedManualCap: "已加载手册上限",
+    initialManuals: "初始手册",
+    initialManualsDescription: "新线程一开始就自动加载的手册，先于第一条消息；它们计入已加载手册上限，每个线程还可以保留自己的列表。",
+    initialManualsAdd: "添加手册…",
+    initialManualsEmpty: "还没有初始手册：新线程从空开始。",
+    initialManualsUnknown: "未知手册",
+    initialManualsRemove: "移除",
     loadedManualCapDescription: "单个线程用 load_manual 能同时保持加载的手册数量；超过后新的加载会被拒绝，需要先卸载一份。内置默认 12，可设 1–64。",
     imageGenerationDisabled: "关闭",
     normaiTitle: "NormAI 上游",
@@ -2605,6 +2624,36 @@ function MetricCard({ label, value, detail, progress }: { label: string; value: 
 
 // The controller refuses a cap outside 1–64; clamping in the field keeps a
 // keystroke from becoming a save that fails silently.
+type ManualChoice = { manual_id: string; name: string }
+
+/// The account's initial list: the same chips and "add" picker the Thread
+/// settings popover offers, over `/api/manual-summaries` (names, not bodies).
+function InitialManualsField({ value, choices, disabled, onChange }: {
+  value: string[] | undefined
+  choices: ManualChoice[] | undefined
+  disabled: boolean
+  onChange: (ids: string[]) => void
+}) {
+  const { t } = useUi()
+  const listed = value ?? []
+  const names = new Map((choices ?? []).map((manual) => [manual.manual_id, manual.name]))
+  const chosen = new Set(listed)
+  const available = (choices ?? []).filter((manual) => !chosen.has(manual.manual_id))
+  return <>
+    <div data-slot="default-initial-manuals" className="flex flex-wrap gap-1">
+      {listed.length === 0 && <p className="text-sm text-muted-foreground">{t("initialManualsEmpty")}</p>}
+      {listed.map((id) => <span key={id} title={id} className="flex min-w-0 max-w-full items-center gap-1 rounded-full border bg-card px-2 py-0.5 text-xs">
+        <span className="truncate">{names.get(id) ?? t("initialManualsUnknown")}</span>
+        <button type="button" aria-label={`${t("initialManualsRemove")}: ${names.get(id) ?? id}`} title={t("initialManualsRemove")} disabled={disabled} className="shrink-0 rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onChange(listed.filter((item) => item !== id))}><XIcon className="size-3" /></button>
+      </span>)}
+    </div>
+    {available.length > 0 && <Select value="" disabled={disabled} onValueChange={(id) => { if (id && !chosen.has(id)) onChange([...listed, id]) }}>
+      <SelectTrigger className="w-full" aria-label={t("initialManualsAdd")}><SelectValue placeholder={t("initialManualsAdd")} /></SelectTrigger>
+      <SelectContent><SelectGroup>{available.map((manual) => <SelectItem key={manual.manual_id} value={manual.manual_id}>{manual.name}</SelectItem>)}</SelectGroup></SelectContent>
+    </Select>}
+  </>
+}
+
 function loadedManualCap(value: number) {
   return Math.min(64, Math.max(1, Math.trunc(value)))
 }
@@ -2618,6 +2667,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const models = useUpstreamModels(sdk)
   const imageModels = useImageModels(sdk)
   const audioModels = useAudioModels(sdk)
+  const manualChoices = useQuery({ queryKey: ["manual-summaries"], queryFn: ({ signal }) => api<{ manuals: ManualChoice[] }>(sdk, "/api/manual-summaries", { signal }) })
   const save = useMutation({
     mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
     onMutate: () => client.cancelQueries({ queryKey }),
@@ -2704,6 +2754,11 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
             <FieldLabel htmlFor="default-thread-loaded-manual-cap">{t("loadedManualCap")}</FieldLabel>
             <Input id="default-thread-loaded-manual-cap" type="number" min={1} max={64} step={1} inputMode="numeric" disabled={save.isPending} value={String(value.max_loaded_manuals)} onChange={(event) => { const raw = event.target.value.trim(); if (raw === "") return; const parsed = Number(raw); if (Number.isFinite(parsed)) edit({ ...value, max_loaded_manuals: loadedManualCap(parsed) }) }} />
             <FieldDescription id="default-thread-loaded-manual-cap-description">{t("loadedManualCapDescription")}</FieldDescription>
+          </Field>
+          <Field data-disabled={save.isPending}>
+            <FieldLabel>{t("initialManuals")}</FieldLabel>
+            <InitialManualsField value={value.initial_manual_ids} choices={manualChoices.data?.manuals} disabled={save.isPending} onChange={(initial_manual_ids) => edit({ ...value, initial_manual_ids })} />
+            <FieldDescription id="default-thread-initial-manuals-description">{t("initialManualsDescription")}</FieldDescription>
           </Field>
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
