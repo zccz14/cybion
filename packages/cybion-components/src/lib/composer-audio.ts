@@ -7,6 +7,12 @@ export function audioTooLarge(file: File): boolean {
   return file.size > maxAudioBytes
 }
 
+/// 已经拿到 data URL 的调用方（例如侧边栏录完音直接递过来）不用再过一遍 File。
+export function audioDataUrlTooLarge(dataUrl: string): boolean {
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1)
+  return Math.floor((base64.length * 3) / 4) > maxAudioBytes
+}
+
 export function audioFileDataUrl(file: File): Promise<string | null> {
   return new Promise((resolve) => {
     const reader = new FileReader()
