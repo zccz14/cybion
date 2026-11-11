@@ -173,6 +173,7 @@ async fn creating_threads_requires_an_existing_upstream() {
             minimal_mode: false,
             image_generation_model: String::new(),
             max_loaded_manuals: 12,
+            initial_manual_ids: Vec::new(),
         }),
     )
     .await
@@ -294,6 +295,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
             minimal_mode: false,
             image_generation_model: String::new(),
             max_loaded_manuals: 12,
+            initial_manual_ids: Vec::new(),
         }),
     )
     .await
@@ -349,6 +351,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
             minimal_mode: false,
             image_generation_model: String::new(),
             max_loaded_manuals: 12,
+            initial_manual_ids: Vec::new(),
         }),
     )
     .await

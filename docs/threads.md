@@ -114,6 +114,17 @@ thread settings popover, and the thread value wins. The setting is display
 only: it is stored on the thread and defaults rows, and never part of model
 input or context compilation.
 
+A Thread also records the Manuals it starts with. The account default is the
+`initial_manual_ids` list under Configuration → Personal settings; each Thread
+can override it from the thread settings popover, and creating a Thread binds
+the effective list into the loaded set before its first input, so a Thread
+opens with those copies already in front of the model. The list must fit the
+loaded-Manual cap — every named Manual becomes a binding — and editing it on a
+live Thread loads what it gained and releases what it left, leaving a Manual
+the Thread loaded on its own alone. See
+[Initial Manuals](context.md#initial-manuals) for storage and the picker
+endpoint.
+
 The authenticated browser endpoints accept an empty POST body:
 
 | Endpoint | Result |

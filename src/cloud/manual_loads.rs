@@ -76,17 +76,144 @@ struct ManualIdArguments {
     manual_id: String,
 }
 
-/// Every Manual this Thread keeps loaded, in the order it loaded them.
+/// Every Manual this Thread keeps loaded, in the order it loaded them. The
+/// rowid breaks `loaded_at` ties — an initial list is bound in one second —
+/// so a list arrives upstream in the order it was written.
 pub(super) fn loaded_ids(
     connection: &Connection,
     thread_id: &str,
 ) -> Result<Vec<String>, ApiError> {
     let mut statement = connection.prepare(
-        "SELECT manual_id FROM thread_manual_loads WHERE thread_id=? ORDER BY loaded_at,manual_id",
+        "SELECT manual_id FROM thread_manual_loads WHERE thread_id=? ORDER BY loaded_at,rowid",
     )?;
     let rows = statement.query_map([thread_id], |row| row.get::<_, String>(0))?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+/// The largest initial list a setting may name. Every named Manual is bound
+/// when the list applies, so the list stays inside the widest cap a setting may
+/// configure; a longer one is refused where it is written, never truncated.
+pub(super) fn initial_manual_ids(value: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut ids: Vec<String> = Vec::with_capacity(value.len());
+    for id in value {
+        let id = manual_id(id)?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.len() as i64 > MAX_CONFIGURED_LOADED_MANUALS {
+        return Err(ApiError::bad_request(format!(
+            "an initial Manual list names at most {MAX_CONFIGURED_LOADED_MANUALS} Manuals"
+        )));
+    }
+    Ok(ids)
+}
+
+/// Refuses an initial list longer than the cap it has to fit: every Manual the
+/// list names is bound when it applies, so a longer list could not be honoured
+/// without breaking the cap's promise about what one request carries.
+pub(super) fn initial_ids_within_cap(ids: &[String], cap: i64) -> Result<(), ApiError> {
+    if ids.len() as i64 > cap {
+        return Err(ApiError::bad_request(format!(
+            "an initial Manual list names at most {cap} Manuals, the loaded Manual cap in force; shorten the list or raise the cap"
+        )));
+    }
+    Ok(())
+}
+
+/// A stored initial list as ids. The column keeps a JSON array; a row written
+/// by hand or by a newer build resolves to nothing rather than failing every
+/// read of the Thread.
+pub(super) fn parse_initial_ids(raw: Option<&str>) -> Vec<String> {
+    raw.and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default()
+}
+
+/// The column value for an initial list.
+pub(super) fn encode_initial_ids(ids: &[String]) -> String {
+    serde_json::to_string(ids).expect("a list of manual ids is serializable")
+}
+
+/// The User default's initial list: the Manuals every new Thread starts with
+/// unless the Thread carries a list of its own.
+pub(super) fn default_initial_ids(connection: &Connection) -> Result<Vec<String>, ApiError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT initial_manual_ids FROM thread_defaults WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(parse_initial_ids(raw.as_deref()))
+}
+
+/// The Thread's own initial list; `None` follows the User default.
+pub(super) fn stored_initial_ids(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<Option<Vec<String>>, ApiError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT initial_manual_ids FROM threads WHERE id=?",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| ApiError::not_found("thread not found"))?;
+    Ok(raw.as_deref().map(|raw| parse_initial_ids(Some(raw))))
+}
+
+/// The initial list in force for one Thread: its own, then the User default.
+pub(super) fn effective_initial_ids(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    match stored_initial_ids(connection, thread_id)? {
+        Some(ids) => Ok(ids),
+        None => default_initial_ids(connection),
+    }
+}
+
+/// Brings the Thread's bindings in line with its initial list: every Manual the
+/// list names and the Thread does not hold becomes loaded, and every Manual
+/// that left the list is released. Manuals the Thread loaded on its own are in
+/// neither set and keep their binding.
+///
+/// This is what makes the list a promise about the start of a Thread: creation
+/// binds it before the first input is compiled, and a later edit — a tick in
+/// the settings popover — binds or releases exactly the difference, so the
+/// loaded set never silently lags behind the list.
+pub(super) fn apply_initial(
+    connection: &Connection,
+    thread_id: &str,
+    before: &[String],
+    after: &[String],
+) -> Result<(), ApiError> {
+    let bound = loaded_ids(connection, thread_id)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    for id in after {
+        // A Manual that no longer resolves (deleted, or hidden by the trash)
+        // cannot be bound; the Thread is told the first time it is asked for.
+        if bound.contains(id) || resolve_manual(connection, id)?.is_none() {
+            continue;
+        }
+        connection.execute(
+            "INSERT OR IGNORE INTO thread_manual_loads(thread_id,manual_id,loaded_at) VALUES(?,?,?)",
+            params![thread_id, id, now()],
+        )?;
+    }
+    for id in before {
+        if after.contains(id) {
+            continue;
+        }
+        connection.execute(
+            "DELETE FROM thread_manual_loads WHERE thread_id=? AND manual_id=?",
+            params![thread_id, id],
+        )?;
+    }
+    Ok(())
 }
 
 /// The Manual as the Controller hands it to the model right now: local Manuals

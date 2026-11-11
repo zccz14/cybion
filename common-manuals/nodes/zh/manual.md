@@ -8,7 +8,7 @@ Cybion 是 Agent Harness 平台产品，底层由 NormAI 提供多样化的模�
 
 **线程 (Thread)**：在 Cybion 中，线程是执行智能任务的基本单位。每个线程都有自己的配置、生命周期、状态、上下文，可以独立运行并处理特定的请求或操作，不同线程之间的上下文是隔离的。类似的概念有对话（Chat）、会话（Session）等。
 
-**手册 (Manual)**：长期维护的、精炼压缩的、用于引导模型行为的文本提示。类似的概念有 Agents.md, Claude.md, Skills 等。它的有无决定了模型是否能在特定场景下做出正确的行为或者避开不该做的行为。手册是跨轮次、抗压缩的。压缩时，不需要输出手册的内容，因为 Cybion 会自动补发最新手册。相关工具：`load_manual` / `unload_manual` / `list_manuals` / `write_manual`
+**手册 (Manual)**：长期维护的、精炼压缩的、用于引导模型行为的文本提示。类似的概念有 Agents.md, Claude.md, Skills 等。它的有无决定了模型是否能在特定场景下做出正确的行为或者避开不该做的行为。手册是跨轮次、抗压缩的。压缩时，不需要输出手册的内容，因为 Cybion 会自动补发最新手册。相关工具：`load_manual` / `unload_manual` / `list_manuals` / `write_manual`。线程还可以在设置里指定「初始手册」：这些手册在线程创建时就已加载，模型不必再为它们调用 `load_manual`。
 
 **便签 (Note)**：线程级别维护的、用于记录目标和待办事项的文本提示。类似的概念有 TODO, 待办事项，目标模式等。便签是跨轮次、抗压缩的，便签上记录的事项在验证完成后应当立即被划掉。便签尚未全部完成时，Cybion 会反复续跑线程，直到便签被全部划掉，或者线程进入受阻（Blocked）状态请求上级介入。相关工具：`add_notes` / `cross_out_notes` / `block_thread`
 

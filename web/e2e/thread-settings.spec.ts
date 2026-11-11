@@ -70,6 +70,37 @@ test("the popover groups models by upstream and edits reasoning effort and fast 
   await expect(popover).toBeHidden()
 })
 
+test("initial manuals follow the account default until the thread names its own", async ({ page }) => {
+  await page.goto("/e2e/thread-settings.html")
+  await page.getByRole("button", { name: "线程设置" }).click()
+  const popover = page.locator('[data-slot="popover-content"]')
+  const chips = popover.locator('[data-slot="initial-manuals"]')
+  // Following the default: the inherited Manual is shown and counted.
+  await expect(chips.getByText("必读手册")).toBeVisible()
+  await expect(popover).toContainText("当前跟随账号默认。")
+  await expect(page.getByTestId("initial-manuals")).toHaveText("null")
+  // Removing the inherited Manual pins an empty list instead of following.
+  await chips.getByRole("button", { name: "移除: 必读手册" }).click()
+  await expect(page.getByTestId("initial-manuals")).toHaveText("[]")
+  await expect(chips).toContainText("还没有初始手册")
+  // Adding one names it in the Thread's own list.
+  await popover.getByRole("combobox", { name: "添加手册…" }).click()
+  await page.getByRole("option", { name: "前端开发指南", exact: true }).click()
+  await expect(page.getByTestId("initial-manuals")).toHaveText('["33333333-3333-4333-8333-333333333333"]')
+  await expect(chips.getByText("前端开发指南")).toBeVisible()
+  // And "follow default" hands the Thread back to the account list.
+  await popover.getByRole("button", { name: "跟随默认" }).click()
+  await expect(page.getByTestId("initial-manuals")).toHaveText("null")
+  await expect(chips.getByText("必读手册")).toBeVisible()
+  await expect(popover.getByRole("button", { name: "跟随默认" })).toHaveCount(0)
+  await page.screenshot({ path: "test-results/thread-settings-initial-manuals.png" })
+  // The picker must also fit the narrow layout the composer runs in.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(chips.getByText("必读手册")).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: "test-results/thread-settings-initial-manuals-mobile.png" })
+})
+
 test("the popover follows the language and stays within narrow layouts", async ({ page }) => {
   await page.goto("/e2e/thread-settings.html")
   await page.setViewportSize({ width: 390, height: 844 })

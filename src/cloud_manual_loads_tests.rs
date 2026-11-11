@@ -1,4 +1,4 @@
-use super::tests::{create_test_thread, insert_record, test_state};
+use super::tests::{create_test_thread, insert_record, insert_upstream, test_state};
 use super::*;
 
 fn insert_manual(connection: &Connection, id: &str, content: &str) {
@@ -40,6 +40,29 @@ fn set_thread_cap(connection: &Connection, thread_id: &str, cap: Option<i64>) {
             params![cap, thread_id],
         )
         .unwrap();
+}
+
+/// A User default row carrying an initial list; every other column keeps the
+/// value schema migration would have written.
+fn set_user_initial(connection: &Connection, ids: &[&str]) {
+    let encoded = manual_loads::encode_initial_ids(
+        &ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+    );
+    connection
+        .execute(
+            "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,initial_manual_ids)
+             VALUES(1,'gpt-6-astra','medium',0,200000,0,'',12,?)
+             ON CONFLICT(id) DO UPDATE SET initial_manual_ids=excluded.initial_manual_ids",
+            [encoded],
+        )
+        .unwrap();
+}
+
+fn identity(user: &User) -> axum::Extension<BrowserIdentity> {
+    axum::Extension(BrowserIdentity {
+        user: user.clone(),
+        bearer: String::new(),
+    })
 }
 
 fn insert_manuals(connection: &Connection, count: i64) -> Vec<String> {
@@ -567,5 +590,341 @@ async fn the_copy_arrives_right_after_the_load_answer() {
     assert!(
         copy.expect("the copy is in the same turn's replay") > tool_output,
         "the copy follows the answer that bound it"
+    );
+}
+
+/// The User default list is a promise about the start of every new Thread:
+/// creation binds it before the first input, so the very first compile carries
+/// the copies with no tool call and no turn spent asking for them.
+#[tokio::test]
+async fn a_new_thread_starts_with_the_users_initial_manuals() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "initial-default").unwrap();
+    let first = "10000000-0000-4000-8000-000000000001";
+    let second = "10000000-0000-4000-8000-000000000002";
+    user_db(&state, &user, true, move |connection| {
+        insert_manual(connection, first, "开局手册甲");
+        insert_manual(connection, second, "开局手册乙");
+        set_user_initial(connection, &[first, second]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    assert_eq!(
+        thread.initial_manual_ids,
+        Some(vec![first.to_owned(), second.to_owned()]),
+        "the Thread records the list it was created with"
+    );
+    let thread_id = thread.id.clone();
+    let data_dir = state.data_dir.clone();
+    let (loaded, messages) = user_db(&state, &user, true, move |connection| {
+        let loaded = manual_loads::loaded_ids(connection, &thread_id).unwrap();
+        start_thread(connection, &thread_id);
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        manual_loads::append_injections(connection, &thread_id, tail).unwrap();
+        let tail = latest_protocol_record_id(connection, &thread_id).unwrap();
+        let compiled = compile_thread_context(connection, &data_dir, &thread_id, tail).unwrap();
+        Ok((loaded, developer_messages(&compiled.items)))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        loaded,
+        [first, second],
+        "the list's order is the order the Thread receives"
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0].contains("开局手册甲"), "{}", messages[0]);
+    assert!(messages[1].contains("开局手册乙"), "{}", messages[1]);
+}
+
+/// A Thread created by an integration can name its own list; the account
+/// default only fills the Threads that name none.
+#[tokio::test]
+async fn a_thread_named_list_wins_over_the_user_default() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "initial-explicit").unwrap();
+    let default_manual = "20000000-0000-4000-8000-000000000001";
+    let named = "20000000-0000-4000-8000-000000000002";
+    user_db(&state, &user, true, move |connection| {
+        insert_manual(connection, default_manual, "默认开局");
+        insert_manual(connection, named, "指定开局");
+        set_user_initial(connection, &[default_manual]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+    let thread = create_thread_for(
+        &state,
+        &user,
+        CreateThreadInput {
+            title: Some("Named".to_owned()),
+            external_ref: None,
+            model: Some("test-model".to_owned()),
+            upstream_id: Some(upstream.id),
+            reasoning_effort: None,
+            service_tier_fast: None,
+            initial_manual_ids: Some(vec![named.to_owned()]),
+        },
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    assert_eq!(thread.initial_manual_ids, Some(vec![named.to_owned()]));
+    let thread_id = thread.id.clone();
+    let loaded = user_db(&state, &user, false, move |connection| {
+        manual_loads::loaded_ids(connection, &thread_id)
+    })
+    .await
+    .unwrap();
+    assert_eq!(loaded, [named]);
+}
+
+/// Every named Manual becomes a binding, so the list has to fit the cap those
+/// bindings count against; a longer list is refused where it is written.
+#[tokio::test]
+async fn an_initial_list_longer_than_the_loaded_manual_cap_is_refused() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "initial-cap").unwrap();
+    let error = update_thread_defaults(
+        State(state.clone()),
+        identity(&user),
+        Json(ThreadDefaults {
+            model: "gpt-6-astra".to_owned(),
+            upstream_id: None,
+            reasoning_effort: "medium".to_owned(),
+            service_tier_fast: false,
+            context_budget_tokens: 200_000,
+            minimal_mode: false,
+            image_generation_model: String::new(),
+            max_loaded_manuals: 1,
+            initial_manual_ids: vec![
+                "30000000-0000-4000-8000-000000000001".to_owned(),
+                "30000000-0000-4000-8000-000000000002".to_owned(),
+            ],
+            audio_transcription_model: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.message.contains("at most 1"),
+        "the refusal names the cap: {}",
+        error.message
+    );
+}
+
+/// Editing the list on a live Thread keeps the bindings in step: what the list
+/// gained is bound, what it lost is released, and a Manual the model loaded on
+/// its own keeps its binding.
+#[tokio::test]
+async fn editing_the_initial_list_binds_what_it_gained_and_releases_what_it_lost() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "initial-edit").unwrap();
+    let kept = "40000000-0000-4000-8000-000000000001";
+    let dropped = "40000000-0000-4000-8000-000000000002";
+    let added = "40000000-0000-4000-8000-000000000003";
+    let model_loaded = "40000000-0000-4000-8000-000000000004";
+    user_db(&state, &user, true, move |connection| {
+        for (id, content) in [
+            (kept, "留下"),
+            (dropped, "移出"),
+            (added, "新加"),
+            (model_loaded, "模型自己加载"),
+        ] {
+            insert_manual(connection, id, content);
+        }
+        set_user_initial(connection, &[kept, dropped]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, true, {
+        let thread_id = thread_id.clone();
+        move |connection| {
+            load(connection, &thread_id, model_loaded);
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let updated = update_thread(
+        State(state.clone()),
+        identity(&user),
+        AxumPath(thread_id.clone()),
+        Json(UpdateThreadInput {
+            title: None,
+            model: None,
+            upstream_id: None,
+            reasoning_effort: None,
+            service_tier_fast: None,
+            context_budget_tokens: None,
+            minimal_mode: None,
+            image_generation_model: None,
+            max_loaded_manuals: None,
+            initial_manual_ids: Some(Some(vec![kept.to_owned(), added.to_owned()])),
+            audio_transcription_model: None,
+            archived: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        updated.initial_manual_ids,
+        Some(vec![kept.to_owned(), added.to_owned()])
+    );
+    let loaded = user_db(&state, &user, false, move |connection| {
+        manual_loads::loaded_ids(connection, &thread_id)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        loaded,
+        [kept, model_loaded, added],
+        "the released Manual leaves, the gained one arrives, and the model's own binding stays"
+    );
+}
+
+/// Clearing the override returns the Thread to the account default, and the
+/// bindings follow that list the same way an explicit one would.
+#[tokio::test]
+async fn clearing_the_override_binds_the_default_list_instead() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "initial-cleared").unwrap();
+    let named = "50000000-0000-4000-8000-000000000001";
+    let defaulted = "50000000-0000-4000-8000-000000000002";
+    user_db(&state, &user, true, move |connection| {
+        insert_manual(connection, named, "线程自己的");
+        insert_manual(connection, defaulted, "账号默认的");
+        set_user_initial(connection, &[]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+    let thread = create_thread_for(
+        &state,
+        &user,
+        CreateThreadInput {
+            title: Some("Cleared".to_owned()),
+            external_ref: None,
+            model: Some("test-model".to_owned()),
+            upstream_id: Some(upstream.id),
+            reasoning_effort: None,
+            service_tier_fast: None,
+            initial_manual_ids: Some(vec![named.to_owned()]),
+        },
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    let thread_id = thread.id.clone();
+    user_db(&state, &user, true, move |connection| {
+        set_user_initial(connection, &[defaulted]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let updated = update_thread(
+        State(state.clone()),
+        identity(&user),
+        AxumPath(thread_id.clone()),
+        Json(UpdateThreadInput {
+            title: None,
+            model: None,
+            upstream_id: None,
+            reasoning_effort: None,
+            service_tier_fast: None,
+            context_budget_tokens: None,
+            minimal_mode: None,
+            image_generation_model: None,
+            max_loaded_manuals: None,
+            initial_manual_ids: Some(None),
+            audio_transcription_model: None,
+            archived: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(updated.initial_manual_ids, None);
+    let loaded = user_db(&state, &user, false, move |connection| {
+        manual_loads::loaded_ids(connection, &thread_id)
+    })
+    .await
+    .unwrap();
+    assert_eq!(loaded, [defaulted]);
+}
+
+/// A Manual hidden by the trash cannot be bound, and one stale id must not stop
+/// every new Thread from being created.
+#[tokio::test]
+async fn a_trashed_manual_in_the_list_is_skipped_instead_of_failing_creation() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "initial-trashed").unwrap();
+    let trashed = "60000000-0000-4000-8000-000000000001";
+    user_db(&state, &user, true, move |connection| {
+        insert_manual(connection, trashed, "已删除");
+        connection
+            .execute(
+                "UPDATE manuals SET trashed_at=? WHERE id=?",
+                params![now(), trashed],
+            )
+            .unwrap();
+        set_user_initial(connection, &[trashed]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    assert_eq!(thread.initial_manual_ids, Some(vec![trashed.to_owned()]));
+    let thread_id = thread.id.clone();
+    let loaded = user_db(&state, &user, false, move |connection| {
+        manual_loads::loaded_ids(connection, &thread_id)
+    })
+    .await
+    .unwrap();
+    assert!(loaded.is_empty(), "a hidden Manual never becomes a binding");
+}
+
+/// The settings picker reads names, not bodies: the same shape the model's
+/// `list_manuals` answers with, minus every Manual's content.
+#[tokio::test]
+async fn the_initial_manual_picker_lists_the_common_root_and_the_users_manuals() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "initial-picker").unwrap();
+    let id = "70000000-0000-4000-8000-000000000001";
+    user_db(&state, &user, true, move |connection| {
+        insert_manual(connection, id, "正文不该出现在选择器里");
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let view = list_manual_summaries(State(state.clone()), identity(&user))
+        .await
+        .unwrap()
+        .0;
+    let manuals = view["manuals"].as_array().unwrap();
+    assert_eq!(manuals[0]["source"], "common");
+    assert_eq!(
+        manuals[0]["manual_id"],
+        common_manuals::root_summary(common_manuals::SOURCE_LANGUAGE)["manual_id"],
+        "the built-in help manual can be named like any other"
+    );
+    let local = manuals
+        .iter()
+        .find(|item| item["manual_id"] == id)
+        .expect("the user's Manual is listed");
+    assert_eq!(local["source"], "local");
+    assert_eq!(local["name"], "Manual");
+    assert!(
+        local.get("content").is_none(),
+        "a picker entry carries no body"
     );
 }

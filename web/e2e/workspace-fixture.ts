@@ -36,7 +36,7 @@ export async function stubWorkspace(page: Page, options: {
   const profile = { user_id: "onboarding-user", username: "onboarding", intro: "", lang: language, theme, avatar_url: null }
   const release = JSON.parse(readFileSync(new URL("../../worker-release.json", import.meta.url), "utf8"))
   const upstream = { id: options.fallbackReady ? "manual-upstream" : "normai-upstream", name: options.fallbackReady ? "Manual" : "NormAI", base_url: options.fallbackReady ? "https://model.fixture" : "https://normai.ntnl.io", api_key_configured: true }
-  const defaults = { model: "deepseek-flash", upstream_id: options.connectionFails && !options.fallbackReady ? null : upstream.id, reasoning_effort: "medium", service_tier_fast: false, context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "" }
+  const defaults = { model: "deepseek-flash", upstream_id: options.connectionFails && !options.fallbackReady ? null : upstream.id, reasoning_effort: "medium", service_tier_fast: false, context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "", initial_manual_ids: [] as string[] }
   const thread = { ...defaults, id: "created-thread", title: "Fixture conversation", status: "idle", display_status: "ready", usage: emptyThreadUsage, context_tokens: 0, archived_at: null, created_at: now, updated_at: now, created_by: "web", external_ref: null }
   const notifications = { enabled: true, configured: true, bot_id: "fixture-bot", recipient_username: "onboarding", last_attempt_at: null, last_success_at: null, last_error: null, conversation_id: null, message_id: null }
   // Mirror the controller: every group keeps fractional-style keys in array order.
@@ -96,6 +96,7 @@ export async function stubWorkspace(page: Page, options: {
       if (path === `/api/threads/${thread.id}/history/loaded`) return json({ head: null, tail: null, loaded: [] })
       if (path === `/api/threads/${thread.id}/response`) return json(null)
       if (path === `/api/threads/${thread.id}/grants`) return json([])
+      if (path === "/api/manual-summaries") return json({ manuals: references.filter((reference) => reference.trashed_at === undefined).map((reference) => ({ manual_id: reference.id, name: reference.name, description: reference.description, source: "local" })) })
       if (path === "/api/manuals") {
         if (request.method() === "POST") {
           const reference = { locked: false, ...request.postDataJSON(), id: references.length === 0 ? "saved-reference" : `saved-reference-${references.length + 1}`, sort_key: "" }
