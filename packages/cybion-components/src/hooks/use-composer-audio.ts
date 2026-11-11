@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { Dispatch, SetStateAction } from "react"
-import { audioFileDataUrl, audioTooLarge, recordingFile } from "../lib/composer-audio"
+import { audioDataUrlTooLarge, audioFileDataUrl, audioTooLarge, recordingFile } from "../lib/composer-audio"
+
+const ATTACH_EVENT = "cybion:attach-audio"
+const pendingAudio: string[] = []
+
+/// 录音的第二个来路：侧边栏（扩展页）有麦克风权限，网页里没有。它把录好的
+/// data URL 递进来；composer 还没挂载时先排队，挂载时一并取走。
+export function attachComposerAudio(dataUrls: string[]) {
+  if (dataUrls.length === 0) return
+  pendingAudio.push(...dataUrls)
+  window.dispatchEvent(new Event(ATTACH_EVENT))
+}
 
 /// Audio attachments for one composer: recording through the browser's
 /// MediaRecorder plus files picked from disk, both held as data URLs until the
@@ -45,6 +56,20 @@ export function useComposerAudio(): {
     const ready = dataUrls.filter((dataUrl): dataUrl is string => dataUrl !== null)
     if (ready.length > 0) setAudios((current) => [...current, ...ready])
   }, [])
+
+  const drainAttached = useCallback(() => {
+    if (pendingAudio.length === 0) return
+    const ready = pendingAudio
+      .splice(0, pendingAudio.length)
+      .filter((dataUrl) => !audioDataUrlTooLarge(dataUrl))
+    if (ready.length > 0) setAudios((current) => [...current, ...ready])
+  }, [])
+
+  useEffect(() => {
+    drainAttached()
+    window.addEventListener(ATTACH_EVENT, drainAttached)
+    return () => window.removeEventListener(ATTACH_EVENT, drainAttached)
+  }, [drainAttached])
 
   const start = useCallback(async () => {
     setError(null)
