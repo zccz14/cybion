@@ -8,6 +8,8 @@ import { audioFileDataUrl, audioTooLarge, recordingFile } from "../lib/composer-
 export function useComposerAudio(): {
   audios: string[]
   recording: boolean
+  /// "录音没开始"的原因；不解释清楚，这个按钮就是个哑巴。
+  error: ComposerAudioError | null
   start: () => Promise<boolean>
   /// Stops the recorder and hands the clip back as a data URL. Nothing is
   /// stored: the caller either sends it straight out as a voice message or
@@ -21,6 +23,7 @@ export function useComposerAudio(): {
 } {
   const [audios, setAudios] = useState<string[]>([])
   const [recording, setRecording] = useState(false)
+  const [error, setError] = useState<ComposerAudioError | null>(null)
   const recorder = useRef<MediaRecorder | null>(null)
   const stream = useRef<MediaStream | null>(null)
   const chunks = useRef<Blob[]>([])
@@ -44,7 +47,12 @@ export function useComposerAudio(): {
   }, [])
 
   const start = useCallback(async () => {
-    if (!navigator.mediaDevices || !window.MediaRecorder) return false
+    setError(null)
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      // 没有 mediaDevices 只可能是非安全上下文或不支持的环境。
+      setError("unsupported")
+      return false
+    }
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
       stream.current = mediaStream
@@ -71,7 +79,17 @@ export function useComposerAudio(): {
       next.start()
       setRecording(true)
       return true
-    } catch {
+    } catch (failure) {
+      // 权限被拒、没有设备、被扩展页的策略拦住……都得说出来，不然用户只看到按钮没反应。
+      const name = (failure as { name?: string } | null)?.name ?? ""
+      setError(
+        name === "NotAllowedError" || name === "SecurityError"
+          ? "denied"
+          : name === "NotFoundError" || name === "OverconstrainedError"
+            ? "no-device"
+            : "unknown"
+      )
+      console.warn("[cybion] 无法开始录音", failure)
       return false
     }
   }, [])
@@ -102,8 +120,9 @@ export function useComposerAudio(): {
   }, [])
   const clear = useCallback(() => setAudios([]), [])
 
-  return { audios, recording, start, finish, cancel, add, remove, clear }
+  return { audios, recording, error, start, finish, cancel, add, remove, clear }
 }
 
+export type ComposerAudioError = "unsupported" | "denied" | "no-device" | "unknown"
 export type ComposerAudioState = ReturnType<typeof useComposerAudio>
 export type ComposerAudioSetter = Dispatch<SetStateAction<string[]>>
