@@ -277,7 +277,7 @@ export function attachThreadProcessSpend(entries: ThreadHistoryEntry[]): ThreadH
     if (entry.type !== "process" || last === null) continue
     entry.spendNanos = Math.max(0, last - (before ?? first ?? last))
   }
-  return attachThreadProcessSpend(entries)
+  return entries
 }
 
 // Locale-neutral on purpose: `$` is the settled amount's own unit, not a word to translate.
