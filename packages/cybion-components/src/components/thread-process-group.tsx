@@ -1,7 +1,7 @@
 import type { ReactNode } from "react"
 import { ChevronRightIcon } from "lucide-react"
 import { useLiveSeconds } from "../hooks/use-now"
-import { formatThreadProcessDuration, threadProcessDuration } from "../lib/thread-history"
+import { formatThreadProcessDuration, formatThreadProcessSpend, threadProcessDuration } from "../lib/thread-history"
 
 const copy = {
   en: {
@@ -9,12 +9,14 @@ const copy = {
     durationHint: "Time between the earliest and latest messages in this group.",
     liveDurationHint: "Time from this group's earliest message until now: this run is still writing into it.",
     count: (count: number) => `${count} ${count === 1 ? "message" : "messages"}`,
+    spendHint: "Settled spend reported by this group's own records. An unsettled call is never counted, and never shown as $0.00.",
   },
   zh: {
     title: "过程消息",
     durationHint: "本组最早一条消息到最晚一条消息的时间差。",
     liveDurationHint: "本组最早一条消息到现在的时间：本次执行仍在往这一组里写记录。",
     count: (count: number) => `${count} 条`,
+    spendHint: "本组记录里已结算的花费。未结算的调用不计入，也不会显示为 $0.00。",
   },
 }
 
@@ -25,12 +27,14 @@ function LiveProcessDuration({ language, startedAt, finishedAt }: { language: "e
   return <>{formatThreadProcessDuration(threadProcessDuration(startedAt, finishedAt, now), language)}</>
 }
 
-export function ThreadProcessGroup({ language, count, startedAt, finishedAt, running, children }: {
+export function ThreadProcessGroup({ language, count, startedAt, finishedAt, running, spendNanos, children }: {
   language: "en" | "zh"
   count: number
   startedAt: number
   finishedAt: number
   running: boolean
+  // What this group's own records report as settled; absent when none of them priced a call.
+  spendNanos?: number
   children: ReactNode
 }) {
   const text = copy[language]
@@ -45,6 +49,11 @@ export function ThreadProcessGroup({ language, count, startedAt, finishedAt, run
             ? <LiveProcessDuration language={language} startedAt={startedAt} finishedAt={finishedAt} />
             : formatThreadProcessDuration(finishedAt - startedAt, language)}
         </span>
+        {spendNanos ? (
+          <span title={text.spendHint} className="text-xs tabular-nums text-muted-foreground">
+            {formatThreadProcessSpend(spendNanos)}
+          </span>
+        ) : null}
       </span>
     </summary>
     <div className="flex min-w-0 flex-col gap-6 border-t border-border/70 p-3 sm:p-4">{children}</div>
