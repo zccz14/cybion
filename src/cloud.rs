@@ -169,7 +169,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // hosted database, because the index batches below only run on a version change.
 // 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
 // with, and the User default that fills the list of a new Thread.
-const USER_SCHEMA_VERSION: i64 = 58;
+const USER_SCHEMA_VERSION: i64 = 59;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -2235,6 +2235,20 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     // later version. This one has to land on every hosted database, so it sits
     // beside the version bump where each upgrade passes.
     transaction.execute_batch(USER_COST_PENDING_INDEXES)?;
+    // INVARIANT: this one cannot live in `migrate_user_schema_through_53`. That
+    // function only runs for a database below schema 53, so a table created
+    // there reaches fresh databases and no hosted one — and the request path
+    // reads `thread_rollup` on every inference request. Shipping it that way
+    // took the product down for every existing user; the upgrade path is the
+    // only place that reaches all of them.
+    transaction
+        .execute_batch(THREAD_ROLLUP_SCHEMA)
+        .map_err(ApiError::internal)?;
+    if version < 59 {
+        transaction
+            .execute_batch(THREAD_ROLLUP_BACKFILL)
+            .map_err(ApiError::internal)?;
+    }
     transaction.pragma_update(None, "user_version", USER_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -2782,14 +2796,6 @@ fn migrate_user_schema_through_53(
     transaction
         .execute_batch(USER_ROLLUP_BACKFILL)
         .map_err(ApiError::internal)?;
-    if version < 58 {
-        transaction
-            .execute_batch(THREAD_ROLLUP_SCHEMA)
-            .map_err(ApiError::internal)?;
-        transaction
-            .execute_batch(THREAD_ROLLUP_BACKFILL)
-            .map_err(ApiError::internal)?;
-    }
     Ok(())
 }
 
