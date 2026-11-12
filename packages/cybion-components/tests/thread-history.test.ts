@@ -1,14 +1,14 @@
 import assert from "node:assert/strict"
-import test from "node:test"
-import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, isControllerNotice, isRestartNotice, isRetryNotice, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history.ts"
-import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response.ts"
+import { it as test } from "vitest"
+import { formatThreadProcessDuration, groupThreadHistory, groupThreadHistoryMinimal, inFlightCallIds, isControllerNotice, isRestartNotice, isRetryNotice, liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory, recordInFlight, threadHistoryRecordKey, threadProcessDuration, type HistoryRecord } from "../src/lib/thread-history"
+import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response"
 
 function record(id: number, kind: HistoryRecord["kind"], payload: unknown = null, created_at = id, screenshot = false): HistoryRecord {
   return { id, thread_id: "thread-a", kind, payload, created_at, ...(screenshot ? { screenshot: true } : {}) }
 }
 
 function shape(entries: ReturnType<typeof groupThreadHistory>) {
-  return entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id)
+  return entries.map((entry) => entry.type === "message" ? entry.record.id : entry.records.map((item) => item.id))
 }
 
 test("a Worker call stays in flight until its own output record lands", () => {
@@ -60,7 +60,7 @@ test("all other record types form adjacent groups, including singletons at both 
   ]
   const entries = groupThreadHistory(records)
   // The image_generation_call record stays standalone: image content never joins a process group.
-  assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
+  assert.deepEqual(entries.map((entry) => entry.type === "message" ? entry.record.id : entry.records.map((item) => item.id)), [
     1, [2, 3, 4, 5], 6, [7], 8, [9], 10, [11],
   ])
 })
@@ -196,11 +196,11 @@ test("a checkpoint is a compression boundary: it stays in the conversation and s
     record(5, "response_output", { type: "message" }),
     record(6, "checkpoint"),
   ])
-  assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
+  assert.deepEqual(entries.map((entry) => entry.type === "message" ? entry.record.id : entry.records.map((item) => item.id)), [
     1, [2], 3, [4], 5, 6,
   ])
   // Minimal mode keeps its own contract: the checkpoint folds into the turn's process group.
-  assert.deepEqual(groupThreadHistoryMinimal([record(1, "input"), record(2, "tool_output"), record(3, "checkpoint"), record(4, "response_output", { type: "message" })]).map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [1, [2, 3], 4])
+  assert.deepEqual(groupThreadHistoryMinimal([record(1, "input"), record(2, "tool_output"), record(3, "checkpoint"), record(4, "response_output", { type: "message" })]).map((entry) => entry.type === "message" ? entry.record.id : entry.records.map((item) => item.id)), [1, [2, 3], 4])
 })
 
 test("only response message items are standalone; unexpected payload shapes remain inspectable in groups", () => {
@@ -221,7 +221,7 @@ test("grouping preserves exact record order and references without mutating inpu
   ])
   const snapshot = JSON.stringify(records)
   const entries = groupThreadHistory(records)
-  const flattened = entries.flatMap((entry) => entry.type === "process" ? entry.records : [entry.record])
+  const flattened = entries.flatMap((entry) => entry.type === "message" ? [entry.record] : entry.records)
   flattened.forEach((item, index) => assert.equal(item, records[index]))
   assert.equal(JSON.stringify(records), snapshot)
   assert.deepEqual(groupThreadHistory(records), entries)
@@ -447,7 +447,7 @@ test("generated images and ledger screenshots stay outside process groups", () =
     record(7, "tool_output", screenshotOutput),
   ]
   const entries = groupThreadHistory(records)
-  assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [
+  assert.deepEqual(entries.map((entry) => entry.type === "message" ? entry.record.id : entry.records.map((item) => item.id)), [
     [1], 2, 3, [4, 5, 6, 7],
   ])
 })
@@ -458,7 +458,7 @@ test("viewed images stay outside process groups", () => {
     record(2, "tool_output", viewedOutput),
   ]
   const entries = groupThreadHistory(records)
-  assert.deepEqual(entries.map((entry) => entry.type === "process" ? entry.records.map((item) => item.id) : entry.record.id), [[1], 2])
+  assert.deepEqual(entries.map((entry) => entry.type === "message" ? entry.record.id : entry.records.map((item) => item.id)), [[1], 2])
 })
 
 test("minimal mode collects a turn's images into one image group shown with its tail candidate", () => {

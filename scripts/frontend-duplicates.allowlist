@@ -1,0 +1,34 @@
+# Paths that still exist in both web/src and packages/cybion-components/src.
+#
+# This list only shrinks: delete an entry when the module is collapsed into the
+# package, never add one. The check that reads it also fails on a stale entry,
+# so a removed duplicate cannot linger here.
+#
+# styles.css is not a duplicate in the harmful sense: web's copy is the app's
+# own theme, the package's copy ships the component styles.
+components/audio-message.tsx
+components/composer-attachments.tsx
+components/composer-audio-notice.tsx
+components/composer-audio.tsx
+components/composer-draft-notice.tsx
+components/cybion-tool-call.tsx
+components/thread-settings-popover.tsx
+components/thread-status.tsx
+components/thread-usage.tsx
+components/worker-call-summary.tsx
+hooks/use-composer-audio.ts
+hooks/use-composer-draft.ts
+hooks/use-composer-images.ts
+hooks/use-now.ts
+lib/chat-input.ts
+lib/composer-audio.ts
+lib/composer-drafts.ts
+lib/composer-images.ts
+lib/format.ts
+lib/history-payload.ts
+lib/thread-response.ts
+lib/thread-status.ts
+lib/thread-usage.ts
+lib/time.ts
+lib/utils.ts
+styles.css

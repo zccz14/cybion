@@ -12,7 +12,7 @@ import { ThreadStatusBadge } from "@/components/thread-status"
 import { ThreadUsagePanel } from "@/components/thread-usage"
 import { SharingError } from "@/components/thread-sharing"
 import { pendingResponseRecords } from "@/lib/thread-response"
-import { newestRecordId, oldestRecordId, type HistoryRecord } from "@/lib/thread-history"
+import { newestRecordId, oldestRecordId, type HistoryRecord } from "@zccz14/cybion-components"
 import { formattedTime } from "@/lib/time"
 import { sharedThreadPath, sharedThreadQueryKey, sharingAccessLost, type SharedResponse, type SharedThread, type SharedThreadPageData, type SharingRequest } from "@/lib/thread-sharing"
 

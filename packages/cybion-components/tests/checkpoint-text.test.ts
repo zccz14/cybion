@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
-import test from "node:test"
-import { checkpointPreview } from "../src/lib/checkpoint-text.ts"
+import { it as test } from "vitest"
+import { checkpointPreview } from "../src/lib/checkpoint-text"
 
 test("preview skips headings, rules, quotes and table rows to reach the first prose line", () => {
   const markdown = "# Durable working context\n\n---\n\n> quoted\n\n| a | b |\n| - | - |\n\n## 概念与术语\n\n- **Thread**：独立的对话与执行单元。\n"

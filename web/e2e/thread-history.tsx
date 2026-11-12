@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client"
 
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
 import { historyPayloadText } from "../src/lib/history-payload"
-import type { HistoryRecord } from "../src/lib/thread-history"
+import type { HistoryRecord } from "@zccz14/cybion-components"
 import { formattedTime } from "../src/lib/time"
 import { pendingResponseRecords, type ThreadResponseView } from "../src/lib/thread-response"
 import "../src/styles.css"

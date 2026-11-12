@@ -34,6 +34,7 @@ jobs:
       - run: pnpm --dir packages/cybion-components run build
       - run: pnpm --dir web install --frozen-lockfile
       - run: pnpm --dir web run check
+      - run: bash scripts/check-frontend-duplicates.sh
       - name: Restore Playwright browser cache
         id: playwright-cache
         uses: actions/cache@v4

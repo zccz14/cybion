@@ -7,8 +7,8 @@ import { MessageScroller, MessageScrollerContent, MessageScrollerProvider, Messa
 
 import { ThreadManualLoads } from "../src/components/thread-manual-loads"
 import { historyPayloadText } from "../src/lib/history-payload"
-import { manualLoadNotice } from "../src/lib/thread-manual-loads"
-import type { HistoryRecord } from "../src/lib/thread-history"
+import { manualLoadNotice } from "@zccz14/cybion-components"
+import type { HistoryRecord } from "@zccz14/cybion-components"
 import { formattedTime } from "../src/lib/time"
 import "../src/styles.css"
 import { CybionThreadProvider, ManualLoadNotice, ThreadHistory } from "@zccz14/cybion-components"

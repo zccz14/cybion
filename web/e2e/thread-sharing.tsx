@@ -9,7 +9,7 @@ import { TooltipProvider } from "../src/components/ui/tooltip"
 import { Markdown } from "@zccz14/ux"
 
 import { historyPayloadText, screenshotImageSource, viewedImageSource } from "../src/lib/history-payload"
-import type { HistoryRecord } from "../src/lib/thread-history"
+import type { HistoryRecord } from "@zccz14/cybion-components"
 import type { SharingRequest } from "../src/lib/thread-sharing"
 import { adoptLinkitFixtureSession, LinkitFixtureProviders } from "./linkit-fixture"
 import "../src/styles.css"
