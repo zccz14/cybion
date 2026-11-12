@@ -426,7 +426,12 @@ async fn cancel_closes_the_in_flight_stream_and_preserves_committed_records() {
             let history = history_for(&state, &user, thread.id.clone(), 0)
                 .await
                 .unwrap();
-            if history.len() == 2 {
+            // Wait for the streamed item to be committed, not for a record
+            // count: every inference request also freezes a request tail.
+            if history
+                .iter()
+                .any(|record| record.kind == "response_output")
+            {
                 break history;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

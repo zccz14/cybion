@@ -52,11 +52,11 @@ is itself the range's `idx_tail` (see [The request tail](#the-request-tail)).
 ## The request tail
 
 A request carries one item that is not conversation: the Thread's own
-bookkeeping — which open notes it owes, and (as it grows) what the turn has cost
-so far. That item is frozen before the request compiles.
+bookkeeping — which open notes it owes, what it has spent, and the nudge that
+hands an unfinished turn back to the model. That item is frozen before the
+request compiles.
 
-`recovery::current_context` writes it, when there is anything to say, as an
-`activity` record — `kind` stays
+`recovery::current_context` writes it as an `activity` record — `kind` stays
 `activity`, `payload.type` is `request_tail`, `payload.text` is the rendered
 `developer` message — inside the transaction that compiles the request, after the
 Manual copies. The record's id becomes the range's `idx_tail`, so the audit row of
@@ -73,9 +73,34 @@ Three properties follow, and each one is enforced rather than assumed:
 - **The estimator and the compiler cannot disagree.** Both read a range through
   `replay_rows`, so what enters the model context is decided in exactly one
   place.
-- **A tail with nothing to say is not written.** The record exists only when it
-  carries text, so a range normally ends at its last conversation record and the
-  checkpoint invariant — the replayed records reach `idx_tail` — still holds.
+- **The record is written for every inference request.** The spend line always
+  has something to report, so the range always ends at a tail record and the
+  checkpoint invariant — the replayed records reach `idx_tail` — holds by
+  construction.
+
+## What the tail says
+
+Three parts, in this order, in one `developer` message:
+
+1. the open notes, when the Thread has any (`Sticky notes (n)` and the rules);
+2. one spend line, read from two O(1) rows — `thread_rollup`, which the audit
+   triggers maintain per Thread, and the newest finished inference — so the
+   request path never walks the Thread's audits:
+   `[spend] 1.24M tokens total (1.10M in / 140k out, cache 82%). $3.71 settled
+   over 41 of 43 requests. Last request 18.3k tokens / $0.06. Context 138k of the
+   200k budget (69%).`
+3. the continuation nudge, when the kernel is handing the turn back, because the
+   Thread still owes notes.
+
+Two honesty rules are part of the rendering. An unsettled call is never priced as
+free: the line names how many requests have an amount and how many do not, and a
+Thread whose upstream does not settle cost says so instead of reporting `$0.00`.
+And the context sentence is the one place the model is warned before an automatic
+compaction replaces the conversation; at 80% of the budget it adds a sentence
+asking for narrow reads and for what matters to be written into the reply.
+
+`payload.spend` carries the same numbers structurally, so a browser can render
+them without parsing the sentence.
 
 Because the tail is the last item, everything before it is a reusable prefix; a
 frozen tail costs its own bytes and no cache.

@@ -94,11 +94,15 @@ pub(super) async fn ensure_thread_loop(
     Ok(())
 }
 
+/// `nudge` is the runtime instruction that hands an unfinished turn back to the
+/// model. It is frozen into the request tail rather than pushed onto the items
+/// afterwards, so the compiled request stays a pure function of its records.
 pub(super) fn current_context(
     c: &mut Connection,
     data_dir: &Path,
     thread: &str,
     input: i64,
+    nudge: Option<&str>,
 ) -> Result<CompiledThreadContext, ApiError> {
     // INVARIANT: every inference attempt compiles here, and a Thread can start
     // replaying with another (upstream, model) pair mid-run, so the barrier is
@@ -119,7 +123,7 @@ pub(super) fn current_context(
     let tail = manual_loads::append_injections(&tx, thread, tail)?.unwrap_or(tail);
     // Freeze the request tail last, so it is the record the model reads last and
     // the compiled range stays a pure function of its records.
-    let tail = request_tail::append(&tx, thread)?.unwrap_or(tail);
+    let tail = request_tail::append(&tx, thread, nudge)?.unwrap_or(tail);
     let manual = compile_thread_context(&tx, data_dir, thread, tail)?;
     tx.commit()?;
     Ok(manual)

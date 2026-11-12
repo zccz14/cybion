@@ -3329,7 +3329,9 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     let manual = user_db(&state, &user, false, {
         let data_dir = data_dir.clone();
         let thread_id = thread.id.clone();
-        move |connection| recovery::current_context(connection, &data_dir, &thread_id, next_input)
+        move |connection| {
+            recovery::current_context(connection, &data_dir, &thread_id, next_input, None)
+        }
     })
     .await
     .unwrap();
@@ -3351,9 +3353,9 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     let payload: Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(payload["from"]["model"], json!(first_model));
     assert_eq!(payload["to"]["model"], json!("next-model"));
-    assert_eq!(
-        manual.idx_tail, barrier,
-        "the barrier is a protocol record, so it advances the replay tail"
+    assert!(
+        barrier >= manual.idx_head && barrier < manual.idx_tail,
+        "the barrier is a protocol record, so the replayed range carries it inside the frozen tail"
     );
 
     let replay = replayable_context_items(manual.items.clone());
@@ -3434,7 +3436,9 @@ async fn switching_a_thread_model_records_one_barrier_and_retires_earlier_envelo
     user_db(&state, &user, false, {
         let data_dir = data_dir.clone();
         let thread_id = thread.id.clone();
-        move |connection| recovery::current_context(connection, &data_dir, &thread_id, next_input)
+        move |connection| {
+            recovery::current_context(connection, &data_dir, &thread_id, next_input, None)
+        }
     })
     .await
     .unwrap();
@@ -3487,7 +3491,7 @@ async fn an_audit_without_upstream_id_records_no_barrier() {
     user_db(&state, &user, false, {
         let data_dir = data_dir.clone();
         let thread_id = thread.id.clone();
-        move |connection| recovery::current_context(connection, &data_dir, &thread_id, input)
+        move |connection| recovery::current_context(connection, &data_dir, &thread_id, input, None)
     })
     .await
     .unwrap();
@@ -3843,12 +3847,15 @@ async fn a_turn_that_still_owes_a_note_is_sent_back_with_the_runtime_nudge() {
     assert_eq!(last["role"], "developer");
     let nudge = last["content"].as_str().unwrap();
     assert!(
-        nudge.starts_with(&format!(
+        nudge.contains(&format!(
             "[Runtime continuation 1 of {}",
             continuation::MAX_PER_TURN
         )),
         "{nudge}"
     );
+    // The nudge closes the tail: the freeze puts it after the notes and the
+    // spend line, and nothing follows it.
+    assert!(nudge.trim_end().len() > 40, "{nudge}");
     // The nudge is the last thing the model reads; the turn's own words and the
     // assistant message it just wrote stay above it.
     assert!(items.iter().any(|item| item["role"] == "user"));

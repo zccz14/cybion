@@ -2,11 +2,11 @@
 //!
 //! Every inference request carries one item that is not part of the
 //! conversation itself: the Thread's own bookkeeping — the notes it still owes,
-//! and whatever else the model must know about this request. That item is
-//! frozen as an `activity` record *before* the request compiles, inside the same
-//! transaction, so the compiled request stays a pure function of its record
-//! range: the compiler reads records and nothing else, and replaying the same
-//! range twice produces the same items.
+//! what the Thread has spent, and the nudge that hands an unfinished turn back
+//! to the model. That item is frozen as an `activity` record *before* the
+//! request compiles, inside the same transaction, so the compiled request stays
+//! a pure function of its record range: the compiler reads records and nothing
+//! else, and replaying the same range twice produces the same items.
 //!
 //! INVARIANT: one tail record is written per inference attempt, and only the
 //! record named by `idx_tail` replays. A tail left behind by a failed attempt
@@ -22,6 +22,10 @@ use super::*;
 /// `history_records.kind` stays `activity`; the payload names the type, as
 /// `manual_loaded` and `context` records do.
 pub(super) const TYPE: &str = "request_tail";
+
+/// A Thread at this share of its context budget is told to narrow its next
+/// steps instead of being surprised by a compaction.
+const CONTEXT_PRESSURE_PERCENT: i128 = 80;
 
 fn is_tail(kind: &str, payload: &str) -> bool {
     if kind != "activity" {
@@ -56,17 +60,200 @@ pub(super) fn at(
     Ok(row.filter(|(_, _, kind, payload)| is_tail(kind, payload)))
 }
 
-/// Freezes this request's tail and returns the record id, or nothing when the
-/// Thread has nothing to report: a record that would replay no item is not
-/// worth a row, and the range then ends at its last conversation record.
-///
-/// Called inside the transaction that compiles the request, after the Manual
-/// copies, so the tail is the last record of the range the model reads.
-pub(super) fn append(connection: &Connection, thread_id: &str) -> Result<Option<i64>, ApiError> {
-    let Some(text) = notes::injection_block(connection, thread_id)? else {
-        return Ok(None);
-    };
-    let payload = json!({ "type": TYPE, "text": text });
+/// What one Thread has spent so far, plus the context its last request read.
+/// Read from two O(1) rows — the rollup the audit triggers maintain and the
+/// newest finished inference — so the tail never walks the Thread's history.
+#[derive(Debug, Default)]
+struct Spend {
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_tokens: i64,
+    cost_usd_nanos: i64,
+    settled: i64,
+    last_input_tokens: Option<i64>,
+    last_cost_usd_nanos: Option<i64>,
+    budget: Option<i64>,
+}
+
+fn spend(connection: &Connection, thread_id: &str) -> Result<Spend, ApiError> {
+    let rollup = connection
+        .query_row(
+            "SELECT requests,input_tokens,output_tokens,cached_tokens,
+                    cost_usd_nanos,cost_settled_requests
+             FROM thread_rollup WHERE thread_id=?",
+            [thread_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or((0, 0, 0, 0, 0, 0));
+    let last = connection
+        .query_row(
+            "SELECT input_tokens,cost_usd_nanos FROM reasoning_audits
+             WHERE thread_id=? AND request_kind='inference' AND input_tokens IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+            [thread_id],
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()?;
+    // The Thread's own budget, then the account default. A missing default row
+    // means the built-in budget, which the caller's defaults also assume.
+    let budget: Option<i64> = connection.query_row(
+        "SELECT COALESCE(
+             (SELECT context_budget_tokens FROM threads WHERE id=?),
+             (SELECT context_budget_tokens FROM thread_defaults WHERE id=1))",
+        [thread_id],
+        |row| row.get(0),
+    )?;
+    Ok(Spend {
+        requests: rollup.0,
+        input_tokens: rollup.1,
+        output_tokens: rollup.2,
+        cached_tokens: rollup.3,
+        cost_usd_nanos: rollup.4,
+        settled: rollup.5,
+        last_input_tokens: last.and_then(|(input, _)| input),
+        last_cost_usd_nanos: last.and_then(|(_, cost)| cost),
+        budget,
+    })
+}
+
+fn tokens(value: i64) -> String {
+    match value {
+        value if value >= 1_000_000 => format!("{:.2}M", value as f64 / 1_000_000.0),
+        value if value >= 1_000 => format!("{:.1}k", value as f64 / 1_000.0),
+        value => value.to_string(),
+    }
+}
+
+fn dollars(nanos: i64) -> String {
+    let value = nanos as f64 / 1_000_000_000.0;
+    if value > 0.0 && value < 0.01 {
+        "<$0.01".to_owned()
+    } else {
+        format!("${value:.2}")
+    }
+}
+
+impl Spend {
+    /// The one line the Thread reads about itself. Reported usage and settled
+    /// amounts only: an unsettled call is never priced as free.
+    fn line(&self) -> String {
+        let cache = if self.input_tokens > 0 {
+            Some(self.cached_tokens as f64 / self.input_tokens as f64 * 100.0)
+        } else {
+            None
+        };
+        let mut line = format!(
+            "[spend] {} tokens total ({} in / {} out{}).",
+            tokens(self.input_tokens + self.output_tokens),
+            tokens(self.input_tokens),
+            tokens(self.output_tokens),
+            cache.map_or_else(String::new, |share| format!(", cache {share:.0}%")),
+        );
+        if self.settled == 0 {
+            line.push_str(if self.requests == 0 {
+                " Nothing spent yet."
+            } else {
+                " No cost settled yet."
+            });
+        } else {
+            line.push_str(&format!(" {}", dollars(self.cost_usd_nanos)));
+            let settled = if self.settled < self.requests {
+                format!(
+                    " settled over {} of {} requests.",
+                    self.settled, self.requests
+                )
+            } else {
+                format!(" settled over {} requests.", self.requests)
+            };
+            line.push_str(&settled);
+        }
+        if let Some(input) = self.last_input_tokens {
+            line.push_str(&format!(" Last request {} tokens", tokens(input)));
+            if let Some(cost) = self.last_cost_usd_nanos {
+                line.push_str(&format!(" / {}", dollars(cost)));
+            }
+            line.push('.');
+        }
+        line
+    }
+
+    /// The context sentence, which is also the only place the Thread is told
+    /// when its budget is nearly gone: automatic compaction is about to replace
+    /// the conversation, so the model should write down what matters first.
+    fn context(&self) -> Option<String> {
+        let input = self.last_input_tokens?;
+        let budget = self.budget?;
+        if budget <= 0 {
+            return Some(format!(
+                "Context {} tokens; automatic compaction is off.",
+                tokens(input)
+            ));
+        }
+        let share = (i128::from(input) * 100 / i128::from(budget)).max(0);
+        let mut line = format!(
+            "Context {} of the {} budget ({share}%).",
+            tokens(input),
+            tokens(budget)
+        );
+        if share >= CONTEXT_PRESSURE_PERCENT {
+            line.push_str(
+                " Compaction is close: prefer narrow reads, and write what matters into your reply.",
+            );
+        }
+        Some(line)
+    }
+}
+
+/// Freezes this request's tail and returns the record id. Called inside the
+/// transaction that compiles the request, after the Manual copies, so the tail
+/// is the last record of the range the model reads.
+pub(super) fn append(
+    connection: &Connection,
+    thread_id: &str,
+    nudge: Option<&str>,
+) -> Result<Option<i64>, ApiError> {
+    let spend = spend(connection, thread_id)?;
+    let mut text = String::new();
+    if let Some(block) = notes::injection_block(connection, thread_id)? {
+        text.push_str(&block);
+        text.push_str("\n\n");
+    }
+    text.push_str(&spend.line());
+    if let Some(context) = spend.context() {
+        text.push(' ');
+        text.push_str(&context);
+    }
+    if let Some(nudge) = nudge {
+        // The nudge closes the tail: the most recent instruction in the request
+        // is "the Thread is not done", while the user's message stays the goal.
+        text.push_str("\n\n");
+        text.push_str(nudge);
+    }
+    let payload = json!({
+        "type": TYPE,
+        "text": text,
+        "spend": {
+            "requests": spend.requests,
+            "input_tokens": spend.input_tokens,
+            "output_tokens": spend.output_tokens,
+            "cached_tokens": spend.cached_tokens,
+            "cost_usd_nanos": spend.cost_usd_nanos,
+            "cost_settled_requests": spend.settled,
+            "context_tokens": spend.last_input_tokens,
+            "context_budget_tokens": spend.budget,
+        },
+    });
     let id = persist_history_record(
         connection,
         HistoryRecordInsert {
@@ -79,9 +266,8 @@ pub(super) fn append(connection: &Connection, thread_id: &str) -> Result<Option<
     Ok(Some(id))
 }
 
-/// Whether a tail record replays at all. A tail with nothing to say — no open
-/// notes yet, and nothing else to report — is still written, so every request
-/// ends at one, but it stays out of the model context and out of its estimate.
+/// Whether a tail record replays at all: a record that froze no text is
+/// evidence only.
 pub(super) fn replays(payload: &str) -> bool {
     serde_json::from_str::<Value>(payload)
         .ok()
@@ -95,8 +281,7 @@ pub(super) fn replays(payload: &str) -> bool {
 }
 
 /// A tail record replays as the developer message it froze: the folded card in
-/// the conversation is the same text the model reads. A tail with nothing to say
-/// writes no item.
+/// the conversation is the same text the model reads.
 pub(super) fn message(payload: &Value) -> Option<Value> {
     if payload.get("type").and_then(Value::as_str)? != TYPE {
         return None;

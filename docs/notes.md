@@ -43,10 +43,12 @@ item. The compiled request is therefore a pure function of its record range, and
 the bytes the model read stay recoverable after the renderer changes. See
 [Thread context replay](context.md#the-request-tail).
 
-A Thread with nothing open freezes no tail at all — the range then ends at its
-last conversation record, and nothing is owed, so there is nothing to say. Only
-the range's own tail replays; a tail left behind by an earlier attempt stays as
-evidence. Compaction and title requests build their own input without it. The
+The tail also carries the Thread's spend line and, when the kernel hands an
+unfinished turn back, the continuation nudge — see
+[The request tail](context.md#what-the-tail-says). A Thread with nothing open
+still reads its own spend; the notes block is simply absent from that message.
+Only the range's own tail replays; a tail left behind by an earlier attempt stays
+as evidence. Compaction and title requests build their own input without it. The
 tail is the last item, so the replayed prefix keeps its warm cache.
 
 ## Tools
@@ -118,7 +120,7 @@ the continuation. A settled response has already finalized the Thread back to
 that is not `running` — without the re-arm the hand-back is cancelled before the
 second request is ever sent.
 
-The nudge rides the request copy only, appended after the notes block, and is
+The nudge rides the request copy only, inside the frozen request tail, and is
 never written as a user message: adding a fake user turn would read as the
 person speaking and would outlive the one moment it was meant for. It names who
 is speaking, states the fact, names the two legal moves (finish it, or
