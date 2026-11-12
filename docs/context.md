@@ -46,7 +46,39 @@ conversation records themselves. Compaction and title generation append their
 instruction as the final user message after the replayed records, so the
 warmed request prefix stays reusable. The durable conversation remains the
 record range above. The compiler uses `kind` to select protocol records;
-`activity` stays outside the model context.
+`activity` stays outside the model context, except a `request_tail` record that
+is itself the range's `idx_tail` (see [The request tail](#the-request-tail)).
+
+## The request tail
+
+A request carries one item that is not conversation: the Thread's own
+bookkeeping — which open notes it owes, and (as it grows) what the turn has cost
+so far. That item is frozen before the request compiles.
+
+`recovery::current_context` writes it, when there is anything to say, as an
+`activity` record — `kind` stays
+`activity`, `payload.type` is `request_tail`, `payload.text` is the rendered
+`developer` message — inside the transaction that compiles the request, after the
+Manual copies. The record's id becomes the range's `idx_tail`, so the audit row of
+every inference request points at the exact tail the model read.
+
+Three properties follow, and each one is enforced rather than assumed:
+
+- **The compile is a pure function of the range.** The compiler reads records and
+  nothing else; the notes table is read on the write side, once, before the
+  record exists. Compiling the same range twice produces the same items.
+- **Only the range's own tail replays.** `request_tail::at` returns the record at
+  `idx_tail` and never an earlier one: a tail left behind by a failed attempt is
+  evidence, and the newer freeze supersedes it.
+- **The estimator and the compiler cannot disagree.** Both read a range through
+  `replay_rows`, so what enters the model context is decided in exactly one
+  place.
+- **A tail with nothing to say is not written.** The record exists only when it
+  carries text, so a range normally ends at its last conversation record and the
+  checkpoint invariant — the replayed records reach `idx_tail` — still holds.
+
+Because the tail is the last item, everything before it is a reusable prefix; a
+frozen tail costs its own bytes and no cache.
 
 ## Registry tools
 
@@ -94,9 +126,8 @@ move, trash, and restore are the page's own routes and never touch it.
 Sticky notes are a separate governed-context kind with their own tools
 (`add_notes`, `cross_out_notes`) and their own storage; no Manual tool returns
 or edits them. Every inference request also carries one synthetic `developer`
-message holding the Thread's open notes immediately before the newest user
-input, assembled into the request copy and never into `history_records`. See
-[Sticky notes](notes.md).
+message holding the Thread's open notes, frozen into the request tail record
+described below rather than spliced in. See [Sticky notes](notes.md).
 
 Every Worker tool call must include an exact `worker_id` from
 `cybion_list_workers`; a Worker is never chosen implicitly. It must also carry

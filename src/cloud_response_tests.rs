@@ -3554,7 +3554,7 @@ fn a_barrier_that_did_not_move_the_replay_target_keeps_envelopes() {
 }
 
 #[tokio::test]
-async fn inference_injects_the_open_notes_before_the_newest_user_input() {
+async fn inference_replays_the_open_notes_as_the_frozen_request_tail() {
     let (_root, state) = test_state();
     // This test is about where the notes block sits in one request. The loop
     // that would otherwise hand the turn back needs a second response from the
@@ -3604,13 +3604,15 @@ async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     let request = server.await.unwrap();
     let items = request["input"].as_array().unwrap();
     assert_eq!(items.len(), 2, "{items:?}");
-    assert_eq!(items[0]["role"], "developer");
-    let block = items[0]["content"].as_str().unwrap();
+    assert_eq!(items[0], json!({"role":"user","content":"hello"}));
+    // The tail is the last item, so everything before it stays a warm prefix.
+    assert_eq!(items[1]["role"], "developer");
+    let block = items[1]["content"].as_str().unwrap();
     assert!(block.contains("Sticky notes (1):"), "{block}");
     assert!(block.contains("alpha item"), "{block}");
     assert!(!block.contains("beta item"), "{block}");
-    assert_eq!(items[1], json!({"role":"user","content":"hello"}));
-    // The block is request state, never a record.
+    // The text the model read is a frozen record, not a splice: this is what
+    // makes the request a pure function of its record range.
     let stored: i64 = user_db(&state, &user, false, |connection| {
         Ok(connection.query_row(
             "SELECT COUNT(*) FROM history_records WHERE payload LIKE '%Sticky notes%'",
@@ -3620,7 +3622,7 @@ async fn inference_injects_the_open_notes_before_the_newest_user_input() {
     })
     .await
     .unwrap();
-    assert_eq!(stored, 0);
+    assert_eq!(stored, 1);
 }
 
 /// A strict Responses validator refuses replayed fields one name per request

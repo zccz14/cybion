@@ -211,23 +211,6 @@ fn injection_skips_crossed_notes_entirely() {
 }
 
 #[test]
-fn the_injected_block_precedes_the_newest_user_input() {
-    let mut items = vec![
-        json!({"role":"user","content":"first"}),
-        json!({"role":"assistant","content":"reply"}),
-        json!({"role":"user","content":"second"}),
-    ];
-    notes::inject(&mut items, "block");
-    assert_eq!(items.len(), 4);
-    assert_eq!(items[2], json!({"role":"developer","content":"block"}));
-    assert_eq!(items[3], json!({"role":"user","content":"second"}));
-
-    let mut empty: Vec<Value> = Vec::new();
-    notes::inject(&mut empty, "block");
-    assert_eq!(empty, vec![json!({"role":"developer","content":"block"})]);
-}
-
-#[test]
 fn deleting_a_thread_tears_off_only_its_notes() {
     let mut connection = notes_connection();
     insert_thread(&connection, "thread-a", "Thread A");
