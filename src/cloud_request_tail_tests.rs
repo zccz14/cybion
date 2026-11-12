@@ -259,96 +259,52 @@ fn the_estimator_counts_exactly_the_tail_the_compiler_replays() {
 }
 
 #[test]
-fn the_rollup_follows_the_audit_rows() {
-    let connection = tail_connection();
-    let first = audit(&connection, 1_000, 100, 900);
-    connection
-        .execute(
-            "UPDATE reasoning_audits SET cost_usd_nanos=200000000 WHERE id=?",
-            params![first],
-        )
-        .unwrap();
-    let mut statement = connection
-        .prepare(
-            "SELECT requests,input_tokens,output_tokens,cached_tokens,
-                    cost_usd_nanos,cost_settled_requests
-             FROM thread_rollup WHERE thread_id='th'",
-        )
-        .unwrap();
-    let row = |statement: &mut rusqlite::Statement| -> (i64, i64, i64, i64, i64, i64) {
-        statement
-            .query_row([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            })
-            .unwrap()
-    };
-    assert_eq!(row(&mut statement), (1, 1_000, 100, 900, 200_000_000, 1));
-    drop(statement);
-
-    // A late settlement lands in the rollup too.
-    connection
-        .execute(
-            "UPDATE reasoning_audits SET cost_usd_nanos=50000000 WHERE id=?",
-            params![first],
-        )
-        .unwrap();
-    let mut statement = connection
-        .prepare(
-            "SELECT requests,input_tokens,output_tokens,cached_tokens,
-                    cost_usd_nanos,cost_settled_requests
-             FROM thread_rollup WHERE thread_id='th'",
-        )
-        .unwrap();
-    assert_eq!(row(&mut statement), (1, 1_000, 100, 900, 50_000_000, 1));
-    drop(statement);
-
-    // Removing a Thread takes its rollup row with it.
-    connection
-        .execute("DELETE FROM threads WHERE id='th'", [])
-        .unwrap();
-    let remaining: i64 = connection
-        .query_row("SELECT COUNT(*) FROM thread_rollup", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(remaining, 0);
-}
-
-#[test]
-fn a_database_without_the_rollup_still_serves_a_request() {
+fn the_spend_line_follows_the_audit_rows() {
     let connection = tail_connection();
     let directory = tempfile::tempdir().unwrap();
     record(&connection, "input", json!({"role":"user","content":"go"}));
-    note(&connection, "n1", "完成交付");
-    // The shape a release once left behind: the schema version moved but the
-    // rollup never arrived. Reading it must cost the spend line, never the
-    // request.
+    let settled = audit(&connection, 1_000, 100, 900);
     connection
-        .execute_batch(
-            "DROP TRIGGER IF EXISTS thread_rollup_audit_insert;
-             DROP TRIGGER IF EXISTS thread_rollup_audit_tokens;
-             DROP TRIGGER IF EXISTS thread_rollup_audit_cost;
-             DROP TRIGGER IF EXISTS thread_rollup_audit_delete;
-             DROP TRIGGER IF EXISTS thread_rollup_thread_delete;
-             DROP TABLE thread_rollup;",
+        .execute(
+            "UPDATE reasoning_audits SET cost_usd_nanos=200000000 WHERE id=?",
+            params![settled],
         )
         .unwrap();
-    let tail = request_tail::append(&connection, "th", None)
-        .unwrap()
+    let line = |connection: &Connection| {
+        let tail = request_tail::append(connection, "th", None)
+            .unwrap()
+            .unwrap();
+        tail_text(
+            &compile_thread_context(connection, directory.path(), "th", tail)
+                .unwrap()
+                .items,
+        )
+    };
+    let text = line(&connection);
+    assert!(text.contains("$0.20"), "{text}");
+    assert!(text.contains("1.1k tokens total"), "{text}");
+
+    // A settlement that lands late is counted too: the aggregate is recomputed,
+    // never carried forward.
+    connection
+        .execute(
+            "UPDATE reasoning_audits SET cost_usd_nanos=50000000 WHERE id=?",
+            params![settled],
+        )
         .unwrap();
-    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
-    let text = tail_text(&compiled.items);
-    assert!(text.contains("完成交付"), "{text}");
-    assert!(!text.contains("[spend]"), "{text}");
+    let text = line(&connection);
+    assert!(text.contains("$0.05"), "{text}");
+
+    // Deleting the audit row takes its contribution with it.
+    connection
+        .execute("DELETE FROM reasoning_audits WHERE id=?", params![settled])
+        .unwrap();
+    let text = line(&connection);
+    assert!(text.contains("Nothing spent yet"), "{text}");
 }
 
 #[test]
-fn opening_an_old_database_creates_the_rollup_and_fills_it() {
+fn an_old_database_drops_the_rollup_and_still_reports_spend() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("old.sqlite3");
     let connection = open_user(&path, true).unwrap();
@@ -359,6 +315,16 @@ fn opening_an_old_database_creates_the_rollup_and_fills_it() {
             [],
         )
         .unwrap();
+    persist_history_record(
+        &connection,
+        HistoryRecordInsert {
+            thread_id: "old",
+            kind: "input",
+            payload: &json!({"role":"user","content":"go"}),
+            created_at: now(),
+        },
+    )
+    .unwrap();
     connection
         .execute(
             "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,
@@ -367,42 +333,35 @@ fn opening_an_old_database_creates_the_rollup_and_fills_it() {
             [],
         )
         .unwrap();
-    // Rewind to the version before the rollup existed.
+    // The shape v0.6.78 left behind: the derived table and one of its triggers.
     connection
         .execute_batch(
-            "DROP TRIGGER IF EXISTS thread_rollup_audit_insert;
-             DROP TRIGGER IF EXISTS thread_rollup_audit_tokens;
-             DROP TRIGGER IF EXISTS thread_rollup_audit_cost;
-             DROP TRIGGER IF EXISTS thread_rollup_audit_delete;
-             DROP TRIGGER IF EXISTS thread_rollup_thread_delete;
-             DROP TABLE thread_rollup;
-             PRAGMA user_version = 57;",
+            "CREATE TABLE thread_rollup (thread_id TEXT PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0);
+             CREATE TRIGGER thread_rollup_audit_insert AFTER INSERT ON reasoning_audits BEGIN SELECT 1; END;
+             PRAGMA user_version = 58;",
         )
         .unwrap();
     drop(connection);
-    let version: i64 = open_user(&path, true)
-        .unwrap()
+
+    let reopened = open_user(&path, true).unwrap();
+    let version: i64 = reopened
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, USER_SCHEMA_VERSION);
-    let reopened = open_user(&path, true).unwrap();
-    let row: (i64, i64, i64, i64, i64, i64) = reopened
+    let objects: i64 = reopened
         .query_row(
-            "SELECT requests,input_tokens,output_tokens,cached_tokens,
-                    cost_usd_nanos,cost_settled_requests
-             FROM thread_rollup WHERE thread_id='old'",
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'thread_rollup%'",
             [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
+            |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(row, (1, 1_000, 100, 900, 50_000_000, 1));
+    assert_eq!(objects, 0, "the derived table and its triggers are gone");
+
+    let directory = tempfile::tempdir().unwrap();
+    let tail = request_tail::append(&reopened, "old", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&reopened, directory.path(), "old", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(text.contains("$0.05"), "{text}");
 }
