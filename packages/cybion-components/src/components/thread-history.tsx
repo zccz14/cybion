@@ -18,7 +18,7 @@ export function ThreadHistory({ records, language, minimal, running, renderRecor
   // INVARIANT: a stable messageId per entry keeps the scroller able to anchor the viewport while
   // older pages are prepended.
   return entries.map((entry) => <MessageScrollerItem key={entry.key} messageId={entry.key}>
-    {entry.type === "process" && <ThreadProcessGroup language={language} count={entry.records.length} startedAt={entry.startedAt} finishedAt={entry.finishedAt} running={entry.key === liveKey}>
+    {entry.type === "process" && <ThreadProcessGroup language={language} count={entry.records.length} startedAt={entry.startedAt} finishedAt={entry.finishedAt} spendNanos={entry.spendNanos} running={entry.key === liveKey}>
       {entry.records.map((record) => <div key={threadHistoryRecordKey(record)} className="min-w-0">{renderRecord(record)}</div>)}
     </ThreadProcessGroup>}
     {entry.type === "message" && renderRecord(entry.record)}

@@ -14,7 +14,7 @@ export type HistoryRecord = {
 
 export type ThreadHistoryEntry =
   | { type: "message"; key: string; record: HistoryRecord }
-  | { type: "process"; key: string; records: HistoryRecord[]; startedAt: number; finishedAt: number }
+  | { type: "process"; key: string; records: HistoryRecord[]; startedAt: number; finishedAt: number; spendNanos?: number }
   | { type: "image-group"; key: string; records: HistoryRecord[] }
 
 export type ThreadImage = { source: string; kind: "generated" | "screenshot" | "viewed" }
@@ -171,7 +171,7 @@ export function groupThreadHistory(records: readonly HistoryRecord[]): ThreadHis
     }
     entries.push({ type: "process", key: `process:${key}`, records: [record], startedAt: record.created_at, finishedAt: record.created_at })
   }
-  return entries
+  return attachThreadProcessSpend(entries)
 }
 
 // Minimal mode keeps one tail candidate per turn: the last activity or message record.
@@ -227,7 +227,7 @@ export function groupThreadHistoryMinimal(records: readonly HistoryRecord[]): Th
     segment.push(record)
   }
   flush()
-  return entries
+  return attachThreadProcessSpend(entries)
 }
 
 // A Thread that is still running keeps writing into its newest process group, so that group is
@@ -244,6 +244,48 @@ export function liveThreadProcessKey(entries: readonly ThreadHistoryEntry[]): st
 
 // The clock is the browser's while `created_at` is the server's, so the clock never shortens the
 // span the group's own records already prove: a client running behind cannot rewind the counter.
+// What a group cost. Every inference request freezes the Thread's cumulative settled amount on
+// its `request_tail` record, so a group's own share is the difference between the last amount it
+// reached and the one the Thread had already reached before the group started. Records written
+// before the spend line existed carry no `spend` field: such a group shows nothing rather than
+// `$0.00`, because a call nobody priced is not a free call.
+function threadRecordSpendNanos(record: HistoryRecord): number | null {
+  const payload = historyPayloadObject(record.payload)
+  if (payload?.type !== "request_tail") return null
+  const spend = payload.spend
+  if (spend === null || typeof spend !== "object" || !("cost_usd_nanos" in spend)) return null
+  const nanos = spend.cost_usd_nanos
+  return typeof nanos === "number" && Number.isFinite(nanos) ? nanos : null
+}
+
+// Attaches `spendNanos` to every process group, walking the whole loaded conversation so a group
+// can subtract what the Thread had already spent before it began.
+export function attachThreadProcessSpend(entries: ThreadHistoryEntry[]): ThreadHistoryEntry[] {
+  let reached: number | null = null
+  for (const entry of entries) {
+    const records = entry.type === "message" ? [entry.record] : entry.records
+    const before = reached
+    let first: number | null = null
+    let last: number | null = null
+    for (const record of records) {
+      const nanos = threadRecordSpendNanos(record)
+      if (nanos === null) continue
+      if (first === null) first = nanos
+      last = nanos
+      reached = nanos
+    }
+    if (entry.type !== "process" || last === null) continue
+    entry.spendNanos = Math.max(0, last - (before ?? first ?? last))
+  }
+  return entries
+}
+
+// Locale-neutral on purpose: `$` is the settled amount's own unit, not a word to translate.
+export function formatThreadProcessSpend(nanos: number) {
+  const dollars = nanos / 1_000_000_000
+  return dollars > 0 && dollars < 0.01 ? "<$0.01" : `$${dollars.toFixed(2)}`
+}
+
 export function threadProcessDuration(startedAt: number, finishedAt: number, now: number) {
   return Math.max(finishedAt, now) - startedAt
 }
