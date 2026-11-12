@@ -83,9 +83,11 @@ Three properties follow, and each one is enforced rather than assumed:
 Three parts, in this order, in one `developer` message:
 
 1. the open notes, when the Thread has any (`Sticky notes (n)` and the rules);
-2. one spend line, read from two O(1) rows — `thread_rollup`, which the audit
-   triggers maintain per Thread, and the newest finished inference — so the
-   request path never walks the Thread's audits:
+2. one spend line, computed on the spot from the Thread's own audits (one
+   aggregate, on the index the UI already uses) plus one row for its newest
+   finished inference. It is recomputed rather than kept: cost settles
+   asynchronously, so a total carried forward from the previous tail would miss a
+   settlement that landed late:
    `[spend] 1.24M tokens total (1.10M in / 140k out, cache 82%). $3.71 settled
    over 41 of 43 requests. Last request 18.3k tokens / $0.06. Context 138k of the
    200k budget (69%).`

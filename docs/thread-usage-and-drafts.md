@@ -22,11 +22,12 @@ status is not a substitute for whether Tokens were consumed. Each audit row is
 counted once; updating its streaming/final state does not add a second copy.
 This is reported usage, not a billing estimate. The same reported numbers, plus
 `cost_usd_nanos` once the upstream settles it, are what the Thread reads about
-itself: `thread_rollup` keeps one row per Thread in step with the audit rows
-through triggers, and the request tail renders it into every inference request
-(see [The request tail](context.md#what-the-tail-says)). The rollup is derived
-data, never a second ledger: deleting an audit row removes its contribution, and
-a fresh database backfills it from the audits it already has.
+itself: the request tail aggregates this Thread's audits on every inference
+request and renders one line from them (see
+[The request tail](context.md#what-the-tail-says)). Nothing is stored a second
+time — no rollup table, no triggers to keep in step — because the aggregate is
+cheap and because a stored total would have to be corrected every time a
+settlement lands late.
 
 The conversation header separately shows the latest context: the input Tokens of
 the most recent inference request (`context_tokens`) against the effective

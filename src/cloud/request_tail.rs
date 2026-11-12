@@ -61,8 +61,8 @@ pub(super) fn at(
 }
 
 /// What one Thread has spent so far, plus the context its last request read.
-/// Read from two O(1) rows — the rollup the audit triggers maintain and the
-/// newest finished inference — so the tail never walks the Thread's history.
+/// One aggregate over the Thread's audits and one O(1) row for its last request:
+/// no stored total, no triggers, nothing to keep in step.
 #[derive(Debug, Default)]
 struct Spend {
     requests: i64,
@@ -89,25 +89,28 @@ fn spend(connection: &Connection, thread_id: &str) -> Option<Spend> {
 }
 
 fn read_spend(connection: &Connection, thread_id: &str) -> Result<Spend, ApiError> {
-    let rollup = connection
-        .query_row(
-            "SELECT requests,input_tokens,output_tokens,cached_tokens,
-                    cost_usd_nanos,cost_settled_requests
-             FROM thread_rollup WHERE thread_id=?",
-            [thread_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            },
-        )
-        .optional()?
-        .unwrap_or((0, 0, 0, 0, 0, 0));
+    // The same aggregate `THREAD_USAGE_SELECT` computes for the UI, narrowed to
+    // one Thread: an index scan over this Thread's audits, cheaper than the
+    // context estimate the very same request already pays for. Recomputed, never
+    // carried forward from the previous tail: cost settles asynchronously, so a
+    // running total would miss a settlement that landed after it was written.
+    let usage = connection.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),
+                COALESCE(SUM(cached_tokens),0),COALESCE(SUM(cost_usd_nanos),0),
+                COALESCE(SUM(CASE WHEN cost_usd_nanos IS NOT NULL THEN 1 ELSE 0 END),0)
+         FROM reasoning_audits WHERE thread_id=?",
+        [thread_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        },
+    )?;
     let last = connection
         .query_row(
             "SELECT input_tokens,cost_usd_nanos FROM reasoning_audits
@@ -127,12 +130,12 @@ fn read_spend(connection: &Connection, thread_id: &str) -> Result<Spend, ApiErro
         |row| row.get(0),
     )?;
     Ok(Spend {
-        requests: rollup.0,
-        input_tokens: rollup.1,
-        output_tokens: rollup.2,
-        cached_tokens: rollup.3,
-        cost_usd_nanos: rollup.4,
-        settled: rollup.5,
+        requests: usage.0,
+        input_tokens: usage.1,
+        output_tokens: usage.2,
+        cached_tokens: usage.3,
+        cost_usd_nanos: usage.4,
+        settled: usage.5,
         last_input_tokens: last.and_then(|(input, _)| input),
         last_cost_usd_nanos: last.and_then(|(_, cost)| cost),
         budget,

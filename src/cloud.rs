@@ -169,7 +169,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // hosted database, because the index batches below only run on a version change.
 // 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
 // with, and the User default that fills the list of a new Thread.
-const USER_SCHEMA_VERSION: i64 = 59;
+const USER_SCHEMA_VERSION: i64 = 60;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1875,82 +1875,6 @@ CREATE INDEX IF NOT EXISTS history_shared_intent_thread
 // step with the raw rows inside the writing transaction — including the
 // foreign-key cascade behind `DELETE FROM threads` — so the snapshot reads
 // seven integers per user.
-// Per-Thread spend, kept in step with the audit rows by the same trigger shape
-// `user_rollup` uses. The request tail renders these numbers on every inference
-// request, so reading them must never walk that Thread's audits — a long turn
-// writes hundreds of them, and the request path pays for every read.
-const THREAD_ROLLUP_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS thread_rollup (
-  thread_id TEXT PRIMARY KEY,
-  requests INTEGER NOT NULL DEFAULT 0,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
-  cached_tokens INTEGER NOT NULL DEFAULT 0,
-  cost_usd_nanos INTEGER NOT NULL DEFAULT 0,
-  cost_settled_requests INTEGER NOT NULL DEFAULT 0
-);
-CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_insert AFTER INSERT ON reasoning_audits BEGIN
-  INSERT INTO thread_rollup(thread_id,requests,input_tokens,output_tokens,cached_tokens,
-                            cost_usd_nanos,cost_settled_requests)
-  VALUES(NEW.thread_id,1,COALESCE(NEW.input_tokens,0),COALESCE(NEW.output_tokens,0),
-         COALESCE(NEW.cached_tokens,0),COALESCE(NEW.cost_usd_nanos,0),
-         CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
-  ON CONFLICT(thread_id) DO UPDATE SET
-    requests=requests+1,
-    input_tokens=input_tokens+COALESCE(NEW.input_tokens,0),
-    output_tokens=output_tokens+COALESCE(NEW.output_tokens,0),
-    cached_tokens=cached_tokens+COALESCE(NEW.cached_tokens,0),
-    cost_usd_nanos=cost_usd_nanos+COALESCE(NEW.cost_usd_nanos,0),
-    cost_settled_requests=cost_settled_requests+(CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END);
-END;
-CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_tokens AFTER UPDATE OF input_tokens,output_tokens,cached_tokens ON reasoning_audits BEGIN
-  INSERT INTO thread_rollup(thread_id,input_tokens,output_tokens,cached_tokens)
-  VALUES(NEW.thread_id,
-         COALESCE(NEW.input_tokens,0)-COALESCE(OLD.input_tokens,0),
-         COALESCE(NEW.output_tokens,0)-COALESCE(OLD.output_tokens,0),
-         COALESCE(NEW.cached_tokens,0)-COALESCE(OLD.cached_tokens,0))
-  ON CONFLICT(thread_id) DO UPDATE SET
-    input_tokens=input_tokens+COALESCE(NEW.input_tokens,0)-COALESCE(OLD.input_tokens,0),
-    output_tokens=output_tokens+COALESCE(NEW.output_tokens,0)-COALESCE(OLD.output_tokens,0),
-    cached_tokens=cached_tokens+COALESCE(NEW.cached_tokens,0)-COALESCE(OLD.cached_tokens,0);
-END;
-CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_cost AFTER UPDATE OF cost_usd_nanos ON reasoning_audits BEGIN
-  INSERT INTO thread_rollup(thread_id,cost_usd_nanos,cost_settled_requests)
-  VALUES(NEW.thread_id,
-         COALESCE(NEW.cost_usd_nanos,0)-COALESCE(OLD.cost_usd_nanos,0),
-         (CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
-           -(CASE WHEN OLD.cost_usd_nanos IS NULL THEN 0 ELSE 1 END))
-  ON CONFLICT(thread_id) DO UPDATE SET
-    cost_usd_nanos=cost_usd_nanos+COALESCE(NEW.cost_usd_nanos,0)-COALESCE(OLD.cost_usd_nanos,0),
-    cost_settled_requests=cost_settled_requests
-      +(CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
-      -(CASE WHEN OLD.cost_usd_nanos IS NULL THEN 0 ELSE 1 END);
-END;
-CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_delete AFTER DELETE ON reasoning_audits BEGIN
-  UPDATE thread_rollup SET
-    requests=requests-1,
-    input_tokens=input_tokens-COALESCE(OLD.input_tokens,0),
-    output_tokens=output_tokens-COALESCE(OLD.output_tokens,0),
-    cached_tokens=cached_tokens-COALESCE(OLD.cached_tokens,0),
-    cost_usd_nanos=cost_usd_nanos-COALESCE(OLD.cost_usd_nanos,0),
-    cost_settled_requests=cost_settled_requests-(CASE WHEN OLD.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
-  WHERE thread_id=OLD.thread_id;
-END;
-CREATE TRIGGER IF NOT EXISTS thread_rollup_thread_delete AFTER DELETE ON threads BEGIN
-  DELETE FROM thread_rollup WHERE thread_id=OLD.id;
-END;
-"#;
-
-// A database that predates the rollup already has the audits it summarizes.
-const THREAD_ROLLUP_BACKFILL: &str = r#"
-INSERT OR REPLACE INTO thread_rollup(thread_id,requests,input_tokens,output_tokens,cached_tokens,
-                                     cost_usd_nanos,cost_settled_requests)
-SELECT thread_id,COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),
-       COALESCE(SUM(cached_tokens),0),COALESCE(SUM(cost_usd_nanos),0),
-       SUM(CASE WHEN cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
-FROM reasoning_audits GROUP BY thread_id;
-"#;
-
 const USER_ROLLUP_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS user_rollup (
   id INTEGER PRIMARY KEY CHECK(id=1),
@@ -2235,18 +2159,28 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     // later version. This one has to land on every hosted database, so it sits
     // beside the version bump where each upgrade passes.
     transaction.execute_batch(USER_COST_PENDING_INDEXES)?;
-    // INVARIANT: this one cannot live in `migrate_user_schema_through_53`. That
-    // function only runs for a database below schema 53, so a table created
-    // there reaches fresh databases and no hosted one — and the request path
-    // reads `thread_rollup` on every inference request. Shipping it that way
-    // took the product down for every existing user; the upgrade path is the
-    // only place that reaches all of them.
-    transaction
-        .execute_batch(THREAD_ROLLUP_SCHEMA)
-        .map_err(ApiError::internal)?;
-    if version < 59 {
+    // Schema 58 briefly carried a materialized per-Thread spend table. The spend
+    // line only needed an aggregate, and a stored copy bought one saved SUM at
+    // the price of DDL — which is exactly what broke the service. A derived table
+    // nobody reads is dropped here; the request path recomputes from
+    // `reasoning_audits`. Probed first, so a database that never had it runs no
+    // DDL at all — every fresh database opens through this function.
+    let derived: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='thread_rollup'
+                        OR name LIKE 'thread_rollup\\_%' ESCAPE '\\')",
+        [],
+        |row| row.get(0),
+    )?;
+    if derived {
         transaction
-            .execute_batch(THREAD_ROLLUP_BACKFILL)
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS thread_rollup_audit_insert;
+                 DROP TRIGGER IF EXISTS thread_rollup_audit_tokens;
+                 DROP TRIGGER IF EXISTS thread_rollup_audit_cost;
+                 DROP TRIGGER IF EXISTS thread_rollup_audit_delete;
+                 DROP TRIGGER IF EXISTS thread_rollup_thread_delete;
+                 DROP TABLE IF EXISTS thread_rollup;",
+            )
             .map_err(ApiError::internal)?;
     }
     transaction.pragma_update(None, "user_version", USER_SCHEMA_VERSION)?;
