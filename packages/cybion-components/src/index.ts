@@ -18,6 +18,18 @@ export type { ThreadDisplayStatus } from "./lib/thread-status"
 export { copyFor } from "./copy"
 export type { CopyKey } from "./copy"
 export { ThreadHistory } from "./components/thread-history"
+
+// The transcript's own logic, exported so a host can decide what folds into a
+// process group, where that group's spend sits, and which record a history page
+// starts from — without keeping a second copy of any of it.
+export {
+  attachThreadProcessSpend, formatThreadProcessDuration, formatThreadProcessSpend, groupThreadHistory,
+  groupThreadHistoryMinimal, inFlightCallIds, isControllerNotice, isRestartNotice, isRetryNotice,
+  liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory,
+  recordInFlight, threadHistoryRecordKey, threadProcessDuration,
+} from "./lib/thread-history"
+export { isManualNotice, manualLoadNotice } from "./lib/thread-manual-loads"
+export type { ThreadManualLoadsView } from "./lib/thread-manual-loads"
 export { ThreadUsagePanel, ThreadContextUsage, ThreadUsageSummary, ThreadUsageDetails } from "./components/thread-usage"
 export { ThreadStatusSummary, ThreadStatusBadge } from "./components/thread-status"
 

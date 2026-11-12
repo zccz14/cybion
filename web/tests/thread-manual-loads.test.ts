@@ -1,9 +1,15 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import test from "node:test"
+import test, { after } from "node:test"
+import type { HistoryRecord } from "@zccz14/cybion-components"
 import { readPackageSource } from "./package-source.ts"
-import { manualLoadNotice } from "../src/lib/thread-manual-loads.ts"
-import type { HistoryRecord } from "../src/lib/thread-history.ts"
+import { createTestServer } from "./vite-server.ts"
+
+// The notice parser ships in the package, and the page resolves the package
+// through Vite's alias — so the test loads it the same way the page does.
+const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
+after(() => server.close())
+const { manualLoadNotice } = await server.ssrLoadModule("@zccz14/cybion-components") as typeof import("@zccz14/cybion-components")
 
 const manual = "8F1D2E3A-4B5C-6D7E-8F90-1A2B3C4D5E6F"
 const loaded: HistoryRecord = {
