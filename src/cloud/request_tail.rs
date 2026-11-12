@@ -76,7 +76,19 @@ struct Spend {
     budget: Option<i64>,
 }
 
-fn spend(connection: &Connection, thread_id: &str) -> Result<Spend, ApiError> {
+/// Never fatal: a Thread whose rollup cannot be read loses its spend line, not
+/// its request. The line is useful, never essential.
+fn spend(connection: &Connection, thread_id: &str) -> Option<Spend> {
+    match read_spend(connection, thread_id) {
+        Ok(spend) => Some(spend),
+        Err(error) => {
+            tracing::warn!(error = %error.message, "could not read a Thread's spend");
+            None
+        }
+    }
+}
+
+fn read_spend(connection: &Connection, thread_id: &str) -> Result<Spend, ApiError> {
     let rollup = connection
         .query_row(
             "SELECT requests,input_tokens,output_tokens,cached_tokens,
@@ -223,27 +235,19 @@ pub(super) fn append(
     thread_id: &str,
     nudge: Option<&str>,
 ) -> Result<Option<i64>, ApiError> {
-    let spend = spend(connection, thread_id)?;
     let mut text = String::new();
     if let Some(block) = notes::injection_block(connection, thread_id)? {
         text.push_str(&block);
         text.push_str("\n\n");
     }
-    text.push_str(&spend.line());
-    if let Some(context) = spend.context() {
-        text.push(' ');
-        text.push_str(&context);
-    }
-    if let Some(nudge) = nudge {
-        // The nudge closes the tail: the most recent instruction in the request
-        // is "the Thread is not done", while the user's message stays the goal.
-        text.push_str("\n\n");
-        text.push_str(nudge);
-    }
-    let payload = json!({
-        "type": TYPE,
-        "text": text,
-        "spend": {
+    let mut reported = Value::Null;
+    if let Some(spend) = spend(connection, thread_id) {
+        text.push_str(&spend.line());
+        if let Some(context) = spend.context() {
+            text.push(' ');
+            text.push_str(&context);
+        }
+        reported = json!({
             "requests": spend.requests,
             "input_tokens": spend.input_tokens,
             "output_tokens": spend.output_tokens,
@@ -252,9 +256,21 @@ pub(super) fn append(
             "cost_settled_requests": spend.settled,
             "context_tokens": spend.last_input_tokens,
             "context_budget_tokens": spend.budget,
-        },
-    });
-    let id = persist_history_record(
+        });
+    }
+    if let Some(nudge) = nudge {
+        // The nudge closes the tail: the most recent instruction in the request
+        // is "the Thread is not done", while the user's message stays the goal.
+        text.push_str("\n\n");
+        text.push_str(nudge);
+    }
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let payload = json!({ "type": TYPE, "text": text, "spend": reported });
+    // A tail that cannot be written must not cost the request: the model simply
+    // reads a request without it, exactly as before this feature existed.
+    match persist_history_record(
         connection,
         HistoryRecordInsert {
             thread_id,
@@ -262,8 +278,13 @@ pub(super) fn append(
             payload: &payload,
             created_at: now(),
         },
-    )?;
-    Ok(Some(id))
+    ) {
+        Ok(id) => Ok(Some(id)),
+        Err(error) => {
+            tracing::warn!(error = %error.message, "could not freeze a request tail");
+            Ok(None)
+        }
+    }
 }
 
 /// Whether a tail record replays at all: a record that froze no text is

@@ -318,3 +318,91 @@ fn the_rollup_follows_the_audit_rows() {
         .unwrap();
     assert_eq!(remaining, 0);
 }
+
+#[test]
+fn a_database_without_the_rollup_still_serves_a_request() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    note(&connection, "n1", "完成交付");
+    // The shape a release once left behind: the schema version moved but the
+    // rollup never arrived. Reading it must cost the spend line, never the
+    // request.
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS thread_rollup_audit_insert;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_tokens;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_cost;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_delete;
+             DROP TRIGGER IF EXISTS thread_rollup_thread_delete;
+             DROP TABLE thread_rollup;",
+        )
+        .unwrap();
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(text.contains("完成交付"), "{text}");
+    assert!(!text.contains("[spend]"), "{text}");
+}
+
+#[test]
+fn opening_an_old_database_creates_the_rollup_and_fills_it() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("old.sqlite3");
+    let connection = open_user(&path, true).unwrap();
+    connection
+        .execute(
+            "INSERT INTO threads(id,title,model,status,created_at,updated_at)
+             VALUES('old','O','m','idle',1,1)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,
+                                          input_tokens,output_tokens,cached_tokens,cost_usd_nanos)
+             VALUES('old','inference','m','completed',1,1000,100,900,50000000)",
+            [],
+        )
+        .unwrap();
+    // Rewind to the version before the rollup existed.
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS thread_rollup_audit_insert;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_tokens;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_cost;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_delete;
+             DROP TRIGGER IF EXISTS thread_rollup_thread_delete;
+             DROP TABLE thread_rollup;
+             PRAGMA user_version = 57;",
+        )
+        .unwrap();
+    drop(connection);
+    let version: i64 = open_user(&path, true)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, USER_SCHEMA_VERSION);
+    let reopened = open_user(&path, true).unwrap();
+    let row: (i64, i64, i64, i64, i64, i64) = reopened
+        .query_row(
+            "SELECT requests,input_tokens,output_tokens,cached_tokens,
+                    cost_usd_nanos,cost_settled_requests
+             FROM thread_rollup WHERE thread_id='old'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row, (1, 1_000, 100, 900, 50_000_000, 1));
+}
