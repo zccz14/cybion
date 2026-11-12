@@ -113,7 +113,13 @@ pub(super) fn current_context(
     let tail = latest_protocol_record_id(&tx, thread)?;
     // Deliver every loaded Manual before the request compiles, so the copies
     // belong to the range this request replays rather than the next one.
+    // Deliver every loaded Manual before the request compiles, so the copies
+    // belong to the range this request replays rather than the next one. The
+    // frozen tail below lands after them and ends the range.
     let tail = manual_loads::append_injections(&tx, thread, tail)?.unwrap_or(tail);
+    // Freeze the request tail last, so it is the record the model reads last and
+    // the compiled range stays a pure function of its records.
+    let tail = request_tail::append(&tx, thread)?.unwrap_or(tail);
     let manual = compile_thread_context(&tx, data_dir, thread, tail)?;
     tx.commit()?;
     Ok(manual)

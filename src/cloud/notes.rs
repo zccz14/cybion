@@ -312,19 +312,6 @@ pub(super) fn injection_block(
     Ok(Some(block))
 }
 
-/// Places the block immediately before the newest user input, so the request
-/// tail is the user's actual message and the replayed prefix stays stable.
-pub(super) fn inject(items: &mut Vec<Value>, block: &str) {
-    let item = json!({"role":"developer","content":block});
-    match items
-        .iter()
-        .rposition(|item| item.get("role").and_then(Value::as_str) == Some("user"))
-    {
-        Some(index) => items.insert(index, item),
-        None => items.push(item),
-    }
-}
-
 /// Whether the notes continuation loop runs at all. Read on the turn's own
 /// path, so flipping the switch takes effect on the next settlement.
 pub(super) async fn continuation_enabled(state: &AppState) -> Result<bool, ApiError> {

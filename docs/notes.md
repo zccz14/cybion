@@ -26,8 +26,8 @@ another Thread's notes are not part of this Thread's world.
 
 ## Injection
 
-Every inference request inserts one synthetic `developer` message immediately
-before the newest user input:
+Every inference request carries the Thread's open notes as one synthetic
+`developer` message:
 
 ```text
 Sticky notes (1):
@@ -36,10 +36,18 @@ Cross out what you finished. A note is visible and crossable only in the Thread
 that wrote it. Ask the user when you are blocked.
 ```
 
-The block is assembled into the request copy only: `history_records` stays exactly
-what happened, and compaction and title requests build their own input without it.
-A Thread with nothing open gets no block at all — nothing is owed, nothing to say.
-Because insertion happens at the tail, the replayed prefix keeps its warm cache.
+The block is never spliced in while the request compiles. The controller freezes
+it — rendered text included — into a `request_tail` `activity` record *before*
+the request compiles, and the compiler replays that record as the request's last
+item. The compiled request is therefore a pure function of its record range, and
+the bytes the model read stay recoverable after the renderer changes. See
+[Thread context replay](context.md#the-request-tail).
+
+A Thread with nothing open freezes no tail at all — the range then ends at its
+last conversation record, and nothing is owed, so there is nothing to say. Only
+the range's own tail replays; a tail left behind by an earlier attempt stays as
+evidence. Compaction and title requests build their own input without it. The
+tail is the last item, so the replayed prefix keeps its warm cache.
 
 ## Tools
 

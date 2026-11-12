@@ -49,6 +49,7 @@ mod normai;
 mod notes;
 mod objects;
 mod recovery;
+mod request_tail;
 mod route_performance;
 mod run_phase;
 mod sql_performance;
@@ -6391,9 +6392,14 @@ fn validate_protocol_record(
     thread_id: &str,
     idx_tail: i64,
 ) -> Result<(), ApiError> {
+    // A frozen request tail ends a range without being a protocol record: it is
+    // written immediately before the request compiles, so it is always the tail
+    // the model reads.
     let protocol: Option<bool> = connection
         .query_row(
-            &format!("SELECT {PROTOCOL_RECORDS} FROM history_records WHERE id=? AND thread_id=?"),
+            &format!(
+                "SELECT {PROTOCOL_RECORDS} OR (kind='activity' AND json_extract(payload,'$.type')='request_tail') FROM history_records WHERE id=? AND thread_id=?"
+            ),
             params![idx_tail, thread_id],
             |row| row.get(0),
         )
@@ -6507,7 +6513,9 @@ fn estimate_context_tokens(
     Ok((range_bytes + CONTEXT_ESTIMATE_BYTES_PER_TOKEN - 1) / CONTEXT_ESTIMATE_BYTES_PER_TOKEN)
 }
 
-/// Estimated replay bytes of the protocol records in an inclusive record range.
+/// Estimated replay bytes of an inclusive record range. It reads the range
+/// through the same `replay_rows` the compiler uses, so the estimate can never
+/// disagree with the request about what enters the model context.
 /// Integer record ids make `id > anchor_tail` the same as `id >= anchor_tail + 1`.
 fn estimate_range_bytes(
     connection: &Connection,
@@ -6515,23 +6523,10 @@ fn estimate_range_bytes(
     idx_from: i64,
     idx_to: i64,
 ) -> Result<i64, ApiError> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT id,kind,payload FROM history_records
-             WHERE thread_id=? AND id>=? AND id<=? AND {PROTOCOL_RECORDS}
-             ORDER BY id"
-    ))?;
-    let rows = statement
-        .query_map(params![thread_id, idx_from, idx_to], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let rows = replay_rows(connection, thread_id, idx_from, idx_to)?;
     // Screenshots can only live in tool_output records; skip the ledger read
     // for ranges that cannot contain one.
-    let (screenshots, reinjected) = if rows.iter().any(|row| row.1 == "tool_output") {
+    let (screenshots, reinjected) = if rows.iter().any(|row| row.2 == "tool_output") {
         let ordered_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
         let screenshots = screenshot_output_record_ids(connection, thread_id)?;
         let reinjected = reinjected_screenshot_ids(&ordered_ids, &screenshots);
@@ -6540,7 +6535,7 @@ fn estimate_range_bytes(
         (HashSet::new(), HashSet::new())
     };
     let mut bytes = 0;
-    for (id, _, payload) in rows {
+    for (id, _, _, payload) in rows {
         bytes += if screenshots.contains(&id) {
             estimated_screenshot_bytes(&payload, reinjected.contains(&id))
         } else {
@@ -6728,19 +6723,22 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
     STANDARD.decode(text).ok()
 }
 
-fn load_protocol_items(
+/// The records one request replays, in id order: the protocol records in the
+/// range, then the frozen request tail when the range ends at one. Both the
+/// compiler and the context estimator read a range through this function, so the
+/// two can never disagree about what enters the model context.
+fn replay_rows(
     connection: &Connection,
-    data_dir: &Path,
     thread_id: &str,
     idx_head: i64,
     idx_tail: i64,
-) -> Result<Vec<(i64, i64, String, Value)>, ApiError> {
+) -> Result<Vec<(i64, i64, String, String)>, ApiError> {
     let mut statement = connection.prepare(&format!(
         "SELECT h.id,h.created_at,h.kind,h.payload FROM history_records h
              WHERE h.thread_id=? AND h.id>=? AND h.id<=? AND {PROTOCOL_RECORDS}
              ORDER BY h.id"
     ))?;
-    let rows = statement
+    let mut rows = statement
         .query_map(params![thread_id, idx_head, idx_tail], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -6750,6 +6748,23 @@ fn load_protocol_items(
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    if let Some(tail) = request_tail::at(connection, thread_id, idx_tail)?
+        && request_tail::replays(&tail.3)
+    {
+        rows.push(tail);
+    }
+    Ok(rows)
+}
+
+fn load_protocol_items(
+    connection: &Connection,
+    data_dir: &Path,
+    thread_id: &str,
+    idx_head: i64,
+    idx_tail: i64,
+) -> Result<Vec<(i64, i64, String, Value)>, ApiError> {
+    let rows = replay_rows(connection, thread_id, idx_head, idx_tail)?;
     // Screenshots can only live in tool_output records; skip the ledger read
     // for ranges that cannot contain one.
     let reinjected = if !rows.iter().any(|row| row.2 == "tool_output") {
@@ -6767,6 +6782,9 @@ fn load_protocol_items(
             item = notice;
         }
         if let Some(message) = context_message(&item) {
+            item = message;
+        }
+        if let Some(message) = request_tail::message(&item) {
             item = message;
         }
         if reinjected.contains(&id) {
@@ -7295,26 +7313,16 @@ async fn request_agent(
                 continue;
             }
         }
-        let (workers, note_block) = user_db(state, user, false, {
-            let thread_id = thread.id.clone();
-            move |connection| {
-                Ok((
-                    registered_workers(connection)?,
-                    notes::injection_block(connection, &thread_id)?,
-                ))
-            }
+        let workers = user_db(state, user, false, |connection| {
+            registered_workers(connection)
         })
         .await
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let has_workers = !workers.is_empty();
         let surface = RequestSurface::of(thread, &defaults, has_workers);
+        // The notes block is not spliced here: the request tail record carries
+        // it, written by `recovery::current_context` before this range compiled.
         let mut request_items = std::mem::take(&mut manual.items);
-        if let Some(block) = note_block.as_deref() {
-            // The notes block lives only in the request copy: history records
-            // stay exactly what happened, and compaction and title requests
-            // build their own input without it.
-            notes::inject(&mut request_items, block);
-        }
         if let Some(nudge) = continuation_nudge.take() {
             // Appended last, after the notes block and the user's own words:
             // the most recent instruction in the request is "the Thread is not
@@ -11025,6 +11033,10 @@ mod thread_token_tests;
 #[cfg(test)]
 #[path = "cloud_continuation_tests.rs"]
 mod continuation_tests;
+
+#[cfg(test)]
+#[path = "cloud_request_tail_tests.rs"]
+mod request_tail_tests;
 
 #[cfg(test)]
 #[path = "cloud_notes_tests.rs"]

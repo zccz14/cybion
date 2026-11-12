@@ -124,6 +124,7 @@ something the turn produced:
 | `type: request_interrupted` | a request the controller closed across a restart. Records written before that type existed are recognised by the exact wording the controller ever used, `Request interrupted by a Cybion restart`. |
 | `next_retry_at` | a retry the Thread scheduled for itself, so its answer comes later |
 | `type: context` | background a host appended with `POST /v1/threads/{id}/context` |
+| `type: request_tail` | the frozen request tail a request carried — the notes block it replayed |
 | `type: thread_share` | a grant or revoke of viewer access |
 | `type: thread_control` | a Stop, Continue or Compact request |
 | `type: late_worker_result`, or an activity carrying a `call_id` | a Worker result stored as activity because the call it answers had already settled or been superseded |
