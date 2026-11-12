@@ -34,9 +34,29 @@ fn note(connection: &Connection, id: &str, text: &str) {
         .unwrap();
 }
 
-/// The developer messages a compiled request carries that came from a frozen
-/// tail: the notes block always names itself in its first line.
-fn tail_items(items: &[Value]) -> Vec<String> {
+fn audit(connection: &Connection, input: i64, output: i64, cached: i64) -> i64 {
+    connection
+        .execute(
+            "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,
+                                          input_tokens,output_tokens,cached_tokens)
+             VALUES('th','inference','model','completed',1,?,?,?)",
+            params![input, output, cached],
+        )
+        .unwrap();
+    connection.last_insert_rowid()
+}
+
+/// The developer message a compiled request ends with.
+fn tail_text(items: &[Value]) -> String {
+    items
+        .last()
+        .and_then(|item| item["content"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The developer messages that came from a notes block.
+fn notes_lines(items: &[Value]) -> Vec<String> {
     items
         .iter()
         .filter_map(|item| item.get("content").and_then(Value::as_str))
@@ -51,13 +71,17 @@ fn a_frozen_tail_replays_as_the_last_item_the_model_reads() {
     let directory = tempfile::tempdir().unwrap();
     record(&connection, "input", json!({"role":"user","content":"go"}));
     note(&connection, "n1", "完成交付");
-    let tail = request_tail::append(&connection, "th").unwrap().unwrap();
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
     let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
     assert_eq!(compiled.idx_tail, tail);
     let last = compiled.items.last().unwrap();
     assert_eq!(last["role"], "developer");
-    assert!(last["content"].as_str().unwrap().contains("完成交付"));
-    assert_eq!(tail_items(&compiled.items).len(), 1);
+    let text = last["content"].as_str().unwrap();
+    assert!(text.contains("完成交付"), "{text}");
+    assert!(text.contains("[spend]"), "{text}");
+    assert_eq!(notes_lines(&compiled.items).len(), 1);
 }
 
 #[test]
@@ -66,7 +90,10 @@ fn compiling_the_same_range_twice_reproduces_the_same_items() {
     let directory = tempfile::tempdir().unwrap();
     record(&connection, "input", json!({"role":"user","content":"go"}));
     note(&connection, "n1", "完成交付");
-    let tail = request_tail::append(&connection, "th").unwrap().unwrap();
+    audit(&connection, 1_000, 200, 800);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
     let first = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
     let second = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
     assert_eq!(first.items, second.items);
@@ -79,36 +106,142 @@ fn an_older_tail_is_evidence_and_never_replays() {
     let directory = tempfile::tempdir().unwrap();
     record(&connection, "input", json!({"role":"user","content":"go"}));
     note(&connection, "n1", "完成交付");
-    let stale = request_tail::append(&connection, "th").unwrap().unwrap();
+    let stale = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
     note(&connection, "n2", "再检查一遍");
     let answer = record(
         &connection,
         "response_output",
         json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}),
     );
-    let tail = request_tail::append(&connection, "th").unwrap().unwrap();
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
     assert!(stale < answer && answer < tail);
 
     let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
-    let replayed = tail_items(&compiled.items);
+    let replayed = notes_lines(&compiled.items);
     assert_eq!(replayed.len(), 1);
     assert!(replayed[0].contains("再检查一遍"));
 
     // A range that ends before the newest freeze carries no tail item at all.
     let older = compile_thread_context(&connection, directory.path(), "th", answer).unwrap();
-    assert!(tail_items(&older.items).is_empty());
+    assert!(notes_lines(&older.items).is_empty());
 }
 
 #[test]
-fn a_thread_with_nothing_to_say_freezes_no_tail_and_replays_the_conversation() {
+fn a_thread_without_notes_still_reads_its_own_spend() {
     let connection = tail_connection();
     let directory = tempfile::tempdir().unwrap();
     let head = record(&connection, "input", json!({"role":"user","content":"go"}));
-    assert_eq!(request_tail::append(&connection, "th").unwrap(), None);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    // The tail is not a protocol record: it never advances the replay tail on
+    // its own, it only ends the range this request compiles.
     assert_eq!(latest_protocol_record_id(&connection, "th").unwrap(), head);
-    let compiled = compile_thread_context(&connection, directory.path(), "th", head).unwrap();
-    assert_eq!(compiled.items.len(), 1);
-    assert!(tail_items(&compiled.items).is_empty());
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    assert_eq!(compiled.items.len(), 2);
+    let text = tail_text(&compiled.items);
+    assert!(text.starts_with("[spend]"), "{text}");
+    assert!(notes_lines(&compiled.items).is_empty());
+}
+
+#[test]
+fn the_tail_names_what_the_thread_spent_and_what_settled() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    let settled = audit(&connection, 1_000, 200, 800);
+    connection
+        .execute(
+            "UPDATE reasoning_audits SET cost_usd_nanos=250000000 WHERE id=?",
+            params![settled],
+        )
+        .unwrap();
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(text.contains("1.2k tokens total"), "{text}");
+    assert!(text.contains("1.0k in / 200 out"), "{text}");
+    assert!(text.contains("cache 80%"), "{text}");
+    assert!(text.contains("$0.25"), "{text}");
+    assert!(text.contains("Last request 1.0k tokens / $0.25"), "{text}");
+}
+
+#[test]
+fn an_unsettled_call_is_never_reported_as_free() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    let settled = audit(&connection, 1_000, 100, 0);
+    connection
+        .execute(
+            "UPDATE reasoning_audits SET cost_usd_nanos=100000000 WHERE id=?",
+            params![settled],
+        )
+        .unwrap();
+    audit(&connection, 2_000, 300, 0);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(
+        text.contains("$0.10 settled over 1 of 2 requests"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_context_sentence_warns_before_a_compaction() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    connection
+        .execute(
+            "UPDATE threads SET context_budget_tokens=1000 WHERE id='th'",
+            [],
+        )
+        .unwrap();
+    audit(&connection, 900, 10, 0);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(
+        text.contains("Context 900 of the 1.0k budget (90%)"),
+        "{text}"
+    );
+    assert!(text.contains("Compaction is close"), "{text}");
+}
+
+#[test]
+fn the_continuation_nudge_is_frozen_into_the_tail() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    note(&connection, "n1", "完成交付");
+    let nudge = "The Thread still owes 1 open note. Cross out what you finished.";
+    let tail = request_tail::append(&connection, "th", Some(nudge))
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(text.ends_with(nudge), "{text}");
+    // The nudge is the last thing in the request, and it is a record.
+    let stored: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM history_records WHERE payload LIKE '%still owes%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 1);
 }
 
 #[test]
@@ -116,9 +249,72 @@ fn the_estimator_counts_exactly_the_tail_the_compiler_replays() {
     let connection = tail_connection();
     let head = record(&connection, "input", json!({"role":"user","content":"go"}));
     note(&connection, "n1", "完成交付");
-    let tail = request_tail::append(&connection, "th").unwrap().unwrap();
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
     let with_tail = estimate_range_bytes(&connection, "th", head, tail).unwrap();
     let without_tail = estimate_range_bytes(&connection, "th", head, tail - 1).unwrap();
     assert!(with_tail > without_tail);
     assert_eq!(tail - 1, head);
+}
+
+#[test]
+fn the_rollup_follows_the_audit_rows() {
+    let connection = tail_connection();
+    let first = audit(&connection, 1_000, 100, 900);
+    connection
+        .execute(
+            "UPDATE reasoning_audits SET cost_usd_nanos=200000000 WHERE id=?",
+            params![first],
+        )
+        .unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT requests,input_tokens,output_tokens,cached_tokens,
+                    cost_usd_nanos,cost_settled_requests
+             FROM thread_rollup WHERE thread_id='th'",
+        )
+        .unwrap();
+    let row = |statement: &mut rusqlite::Statement| -> (i64, i64, i64, i64, i64, i64) {
+        statement
+            .query_row([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+    };
+    assert_eq!(row(&mut statement), (1, 1_000, 100, 900, 200_000_000, 1));
+    drop(statement);
+
+    // A late settlement lands in the rollup too.
+    connection
+        .execute(
+            "UPDATE reasoning_audits SET cost_usd_nanos=50000000 WHERE id=?",
+            params![first],
+        )
+        .unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT requests,input_tokens,output_tokens,cached_tokens,
+                    cost_usd_nanos,cost_settled_requests
+             FROM thread_rollup WHERE thread_id='th'",
+        )
+        .unwrap();
+    assert_eq!(row(&mut statement), (1, 1_000, 100, 900, 50_000_000, 1));
+    drop(statement);
+
+    // Removing a Thread takes its rollup row with it.
+    connection
+        .execute("DELETE FROM threads WHERE id='th'", [])
+        .unwrap();
+    let remaining: i64 = connection
+        .query_row("SELECT COUNT(*) FROM thread_rollup", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0);
 }

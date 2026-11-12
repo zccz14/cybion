@@ -169,7 +169,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // hosted database, because the index batches below only run on a version change.
 // 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
 // with, and the User default that fills the list of a new Thread.
-const USER_SCHEMA_VERSION: i64 = 57;
+const USER_SCHEMA_VERSION: i64 = 58;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1875,6 +1875,82 @@ CREATE INDEX IF NOT EXISTS history_shared_intent_thread
 // step with the raw rows inside the writing transaction — including the
 // foreign-key cascade behind `DELETE FROM threads` — so the snapshot reads
 // seven integers per user.
+// Per-Thread spend, kept in step with the audit rows by the same trigger shape
+// `user_rollup` uses. The request tail renders these numbers on every inference
+// request, so reading them must never walk that Thread's audits — a long turn
+// writes hundreds of them, and the request path pays for every read.
+const THREAD_ROLLUP_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_rollup (
+  thread_id TEXT PRIMARY KEY,
+  requests INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd_nanos INTEGER NOT NULL DEFAULT 0,
+  cost_settled_requests INTEGER NOT NULL DEFAULT 0
+);
+CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_insert AFTER INSERT ON reasoning_audits BEGIN
+  INSERT INTO thread_rollup(thread_id,requests,input_tokens,output_tokens,cached_tokens,
+                            cost_usd_nanos,cost_settled_requests)
+  VALUES(NEW.thread_id,1,COALESCE(NEW.input_tokens,0),COALESCE(NEW.output_tokens,0),
+         COALESCE(NEW.cached_tokens,0),COALESCE(NEW.cost_usd_nanos,0),
+         CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
+  ON CONFLICT(thread_id) DO UPDATE SET
+    requests=requests+1,
+    input_tokens=input_tokens+COALESCE(NEW.input_tokens,0),
+    output_tokens=output_tokens+COALESCE(NEW.output_tokens,0),
+    cached_tokens=cached_tokens+COALESCE(NEW.cached_tokens,0),
+    cost_usd_nanos=cost_usd_nanos+COALESCE(NEW.cost_usd_nanos,0),
+    cost_settled_requests=cost_settled_requests+(CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END);
+END;
+CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_tokens AFTER UPDATE OF input_tokens,output_tokens,cached_tokens ON reasoning_audits BEGIN
+  INSERT INTO thread_rollup(thread_id,input_tokens,output_tokens,cached_tokens)
+  VALUES(NEW.thread_id,
+         COALESCE(NEW.input_tokens,0)-COALESCE(OLD.input_tokens,0),
+         COALESCE(NEW.output_tokens,0)-COALESCE(OLD.output_tokens,0),
+         COALESCE(NEW.cached_tokens,0)-COALESCE(OLD.cached_tokens,0))
+  ON CONFLICT(thread_id) DO UPDATE SET
+    input_tokens=input_tokens+COALESCE(NEW.input_tokens,0)-COALESCE(OLD.input_tokens,0),
+    output_tokens=output_tokens+COALESCE(NEW.output_tokens,0)-COALESCE(OLD.output_tokens,0),
+    cached_tokens=cached_tokens+COALESCE(NEW.cached_tokens,0)-COALESCE(OLD.cached_tokens,0);
+END;
+CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_cost AFTER UPDATE OF cost_usd_nanos ON reasoning_audits BEGIN
+  INSERT INTO thread_rollup(thread_id,cost_usd_nanos,cost_settled_requests)
+  VALUES(NEW.thread_id,
+         COALESCE(NEW.cost_usd_nanos,0)-COALESCE(OLD.cost_usd_nanos,0),
+         (CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
+           -(CASE WHEN OLD.cost_usd_nanos IS NULL THEN 0 ELSE 1 END))
+  ON CONFLICT(thread_id) DO UPDATE SET
+    cost_usd_nanos=cost_usd_nanos+COALESCE(NEW.cost_usd_nanos,0)-COALESCE(OLD.cost_usd_nanos,0),
+    cost_settled_requests=cost_settled_requests
+      +(CASE WHEN NEW.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
+      -(CASE WHEN OLD.cost_usd_nanos IS NULL THEN 0 ELSE 1 END);
+END;
+CREATE TRIGGER IF NOT EXISTS thread_rollup_audit_delete AFTER DELETE ON reasoning_audits BEGIN
+  UPDATE thread_rollup SET
+    requests=requests-1,
+    input_tokens=input_tokens-COALESCE(OLD.input_tokens,0),
+    output_tokens=output_tokens-COALESCE(OLD.output_tokens,0),
+    cached_tokens=cached_tokens-COALESCE(OLD.cached_tokens,0),
+    cost_usd_nanos=cost_usd_nanos-COALESCE(OLD.cost_usd_nanos,0),
+    cost_settled_requests=cost_settled_requests-(CASE WHEN OLD.cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
+  WHERE thread_id=OLD.thread_id;
+END;
+CREATE TRIGGER IF NOT EXISTS thread_rollup_thread_delete AFTER DELETE ON threads BEGIN
+  DELETE FROM thread_rollup WHERE thread_id=OLD.id;
+END;
+"#;
+
+// A database that predates the rollup already has the audits it summarizes.
+const THREAD_ROLLUP_BACKFILL: &str = r#"
+INSERT OR REPLACE INTO thread_rollup(thread_id,requests,input_tokens,output_tokens,cached_tokens,
+                                     cost_usd_nanos,cost_settled_requests)
+SELECT thread_id,COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),
+       COALESCE(SUM(cached_tokens),0),COALESCE(SUM(cost_usd_nanos),0),
+       SUM(CASE WHEN cost_usd_nanos IS NULL THEN 0 ELSE 1 END)
+FROM reasoning_audits GROUP BY thread_id;
+"#;
+
 const USER_ROLLUP_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS user_rollup (
   id INTEGER PRIMARY KEY CHECK(id=1),
@@ -2706,6 +2782,14 @@ fn migrate_user_schema_through_53(
     transaction
         .execute_batch(USER_ROLLUP_BACKFILL)
         .map_err(ApiError::internal)?;
+    if version < 58 {
+        transaction
+            .execute_batch(THREAD_ROLLUP_SCHEMA)
+            .map_err(ApiError::internal)?;
+        transaction
+            .execute_batch(THREAD_ROLLUP_BACKFILL)
+            .map_err(ApiError::internal)?;
+    }
     Ok(())
 }
 
@@ -6375,6 +6459,14 @@ impl CompiledThreadContext {
 /// with another `(upstream, model)` pair.
 const PROTOCOL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','manual_loaded','manual_unloaded','context')))";
 
+/// What a record range may end at: a protocol record, or the frozen request
+/// tail. The tail is written immediately before the request compiles, so it is
+/// always the last record the model reads, and the two authorities that guard a
+/// range — `validate_protocol_record` and the checkpoint write — must accept it
+/// as the end of a range without letting it into `PROTOCOL_RECORDS`, which is
+/// what the summarizer compiles and what the context estimate counts.
+const RANGE_TAIL_RECORDS: &str = "(kind IN ('input','response_output','tool_output','checkpoint') OR (kind='activity' AND json_extract(payload,'$.type') IN ('model_switch','manual_loaded','manual_unloaded','context','request_tail')))";
+
 fn latest_protocol_record_id(connection: &Connection, thread_id: &str) -> Result<i64, ApiError> {
     connection
         .query_row(
@@ -6397,9 +6489,7 @@ fn validate_protocol_record(
     // the model reads.
     let protocol: Option<bool> = connection
         .query_row(
-            &format!(
-                "SELECT {PROTOCOL_RECORDS} OR (kind='activity' AND json_extract(payload,'$.type')='request_tail') FROM history_records WHERE id=? AND thread_id=?"
-            ),
+            &format!("SELECT {RANGE_TAIL_RECORDS} FROM history_records WHERE id=? AND thread_id=?"),
             params![idx_tail, thread_id],
             |row| row.get(0),
         )
@@ -7273,13 +7363,19 @@ async fn request_agent(
             .await
             .map_err(|e| (thread.clone(), Box::new(e)))?;
         let thread = &current;
+        // Cloned rather than taken: the nudge belongs to the request that is
+        // actually assembled, so a compile that fails keeps it for the retry.
+        let nudge = continuation_nudge.clone();
         let mut manual = user_db(state, user, false, {
             let id = thread.id.clone();
             let data_dir = state.data_dir.clone();
-            move |c| recovery::current_context(c, &data_dir, &id, source_record_idx)
+            move |c| {
+                recovery::current_context(c, &data_dir, &id, source_record_idx, nudge.as_deref())
+            }
         })
         .await
         .map_err(|e| (thread.clone(), Box::new(e)))?;
+        continuation_nudge = None;
         let budget = thread
             .context_budget_tokens
             .unwrap_or(defaults.context_budget_tokens);
@@ -7320,15 +7416,10 @@ async fn request_agent(
         .map_err(|error| (thread.clone(), Box::new(error)))?;
         let has_workers = !workers.is_empty();
         let surface = RequestSurface::of(thread, &defaults, has_workers);
-        // The notes block is not spliced here: the request tail record carries
-        // it, written by `recovery::current_context` before this range compiled.
-        let mut request_items = std::mem::take(&mut manual.items);
-        if let Some(nudge) = continuation_nudge.take() {
-            // Appended last, after the notes block and the user's own words:
-            // the most recent instruction in the request is "the Thread is not
-            // done", while the user's message stays the goal being served.
-            request_items.push(json!({"role": "developer", "content": nudge}));
-        }
+        // Neither the notes block nor the continuation nudge is spliced here:
+        // the request tail record carries both, frozen by
+        // `recovery::current_context` before this range compiled.
+        let request_items = std::mem::take(&mut manual.items);
         let response = match responses_request_with_options(
             state,
             user,
@@ -7729,7 +7820,7 @@ async fn persist_thread_checkpoint(
         }
         let latest: Option<i64> = transaction.query_row(
             &format!(
-                "SELECT MAX(id) FROM history_records WHERE thread_id=? AND {PROTOCOL_RECORDS}"
+                "SELECT MAX(id) FROM history_records WHERE thread_id=? AND {RANGE_TAIL_RECORDS}"
             ),
             [&thread_id],
             |row| row.get(0),
@@ -13064,6 +13155,15 @@ mod tests {
                 // A schema 39 database predates the cost-settlement index too, and
                 // SQLite refuses to drop a column an index still references.
                 "DROP INDEX IF EXISTS reasoning_audits_cost_pending;
+                 -- A database this old predates the Thread rollup, so neither
+                 -- its table nor the audit triggers it installs exist there;
+                 -- SQLite refuses a DROP COLUMN a trigger still references.
+                 DROP TRIGGER IF EXISTS thread_rollup_audit_insert;
+                 DROP TRIGGER IF EXISTS thread_rollup_audit_tokens;
+                 DROP TRIGGER IF EXISTS thread_rollup_audit_cost;
+                 DROP TRIGGER IF EXISTS thread_rollup_audit_delete;
+                 DROP TRIGGER IF EXISTS thread_rollup_thread_delete;
+                 DROP TABLE IF EXISTS thread_rollup;
                  ALTER TABLE reasoning_audits DROP COLUMN upstream_id;
                  ALTER TABLE reasoning_audits DROP COLUMN cost_usd_nanos;
                  ALTER TABLE reasoning_audits DROP COLUMN cost_attempts;

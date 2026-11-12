@@ -747,6 +747,12 @@ async fn schema_48_upgrade_adds_reasoning_cost_columns_and_keeps_the_audits() {
             // A schema 48 database predates the cost-settlement index too, and
             // SQLite refuses to drop a column an index still references.
             "DROP INDEX IF EXISTS reasoning_audits_cost_pending;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_insert;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_tokens;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_cost;
+             DROP TRIGGER IF EXISTS thread_rollup_audit_delete;
+             DROP TRIGGER IF EXISTS thread_rollup_thread_delete;
+             DROP TABLE IF EXISTS thread_rollup;
              ALTER TABLE reasoning_audits DROP COLUMN cost_usd_nanos;
              ALTER TABLE reasoning_audits DROP COLUMN cost_attempts;
              INSERT INTO threads(id,title,model,status,created_at,updated_at) VALUES('t','T','m','idle',1,1);

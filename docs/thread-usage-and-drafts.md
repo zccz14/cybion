@@ -20,7 +20,13 @@ All request kinds and statuses are included: inference, compaction, title
 creation, retries, and failed/cancelled requests with reported usage. Request
 status is not a substitute for whether Tokens were consumed. Each audit row is
 counted once; updating its streaming/final state does not add a second copy.
-This is reported usage, not a billing estimate.
+This is reported usage, not a billing estimate. The same reported numbers, plus
+`cost_usd_nanos` once the upstream settles it, are what the Thread reads about
+itself: `thread_rollup` keeps one row per Thread in step with the audit rows
+through triggers, and the request tail renders it into every inference request
+(see [The request tail](context.md#what-the-tail-says)). The rollup is derived
+data, never a second ledger: deleting an audit row removes its contribution, and
+a fresh database backfills it from the audits it already has.
 
 The conversation header separately shows the latest context: the input Tokens of
 the most recent inference request (`context_tokens`) against the effective
