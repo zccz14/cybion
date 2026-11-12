@@ -56,8 +56,9 @@ export function isRestartNotice(record: HistoryRecord) {
 // The activity types the controller writes about the Thread's machinery rather than about what
 // the turn produced: a host's injected context, a sharing grant or revoke, and a Stop, Continue
 // or Compact request. Each one is a fact about the Thread, not something the conversation is
-// supposed to answer with.
-const CONTROLLER_ACTIVITY_TYPES = new Set(["context", "thread_share", "thread_control", "late_worker_result"])
+// supposed to answer with. The request tail is the frozen spend header the controller wrote for one
+// inference, so it belongs to the group of records that inference produced.
+const CONTROLLER_ACTIVITY_TYPES = new Set(["context", "thread_share", "thread_control", "late_worker_result", "request_tail"])
 
 // Every notice the controller writes about its own machinery: a Manual load or unload, a
 // scheduled retry, a request it closed across a restart, injected context, a sharing change, a

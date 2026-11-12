@@ -55,4 +55,19 @@ describe("thread history", () => {
     expect(pending).toHaveLength(1)
     expect(pending[0].id).toBe(-1)
   })
+
+  it("folds the frozen request tail into the process group it was written for", () => {
+    const records = [
+      record(1, "input", { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }),
+      record(2, "response_output", { type: "message", role: "assistant", content: [{ type: "output_text", text: "hello" }] }),
+      // The spend header the controller froze for the next inference: a fact about the Thread's
+      // machinery, never a message of its own.
+      record(3, "activity", { type: "request_tail", text: "[spend] 1.0k tokens total", spend: { requests: 1 } }),
+      record(4, "response_output", { type: "message", role: "assistant", content: [{ type: "output_text", text: "again" }] }),
+    ]
+    const entries = groupThreadHistory(records)
+    expect(entries.map((entry) => entry.type)).toEqual(["message", "message", "process", "message"])
+    const folded = entries[2]
+    expect(folded.type === "process" ? folded.records.map((item) => item.id) : []).toEqual([3])
+  })
 })
