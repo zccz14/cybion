@@ -1496,7 +1496,10 @@ async fn creating_a_thread_pins_the_same_settings_the_panel_edits() {
     .unwrap();
     assert_eq!(pinned.context_budget_tokens, Some(150_000));
     assert_eq!(pinned.minimal_mode, Some(true));
-    assert_eq!(pinned.image_generation_model.as_deref(), Some("gpt-image-2"));
+    assert_eq!(
+        pinned.image_generation_model.as_deref(),
+        Some("gpt-image-2")
+    );
     assert_eq!(pinned.max_loaded_manuals, Some(4));
     assert_eq!(
         pinned.audio_transcription_model.as_deref(),
@@ -1509,8 +1512,5 @@ async fn creating_a_thread_pins_the_same_settings_the_panel_edits() {
     assert_eq!(read.minimal_mode, Some(true));
     assert_eq!(read.image_generation_model.as_deref(), Some("gpt-image-2"));
     assert_eq!(read.max_loaded_manuals, Some(4));
-    assert_eq!(
-        read.audio_transcription_model.as_deref(),
-        Some("whisper-1")
-    );
+    assert_eq!(read.audio_transcription_model.as_deref(), Some("whisper-1"));
 }
