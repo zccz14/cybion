@@ -80,8 +80,13 @@ import { useComposerDraft } from "@zccz14/cybion-components/logic"
 import { composerDraftKey } from "@zccz14/cybion-components/logic"
 import { useComposerImages } from "@zccz14/cybion-components/logic"
 import { useComposerAudio } from "@zccz14/cybion-components/logic"
+import { useComposerFiles } from "@zccz14/cybion-components/logic"
+import { useComposerAttach } from "@zccz14/cybion-components/logic"
+import { composeComposerInput, maxInputChars } from "@zccz14/cybion-components/logic"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
+import { ComposerAttach } from "@zccz14/cybion-components"
 import { ComposerAttachments } from "@zccz14/cybion-components"
+import { ComposerFileNotice, ComposerLengthNotice } from "@zccz14/cybion-components"
 import { ComposerAudio } from "@zccz14/cybion-components"
 import { ComposerAudioNotice } from "@zccz14/cybion-components"
 import { ComposerDraftNotice } from "@zccz14/cybion-components"
@@ -199,7 +204,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids"> & { input: string; images: string[]; audios: string[] }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids"> & { draft: string; input: string; images: string[]; audios: string[] }
 type ApiKey = {
   id: string
   label: string
@@ -1465,6 +1470,8 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const { input, setInput, seed, clearSubmitted } = composer
   const attachments = useComposerImages()
   const audio = useComposerAudio()
+  const files = useComposerFiles()
+  const attach = useComposerAttach({ images: attachments, audio, files })
   useEffect(() => {
     if (typeof location.state?.initialInput !== "string") return
     const { initialInput, ...state } = location.state
@@ -1473,11 +1480,12 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   }, [location, navigate, seed])
   const value = draft ?? defaults.data
   const start = useMutation({
-    mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify({ ...payload, input: payload.input.trim() }) }),
+    mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify({ ...payload, draft: undefined, input: payload.input.trim() }) }),
     onSuccess: (_request, payload) => {
-      clearSubmitted(payload.input)
+      clearSubmitted(payload.draft)
       attachments.clear()
       audio.clear()
+      files.clear()
       void client.invalidateQueries({ queryKey: ["threads"] })
     },
   })
@@ -1485,10 +1493,14 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     setDraft(next)
     start.reset()
   }
+  // Attachments travel inside the message text, so the Controller receives the
+  // composed input; an input longer than the Controller accepts is flagged.
+  const composed = composeComposerInput(input, files.files, language)
+  const oversize = composed.length > maxInputChars
   const submit = (recorded: string[] = []) => {
+    if (!value || oversize || composed === "" || start.isPending) return
     const audios = [...audio.audios, ...recorded]
-    if (!value || (!input.trim() && attachments.images.length === 0 && audios.length === 0) || start.isPending) return
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, input, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1512,7 +1524,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} onRemove={attachments.remove} onRemoveAudio={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} /></Field><div className="flex items-center gap-3">{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || (!input.trim() && attachments.images.length === 0 && audio.audios.length === 0) || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} /></Field><div className="flex items-center gap-3"><ComposerAttach language={language} disabled={!value || start.isPending} onFiles={attach} />{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || composed === "" || oversize || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
       </form>
     </section>
   </main>
