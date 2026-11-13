@@ -132,9 +132,13 @@ test("thread settings live in the composer popover and the image tool follows it
   assert.doesNotMatch(source, /\.image_generation\b/)
   // Web search stays always-on; image generation follows the model chosen at
   // the Thread and account levels, read from the upstream image catalogs.
-  assert.match(source, /"\/api\/integrations\/upstreams\/models\?kind=image"/)
-  assert.match(view, /imageGeneration=\{defaults\.data \?/)
-  assert.match(popover, /imageModelOptions/)
+  // Both places render the same picker, so it may only carry what both offer:
+  // model, reasoning effort, fast mode. Everything else follows the account
+  // defaults, and the picker grows no second behaviour.
+  for (const gone of ["contextBudget", "loadedManualCap", "initialManuals", "minimalMode", "imageGeneration", "audioTranscription", "imageModelOptions"]) {
+    assert.doesNotMatch(popover, new RegExp(gone), gone)
+    assert.doesNotMatch(view, new RegExp(`${gone}=`), gone)
+  }
 })
 
 test("the tools page groups the shared tool catalog by responsible party", () => {

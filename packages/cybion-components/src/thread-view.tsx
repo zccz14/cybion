@@ -9,7 +9,7 @@ import type { Language, Thread, ThreadDefaults, RequestAck, UpstreamModels } fro
 import { useCybion } from "./provider"
 import { HistoryMessage, type ManualSummary, type Worker } from "./components/history-message"
 import { ThreadHistory } from "./components/thread-history"
-import { ThreadSettingsPopover, type ManualChoice } from "./components/thread-settings-popover"
+import { ThreadSettingsPopover } from "./components/thread-settings-popover"
 import { ThreadContextUsage, ThreadUsagePanel } from "./components/thread-usage"
 import { ThreadStatusBadge, ThreadStatusSummary } from "./components/thread-status"
 import { ComposerAttach } from "./components/composer-attach"
@@ -107,13 +107,6 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   })
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => transport.request<ThreadDefaults>("/api/thread-defaults", { signal }) })
   const models = useModels()
-  const imageModels = useModels("image")
-  const audioModels = useModels("sst")
-  // The settings picker names Manuals; their bodies stay on the Manuals page.
-  const manualChoices = useQuery({
-    queryKey: ["manual-summaries", userId],
-    queryFn: ({ signal }) => transport.request<{ manuals: ManualChoice[] }>("/api/manual-summaries", { signal }),
-  })
   // The conversation opens on the window that starts at the most recent user input instead of
   // the whole thread; older pages load on demand, each one a whole turn that starts at the
   // previous input record, until `has_older` clears.
@@ -311,7 +304,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <ComposerAttach language={language} disabled={busy} onFiles={attach} />
-            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} initialManuals={defaults.data ? { override: current.initial_manual_ids ?? null, fallback: defaults.data.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (initial_manual_ids) => settings.mutate({ initial_manual_ids }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} audioTranscription={defaults.data ? { override: current.audio_transcription_model, fallback: defaults.data.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (audio_transcription_model) => settings.mutate({ audio_transcription_model }) } : undefined} />
+            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
@@ -358,11 +351,11 @@ function RequestError({ error, onRetry }: { error: unknown; onRetry?: () => void
   return <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("loadError")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span className="break-words">{errorMessage(error)}</span>{onRetry && <Button size="sm" variant="outline" onClick={onRetry}>{t("retry")}</Button>}</AlertDescription></Alert>
 }
 
-function useModels(kind?: "image" | "sst") {
+function useModels() {
   const { client } = useCybion()
   return useQuery({
-    queryKey: [kind === "image" ? "upstream-image-models" : kind === "sst" ? "upstream-audio-models" : "upstream-models"],
-    queryFn: ({ signal }) => client.request<UpstreamModels>(`/api/integrations/upstreams/models${kind ? `?kind=${kind}` : ""}`, { signal }),
+    queryKey: ["upstream-models"],
+    queryFn: ({ signal }) => client.request<UpstreamModels>("/api/integrations/upstreams/models", { signal }),
     staleTime: 5 * 60 * 1000,
     retry: false,
   })
