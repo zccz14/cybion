@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
 import { readPackageSource } from "./package-source.ts"
-import { screenshotImageSource } from "../src/lib/history-payload.ts"
+import { screenshotImageSource } from "@zccz14/cybion-components/logic"
 
 const png = `iVBORw0KGgo${"A".repeat(64)}`
 const toolOutput = (result: unknown) => ({ type: "function_call_output", call_id: "call-1", output: JSON.stringify(result) })

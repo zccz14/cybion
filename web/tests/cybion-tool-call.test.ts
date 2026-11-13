@@ -12,7 +12,7 @@ const renderInRouter = (element: ReactElement) => renderToStaticMarkup(createEle
 test("cybion tool calls render manual and machine details with escaped text in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
+    const { CybionToolCall } = await server.ssrLoadModule("@zccz14/cybion-components")
     const render = (language: string, call: unknown, workers: { id: string; label: string }[] | undefined) => renderInRouter(createElement(CybionToolCall, {
       language, call, workers, manuals: undefined, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
@@ -60,7 +60,7 @@ test("cybion tool calls render manual and machine details with escaped text in b
 test("manual calls link to the manual page with the title and Use When", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
+    const { CybionToolCall } = await server.ssrLoadModule("@zccz14/cybion-components")
     const render = (manualId: string, manuals: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
       language: "zh", call: { tool: "load_manual", manualId }, workers: undefined, manuals, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))
@@ -87,7 +87,7 @@ test("manual calls link to the manual page with the title and Use When", async (
 test("write manual calls link to the manual, flag the trash, and show creates", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { CybionToolCall } = await server.ssrLoadModule("/src/components/cybion-tool-call.tsx")
+    const { CybionToolCall } = await server.ssrLoadModule("@zccz14/cybion-components")
     const render = (call: unknown, manuals: Map<string, { name: string; description: string }> | undefined) => renderInRouter(createElement(CybionToolCall, {
       language: "zh", call, workers: undefined, manuals, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))

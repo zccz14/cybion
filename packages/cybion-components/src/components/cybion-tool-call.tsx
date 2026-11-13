@@ -8,13 +8,13 @@ const copy = {
     listManuals: "List manuals", listWorkers: "List Workers", loadManual: "Load manual", unloadManual: "Unload manual", writeManual: "Edit manual", createManual: "Create manual", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
     getMachine: "Read Ultimate Machine", updateMachine: "Update Ultimate Machine", createMachine: "Create Ultimate Machine", deleteMachine: "Delete Ultimate Machine",
     name: "Name", worker: "Worker", interval: "Interval", state: "State", enabled: "Enabled", paused: "Paused", command: "Command", intent: "Intent",
-    addNotes: "Add notes", crossOutNotes: "Cross out notes", blockThread: "Block the Thread",
+    addNotes: "Add notes", crossOutNotes: "Cross out notes", blockThread: "Block the Thread", signThreadToken: "Sign a Thread token",
   },
   zh: {
     listManuals: "列出手册", listWorkers: "列出 Worker", loadManual: "加载手册", unloadManual: "卸载手册", writeManual: "编辑手册", createManual: "新建手册", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
     getMachine: "读取终极机器", updateMachine: "更新终极机器", createMachine: "创建终极机器", deleteMachine: "删除终极机器",
     name: "名称", worker: "Worker", interval: "间隔", state: "状态", enabled: "启用", paused: "已暂停", command: "命令", intent: "意图",
-    addNotes: "添加便签", crossOutNotes: "划掉便签", blockThread: "标记受阻",
+    addNotes: "添加便签", crossOutNotes: "划掉便签", blockThread: "标记受阻", signThreadToken: "签发 Thread 令牌",
   },
 } as const
 
@@ -48,6 +48,7 @@ export function CybionToolCall({ language, call, workers, manuals, time, childre
       case "add_notes": return text.addNotes
       case "cross_out_notes": return text.crossOutNotes
       case "block_thread": return text.blockThread
+      case "create_thread_token": return text.signThreadToken
     }
   })()
   return <div className="relative flex items-start gap-3 px-1">

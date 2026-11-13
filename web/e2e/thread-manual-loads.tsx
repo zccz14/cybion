@@ -1,12 +1,12 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
-import type { ManualSummary } from "../src/components/cybion-tool-call"
+import type { ManualSummary } from "@zccz14/cybion-components"
 
 import { MessageScroller, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
 
 import { ThreadManualLoads } from "../src/components/thread-manual-loads"
-import { historyPayloadText } from "../src/lib/history-payload"
+import { historyPayloadText } from "@zccz14/cybion-components/logic"
 import { manualLoadNotice } from "@zccz14/cybion-components"
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import { formattedTime } from "@zccz14/cybion-components/logic"
