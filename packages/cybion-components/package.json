@@ -19,7 +19,12 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./styles.css": "./dist/styles.css"
+    "./styles.css": "./dist/styles.css",
+    "./logic": {
+      "types": "./dist/logic.d.ts",
+      "import": "./dist/logic.js",
+      "default": "./dist/logic.js"
+    }
   },
   "publishConfig": {
     "access": "public",

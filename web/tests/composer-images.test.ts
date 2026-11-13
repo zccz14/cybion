@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { pastedImageFiles } from "../src/lib/composer-images.ts"
+import { pastedImageFiles } from "@zccz14/cybion-components/logic"
 
 function clipboardItem(kind: string, type: string, file: unknown) {
   return { kind, type, getAsFile: () => file }

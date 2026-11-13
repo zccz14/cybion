@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
-import { formatRelativeTime, formatStatsDuration, formattedTime } from "../src/lib/time.ts"
+import { formatRelativeTime, formatStatsDuration, formattedTime } from "@zccz14/cybion-components/logic"
 
 for (const language of ["en", "zh"] as const) {
   test(`${language} timestamps always display two-digit seconds, including whole minutes`, () => {
@@ -28,7 +28,7 @@ for (const [timeZone, en, zh] of [
 ]) {
   test(`timestamps retain the local date, time zone and language in ${timeZone}`, () => {
     const result = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
-      import { formattedTime } from ${JSON.stringify(new URL("../src/lib/time.ts", import.meta.url).href)}
+      import { formattedTime } from "@zccz14/cybion-components/logic"
       const timestamp = Date.UTC(2026, 0, 1, 1, 4, 5) / 1000
       console.log(JSON.stringify([formattedTime("en", timestamp), formattedTime("zh", timestamp)]))
     `], { env: { ...process.env, TZ: timeZone }, encoding: "utf8" })

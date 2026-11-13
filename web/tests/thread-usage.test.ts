@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
-import { compactTokenCount, emptyThreadUsage, threadCacheRate, threadCost } from "../src/lib/thread-usage.ts"
+import { compactTokenCount, emptyThreadUsage, threadCacheRate, threadCost } from "@zccz14/cybion-components/logic"
 
 test("token counts compact large cumulative values without hiding zero", () => {
   for (const [input, expected] of [[0, "0"], [123, "123"], [125000, "125K"], [1234567, "1.2M"], [3000000000, "3B"], [1000000000000, "1T"]] as const) assert.equal(compactTokenCount(input), expected)

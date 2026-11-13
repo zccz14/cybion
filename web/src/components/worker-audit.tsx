@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
-import { formattedTime } from "@/lib/time"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 import { ownedDevice, type Device } from "@/lib/worker-onboarding"
 import { ownWorkerCall, type WorkerCallAudit, type WorkerCallAuditPage } from "@/lib/worker-audit"
 

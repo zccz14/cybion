@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test"
 import { stubWorkspace } from "./workspace-fixture"
-import { emptyThreadUsage } from "../src/lib/thread-usage"
+import { emptyThreadUsage } from "@zccz14/cybion-components/logic"
 
 const thread = (id = "created-thread") => ({
   id, title: id === "created-thread" ? "Fixture conversation" : "Other conversation",

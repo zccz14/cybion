@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react"
 import type { ClipboardEvent } from "react"
-import { inputImageDataUrl, pastedImageFiles } from "@/lib/composer-images"
+import { inputImageDataUrl, pastedImageFiles } from "@zccz14/cybion-components/logic"
 
 export function useComposerImages() {
   const [images, setImages] = useState<string[]>([])

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
 import { PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react"
 
-import { formattedTime } from "@/lib/time"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 import { formatInterval, machineDraftValid, machinePayload, machineStatus, MAX_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, type Machine, type MachineDraft, type MachineStatus } from "@/lib/ultimate-machines"
 import { ownedDevice, type Device } from "@/lib/worker-onboarding"
 
