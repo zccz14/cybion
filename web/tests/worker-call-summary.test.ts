@@ -9,7 +9,7 @@ import { readPackageSource } from "./package-source.ts"
 test("Worker call cards show the model's intent summary", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { WorkerCallSummary } = await server.ssrLoadModule("/src/components/worker-call-summary.tsx")
+    const { WorkerCallSummary } = await server.ssrLoadModule("@zccz14/cybion-components")
     const render = (summary: string | null) => renderToStaticMarkup(createElement(WorkerCallSummary, { summary }))
     // A call recorded before the field existed has no summary to show.
     assert.equal(render(null), "")

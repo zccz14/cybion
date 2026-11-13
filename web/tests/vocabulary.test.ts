@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync, readdirSync } from "node:fs"
 import test from "node:test"
+import { readPackageSource } from "./package-source.ts"
 
 // The Manual is a stored document a Thread reads on demand. The context window is
 // not a Manual: it is what replay occupies in one request. A blanket rename once
@@ -35,7 +36,7 @@ test("window-sense copy never calls the context window a Manual", () => {
 })
 
 test("the thread header names the context window, not a Manual", () => {
-  const chip = readFileSync(new URL("../src/components/thread-usage.tsx", import.meta.url), "utf8")
+  const chip = readPackageSource("components/thread-usage.tsx")
   assert.match(chip, /context: "上下文"/)
   assert.match(chip, /context: "Context"/)
   assert.doesNotMatch(chip, /manual: "手册"/)

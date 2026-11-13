@@ -4,7 +4,7 @@ import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-const popover = readFileSync(new URL("../src/components/thread-settings-popover.tsx", import.meta.url), "utf8")
+const popover = readPackageSource("components/thread-settings-popover.tsx")
 
 test("personal configuration manages multiple Responses-compatible upstreams without exposing keys", () => {
   assert.match(source, /apiBaseUrlDescription: "Cybion sends model requests to this URL with \/responses appended\./)

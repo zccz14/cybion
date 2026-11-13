@@ -10,7 +10,7 @@ const vite = { server: { middlewareMode: true, hmr: false }, optimizeDeps: { noD
 test("the composer keeps one microphone button and turns it into send and cancel while recording", async () => {
   const server = await createTestServer(vite)
   try {
-    const { ComposerAudio } = await server.ssrLoadModule("/src/components/composer-audio.tsx")
+    const { ComposerAudio } = await server.ssrLoadModule("@zccz14/cybion-components")
     const render = (props: Record<string, unknown>) => renderToStaticMarkup(createElement(ComposerAudio, {
       language: "zh",
       recording: false,
@@ -38,7 +38,7 @@ test("the composer keeps one microphone button and turns it into send and cancel
 test("audio waiting to be sent stays with the pasted images, not in the toolbar", async () => {
   const server = await createTestServer(vite)
   try {
-    const { ComposerAttachments } = await server.ssrLoadModule("/src/components/composer-attachments.tsx")
+    const { ComposerAttachments } = await server.ssrLoadModule("@zccz14/cybion-components")
     const markup = renderToStaticMarkup(createElement(ComposerAttachments, {
       language: "zh",
       images: [],

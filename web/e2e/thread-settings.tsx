@@ -1,6 +1,6 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { ThreadSettingsPopover, type ModelCatalog } from "../src/components/thread-settings-popover"
+import { ThreadSettingsPopover, type ModelCatalog } from "@zccz14/cybion-components"
 import { Button } from "../src/components/ui/button"
 import "../src/styles.css"
 

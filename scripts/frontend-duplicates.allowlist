@@ -6,16 +6,8 @@
 #
 # styles.css is not a duplicate in the harmful sense: web's copy is the app's
 # own theme, the package's copy ships the component styles.
-components/audio-message.tsx
-components/composer-attachments.tsx
-components/composer-audio-notice.tsx
-components/composer-audio.tsx
-components/composer-draft-notice.tsx
 components/cybion-tool-call.tsx
-components/thread-settings-popover.tsx
 components/thread-status.tsx
-components/thread-usage.tsx
-components/worker-call-summary.tsx
 hooks/use-composer-audio.ts
 hooks/use-composer-draft.ts
 hooks/use-composer-images.ts
