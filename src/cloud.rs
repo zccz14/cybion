@@ -4856,6 +4856,7 @@ async fn update_thread(
         && input.minimal_mode.is_none()
         && image_generation_model.is_none()
         && max_loaded_manuals.is_none()
+        && audio_transcription_model.is_none()
         && initial_manual_ids.is_none()
         && input.archived.is_none()
     {

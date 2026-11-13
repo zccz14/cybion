@@ -1514,3 +1514,65 @@ async fn creating_a_thread_pins_the_same_settings_the_panel_edits() {
     assert_eq!(read.max_loaded_manuals, Some(4));
     assert_eq!(read.audio_transcription_model.as_deref(), Some("whisper-1"));
 }
+
+#[tokio::test]
+async fn a_thread_keeps_its_own_speech_to_text_model() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "stt-override-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "stt", "http://127.0.0.1:9/v1").await;
+    let thread = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    // The account default names one model; the Thread names another.
+    user_db(&state, &user, true, {
+        let defaults = ThreadDefaults {
+            audio_transcription_model: Some("account-default-stt".to_owned()),
+            ..ThreadDefaults::default()
+        };
+        move |connection| {
+            connection.execute(
+                "INSERT INTO thread_defaults(id,model,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model) VALUES(1,'test-model','medium',0,200000,0,'',12,?)
+                 ON CONFLICT(id) DO UPDATE SET audio_transcription_model=excluded.audio_transcription_model",
+                params![defaults.audio_transcription_model],
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let patched = update_thread(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath(thread.id.clone()),
+        Json(serde_json::from_value(json!({"audio_transcription_model": "thread-stt"})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        patched.audio_transcription_model.as_deref(),
+        Some("thread-stt")
+    );
+    let read = read_thread_for(&state, &user, thread_id(&thread.id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        read.audio_transcription_model.as_deref(),
+        Some("thread-stt")
+    );
+    // And the Thread's own choice is what a transcription would run with.
+    let defaults = user_db(&state, &user, false, |connection| {
+        load_thread_defaults(connection)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        effective_audio_transcription_model(Some(&read), &defaults).as_deref(),
+        Some("thread-stt")
+    );
+}
