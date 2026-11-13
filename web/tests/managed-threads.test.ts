@@ -118,7 +118,7 @@ test("history renders reasoning summaries", () => {
 test("thread settings live in the composer popover and the image tool follows its configured model", () => {
   const popover = readPackageSource("components/thread-settings-popover.tsx")
   const view = readPackageSource("thread-view.tsx")
-  assert.match(source, /import \{ ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection \} from "@\/components\/thread-settings-popover"/)
+  assert.match(source, /import \{ ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection \} from "@zccz14\/cybion-components"/)
   // One picker for the new-Thread composer, one for the conversation composer.
   assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 1)
   assert.equal(view.match(/<ThreadSettingsPopover /g)?.length, 1)

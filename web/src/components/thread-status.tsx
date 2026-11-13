@@ -5,7 +5,7 @@ import { formatRelativeTime } from "@/lib/time"
 import { threadStatusLabel, threadStatusText, type ThreadDisplayStatus } from "@/lib/thread-status"
 import { cn } from "@/lib/utils"
 import type { ThreadUsage } from "@/lib/thread-usage"
-import { ThreadUsageSummary, ThreadUsageDetails } from "@/components/thread-usage"
+import { ThreadUsageSummary, ThreadUsageDetails } from "@zccz14/cybion-components"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 type StatusProps = { status: ThreadDisplayStatus; language: "en" | "zh"; runningSummary?: string | null }

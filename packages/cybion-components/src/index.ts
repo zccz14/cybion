@@ -34,6 +34,15 @@ export type { ThreadManualLoadsView } from "./lib/thread-manual-loads"
 export { ThreadUsagePanel, ThreadContextUsage, ThreadUsageSummary, ThreadUsageDetails } from "./components/thread-usage"
 export { ThreadStatusSummary, ThreadStatusBadge } from "./components/thread-status"
 
+// Hosts that compose their own list, composer and settings pages need the same
+// widgets the packaged view uses, so they import them instead of copying them.
+export { ComposerAttachments } from "./components/composer-attachments"
+export { ComposerAudio } from "./components/composer-audio"
+export { ComposerAudioNotice } from "./components/composer-audio-notice"
+export { ComposerDraftNotice } from "./components/composer-draft-notice"
+export { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "./components/thread-settings-popover"
+export { WorkerCallSummary } from "./components/worker-call-summary"
+
 // Record renderers, exported so a host can compose its own transcript instead of
 // taking the whole view, and so tests can exercise them one by one.
 export { AssistantMessage } from "./components/assistant-message"
