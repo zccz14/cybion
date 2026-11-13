@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
 import { readPackageSource } from "./package-source.ts"
-import { viewedImageSource } from "../src/lib/history-payload.ts"
+import { viewedImageSource } from "@zccz14/cybion-components/logic"
 
 const image = `data:image/png;base64,${"A".repeat(8)}`
 const toolOutput = (output: unknown) => ({ type: "function_call_output", call_id: "call-1", output })

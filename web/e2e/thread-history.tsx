@@ -2,7 +2,7 @@ import { StrictMode, useMemo, useState } from "react"
 import { createRoot } from "react-dom/client"
 
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
-import { historyPayloadText } from "../src/lib/history-payload"
+import { historyPayloadText } from "@zccz14/cybion-components/logic"
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import { formattedTime } from "@zccz14/cybion-components/logic"
 import { pendingResponseRecords, type ThreadResponseView } from "@zccz14/cybion-components/logic"

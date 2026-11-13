@@ -6,8 +6,8 @@
 #
 # styles.css is not a duplicate in the harmful sense: web's copy is the app's
 # own theme, the package's copy ships the component styles.
-components/cybion-tool-call.tsx
+# web's copy carries ThreadLink (a react-router NavLink wired to the host's router)
+# and the status icon/presentation helpers; the package carries the pure badge and
+# summary. Collapsing them would drag react-router into the package.
 components/thread-status.tsx
-hooks/use-composer-images.ts
-lib/history-payload.ts
 styles.css

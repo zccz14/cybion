@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { bashCallCountdown, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, viewImageFunctionCall, webSearchFunctionCall } from "../src/lib/history-payload.ts"
+import { bashCallCountdown, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, historyPayloadText, imageGenerationFunctionCall, userInputView, viewImageFunctionCall, webSearchFunctionCall } from "@zccz14/cybion-components/logic"
 
 test("conversation text is derived from stored protocol payloads", () => {
   for (const [payload, expected] of [

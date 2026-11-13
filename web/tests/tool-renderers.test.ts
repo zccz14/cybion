@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
-import { audioTranscriptionFunctionCall, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, imageGenerationFunctionCall, viewImageFunctionCall, webSearchFunctionCall } from "../src/lib/history-payload.ts"
+import { audioTranscriptionFunctionCall, bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, cybionToolFunctionCall, imageGenerationFunctionCall, viewImageFunctionCall, webSearchFunctionCall } from "@zccz14/cybion-components/logic"
 
 const families = [bashFunctionCall, browserControlFunctionCall, computerUseFunctionCall, viewImageFunctionCall, cybionToolFunctionCall, webSearchFunctionCall, imageGenerationFunctionCall, audioTranscriptionFunctionCall]
 

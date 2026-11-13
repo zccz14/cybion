@@ -60,6 +60,7 @@ export { ScreenshotOutput } from "./components/screenshot-output"
 export { ViewedOutput } from "./components/viewed-output"
 export { ManualLoadNotice } from "./components/manual-load-notice"
 export { HistoryRecordPayload } from "./components/history-record-payload"
+export { CybionToolCall } from "./components/cybion-tool-call"
 export { ThreadImageGroup } from "./components/thread-image-group"
 export {
   MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem,

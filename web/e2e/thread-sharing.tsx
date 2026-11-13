@@ -8,7 +8,7 @@ import { TooltipProvider } from "../src/components/ui/tooltip"
 
 import { Markdown } from "@zccz14/ux"
 
-import { historyPayloadText, screenshotImageSource, viewedImageSource } from "../src/lib/history-payload"
+import { historyPayloadText, screenshotImageSource, viewedImageSource } from "@zccz14/cybion-components/logic"
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import type { SharingRequest } from "../src/lib/thread-sharing"
 import { adoptLinkitFixtureSession, LinkitFixtureProviders } from "./linkit-fixture"
