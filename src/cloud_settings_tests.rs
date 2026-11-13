@@ -776,6 +776,11 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
                 reasoning_effort: None,
                 service_tier_fast: None,
                 initial_manual_ids: None,
+                context_budget_tokens: None,
+                minimal_mode: None,
+                image_generation_model: None,
+                max_loaded_manuals: None,
+                audio_transcription_model: None,
             }),
         )
         .await
@@ -1447,5 +1452,65 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
             .unwrap()
             .0,
         defaults
+    );
+}
+
+#[tokio::test]
+async fn creating_a_thread_pins_the_same_settings_the_panel_edits() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "create-settings-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "create-settings", "http://127.0.0.1:9/v1").await;
+    // Omitted: every setting follows the account default, exactly like a Thread
+    // that never set an override.
+    let plain = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({"upstream_id": upstream.id})).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    assert_eq!(plain.context_budget_tokens, None);
+    assert_eq!(plain.minimal_mode, None);
+    assert_eq!(plain.image_generation_model, None);
+    assert_eq!(plain.max_loaded_manuals, None);
+    assert_eq!(plain.audio_transcription_model, None);
+
+    // Named at creation: the first message carries what the panel showed, and
+    // the Thread reads them back.
+    let pinned = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({
+            "upstream_id": upstream.id,
+            "context_budget_tokens": 150000,
+            "minimal_mode": true,
+            "image_generation_model": "gpt-image-2",
+            "max_loaded_manuals": 4,
+            "audio_transcription_model": "whisper-1",
+        }))
+        .unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pinned.context_budget_tokens, Some(150_000));
+    assert_eq!(pinned.minimal_mode, Some(true));
+    assert_eq!(pinned.image_generation_model.as_deref(), Some("gpt-image-2"));
+    assert_eq!(pinned.max_loaded_manuals, Some(4));
+    assert_eq!(
+        pinned.audio_transcription_model.as_deref(),
+        Some("whisper-1")
+    );
+    let read = read_thread_for(&state, &user, thread_id(&pinned.id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(read.context_budget_tokens, Some(150_000));
+    assert_eq!(read.minimal_mode, Some(true));
+    assert_eq!(read.image_generation_model.as_deref(), Some("gpt-image-2"));
+    assert_eq!(read.max_loaded_manuals, Some(4));
+    assert_eq!(
+        read.audio_transcription_model.as_deref(),
+        Some("whisper-1")
     );
 }

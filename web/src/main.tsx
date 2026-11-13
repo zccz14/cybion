@@ -204,7 +204,17 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids"> & { draft: string; input: string; images: string[]; audios: string[] }
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids"> & { draft: string; input: string; images: string[]; audios: string[] } & {
+  // The same six settings the Thread panel edits, carried by the request that
+  // creates the Thread. Omitted or null follows the account default, so a
+  // fresh draft pins nothing until the composer changes something.
+  context_budget_tokens?: number | null
+  minimal_mode?: boolean | null
+  image_generation_model?: string | null
+  max_loaded_manuals?: number | null
+  audio_transcription_model?: string | null
+  initial_manual_ids?: string[] | null
+}
 type ApiKey = {
   id: string
   label: string
@@ -1463,7 +1473,14 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const client = useQueryClient()
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
   const models = useUpstreamModels(sdk)
+  const imageModels = useImageModels(sdk)
+  const audioModels = useAudioModels(sdk)
+  const manualChoices = useQuery({ queryKey: ["manual-summaries"], queryFn: ({ signal }) => api<{ manuals: ManualChoice[] }>(sdk, "/api/manual-summaries", { signal }) })
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
+  // Creation shows the same six settings the Thread panel edits; each stays
+  // null until the composer changes it, which is what "follow the default" means.
+  const [createSettings, setCreateSettings] = useState<{ contextBudget: number | null; loadedManualCap: number | null; initialManuals: string[] | null; minimalMode: boolean | null; imageGeneration: string | null; audioTranscription: string | null }>({ contextBudget: null, loadedManualCap: null, initialManuals: null, minimalMode: null, imageGeneration: null, audioTranscription: null })
+  const editCreate = <K extends keyof typeof createSettings>(key: K, value: (typeof createSettings)[K]) => setCreateSettings((current) => ({ ...current, [key]: value }))
   const location = useLocation()
   const request = useApiRequest(sdk)
   const composer = useComposerDraft(userId, null)
@@ -1500,7 +1517,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const submit = (recorded: string[] = []) => {
     if (!value || oversize || composed === "" || start.isPending) return
     const audios = [...audio.audios, ...recorded]
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, context_budget_tokens: createSettings.contextBudget, minimal_mode: createSettings.minimalMode, image_generation_model: createSettings.imageGeneration, max_loaded_manuals: createSettings.loadedManualCap, audio_transcription_model: createSettings.audioTranscription, initial_manual_ids: createSettings.initialManuals, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1524,7 +1541,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} /></Field><div className="flex items-center gap-3"><ComposerAttach language={language} disabled={!value || start.isPending} onFiles={attach} />{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || composed === "" || oversize || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} /></Field><div className="flex items-center gap-3"><ComposerAttach language={language} disabled={!value || start.isPending} onFiles={attach} />{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} contextBudget={{ override: createSettings.contextBudget, fallback: defaults.data?.context_budget_tokens ?? 200000, onChange: (next) => editCreate("contextBudget", next) }} loadedManualCap={{ override: createSettings.loadedManualCap, fallback: defaults.data?.max_loaded_manuals ?? 12, onChange: (next) => editCreate("loadedManualCap", next) }} initialManuals={{ override: createSettings.initialManuals, fallback: defaults.data?.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (next) => editCreate("initialManuals", next) }} minimalMode={{ override: createSettings.minimalMode, fallback: defaults.data?.minimal_mode ?? false, onChange: (next) => editCreate("minimalMode", next) }} imageGeneration={{ override: createSettings.imageGeneration, fallback: defaults.data?.image_generation_model ?? "", catalogs: imageModels.data?.upstreams, onChange: (next) => editCreate("imageGeneration", next) }} audioTranscription={{ override: createSettings.audioTranscription, fallback: defaults.data?.audio_transcription_model ?? null, catalogs: audioModels.data?.upstreams, onChange: (next) => editCreate("audioTranscription", next) }} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || composed === "" || oversize || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
       </form>
     </section>
   </main>
