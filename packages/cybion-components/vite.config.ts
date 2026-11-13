@@ -19,7 +19,11 @@ const externalPackages = [
 
 export default defineConfig({
   build: {
-    lib: { entry: "src/index.ts", formats: ["es"], fileName: "index" },
+    lib: {
+      entry: { index: "src/index.ts", logic: "src/logic.ts" },
+      formats: ["es"],
+      fileName: (_format, entryName) => `${entryName}.js`,
+    },
     rollupOptions: {
       external: (id) => externalPackages.some((name) => id === name || id.startsWith(`${name}/`)),
     },

@@ -3,7 +3,7 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 
-import { audioDurationLabel } from "../src/lib/composer-audio.ts"
+import { audioDurationLabel } from "@zccz14/cybion-components/logic"
 import { createTestServer } from "./vite-server.ts"
 
 test("voice bars label their length and leave an unknown one open", () => {

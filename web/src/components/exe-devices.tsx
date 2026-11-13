@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { formattedTime } from "@/lib/time"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 
 type Language = "zh" | "en"
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>

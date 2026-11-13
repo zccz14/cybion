@@ -11,9 +11,9 @@ import { ThreadHistory } from "@zccz14/cybion-components"
 import { ThreadStatusBadge } from "@/components/thread-status"
 import { ThreadUsagePanel } from "@zccz14/cybion-components"
 import { SharingError } from "@/components/thread-sharing"
-import { pendingResponseRecords } from "@/lib/thread-response"
+import { pendingResponseRecords } from "@zccz14/cybion-components/logic"
 import { newestRecordId, oldestRecordId, type HistoryRecord } from "@zccz14/cybion-components"
-import { formattedTime } from "@/lib/time"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 import { sharedThreadPath, sharedThreadQueryKey, sharingAccessLost, type SharedResponse, type SharedThread, type SharedThreadPageData, type SharingRequest } from "@/lib/thread-sharing"
 
 const copy = {

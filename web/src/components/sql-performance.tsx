@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
-import { cn, errorMessage } from "@/lib/utils"
+import { cn, errorMessage } from "@zccz14/cybion-components/logic"
 import { formatLatency, formatTotalDuration } from "@/lib/route-performance"
 import {
   callerLabel,
@@ -32,7 +32,7 @@ import {
   type SqlSortKey,
   type SqlStatement,
 } from "@/lib/sql-performance"
-import { formattedTime } from "@/lib/time"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 
 const copy = {
   en: {

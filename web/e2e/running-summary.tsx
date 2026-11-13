@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
 import { TooltipProvider } from "../src/components/ui/tooltip"
-import { emptyThreadUsage } from "../src/lib/thread-usage"
+import { emptyThreadUsage } from "@zccz14/cybion-components/logic"
 import "../src/styles.css"
 
 const updated_at = Math.floor(Date.now() / 1000) - 30

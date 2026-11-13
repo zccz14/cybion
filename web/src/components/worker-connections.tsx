@@ -14,7 +14,7 @@ import { ConceptHelp } from "@/components/onboarding"
 import { onboardingCopy } from "@/lib/onboarding"
 import { WorkerSharing } from "@/components/worker-sharing"
 import { ExeDevices } from "@/components/exe-devices"
-import { formattedTime } from "@/lib/time"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 import { ANDROID_PLATFORM, assetName, checkReady, ownedDevice, upgradeAvailable, upgradeTargetVersion, deviceStatus, downloadUrl, installCommand, normalizeCode, platformOptions, platformVersion, releaseNotes, runCommand, validCode, type Check, type Device, type Pairing, type Release } from "@/lib/worker-onboarding"
 
 type Language = "zh" | "en"

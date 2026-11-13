@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { MemoryRouter } from "react-router-dom"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { createTestServer } from "./vite-server.ts"
-import { formattedTime } from "../src/lib/time.ts"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 
 test("history table renders database fields and server pagination without transforming protocol payloads", async () => {
   const server = await createTestServer({ server: { middlewareMode: true }, appType: "custom" })

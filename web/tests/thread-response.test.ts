@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { pendingResponseRecords, threadControlAction, type ThreadResponseView } from "../src/lib/thread-response.ts"
+import { pendingResponseRecords, threadControlAction, type ThreadResponseView } from "@zccz14/cybion-components/logic"
 
 test("streamed reasoning and messages become history rows without duplicating committed output", () => {
   const view: ThreadResponseView = {

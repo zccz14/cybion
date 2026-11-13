@@ -59,6 +59,9 @@ importers:
       '@tiptap/starter-kit':
         specifier: ^3.31.3
         version: 3.31.4
+      '@zccz14/cybion-components':
+        specifier: link:../packages/cybion-components
+        version: link:../packages/cybion-components
       '@zccz14/ux':
         specifier: 0.7.4
         version: 0.7.4(@base-ui/react@1.8.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.18)(linkit-react-components@0.6.2(@base-ui/react@1.8.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(auth-mini-react-components@0.6.10(@types/react@19.2.18)(auth-mini@0.4.14)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(lucide-react@0.544.0(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react-router-dom@7.18.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)

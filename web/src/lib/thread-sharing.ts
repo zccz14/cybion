@@ -1,6 +1,6 @@
-import type { ThreadDisplayStatus } from "./thread-status.ts"
-import type { ThreadUsage } from "./thread-usage.ts"
-import type { ThreadResponseView } from "./thread-response.ts"
+import type { ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
+import type { ThreadUsage } from "@zccz14/cybion-components/logic"
+import type { ThreadResponseView } from "@zccz14/cybion-components/logic"
 
 export type SharingRequest = <T>(path: string, init?: RequestInit) => Promise<T>
 export type ThreadGrant = {

@@ -5,7 +5,7 @@ import { ThreadList, type ThreadListItem } from "../src/components/thread-list"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "../src/lib/thread-search"
 import { CybionMark } from "../src/components/cybion-mark"
-import { emptyThreadUsage } from "../src/lib/thread-usage"
+import { emptyThreadUsage } from "@zccz14/cybion-components/logic"
 import "../src/styles.css"
 
 // Ages are relative to page-load time so specs can assert exact labels

@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client"
 import { HashRouter } from "react-router-dom"
 import { ThreadLink } from "../src/components/thread-status"
 import { ThreadContextUsage, ThreadUsagePanel } from "@zccz14/cybion-components"
-import { emptyThreadUsage, type ThreadUsage } from "../src/lib/thread-usage"
+import { emptyThreadUsage, type ThreadUsage } from "@zccz14/cybion-components/logic"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import "../src/styles.css"
 

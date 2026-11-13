@@ -8,19 +8,6 @@
 # own theme, the package's copy ships the component styles.
 components/cybion-tool-call.tsx
 components/thread-status.tsx
-hooks/use-composer-audio.ts
-hooks/use-composer-draft.ts
 hooks/use-composer-images.ts
-hooks/use-now.ts
-lib/chat-input.ts
-lib/composer-audio.ts
-lib/composer-drafts.ts
-lib/composer-images.ts
-lib/format.ts
 lib/history-payload.ts
-lib/thread-response.ts
-lib/thread-status.ts
-lib/thread-usage.ts
-lib/time.ts
-lib/utils.ts
 styles.css

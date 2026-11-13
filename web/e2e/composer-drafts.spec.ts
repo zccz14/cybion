@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test"
-import { composerDraftKey } from "../src/lib/composer-drafts"
+import { composerDraftKey } from "@zccz14/cybion-components/logic"
 
 const pageUrl = "/e2e/composer-drafts.html#/threads/a"
 

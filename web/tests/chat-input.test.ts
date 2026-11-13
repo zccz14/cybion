@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { composerAction, handleChatInputKeyDown } from "../src/lib/chat-input.ts"
+import { composerAction, handleChatInputKeyDown } from "@zccz14/cybion-components/logic"
 import { readPackageSource } from "./package-source.ts"
 
 type ChatKeyEvent = Parameters<typeof handleChatInputKeyDown>[0]

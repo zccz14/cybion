@@ -1,7 +1,7 @@
 import { generateKeyPairSync, sign } from "node:crypto"
 import { readFileSync } from "node:fs"
 import type { Page } from "@playwright/test"
-import { emptyThreadUsage } from "../src/lib/thread-usage"
+import { emptyThreadUsage } from "@zccz14/cybion-components/logic"
 
 // Exercise the real app, including Auth Mini verification, with a test-only
 

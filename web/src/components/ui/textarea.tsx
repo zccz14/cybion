@@ -1,6 +1,6 @@
 import * as React from "react"
 
-import { cn } from "@/lib/utils"
+import { cn } from "@zccz14/cybion-components/logic"
 
 function Textarea({ className, ...props }: React.ComponentProps<"textarea">) {
   return (

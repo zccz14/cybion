@@ -13,6 +13,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
+      "@zccz14/cybion-components/logic": ["../packages/cybion-components/dist/logic.d.ts"],
       "@zccz14/cybion-components": ["../packages/cybion-components/dist/index.d.ts"]
     },
     "resolveJsonModule": true,

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { Link, useSearchParams } from "react-router-dom"
 import { ArrowDownIcon, ArrowUpIcon, ArrowUpDownIcon, ChevronDownIcon, ChevronRightIcon, DatabaseIcon, LinkIcon, RefreshCwIcon, SearchIcon } from "lucide-react"
 
-import { formattedTime } from "@/lib/time"
+import { formattedTime } from "@zccz14/cybion-components/logic"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"

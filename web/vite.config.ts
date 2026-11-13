@@ -20,6 +20,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      '@zccz14/cybion-components/logic': path.resolve(__dirname, '../packages/cybion-components/dist/logic.js'),
       '@zccz14/cybion-components': path.resolve(__dirname, '../packages/cybion-components/dist/index.js'),
     },
     dedupe: ['@tanstack/react-query', 'react', 'react-dom', '@zccz14/ux', '@shadcn/react', 'lucide-react', 'radix-ui', '@base-ui/react', 'embla-carousel-react', 'class-variance-authority', 'clsx', 'tailwind-merge'],

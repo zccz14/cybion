@@ -4,8 +4,8 @@ import { HashRouter } from "react-router-dom"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
 import { CybionMark } from "../src/components/cybion-mark"
 import { TooltipProvider } from "../src/components/ui/tooltip"
-import type { ThreadDisplayStatus } from "../src/lib/thread-status"
-import { emptyThreadUsage } from "../src/lib/thread-usage"
+import type { ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
+import { emptyThreadUsage } from "@zccz14/cybion-components/logic"
 import "../src/styles.css"
 
 const statuses: ThreadDisplayStatus[] = ["running", "completed", "failed", "stopped", "ready", "compacting", "blocked"]
