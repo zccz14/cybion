@@ -2112,6 +2112,11 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
             reasoning_effort: None,
             service_tier_fast: None,
             initial_manual_ids: None,
+            context_budget_tokens: None,
+            minimal_mode: None,
+            image_generation_model: None,
+            max_loaded_manuals: None,
+            audio_transcription_model: None,
         },
         ThreadOrigin::Web,
     )

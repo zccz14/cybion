@@ -3130,6 +3130,19 @@ struct CreateThreadInput {
     /// list; every named Manual is bound before the first input is compiled.
     #[serde(default)]
     initial_manual_ids: Option<Vec<String>>,
+    /// Per-thread settings a caller may pin at creation. Omitted or `null`
+    /// follows the User default, exactly like a Thread that never set one, so
+    /// creation and later editing speak the same language.
+    #[serde(default)]
+    context_budget_tokens: Option<i64>,
+    #[serde(default)]
+    minimal_mode: Option<bool>,
+    #[serde(default)]
+    image_generation_model: Option<String>,
+    #[serde(default)]
+    max_loaded_manuals: Option<i64>,
+    #[serde(default)]
+    audio_transcription_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3140,6 +3153,21 @@ struct StartThreadInput {
     upstream_id: Option<String>,
     reasoning_effort: String,
     service_tier_fast: bool,
+    /// The same six settings the Thread panel edits: the first message creates
+    /// the Thread, so what the panel shows must land on it. Omitted or `null`
+    /// follows the User default.
+    #[serde(default)]
+    context_budget_tokens: Option<i64>,
+    #[serde(default)]
+    minimal_mode: Option<bool>,
+    #[serde(default)]
+    image_generation_model: Option<String>,
+    #[serde(default)]
+    max_loaded_manuals: Option<i64>,
+    #[serde(default)]
+    audio_transcription_model: Option<String>,
+    #[serde(default)]
+    initial_manual_ids: Option<Vec<String>>,
     input: String,
     #[serde(default)]
     images: Vec<String>,
@@ -4122,6 +4150,19 @@ async fn create_thread_for(
         Some(value) => Some(manual_loads::initial_manual_ids(value)?),
         None => None,
     };
+    let context_budget_tokens = input
+        .context_budget_tokens
+        .map(context_budget_tokens)
+        .transpose()?;
+    let max_loaded_manuals = input
+        .max_loaded_manuals
+        .map(manual_loads::max_loaded_manuals)
+        .transpose()?;
+    let image_generation_model = input
+        .image_generation_model
+        .map(image_generation_model)
+        .transpose()?;
+    let audio_transcription_model = optional_model(input.audio_transcription_model);
     let (created_by, api_key_id) = match origin {
         ThreadOrigin::Web => ("web", None),
         ThreadOrigin::Api { key_id } => ("api", Some(key_id)),
@@ -4134,7 +4175,8 @@ async fn create_thread_for(
         // The list is a promise the creation keeps: every named Manual is bound
         // here, so the first input already compiles with the copies in front of
         // the model. Fitting the cap is what makes that promise affordable.
-        manual_loads::initial_ids_within_cap(&initial_manual_ids, defaults.max_loaded_manuals)?;
+        let loaded_manual_cap = max_loaded_manuals.unwrap_or(defaults.max_loaded_manuals);
+        manual_loads::initial_ids_within_cap(&initial_manual_ids, loaded_manual_cap)?;
         let upstream_id = resolve_thread_upstream(&transaction, upstream_id, defaults.upstream_id)?;
         let thread = ThreadView {
             id: Uuid::now_v7().to_string(),
@@ -4146,12 +4188,12 @@ async fn create_thread_for(
             upstream_id: Some(upstream_id),
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
-            context_budget_tokens: None,
-            minimal_mode: None,
-            image_generation_model: None,
-            max_loaded_manuals: None,
+            context_budget_tokens,
+            minimal_mode: input.minimal_mode,
+            image_generation_model,
+            max_loaded_manuals,
             initial_manual_ids: Some(initial_manual_ids.clone()),
-            audio_transcription_model: None,
+            audio_transcription_model,
             archived_at: None,
             context_tokens: None,
             status: "idle".to_owned(),
@@ -4162,7 +4204,7 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
@@ -4175,6 +4217,11 @@ async fn create_thread_for(
                 api_key_id,
                 thread.external_ref,
                 manual_loads::encode_initial_ids(&initial_manual_ids),
+                thread.context_budget_tokens,
+                thread.minimal_mode.map(|value| value as i64),
+                thread.image_generation_model,
+                thread.max_loaded_manuals,
+                thread.audio_transcription_model,
                 thread.created_at,
                 thread.updated_at
             ],
@@ -4737,7 +4784,12 @@ async fn start_thread(
             upstream_id: input.upstream_id,
             reasoning_effort: Some(reasoning_effort),
             service_tier_fast: Some(input.service_tier_fast),
-            initial_manual_ids: None,
+            initial_manual_ids: input.initial_manual_ids,
+            context_budget_tokens: input.context_budget_tokens,
+            minimal_mode: input.minimal_mode,
+            image_generation_model: input.image_generation_model,
+            max_loaded_manuals: input.max_loaded_manuals,
+            audio_transcription_model: input.audio_transcription_model,
         },
         ThreadOrigin::Web,
     )
@@ -11318,6 +11370,11 @@ mod tests {
                 reasoning_effort: None,
                 service_tier_fast: None,
                 initial_manual_ids: None,
+                context_budget_tokens: None,
+                minimal_mode: None,
+                image_generation_model: None,
+                max_loaded_manuals: None,
+                audio_transcription_model: None,
             },
             ThreadOrigin::Web,
         )
@@ -11989,6 +12046,11 @@ mod tests {
             reasoning_effort: None,
             service_tier_fast: None,
             initial_manual_ids: None,
+            context_budget_tokens: None,
+            minimal_mode: None,
+            image_generation_model: None,
+            max_loaded_manuals: None,
+            audio_transcription_model: None,
         };
         let mine = create_thread_for(
             &state,

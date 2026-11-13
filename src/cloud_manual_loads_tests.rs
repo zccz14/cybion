@@ -667,6 +667,11 @@ async fn a_thread_named_list_wins_over_the_user_default() {
             reasoning_effort: None,
             service_tier_fast: None,
             initial_manual_ids: Some(vec![named.to_owned()]),
+            context_budget_tokens: None,
+            minimal_mode: None,
+            image_generation_model: None,
+            max_loaded_manuals: None,
+            audio_transcription_model: None,
         },
         ThreadOrigin::Web,
     )
@@ -819,6 +824,11 @@ async fn clearing_the_override_binds_the_default_list_instead() {
             reasoning_effort: None,
             service_tier_fast: None,
             initial_manual_ids: Some(vec![named.to_owned()]),
+            context_budget_tokens: None,
+            minimal_mode: None,
+            image_generation_model: None,
+            max_loaded_manuals: None,
+            audio_transcription_model: None,
         },
         ThreadOrigin::Web,
     )

@@ -132,12 +132,15 @@ test("thread settings live in the composer popover and the image tool follows it
   assert.doesNotMatch(source, /\.image_generation\b/)
   // Web search stays always-on; image generation follows the model chosen at
   // the Thread and account levels, read from the upstream image catalogs.
-  // Both places render the same picker, so it may only carry what both offer:
-  // model, reasoning effort, fast mode. Everything else follows the account
-  // defaults, and the picker grows no second behaviour.
-  for (const gone of ["contextBudget", "loadedManualCap", "initialManuals", "minimalMode", "imageGeneration", "audioTranscription", "imageModelOptions"]) {
-    assert.doesNotMatch(popover, new RegExp(gone), gone)
-    assert.doesNotMatch(view, new RegExp(`${gone}=`), gone)
+  assert.match(source, /"\/api\/integrations\/upstreams\/models\?kind=image"/)
+  assert.match(view, /imageGeneration=\{\{ override: current\.image_generation_model/)
+  assert.match(popover, /imageModelOptions/)
+  // The six settings are required props: neither call site may leave one out,
+  // so both panels always offer the same options.
+  for (const name of ["contextBudget", "loadedManualCap", "initialManuals", "minimalMode", "imageGeneration", "audioTranscription"]) {
+    assert.doesNotMatch(popover, new RegExp(`  ${name}\\?\\s*:`), `${name} must not be optional`)
+    assert.match(source, new RegExp(`${name}=\\{`), `composer passes ${name}`)
+    assert.match(view, new RegExp(`${name}=\\{`), `conversation passes ${name}`)
   }
 })
 
