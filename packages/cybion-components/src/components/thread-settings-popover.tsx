@@ -88,8 +88,8 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
     <PopoverTrigger asChild>
       <Button type="button" variant="outline" className="min-w-0 shrink gap-0" aria-label={`${t.settings}: ${model} (${reasoningEffort})`} title={t.settings} disabled={disabled}><span className="truncate">{model}</span><span className="whitespace-pre"> ({reasoningEffort})</span></Button>
     </PopoverTrigger>
-    <PopoverContent side="top" align="start" className="w-80 max-h-(--radix-popover-content-available-height) overflow-y-auto">
-      <div className="flex flex-col gap-2">
+    <PopoverContent side="top" align="start" className="max-h-[min(24rem,var(--radix-popover-content-available-height))] w-80 overflow-y-auto overscroll-contain">
+      <div className="flex shrink-0 flex-col gap-2">
         <Label>{t.model}</Label>
         <Select value={modelSelection(upstreamId, model)} onValueChange={(value) => { const parsed = parseModelSelection(value); onModelChange(parsed.upstreamId, parsed.model) }} disabled={disabled}>
           <SelectTrigger className="w-full" aria-label={t.model}><SelectValue placeholder={model} /></SelectTrigger>
@@ -102,19 +102,19 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
           ))}</SelectContent>
         </Select>
       </div>
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2">
+      <div className="flex shrink-0 flex-col gap-2">
+        <div className="flex shrink-0 items-center justify-between gap-2">
           <Label>{t.reasoningEffort}</Label>
           <span data-slot="reasoning-effort-value" className="text-xs text-muted-foreground">{reasoningEffort}</span>
         </div>
         <Slider aria-label={t.reasoningEffort} min={0} max={REASONING_EFFORTS.length - 1} step={1} disabled={disabled} value={[stop]} onValueChange={([value]) => onReasoningChange(REASONING_EFFORTS[value])} />
         <div data-slot="reasoning-effort-scale" className="flex justify-between text-xs text-muted-foreground">{REASONING_EFFORTS.map((item) => <span key={item}>{item}</span>)}</div>
       </div>
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex shrink-0 items-center justify-between gap-2">
         <Label className="flex items-center gap-1.5"><ZapIcon className="size-4" />{t.fastMode}</Label>
         <Switch aria-label={t.fastMode} checked={fast} disabled={disabled} onCheckedChange={onFastChange} />
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="flex shrink-0 flex-col gap-2">
         <Label htmlFor="thread-settings-manual-budget">{t.contextBudget}</Label>
         <Input
           id="thread-settings-manual-budget"
@@ -134,7 +134,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
         />
         <p className="text-xs text-muted-foreground">{t.contextBudgetHint}</p>
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="flex shrink-0 flex-col gap-2">
         <Label htmlFor="thread-settings-loaded-manual-cap">{t.loadedManualCap}</Label>
         <Input
           id="thread-settings-loaded-manual-cap"
@@ -156,8 +156,8 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
         />
         <p className="text-xs text-muted-foreground">{t.loadedManualCapHint}</p>
       </div>
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2">
+      <div className="flex shrink-0 flex-col gap-2">
+        <div className="flex shrink-0 items-center justify-between gap-2">
           <Label>{t.initialManuals}</Label>
           {initialManuals.override !== null && <Button type="button" size="sm" variant="ghost" className="h-6" disabled={disabled} onClick={() => initialManuals.onChange(null)}>{t.initialManualsDefault}</Button>}
         </div>
@@ -182,7 +182,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
         })()}
         <p className="text-xs text-muted-foreground">{initialManuals.override === null ? `${t.initialManualsHint} ${t.initialManualsFollowing}` : t.initialManualsHint}</p>
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="flex shrink-0 flex-col gap-2">
         <Label>{t.minimalMode}</Label>
         <Select value={minimalMode.override === null ? "default" : minimalMode.override ? "on" : "off"} onValueChange={(value) => minimalMode.onChange(value === "default" ? null : value === "on")} disabled={disabled}>
           <SelectTrigger className="w-full" aria-label={t.minimalMode}><SelectValue /></SelectTrigger>
@@ -194,7 +194,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
         </Select>
         <p className="text-xs text-muted-foreground">{t.minimalModeHint}</p>
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="flex shrink-0 flex-col gap-2">
         <Label>{t.audioTranscription}</Label>
         <Select value={audioTranscription.override ?? "default"} onValueChange={(value) => audioTranscription.onChange(value === "default" ? null : value)} disabled={disabled}>
           <SelectTrigger className="w-full" aria-label={t.audioTranscription}><SelectValue /></SelectTrigger>
@@ -205,7 +205,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
         </Select>
         <p className="text-xs text-muted-foreground">{t.audioTranscriptionHint}</p>
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="flex shrink-0 flex-col gap-2">
         <Label>{t.imageGeneration}</Label>
         <Select value={imageGeneration.override === null ? "default" : imageGeneration.override === "" ? "off" : imageGeneration.override} onValueChange={(value) => imageGeneration.onChange(value === "default" ? null : value === "off" ? "" : value)} disabled={disabled}>
           <SelectTrigger className="w-full" aria-label={t.imageGeneration}><SelectValue /></SelectTrigger>
