@@ -157,6 +157,14 @@ Pasted images are attachments of the live composer, not stored drafts: they show
 as removable thumbnails, are sent with the next message, and clear on success.
 A user message shows its attached images above the text, each opening a preview
 dialog on click.
+
+The composer's `[+]` button is the single entry point for every other
+attachment. It opens a file picker and routes what was picked by kind: images
+join the pasted thumbnails, audio joins the voice clips, and a text file becomes
+a removable chip that is sent inside the message as a named, fenced block. A
+file the composer cannot send is named with its reason rather than dropped
+silently, and a message past the Controller's input ceiling explains itself
+before sending. See [attachments](docs/attachments.md).
 Explain local persistence visibly and warn if browser storage cannot save it.
 Existing drafts take precedence over automatic prefills. Draft persistence does
 not imply cross-device synchronization or automatic submission.

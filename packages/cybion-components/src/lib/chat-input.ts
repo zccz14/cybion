@@ -10,9 +10,10 @@ export function handleChatInputKeyDown(event: KeyboardEvent<HTMLTextAreaElement>
   if (!event.repeat) event.currentTarget.form?.requestSubmit()
 }
 
-// One action slot: Send for a non-empty draft or one with pasted images,
-// otherwise Continue on an idle thread and Stop on a running one.
-export function composerAction(input: string, images: number, running: boolean) {
-  if (input.trim() || images > 0) return "send"
+// One action slot: Send for a non-empty draft or one carrying an attachment
+// (pasted image, voice clip, attached file), otherwise Continue on an idle thread
+// and Stop on a running one.
+export function composerAction(input: string, attachments: number, running: boolean) {
+  if (input.trim() || attachments > 0) return "send"
   return running ? "stop" : "continue"
 }

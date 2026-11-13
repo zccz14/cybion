@@ -31,8 +31,10 @@ test("actual composers bind drafts to verified ownership and clear only after ac
   assert.match(main, /useComposerDraft\(userId, null\)/)
   // The conversation composer takes the verified owner as its draft scope.
   assert.match(view, /useComposerDraft\(userId, threadId\)/)
-  assert.match(main, /clearSubmitted\(payload.input\)/)
-  assert.match(view, /clearSubmitted\(submitted.input\)/)
+  // An attachment only lengthens what is sent, so the draft that clears is the
+  // typed text the user still sees, not the composed message.
+  assert.match(main, /clearSubmitted\(payload.draft\)/)
+  assert.match(view, /clearSubmitted\(submitted.draft\)/)
   for (const source of [main, view]) {
     assert.equal(source.match(/useComposerImages\(\)/g)?.length, 1)
     assert.equal(source.match(/attachments\.clear\(\)/g)?.length, 1)

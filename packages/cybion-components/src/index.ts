@@ -9,6 +9,9 @@ export { CybionThreadView } from "./thread-view"
 export type { CybionThreadViewProps } from "./thread-view"
 export { attachComposerAudio } from "./hooks/use-composer-audio"
 export { attachComposerImages } from "./hooks/use-composer-images"
+export { useComposerAttach } from "./hooks/use-composer-attach"
+export { useComposerFiles } from "./hooks/use-composer-files"
+export type { ComposerFile, SkippedFile, SkippedFileReason } from "./lib/composer-files"
 export { HistoryMessage } from "./components/history-message"
 export type { ManualSummary, Worker } from "./components/history-message"
 export { threadImage } from "./lib/thread-history"
@@ -36,7 +39,9 @@ export { ThreadStatusSummary, ThreadStatusBadge } from "./components/thread-stat
 
 // Hosts that compose their own list, composer and settings pages need the same
 // widgets the packaged view uses, so they import them instead of copying them.
+export { ComposerAttach } from "./components/composer-attach"
 export { ComposerAttachments } from "./components/composer-attachments"
+export { ComposerFileNotice, ComposerLengthNotice } from "./components/composer-file-notice"
 export { ComposerAudio } from "./components/composer-audio"
 export { ComposerAudioNotice } from "./components/composer-audio-notice"
 export { ComposerDraftNotice } from "./components/composer-draft-notice"

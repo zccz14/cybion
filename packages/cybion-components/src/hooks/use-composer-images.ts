@@ -40,9 +40,15 @@ export function useComposerImages() {
       if (ready.length > 0) setImages((current) => [...current, ...ready])
     })()
   }, [])
+  /// 第三个来路：附件按钮选中的图片。和粘贴走同一套缩放，失败的那张直接跳过。
+  const add = useCallback(async (files: File[]) => {
+    const dataUrls = await Promise.all(files.map(inputImageDataUrl))
+    const ready = dataUrls.filter((dataUrl): dataUrl is string => dataUrl !== null)
+    if (ready.length > 0) setImages((current) => [...current, ...ready])
+  }, [])
   const remove = useCallback((index: number) => {
     setImages((current) => current.filter((_, currentIndex) => currentIndex !== index))
   }, [])
   const clear = useCallback(() => setImages([]), [])
-  return { images, paste, remove, clear }
+  return { images, paste, add, remove, clear }
 }

@@ -12,13 +12,18 @@ import { ThreadHistory } from "./components/thread-history"
 import { ThreadSettingsPopover, type ManualChoice } from "./components/thread-settings-popover"
 import { ThreadContextUsage, ThreadUsagePanel } from "./components/thread-usage"
 import { ThreadStatusBadge, ThreadStatusSummary } from "./components/thread-status"
+import { ComposerAttach } from "./components/composer-attach"
 import { ComposerAttachments } from "./components/composer-attachments"
 import { ComposerAudio } from "./components/composer-audio"
+import { ComposerFileNotice, ComposerLengthNotice } from "./components/composer-file-notice"
 import { ComposerAudioNotice } from "./components/composer-audio-notice"
 import { ComposerDraftNotice } from "./components/composer-draft-notice"
+import { useComposerAttach } from "./hooks/use-composer-attach"
 import { useComposerAudio } from "./hooks/use-composer-audio"
 import { useComposerDraft } from "./hooks/use-composer-draft"
+import { useComposerFiles } from "./hooks/use-composer-files"
 import { useComposerImages } from "./hooks/use-composer-images"
+import { composeComposerInput, maxInputChars } from "./lib/composer-files"
 import { composerAction, handleChatInputKeyDown } from "./lib/chat-input"
 import { pollThreadHistory, oldestRecordId, recordInFlight, inFlightCallIds, loadedThreadRecords, type HistoryRecord, type ThreadHistoryWindow } from "./lib/thread-history"
 import { pendingResponseRecords, type ThreadResponseView } from "./lib/thread-response"
@@ -151,6 +156,8 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   const { input, setInput, clearSubmitted } = composer
   const attachments = useComposerImages()
   const audio = useComposerAudio()
+  const files = useComposerFiles()
+  const attach = useComposerAttach({ images: attachments, audio, files })
   const loadAudio = loadAudioOverride ?? transport.audioObjectUrl
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState("")
@@ -159,14 +166,17 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
     setEditing(false)
   }, [threadId, thread.data?.title])
   const submit = useMutation({
-    mutationFn: (value: { input: string; images: string[]; audios: string[] }) => transport.request<RequestAck>(`/api/threads/${encodeURIComponent(threadId)}/inputs`, {
+    // `draft` is the typed text and `input` what actually travels (draft plus the
+    // text of every attachment), so the draft that clears is the one the user sees.
+    mutationFn: (value: { draft: string; input: string; images: string[]; audios: string[] }) => transport.request<RequestAck>(`/api/threads/${encodeURIComponent(threadId)}/inputs`, {
       method: "POST",
-      body: JSON.stringify({ input: value.input.trim(), images: value.images, audios: value.audios }),
+      body: JSON.stringify({ input: value.input, images: value.images, audios: value.audios }),
     }),
     onSuccess: (_request, submitted) => {
-      clearSubmitted(submitted.input)
+      clearSubmitted(submitted.draft)
       attachments.clear()
       audio.clear()
+      files.clear()
       void client.invalidateQueries({ queryKey: ["history", threadId] })
       void client.invalidateQueries({ queryKey: ["thread", threadId] })
       void client.invalidateQueries({ queryKey: ["threads"] })
@@ -234,13 +244,17 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
   const archived = current.archived_at !== null
   const busy = submit.isPending || control.isPending
+  // Attachments ride inside the message text, so what the Controller receives is
+  // composed here; an input the Controller would refuse is flagged instead of sent.
+  const composed = composeComposerInput(input, files.files, language)
+  const oversize = composed.length > maxInputChars
   const submitInput = (recorded: string[] = []) => {
     const audios = [...audio.audios, ...recorded]
-    if (busy || (!input.trim() && attachments.images.length === 0 && audios.length === 0)) return
-    submit.mutate({ input, images: attachments.images, audios })
+    if (busy || oversize || composed === "") return
+    submit.mutate({ draft: input, input: composed, images: attachments.images, audios })
   }
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
-  const action = composerAction(input, attachments.images.length, running)
+  const action = composerAction(input, attachments.images.length + files.files.length, running)
   return <section className={threadRootClass(className)}>
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
       {headerLeading}
@@ -293,14 +307,17 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
       </MessageScroller>
     </MessageScrollerProvider>
     {!readOnly && <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submitInput() }}>
-      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} onRemove={attachments.remove} onRemoveAudio={audio.remove} /><ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} /></Field>
+      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} /></Field>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} initialManuals={defaults.data ? { override: current.initial_manual_ids ?? null, fallback: defaults.data.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (initial_manual_ids) => settings.mutate({ initial_manual_ids }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} audioTranscription={defaults.data ? { override: current.audio_transcription_model, fallback: defaults.data.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (audio_transcription_model) => settings.mutate({ audio_transcription_model }) } : undefined} />
+          <div className="flex flex-wrap items-center gap-2">
+            <ComposerAttach language={language} disabled={busy} onFiles={attach} />
+            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} contextBudget={defaults.data ? { override: current.context_budget_tokens, fallback: defaults.data.context_budget_tokens, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) } : undefined} minimalMode={defaults.data ? { override: current.minimal_mode, fallback: defaults.data.minimal_mode, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) } : undefined} loadedManualCap={defaults.data ? { override: current.max_loaded_manuals, fallback: defaults.data.max_loaded_manuals, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) } : undefined} initialManuals={defaults.data ? { override: current.initial_manual_ids ?? null, fallback: defaults.data.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (initial_manual_ids) => settings.mutate({ initial_manual_ids }) } : undefined} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} imageGeneration={defaults.data ? { override: current.image_generation_model, fallback: defaults.data.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) } : undefined} audioTranscription={defaults.data ? { override: current.audio_transcription_model, fallback: defaults.data.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (audio_transcription_model) => settings.mutate({ audio_transcription_model }) } : undefined} />
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
             <ComposerAudio language={language} recording={audio.recording} disabled={busy} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submitInput([dataUrl]) })} onCancel={audio.cancel} />
             {action === "send"
-              ? <Button disabled={busy || audio.recording}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
+              ? <Button disabled={busy || audio.recording || oversize}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
               : action === "stop"
                 ? <Button type="button" variant="outline" disabled={busy} title={t("stopThreadHint")} onClick={() => control.mutate("cancel")}>{control.isPending && control.variables === "cancel" ? <Spinner data-icon="inline-start" /> : <SquareIcon data-icon="inline-start" />}{t("stopThread")}</Button>
                 : <Button type="button" variant="outline" disabled={busy || !hasHistory} title={t("continueThreadHint")} onClick={() => control.mutate("continue")}>{control.isPending && control.variables === "continue" ? <Spinner data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}{t("continueThread")}</Button>}
