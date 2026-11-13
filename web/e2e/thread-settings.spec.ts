@@ -130,6 +130,22 @@ test("the popover caps its height and scrolls instead of overflowing a short vie
   await page.screenshot({ path: "test-results/thread-settings-short-viewport.png" })
 })
 
+test("a tall viewport still caps the panel at 24rem and scrolls inside", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto("/e2e/thread-settings.html")
+  await page.getByRole("button", { name: "线程设置" }).click()
+  const popover = page.locator('[data-slot="popover-content"]')
+  await expect(popover).toBeVisible()
+  // 上限是 24rem（384px）：视口再高也不长高，多出来的靠面板内滚动。
+  const box = await popover.boundingBox()
+  expect(box !== null && box.height <= 384).toBe(true)
+  const overflow = await popover.evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }))
+  expect(overflow.scroll).toBeGreaterThan(overflow.client)
+  const scrolled = await popover.evaluate((element) => { element.scrollTop = element.scrollHeight; return element.scrollTop })
+  expect(scrolled).toBeGreaterThan(0)
+  await page.screenshot({ path: "test-results/thread-settings-capped-tall.png" })
+})
+
 test("the popover follows the language and stays within narrow layouts", async ({ page }) => {
   await page.goto("/e2e/thread-settings.html")
   await page.setViewportSize({ width: 390, height: 844 })
