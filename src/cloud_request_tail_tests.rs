@@ -12,17 +12,34 @@ fn tail_connection() -> Connection {
     connection
 }
 
-fn record(connection: &Connection, kind: &str, payload: Value) -> i64 {
+fn record_at(connection: &Connection, kind: &str, payload: Value, created_at: i64) -> i64 {
     persist_history_record(
         connection,
         HistoryRecordInsert {
             thread_id: "th",
             kind,
             payload: &payload,
-            created_at: now(),
+            created_at,
         },
     )
     .unwrap()
+}
+
+fn record(connection: &Connection, kind: &str, payload: Value) -> i64 {
+    record_at(connection, kind, payload, now())
+}
+
+/// One finished inference request, stamped where the caller wants it.
+fn audit_at(connection: &Connection, started_at: i64, seconds: i64, input: i64) -> i64 {
+    connection
+        .execute(
+            "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,
+                                          finished_at,input_tokens,output_tokens,cached_tokens)
+             VALUES('th','inference','model','completed',?,?,?,100,0)",
+            params![started_at, started_at + seconds, input],
+        )
+        .unwrap();
+    connection.last_insert_rowid()
 }
 
 fn note(connection: &Connection, id: &str, text: &str) {
@@ -364,4 +381,117 @@ fn an_old_database_drops_the_rollup_and_still_reports_spend() {
     let compiled = compile_thread_context(&reopened, directory.path(), "old", tail).unwrap();
     let text = tail_text(&compiled.items);
     assert!(text.contains("$0.05"), "{text}");
+}
+
+/// The tail is the only place a Thread can learn how long it has been going:
+/// its notes say what to do, its spend says how much is gone, and neither
+/// answers "how long have I been on this".
+#[test]
+fn the_tail_reports_how_long_the_last_request_and_this_turn_took() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    let opened = now() - 200;
+    record_at(
+        &connection,
+        "input",
+        json!({"role":"user","content":"go"}),
+        opened,
+    );
+    audit_at(&connection, opened + 20, 41, 1_000);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(text.contains("Last request 1.0k tokens in 41s"), "{text}");
+    assert!(text.contains("This turn: 1 request over 3m"), "{text}");
+    assert!(text.contains("UTC"), "{text}");
+}
+
+/// An attempt that never finished, or one whose timestamps predate this turn,
+/// leaves the clock silent rather than reporting a fabricated zero.
+#[test]
+fn a_request_without_a_finish_reports_no_duration() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    audit(&connection, 1_000, 100, 0);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(text.contains("Last request 1.0k tokens."), "{text}");
+    assert!(!text.contains(" in 0s"), "{text}");
+}
+
+/// Silence is only worth a clause when the Thread was actually asleep: a Thread
+/// resumed a day later is a new session, and must not carry the old momentum.
+#[test]
+fn a_long_silence_is_named_and_a_short_one_is_not() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    let opened = now() - 60;
+    record_at(
+        &connection,
+        "response_output",
+        json!({"type":"message"}),
+        opened - 90_000,
+    );
+    record_at(
+        &connection,
+        "input",
+        json!({"role":"user","content":"go"}),
+        opened,
+    );
+    audit_at(&connection, opened + 1, 5, 500);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(
+        text.contains("It sat quiet for 1d01h before this turn."),
+        "{text}"
+    );
+
+    // Five minutes of silence is a conversation still in progress.
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    let opened = now() - 60;
+    record_at(
+        &connection,
+        "response_output",
+        json!({"type":"message"}),
+        opened - 300,
+    );
+    record_at(
+        &connection,
+        "input",
+        json!({"role":"user","content":"go"}),
+        opened,
+    );
+    audit_at(&connection, opened + 1, 5, 500);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    assert!(!tail_text(&compiled.items).contains("sat quiet"), "{text}");
+}
+
+/// The first request of a turn has no earlier request to count, so the tail
+/// reads only the clock rather than announcing "0 requests".
+#[test]
+fn a_fresh_thread_reads_only_the_time() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(text.contains("It is now"), "{text}");
+    assert!(text.contains("UTC"), "{text}");
+    assert!(!text.contains("This turn"), "{text}");
 }

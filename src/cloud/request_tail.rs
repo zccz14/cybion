@@ -2,8 +2,8 @@
 //!
 //! Every inference request carries one item that is not part of the
 //! conversation itself: the Thread's own bookkeeping — the notes it still owes,
-//! what the Thread has spent, and the nudge that hands an unfinished turn back
-//! to the model. That item is frozen as an `activity` record *before* the
+//! what the Thread has spent, how long it has been running, and the nudge that
+//! hands an unfinished turn back to the model. That item is frozen as an `activity` record *before* the
 //! request compiles, inside the same transaction, so the compiled request stays
 //! a pure function of its record range: the compiler reads records and nothing
 //! else, and replaying the same range twice produces the same items.
@@ -26,6 +26,10 @@ pub(super) const TYPE: &str = "request_tail";
 /// A Thread at this share of its context budget is told to narrow its next
 /// steps instead of being surprised by a compaction.
 const CONTEXT_PRESSURE_PERCENT: i128 = 80;
+
+/// A turn that opens after this much silence is a new session to the model, not
+/// a continuation of the old one, and saying so costs one clause.
+const QUIET_SECONDS: i64 = 3_600;
 
 fn is_tail(kind: &str, payload: &str) -> bool {
     if kind != "activity" {
@@ -73,7 +77,19 @@ struct Spend {
     settled: i64,
     last_input_tokens: Option<i64>,
     last_cost_usd_nanos: Option<i64>,
+    /// How long that last request took. None when it never finished: an
+    /// aborted attempt is not a pace to report.
+    last_request_seconds: Option<i64>,
+    /// The user message that opened the current turn, and how many inference
+    /// requests this Thread has begun since it.
+    turn_started_at: Option<i64>,
+    turn_requests: i64,
+    /// Silence immediately before that message, None on the Thread's first turn.
+    quiet_seconds: Option<i64>,
     budget: Option<i64>,
+    /// The one instant this tail was frozen at, so the clock it prints and the
+    /// clock the model is meant to reason from are the same.
+    read_at: i64,
 }
 
 /// Never fatal: a Thread whose rollup cannot be read loses its spend line, not
@@ -113,13 +129,55 @@ fn read_spend(connection: &Connection, thread_id: &str) -> Result<Spend, ApiErro
     )?;
     let last = connection
         .query_row(
-            "SELECT input_tokens,cost_usd_nanos FROM reasoning_audits
+            "SELECT input_tokens,cost_usd_nanos,started_at,finished_at FROM reasoning_audits
              WHERE thread_id=? AND request_kind='inference' AND input_tokens IS NOT NULL
              ORDER BY id DESC LIMIT 1",
             [thread_id],
-            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
         )
         .optional()?;
+    // Two point lookups over indexes this schema already keeps: the newest user
+    // record opens the turn, the record before it says how long the Thread was
+    // silent. The count since that message is one index range. All three are
+    // cheaper than the context estimate this very request already pays for, and
+    // a Thread that cannot read them loses the clock, never the request.
+    let turn = connection
+        .query_row(
+            "SELECT id,created_at FROM history_records
+             WHERE thread_id=? AND kind='input'
+             ORDER BY created_at DESC,id DESC LIMIT 1",
+            [thread_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let turn_requests = match turn {
+        Some((_, started_at)) => connection.query_row(
+            "SELECT COUNT(*) FROM reasoning_audits
+             WHERE thread_id=? AND request_kind='inference' AND started_at>=?",
+            params![thread_id, started_at],
+            |row| row.get::<_, i64>(0),
+        )?,
+        None => 0,
+    };
+    let quiet_seconds = match turn {
+        Some((id, started_at)) => connection
+            .query_row(
+                "SELECT created_at FROM history_records
+                 WHERE thread_id=? AND id<? ORDER BY id DESC LIMIT 1",
+                params![thread_id, id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|previous| (started_at - previous).max(0)),
+        None => None,
+    };
     // The Thread's own budget, then the account default. A missing default row
     // means the built-in budget, which the caller's defaults also assume.
     let budget: Option<i64> = connection.query_row(
@@ -136,9 +194,15 @@ fn read_spend(connection: &Connection, thread_id: &str) -> Result<Spend, ApiErro
         cached_tokens: usage.3,
         cost_usd_nanos: usage.4,
         settled: usage.5,
-        last_input_tokens: last.and_then(|(input, _)| input),
-        last_cost_usd_nanos: last.and_then(|(_, cost)| cost),
+        last_input_tokens: last.and_then(|(input, _, _, _)| input),
+        last_cost_usd_nanos: last.and_then(|(_, cost, _, _)| cost),
+        last_request_seconds: last
+            .and_then(|(_, _, started, finished)| finished.map(|f| (f - started).max(0))),
+        turn_started_at: turn.map(|(_, created_at)| created_at),
+        turn_requests,
+        quiet_seconds,
         budget,
+        read_at: now(),
     })
 }
 
@@ -147,6 +211,17 @@ fn tokens(value: i64) -> String {
         value if value >= 1_000_000 => format!("{:.2}M", value as f64 / 1_000_000.0),
         value if value >= 1_000 => format!("{:.1}k", value as f64 / 1_000.0),
         value => value.to_string(),
+    }
+}
+
+/// A span the way a person reads it: 41s, 3m12s, 2h05m, 1d01h.
+fn duration(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    match seconds {
+        seconds if seconds < 60 => format!("{seconds}s"),
+        seconds if seconds < 3_600 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        seconds if seconds < 86_400 => format!("{}h{:02}m", seconds / 3_600, seconds % 3_600 / 60),
+        seconds => format!("{}d{:02}h", seconds / 86_400, seconds % 86_400 / 3_600),
     }
 }
 
@@ -198,6 +273,9 @@ impl Spend {
             if let Some(cost) = self.last_cost_usd_nanos {
                 line.push_str(&format!(" / {}", dollars(cost)));
             }
+            if let Some(seconds) = self.last_request_seconds {
+                line.push_str(&format!(" in {}", duration(seconds)));
+            }
             line.push('.');
         }
         line
@@ -230,6 +308,38 @@ impl Spend {
     }
 }
 
+impl Spend {
+    /// The Thread's clock. What it spent says how much is gone; only this says
+    /// how long it has been going, which is what separates a Thread that is
+    /// working from one that has been retrying the same command for eleven
+    /// minutes. Absolute time is UTC and labelled as such: the controller keeps
+    /// no timezone of its own, and a wrong local time is worse than a right UTC.
+    fn clock(&self) -> Option<String> {
+        let stamp = chrono::DateTime::from_timestamp(self.read_at, 0)?;
+        let mut line = format!("It is now {} UTC.", stamp.format("%Y-%m-%d %H:%M (%a)"));
+        if let Some(started_at) = self.turn_started_at
+            && self.turn_requests > 0
+        {
+            let elapsed = (self.read_at - started_at).max(0);
+            line.push_str(&format!(
+                " This turn: {} request{} over {}.",
+                self.turn_requests,
+                if self.turn_requests == 1 { "" } else { "s" },
+                duration(elapsed)
+            ));
+            if let Some(quiet) = self.quiet_seconds
+                && quiet >= QUIET_SECONDS
+            {
+                line.push_str(&format!(
+                    " It sat quiet for {} before this turn.",
+                    duration(quiet)
+                ));
+            }
+        }
+        Some(line)
+    }
+}
+
 /// Freezes this request's tail and returns the record id. Called inside the
 /// transaction that compiles the request, after the Manual copies, so the tail
 /// is the last record of the range the model reads.
@@ -250,6 +360,10 @@ pub(super) fn append(
             text.push(' ');
             text.push_str(&context);
         }
+        if let Some(clock) = spend.clock() {
+            text.push(' ');
+            text.push_str(&clock);
+        }
         reported = json!({
             "requests": spend.requests,
             "input_tokens": spend.input_tokens,
@@ -259,6 +373,11 @@ pub(super) fn append(
             "cost_settled_requests": spend.settled,
             "context_tokens": spend.last_input_tokens,
             "context_budget_tokens": spend.budget,
+            "last_request_seconds": spend.last_request_seconds,
+            "turn_started_at": spend.turn_started_at,
+            "turn_requests": spend.turn_requests,
+            "quiet_seconds": spend.quiet_seconds,
+            "read_at": spend.read_at,
         });
     }
     if let Some(nudge) = nudge {
