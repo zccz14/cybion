@@ -21,7 +21,6 @@ import { ComposerDraftNotice } from "./components/composer-draft-notice"
 import { useComposerAttach } from "./hooks/use-composer-attach"
 import { useComposerAudio } from "./hooks/use-composer-audio"
 import { audioDraftScope } from "./lib/composer-audio-drafts"
-import { retryableSubmitFailure, submitRetryDelay } from "./lib/composer-submit-retry"
 import { useComposerDraft } from "./hooks/use-composer-draft"
 import { useComposerFiles } from "./hooks/use-composer-files"
 import { useComposerImages } from "./hooks/use-composer-images"
@@ -174,9 +173,6 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
       method: "POST",
       body: JSON.stringify({ input: value.input, images: value.images, audios: value.audios }),
     }),
-    // 网络断一下不该让一段话白讲：音频已经落在本地草稿里，这里先把几次自动重试走完。
-    retry: (attempt, error) => attempt < 3 && retryableSubmitFailure(error),
-    retryDelay: submitRetryDelay,
     onSuccess: (_request, submitted) => {
       clearSubmitted(submitted.draft)
       attachments.clear()

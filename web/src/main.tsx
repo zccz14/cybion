@@ -81,7 +81,6 @@ import { composerDraftKey } from "@zccz14/cybion-components/logic"
 import { useComposerImages } from "@zccz14/cybion-components/logic"
 import { useComposerAudio } from "@zccz14/cybion-components/logic"
 import { audioDraftScope } from "@zccz14/cybion-components/logic"
-import { retryableSubmitFailure, submitRetryDelay } from "@zccz14/cybion-components/logic"
 import { useComposerFiles } from "@zccz14/cybion-components/logic"
 import { useComposerAttach } from "@zccz14/cybion-components/logic"
 import { composeComposerInput, maxInputChars } from "@zccz14/cybion-components/logic"
@@ -1500,9 +1499,6 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const value = draft ?? defaults.data
   const start = useMutation({
     mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify({ ...payload, draft: undefined, input: payload.input.trim() }) }),
-    // 语音已经落在本地草稿里；网络抖一下先自己重试几次，别急着让人重录。
-    retry: (attempt, error) => attempt < 3 && retryableSubmitFailure(error),
-    retryDelay: submitRetryDelay,
     onSuccess: (_request, payload) => {
       clearSubmitted(payload.draft)
       attachments.clear()

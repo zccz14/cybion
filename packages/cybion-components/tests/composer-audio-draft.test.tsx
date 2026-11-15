@@ -2,7 +2,6 @@ import { act, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { audioDraftScope, readAudioDrafts, writeAudioDrafts } from "../src/lib/composer-audio-drafts"
-import { retryableSubmitFailure, submitRetryDelay } from "../src/lib/composer-submit-retry"
 import { useComposerAudio } from "../src/hooks/use-composer-audio"
 
 /// jsdom 没有 IndexedDB。这里给一个只实现本模块用到的那几个方法的内存版，
@@ -95,14 +94,5 @@ describe("useComposerAudio with a scope", () => {
       result.current.clear()
     })
     await waitFor(async () => expect(await readAudioDrafts(scope)).toHaveLength(0))
-  })
-})
-
-describe("submit retry", () => {
-  it("retries what did not reach the server and leaves client errors alone", () => {
-    expect(retryableSubmitFailure(new TypeError("Failed to fetch"))).toBe(true)
-    expect(retryableSubmitFailure({ status: 503 })).toBe(true)
-    expect(retryableSubmitFailure({ status: 400 })).toBe(false)
-    expect(submitRetryDelay(0)).toBeLessThan(submitRetryDelay(2))
   })
 })
