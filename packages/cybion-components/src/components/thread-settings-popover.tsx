@@ -69,7 +69,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
   fast: boolean
   language: "en" | "zh"
   contextBudget: { override: number | null; fallback: number; onChange: (value: number | null) => void }
-  usdBudget: { override: number | null; fallback: number; onChange: (value: number | null) => void }
+  usdBudget?: { override: number | null; fallback: number; onChange: (value: number | null) => void }
   loadedManualCap: { override: number | null; fallback: number; onChange: (value: number | null) => void }
   /// The Manuals this Thread starts with: its own list, or the account default
   /// it follows when `override` is null. Changing the list binds what it gained
@@ -184,7 +184,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
         <p className="text-xs text-muted-foreground">{initialManuals.override === null ? `${t.initialManualsHint} ${t.initialManualsFollowing}` : t.initialManualsHint}</p>
       </div>
       <div className="flex shrink-0 flex-col gap-2">
-        <div className="flex flex-col gap-2">
+        {usdBudget && <div className="flex flex-col gap-2">
           <Label htmlFor="thread-settings-usd-budget">{t.usdBudget}</Label>
           <Input
             id="thread-settings-usd-budget"
@@ -203,7 +203,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
             }}
           />
           <p className="text-xs text-muted-foreground">{t.usdBudgetHint}</p>
-        </div>
+        </div>}
         <Label>{t.minimalMode}</Label>
         <Select value={minimalMode.override === null ? "default" : minimalMode.override ? "on" : "off"} onValueChange={(value) => minimalMode.onChange(value === "default" ? null : value === "on")} disabled={disabled}>
           <SelectTrigger className="w-full" aria-label={t.minimalMode}><SelectValue /></SelectTrigger>
