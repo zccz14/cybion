@@ -57,7 +57,7 @@ Both fields have a purpose: `status` governs execution controls; `display_status
 explains the current execution or its outcome.
 
 One part of `display_status` is not an execution fact at all: `blocked`. A Thread
-waiting on its user is something the model states (`block_thread`) and only the
+waiting on its user is something the model states (`block_thread`) — or the kernel, when the Thread reaches its USD budget — and only the
 user's next message retracts, so it lives in its own `threads.blocked` flag
 rather than as a value of `status`. Keeping it out of `status` is what lets the
 flag survive the writes every turn boundary makes (idle on finalization, failed
