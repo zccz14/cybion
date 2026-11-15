@@ -5,8 +5,14 @@ import { audioDurationLabel } from "../lib/composer-audio"
 import type { UserInputAudio } from "../lib/history-payload"
 
 const copy = {
-  en: { play: "Play voice message", pause: "Pause voice message", unavailable: "Voice message unavailable", subtitle: "Subtitle" },
-  zh: { play: "播放语音", pause: "暂停语音", unavailable: "语音无法播放", subtitle: "字幕" },
+  en: {
+    play: "Play voice message", pause: "Pause voice message", unavailable: "Voice message unavailable", subtitle: "Subtitle",
+    untranscribed: "No transcript — ask Cybion to transcribe this clip again with keywords.",
+  },
+  zh: {
+    play: "播放语音", pause: "暂停语音", unavailable: "语音无法播放", subtitle: "字幕",
+    untranscribed: "没有转写出文字 · 可以让 Cybion 带上关键词重新转写这一段",
+  },
 } as const
 
 // Fixed heights keep the waveform identical between renders; it marks the bubble
@@ -95,7 +101,7 @@ export function AudioMessage({ language, audio, loadAudio }: {
         />
       )}
     </button>
-    {audio.transcript && (
+    {audio.transcript ? (
       <p
         data-slot="audio-transcript"
         title={audio.transcriptModel ? `${t.subtitle} · ${audio.transcriptModel}` : undefined}
@@ -103,6 +109,12 @@ export function AudioMessage({ language, audio, loadAudio }: {
       >
         {audio.transcript}
       </p>
-    )}
+    ) : audio.audioRef ? (
+      // 只有从历史里回放的语音才带 ref：它已经落库，转写成功的话字幕就在。
+      // 这里没有字幕只可能是首轮转写失败——说出来，别让一段语音看起来像发丢了。
+      <p data-slot="audio-untranscribed" className="max-w-[75ch] px-1 text-xs leading-5 text-muted-foreground opacity-80">
+        {t.untranscribed}
+      </p>
+    ) : null}
   </div>
 }

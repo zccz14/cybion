@@ -20,6 +20,7 @@ import { ComposerAudioNotice } from "./components/composer-audio-notice"
 import { ComposerDraftNotice } from "./components/composer-draft-notice"
 import { useComposerAttach } from "./hooks/use-composer-attach"
 import { useComposerAudio } from "./hooks/use-composer-audio"
+import { audioDraftScope } from "./lib/composer-audio-drafts"
 import { useComposerDraft } from "./hooks/use-composer-draft"
 import { useComposerFiles } from "./hooks/use-composer-files"
 import { useComposerImages } from "./hooks/use-composer-images"
@@ -155,7 +156,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   const composer = useComposerDraft(userId, threadId)
   const { input, setInput, clearSubmitted } = composer
   const attachments = useComposerImages()
-  const audio = useComposerAudio()
+  const audio = useComposerAudio({ scope: audioDraftScope(userId, threadId) })
   const files = useComposerFiles()
   const attach = useComposerAttach({ images: attachments, audio, files })
   const loadAudio = loadAudioOverride ?? transport.audioObjectUrl
@@ -250,8 +251,19 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   const oversize = composed.length > maxInputChars
   const submitInput = (recorded: string[] = []) => {
     const audios = [...audio.audios, ...recorded]
-    if (busy || oversize || composed === "") return
+    if (busy || oversize) return
+    // 只有一段语音、一个字没打，也是一条合法的消息：Controller 收的就是
+    // 「没有文字、只有音频」的输入。以前这里按文本判空，于是对着麦克风说完
+    // 点发送什么都不会发生。
+    if (composed === "" && attachments.images.length === 0 && audios.length === 0) return
     submit.mutate({ draft: input, input: composed, images: attachments.images, audios })
+  }
+  // 录完先挂到附件上，再发。发送失败时它还挂在输入框上，重试不用重录。
+  const sendVoice = async () => {
+    const clip = await audio.finish()
+    if (!clip) return
+    audio.attach(clip)
+    submitInput([clip])
   }
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
   const action = composerAction(input, attachments.images.length + files.files.length, running)
@@ -307,7 +319,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
       </MessageScroller>
     </MessageScrollerProvider>
     {!readOnly && <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submitInput() }}>
-      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} /></Field>
+      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} restored={audio.restored} onDismissRestored={audio.dismissRestored} onRetry={() => submitInput()} /></Field>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <ComposerAttach language={language} disabled={busy} onFiles={attach} />
@@ -315,7 +327,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
-            <ComposerAudio language={language} recording={audio.recording} disabled={busy} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (dataUrl) submitInput([dataUrl]) })} onCancel={audio.cancel} />
+            <ComposerAudio language={language} recording={audio.recording} phase={audio.phase} elapsed={audio.elapsed} disabled={busy} onStart={audio.start} onSend={() => void sendVoice()} onCancel={audio.cancel} />
             {action === "send"
               ? <Button disabled={busy || audio.recording || oversize}>{submit.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("send")}</Button>
               : action === "stop"

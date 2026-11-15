@@ -92,9 +92,33 @@ must add `sst` rows to an upstream before voice input can be switched on.
 - The composer owns the recording and upload controls; each attachment shows as
   a size chip and can be removed before sending. The input reaches the server as
   `audios` data URLs next to `images`.
+- Every step of the voice path is visible, because a silent button cannot be
+  told apart from a broken one: the mic shows `starting` while the browser asks
+  for permission, `recording` with a running clock, and `finalizing` while the
+  take is closed and encoded. Every failure — refused permission, no device, a
+  microphone another app holds, an empty take, a clip over the 20 MB ceiling, a
+  device pulled mid-recording — is stated in the composer notice with a dismiss
+  control, never swallowed.
+- A finished take is parked as an attachment before it is sent, so a failed
+  request leaves the clip on the composer and the retry button resends it. A
+  voice-only message (no typed text) is a valid input: the client must not treat
+  empty text as an empty message.
+- **The clip outlives the page.** Explaining a failure is not enough when the
+  speech is gone: every take is written to a local draft (IndexedDB, one slot per
+  user and Thread, keyed like the text draft) the moment it exists. A failed
+  send, a refresh, a closed tab or a collapsed extension panel therefore leaves
+  the audio recoverable — reopening the composer restores the clips as
+  attachments and says how many came back, with a retry that sends them right
+  away. The slot is deleted only after the Controller acks the input.
+- Transient failures are retried without the user's help: a network error or a
+  502/503/504 gets three attempts with a widening delay, and a composer that is
+  offline pauses the request until the browser is back rather than failing it.
+  Client errors (400-class) are not retried — the message itself is wrong.
 - A sent voice clip renders as a playable bar with the first-pass transcript
   underneath as its subtitle, so the words are readable without pressing play;
-  the transcript is never drawn as a message of its own.
+  the transcript is never drawn as a message of its own. A clip replayed from
+  history whose first pass failed says "no transcript" in place of the subtitle
+  and points at re-extraction, so it cannot look like a clip that never arrived.
 - A `normai_audio_transcription` call renders as its own card (model, prompt,
   keywords and the reference it re-read; the payload disclosure keeps the rest).
 - The speech-to-text model is picked in the settings card (account default) and
