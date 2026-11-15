@@ -1,16 +1,22 @@
 // A recorded or uploaded audio attachment becomes one `input_audio` data URL.
 // The Controller stores the bytes in the object store, transcribes them once,
 // and keeps the reference so the model can re-extract terms with better hints.
-const maxAudioBytes = 20 * 1024 * 1024
+export const maxAudioBytes = 20 * 1024 * 1024
 
 export function audioTooLarge(file: File): boolean {
   return file.size > maxAudioBytes
 }
 
+/// One data URL's decoded size. The recorded path and the file path answer to
+/// the same ceiling, so a take that is too long is refused before it is sent.
+export function audioDataUrlBytes(dataUrl: string): number {
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1)
+  return Math.floor((base64.length * 3) / 4)
+}
+
 /// 已经拿到 data URL 的调用方（例如侧边栏录完音直接递过来）不用再过一遍 File。
 export function audioDataUrlTooLarge(dataUrl: string): boolean {
-  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1)
-  return Math.floor((base64.length * 3) / 4) > maxAudioBytes
+  return audioDataUrlBytes(dataUrl) > maxAudioBytes
 }
 
 export function audioFileDataUrl(file: File): Promise<string | null> {
@@ -31,8 +37,7 @@ export function recordingFile(blob: Blob, index: number): File {
 }
 
 export function audioAttachmentSize(dataUrl: string): string {
-  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1)
-  const bytes = Math.floor((base64.length * 3) / 4)
+  const bytes = audioDataUrlBytes(dataUrl)
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${Math.max(1, Math.round(bytes / 1024))} KB`
 }
