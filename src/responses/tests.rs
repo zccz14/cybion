@@ -504,6 +504,36 @@ fn a_call_id_reused_for_another_request_moves_to_an_id_of_its_own() {
     );
 }
 
+#[test]
+fn a_reasoning_item_without_a_summary_is_still_a_reasoning_item() {
+    // DeepSeek thinking mode answers with reasoning content and no `summary`
+    // key at all; OpenAI always ships `summary: []`, so the wire model must not
+    // treat the missing field as a malformed payload.
+    let reasoning = item(json!({
+        "id": "rs-1",
+        "type": "reasoning",
+        "content": [{"type": "reasoning_text", "text": "plan the patch"}],
+    }));
+    assert_eq!(reasoning.kind(), "reasoning");
+    assert_eq!(reasoning.value()["summary"], json!([]));
+    assert_eq!(reasoning.value()["content"][0]["text"], "plan the patch");
+    assert_eq!(reasoning.text(), "");
+}
+
+#[test]
+fn an_unreadable_final_output_item_does_not_fail_the_turn() {
+    let event = snapshot(json!([
+        {"id":"rs","type":"reasoning","content":[{"type":"reasoning_text","text":"plan"}]},
+        {"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},
+        {"id":"m2","type":"message","role":"assistant","content":"not-an-array"},
+    ]));
+    let mut state = ResponseState::default();
+    state.apply(&event).unwrap();
+    assert_eq!(state.output.len(), 2);
+    assert_eq!(state.output[0].item.kind(), "reasoning");
+    assert_eq!(state.output[1].item.text(), "done");
+}
+
 fn snapshot(output: Value) -> ResponseEvent {
     ResponseEvent::Completed(
         serde_json::from_value::<ResponseCompleted>(json!({
