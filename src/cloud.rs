@@ -138,6 +138,9 @@ const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
 // budget. 0 disables it; per-user defaults and per-thread overrides tune it.
 const DEFAULT_CONTEXT_BUDGET_TOKENS: i64 = 200_000;
 const MAX_CONTEXT_BUDGET_TOKENS: i64 = 10_000_000;
+// Settled USD a Thread may reach, in nanodollars, before the kernel stops it.
+// The ceiling is an input sanity bound: $10,000.
+const MAX_BUDGET_USD_NANOS: i64 = 10_000_000_000_000;
 // A budget can stay exceeded when a summary cannot shrink the range, so the
 // proactive check is effort-bounded and the reactive overflow path remains.
 const PROACTIVE_COMPACTION_RETRY_LIMIT: usize = 2;
@@ -169,7 +172,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // hosted database, because the index batches below only run on a version change.
 // 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
 // with, and the User default that fills the list of a new Thread.
-const USER_SCHEMA_VERSION: i64 = 60;
+const USER_SCHEMA_VERSION: i64 = 61;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1651,6 +1654,9 @@ CREATE TABLE IF NOT EXISTS threads (
   image_generation_model TEXT,
   max_loaded_manuals INTEGER,
   audio_transcription_model TEXT,
+  -- Settled USD spend this Thread may reach before the kernel stops it and
+  -- blocks it on its user. NULL follows `thread_defaults`; 0 means no limit.
+  budget_usd_nanos INTEGER,
   initial_manual_ids TEXT,
   archived_at INTEGER,
   -- Waiting on the user: its own axis, because `status` is written on every
@@ -1677,7 +1683,8 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
   image_generation_model TEXT NOT NULL DEFAULT '',
   max_loaded_manuals INTEGER NOT NULL DEFAULT 12,
   audio_transcription_model TEXT,
-  initial_manual_ids TEXT NOT NULL DEFAULT '[]'
+  initial_manual_ids TEXT NOT NULL DEFAULT '[]',
+  budget_usd_nanos INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS history_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2150,6 +2157,9 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if version < 57 {
         migrate_initial_manual_ids(&transaction)?;
     }
+    if version < 61 {
+        migrate_thread_budget(&transaction)?;
+    }
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
@@ -2225,6 +2235,29 @@ fn migrate_initial_manual_ids(transaction: &rusqlite::Transaction<'_>) -> Result
         if !exists {
             transaction.execute_batch(&format!(
                 "ALTER TABLE {table} ADD COLUMN initial_manual_ids {definition};"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+/// Threads and the User default gain `budget_usd_nanos`: the settled USD a
+/// Thread may reach before the kernel stops it and blocks it on its user. A
+/// fresh database already carries both columns from
+/// `THREAD_SCHEMA`/`USER_SCHEMA`, so the upgrade checks before it alters.
+fn migrate_thread_budget(transaction: &rusqlite::Transaction<'_>) -> Result<(), ApiError> {
+    for (table, definition) in [
+        ("threads", "INTEGER"),
+        ("thread_defaults", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let exists: bool = transaction.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='budget_usd_nanos')"),
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN budget_usd_nanos {definition};"
             ))?;
         }
     }
@@ -2556,6 +2589,12 @@ fn migrate_user_schema_through_53(
             "initial_manual_ids",
             "TEXT NOT NULL DEFAULT '[]'",
         ),
+        ("threads", "budget_usd_nanos", "INTEGER"),
+        (
+            "thread_defaults",
+            "budget_usd_nanos",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
         ("workers", "boot_id", "TEXT"),
         ("worker_calls", "worker_boot_id", "TEXT"),
         ("worker_calls", "received_at", "INTEGER"),
@@ -2825,6 +2864,10 @@ struct ThreadView {
     /// Per-thread cap on the Manuals this Thread keeps loaded; `None` follows
     /// the user default.
     max_loaded_manuals: Option<i64>,
+    /// Settled USD spend this Thread may reach, in nanodollars, before the
+    /// kernel stops it and blocks it on its user. `None` follows the user
+    /// default and `0` means no limit.
+    budget_usd_nanos: Option<i64>,
     /// The Manuals this Thread started with, bound into `thread_manual_loads`
     /// before its first input. `None` follows the user default list.
     initial_manual_ids: Option<Vec<String>>,
@@ -3143,6 +3186,8 @@ struct CreateThreadInput {
     max_loaded_manuals: Option<i64>,
     #[serde(default)]
     audio_transcription_model: Option<String>,
+    #[serde(default)]
+    budget_usd_nanos: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -3168,6 +3213,8 @@ struct StartThreadInput {
     audio_transcription_model: Option<String>,
     #[serde(default)]
     initial_manual_ids: Option<Vec<String>>,
+    #[serde(default)]
+    budget_usd_nanos: Option<i64>,
     input: String,
     #[serde(default)]
     images: Vec<String>,
@@ -3205,6 +3252,10 @@ struct ThreadDefaults {
     /// input disabled until an `sst` model is picked.
     #[serde(default)]
     audio_transcription_model: Option<String>,
+    /// Settled USD spend a Thread may reach when it carries no override of its
+    /// own, in nanodollars. `0` keeps the limit off.
+    #[serde(default)]
+    budget_usd_nanos: i64,
 }
 
 fn default_context_budget_tokens() -> i64 {
@@ -3228,6 +3279,7 @@ impl Default for ThreadDefaults {
             max_loaded_manuals: manual_loads::DEFAULT_MAX_LOADED_MANUALS,
             initial_manual_ids: Vec::new(),
             audio_transcription_model: None,
+            budget_usd_nanos: 0,
         }
     }
 }
@@ -3263,6 +3315,10 @@ struct UpdateThreadInput {
     // disables audio input for the thread; a model name enables it.
     #[serde(default, deserialize_with = "deserialize_double_option_string")]
     audio_transcription_model: Option<Option<String>>,
+    // `null` clears the override back to the user default; a number sets the
+    // settled USD spend this Thread may reach, in nanodollars.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    budget_usd_nanos: Option<Option<i64>>,
     // `null` clears the override back to the user default list; an array
     // replaces it. Either way the Thread's bindings follow the difference.
     #[serde(default, deserialize_with = "deserialize_double_option_list")]
@@ -3551,6 +3607,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let initial_manual_ids: Option<String> = row.get(24)?;
     let cost_usd_nanos: i64 = row.get(25)?;
     let cost_settled_requests: i64 = row.get(26)?;
+    let budget_usd_nanos: Option<i64> = row.get(28)?;
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
@@ -3571,6 +3628,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         minimal_mode: row.get(16)?,
         image_generation_model: row.get(21)?,
         max_loaded_manuals,
+        budget_usd_nanos,
         initial_manual_ids: initial_manual_ids
             .as_deref()
             .map(|raw| manual_loads::parse_initial_ids(Some(raw))),
@@ -3808,10 +3866,21 @@ fn context_budget_tokens(value: i64) -> Result<i64, ApiError> {
     Ok(value)
 }
 
+/// Settled USD a Thread may reach, in nanodollars. `0` keeps the limit off;
+/// the ceiling is a sanity bound on the input, not a product rule.
+fn budget_usd_nanos(value: i64) -> Result<i64, ApiError> {
+    if !(0..=MAX_BUDGET_USD_NANOS).contains(&value) {
+        return Err(ApiError::bad_request(
+            "budget must be between 0 and 10000000000000 nanodollars",
+        ));
+    }
+    Ok(value)
+}
+
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids,budget_usd_nanos
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -3828,6 +3897,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                     initial_manual_ids: manual_loads::parse_initial_ids(
                         row.get::<_, Option<String>>(9)?.as_deref(),
                     ),
+                    budget_usd_nanos: row.get(10)?,
                 })
             },
         )
@@ -3865,6 +3935,7 @@ async fn update_thread_defaults(
         max_loaded_manuals: manual_loads::max_loaded_manuals(input.max_loaded_manuals)?,
         initial_manual_ids: manual_loads::initial_manual_ids(&input.initial_manual_ids)?,
         audio_transcription_model: optional_model(input.audio_transcription_model),
+        budget_usd_nanos: budget_usd_nanos(input.budget_usd_nanos)?,
     };
     // Every Manual the list names is bound when a Thread is created, so the
     // list has to fit the cap those bindings will count against.
@@ -3877,8 +3948,8 @@ async fn update_thread_defaults(
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids) VALUES(1,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model,initial_manual_ids=excluded.initial_manual_ids",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids,budget_usd_nanos) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model,initial_manual_ids=excluded.initial_manual_ids,budget_usd_nanos=excluded.budget_usd_nanos",
             params![
                 defaults.model,
                 defaults.upstream_id,
@@ -3889,7 +3960,8 @@ async fn update_thread_defaults(
                 defaults.image_generation_model,
                 defaults.max_loaded_manuals,
                 defaults.audio_transcription_model,
-                manual_loads::encode_initial_ids(&defaults.initial_manual_ids)
+                manual_loads::encode_initial_ids(&defaults.initial_manual_ids),
+                defaults.budget_usd_nanos
             ],
         )?;
         Ok(defaults)
@@ -4077,7 +4149,8 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
                          WHERE thread_id=t.id AND kind='tool_output'),0))
            ORDER BY r.id DESC LIMIT 1
          )
-       ) END AS running_summary
+       ) END AS running_summary,
+       t.budget_usd_nanos
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT MAX(id) FROM (
@@ -4175,6 +4248,7 @@ async fn create_thread_for(
         // The list is a promise the creation keeps: every named Manual is bound
         // here, so the first input already compiles with the copies in front of
         // the model. Fitting the cap is what makes that promise affordable.
+        let budget_usd_nanos = input.budget_usd_nanos.map(budget_usd_nanos).transpose()?;
         let loaded_manual_cap = max_loaded_manuals.unwrap_or(defaults.max_loaded_manuals);
         manual_loads::initial_ids_within_cap(&initial_manual_ids, loaded_manual_cap)?;
         let upstream_id = resolve_thread_upstream(&transaction, upstream_id, defaults.upstream_id)?;
@@ -4192,6 +4266,7 @@ async fn create_thread_for(
             minimal_mode: input.minimal_mode,
             image_generation_model,
             max_loaded_manuals,
+            budget_usd_nanos,
             initial_manual_ids: Some(initial_manual_ids.clone()),
             audio_transcription_model,
             archived_at: None,
@@ -4204,7 +4279,7 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,budget_usd_nanos,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
@@ -4222,6 +4297,7 @@ async fn create_thread_for(
                 thread.image_generation_model,
                 thread.max_loaded_manuals,
                 thread.audio_transcription_model,
+                thread.budget_usd_nanos,
                 thread.created_at,
                 thread.updated_at
             ],
@@ -4790,6 +4866,7 @@ async fn start_thread(
             image_generation_model: input.image_generation_model,
             max_loaded_manuals: input.max_loaded_manuals,
             audio_transcription_model: input.audio_transcription_model,
+            budget_usd_nanos: input.budget_usd_nanos,
         },
         ThreadOrigin::Web,
     )
@@ -4835,6 +4912,10 @@ async fn update_thread(
         .map(|value| value.map(image_generation_model).transpose())
         .transpose()?;
     let audio_transcription_model = input.audio_transcription_model.clone().map(optional_model);
+    let budget_usd_nanos = input
+        .budget_usd_nanos
+        .map(|value| value.map(budget_usd_nanos).transpose())
+        .transpose()?;
     let max_loaded_manuals = input
         .max_loaded_manuals
         .map(|value| value.map(manual_loads::max_loaded_manuals).transpose())
@@ -4857,6 +4938,7 @@ async fn update_thread(
         && image_generation_model.is_none()
         && max_loaded_manuals.is_none()
         && audio_transcription_model.is_none()
+        && budget_usd_nanos.is_none()
         && initial_manual_ids.is_none()
         && input.archived.is_none()
     {
@@ -4888,7 +4970,7 @@ async fn update_thread(
             None => None,
         };
         let changed = transaction.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,initial_manual_ids=CASE WHEN ? THEN ? ELSE initial_manual_ids END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,initial_manual_ids=CASE WHEN ? THEN ? ELSE initial_manual_ids END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,budget_usd_nanos=CASE WHEN ? THEN ? ELSE budget_usd_nanos END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -4907,6 +4989,8 @@ async fn update_thread(
                 stored_initial.flatten(),
                 audio_transcription_model.is_some(),
                 audio_transcription_model.flatten(),
+                budget_usd_nanos.is_some(),
+                budget_usd_nanos.flatten(),
                 input.archived.is_some(),
                 input.archived.map(|archived| archived.then_some(updated_at)),
                 updated_at,
@@ -6166,6 +6250,7 @@ async fn process_request(
                 minimal_mode: None,
                 image_generation_model: None,
                 max_loaded_manuals: None,
+                budget_usd_nanos: None,
                 initial_manual_ids: None,
                 audio_transcription_model: None,
                 archived_at: None,
@@ -7356,6 +7441,22 @@ async fn request_agent(
             .await
             .map_err(|e| (thread.clone(), Box::new(e)))?;
         let thread = &current;
+        // The budget gate. It sits before the compile and before the proactive
+        // compaction check, so a Thread that cannot afford another request
+        // freezes no tail record for one and spends nothing shrinking its
+        // context first. Settled cost only: an unsettled call is never counted
+        // as free, and this is therefore a bound one request wide.
+        let budget = thread.budget_usd_nanos.unwrap_or(defaults.budget_usd_nanos);
+        if budget > 0 && thread.usage.cost_usd_nanos >= budget {
+            let spent = thread.usage.cost_usd_nanos;
+            let stopped = user_db(state, user, true, {
+                let id = thread.id.clone();
+                move |connection| blocked::stop_for_budget(connection, &id, budget, spent)
+            })
+            .await
+            .map_err(|error| (thread.clone(), Box::new(error)))?;
+            return Ok((thread.clone(), stopped));
+        }
         // Cloned rather than taken: the nudge belongs to the request that is
         // actually assembled, so a compile that fails keeps it for the retry.
         let nudge = continuation_nudge.clone();
@@ -11364,6 +11465,7 @@ mod tests {
             state,
             user,
             CreateThreadInput {
+                budget_usd_nanos: None,
                 title: Some("Test".to_owned()),
                 external_ref: None,
                 model: Some("test-model".to_owned()),
@@ -11888,6 +11990,7 @@ mod tests {
 
     fn archived_input(archived: bool) -> UpdateThreadInput {
         UpdateThreadInput {
+            budget_usd_nanos: None,
             title: None,
             model: None,
             upstream_id: None,
@@ -12040,6 +12143,7 @@ mod tests {
         let user = user_for_subject(&state, "thread-list-filter-user").unwrap();
         let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
         let input = |title: &str, external_ref: Option<&str>| CreateThreadInput {
+            budget_usd_nanos: None,
             title: Some(title.to_owned()),
             external_ref: external_ref.map(str::to_owned),
             model: Some("test-model".to_owned()),

@@ -660,6 +660,7 @@ async fn a_thread_named_list_wins_over_the_user_default() {
         &state,
         &user,
         CreateThreadInput {
+            budget_usd_nanos: None,
             title: Some("Named".to_owned()),
             external_ref: None,
             model: Some("test-model".to_owned()),
@@ -697,6 +698,7 @@ async fn an_initial_list_longer_than_the_loaded_manual_cap_is_refused() {
         State(state.clone()),
         identity(&user),
         Json(ThreadDefaults {
+            budget_usd_nanos: 0,
             model: "gpt-6-astra".to_owned(),
             upstream_id: None,
             reasoning_effort: "medium".to_owned(),
@@ -763,6 +765,7 @@ async fn editing_the_initial_list_binds_what_it_gained_and_releases_what_it_lost
         identity(&user),
         AxumPath(thread_id.clone()),
         Json(UpdateThreadInput {
+            budget_usd_nanos: None,
             title: None,
             model: None,
             upstream_id: None,
@@ -817,6 +820,7 @@ async fn clearing_the_override_binds_the_default_list_instead() {
         &state,
         &user,
         CreateThreadInput {
+            budget_usd_nanos: None,
             title: Some("Cleared".to_owned()),
             external_ref: None,
             model: Some("test-model".to_owned()),
@@ -846,6 +850,7 @@ async fn clearing_the_override_binds_the_default_list_instead() {
         identity(&user),
         AxumPath(thread_id.clone()),
         Json(UpdateThreadInput {
+            budget_usd_nanos: None,
             title: None,
             model: None,
             upstream_id: None,

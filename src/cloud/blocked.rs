@@ -30,6 +30,64 @@ pub(super) fn block(connection: &Connection, thread_id: &str) -> Result<bool, Ap
     )? == 1)
 }
 
+/// The kernel stops a Thread whose settled spend reached its USD budget.
+///
+/// The Thread is waiting on its user — only they can raise the limit — so it
+/// takes the same `blocked` axis the model's own `block_thread` uses, and the
+/// one write that clears it is the same: the next `input` record. The record
+/// left behind says the amount in the conversation, because a Thread stopped
+/// by its budget must never read as one that simply finished.
+///
+/// `blocked=1` is written conditionally so a Thread that is already blocked
+/// keeps its original state and does not gain a second record: resuming a
+/// running Thread after a Controller restart reaches this gate again.
+pub(super) fn stop_for_budget(
+    connection: &mut Connection,
+    thread_id: &str,
+    budget_usd_nanos: i64,
+    spent_usd_nanos: i64,
+) -> Result<String, ApiError> {
+    let content = format!(
+        "Budget exhausted: {spent} settled of the {budget} limit. Raise the limit in Thread settings, then send a message to continue.",
+        spent = dollars(spent_usd_nanos),
+        budget = dollars(budget_usd_nanos),
+    );
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = transaction.execute(
+        "UPDATE threads SET blocked=1 WHERE id=? AND blocked=0",
+        [thread_id],
+    )?;
+    if changed != 0 {
+        persist_history_record(
+            &transaction,
+            HistoryRecordInsert {
+                thread_id,
+                kind: "activity",
+                payload: &json!({
+                    "role": "system",
+                    "content": content,
+                    "budget_usd_nanos": budget_usd_nanos,
+                    "spent_usd_nanos": spent_usd_nanos,
+                }),
+                created_at: now(),
+            },
+        )?;
+    }
+    transaction.commit()?;
+    Ok(content)
+}
+
+/// A settled amount the way the Thread reads it elsewhere: cents, and anything
+/// under a cent does not read as no money at all.
+fn dollars(nanos: i64) -> String {
+    let value = nanos as f64 / 1_000_000_000.0;
+    if value > 0.0 && value < 0.01 {
+        "<$0.01".to_owned()
+    } else {
+        format!("${value:.2}")
+    }
+}
+
 /// The user spoke, so the Thread is no longer waiting on them. Every input
 /// record passes through here; a system-written input (a continuation nudge, if
 /// one is ever added) must not, or it would silently unblock a Thread no human
