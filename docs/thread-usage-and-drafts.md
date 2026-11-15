@@ -130,3 +130,28 @@ verified-owner loading/error boundary, and draft lifecycle rules (empty scope,
 conditional clearing, key-filtered notifications, storage-error recovery).
 Storage errors use a real in-memory fallback with a visible warning. There are
 no new compatibility paths, schema migrations, or inference-control changes.
+
+## USD budget
+
+A Thread may carry a spend limit: `budget_usd_nanos` on the Thread, falling back
+to `thread_defaults.budget_usd_nanos`. `0` at both levels keeps the limit off,
+so no existing Thread changes behavior.
+
+The limit is checked once per inference attempt, inside the request loop and
+before the context compiles — a Thread that cannot afford another request
+freezes no request tail for one and spends nothing on the compaction that would
+otherwise shrink its context first. Only **settled** cost counts
+(`SUM(reasoning_audits.cost_usd_nanos)`), so an unanswered request is never
+treated as free; the practical bound is therefore one request wide, and an
+upstream that never answers `POST /requests/query` never settles an amount and
+never trips the limit.
+
+Reaching it stops the turn without an error: the Thread is marked `blocked` (the
+same axis `block_thread` uses) and a `system` activity record states the settled
+amount, the limit, and how to continue. Only the user's next message clears the
+block, exactly as for a model-declared block; the gate then fires again unless
+the limit was raised. `blocked=1` is written conditionally, so resuming a
+running Thread after a Controller restart does not stack a second record.
+
+Image generation and web search are separate upstream calls with no audit row,
+so their cost is not covered by this limit.

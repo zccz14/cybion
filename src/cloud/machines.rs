@@ -154,6 +154,7 @@ pub(super) async fn create_for(
             image_generation_model: None,
             max_loaded_manuals: None,
             audio_transcription_model: None,
+            budget_usd_nanos: None,
         },
         ThreadOrigin::Web,
     )

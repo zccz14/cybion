@@ -17,11 +17,11 @@ export type ModelCatalog = {
   error: string | null
 }
 
-type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint" | "loadedManualCap" | "loadedManualCapHint" | "initialManuals" | "initialManualsHint" | "initialManualsFollowing" | "initialManualsAdd" | "initialManualsDefault" | "initialManualsEmpty" | "initialManualsUnknown" | "initialManualsRemove" | "minimalMode" | "minimalModeHint" | "minimalModeDefault" | "minimalModeOn" | "minimalModeOff" | "imageGeneration" | "imageGenerationHint" | "imageGenerationDefault" | "imageGenerationDisabled" | "audioTranscription" | "audioTranscriptionHint" | "audioTranscriptionDefault" | "audioTranscriptionDisabled"
+type ThreadSettingsCopyKey = "settings" | "model" | "reasoningEffort" | "fastMode" | "contextBudget" | "contextBudgetHint" | "usdBudget" | "usdBudgetHint" | "loadedManualCap" | "loadedManualCapHint" | "initialManuals" | "initialManualsHint" | "initialManualsFollowing" | "initialManualsAdd" | "initialManualsDefault" | "initialManualsEmpty" | "initialManualsUnknown" | "initialManualsRemove" | "minimalMode" | "minimalModeHint" | "minimalModeDefault" | "minimalModeOn" | "minimalModeOff" | "imageGeneration" | "imageGenerationHint" | "imageGenerationDefault" | "imageGenerationDisabled" | "audioTranscription" | "audioTranscriptionHint" | "audioTranscriptionDefault" | "audioTranscriptionDisabled"
 
 const copy = {
-  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default.", loadedManualCap: "Loaded manuals", loadedManualCapHint: "Manuals this thread may keep loaded at once; empty follows the default.", initialManuals: "Initial manuals", initialManualsHint: "Loaded the moment the thread starts, before its first message. Adding or removing one here loads or releases it now; the model's own loads stay.", initialManualsFollowing: "Following the account default.", initialManualsAdd: "Add a manual…", initialManualsDefault: "Follow default", initialManualsEmpty: "No initial manual: a new thread starts empty until you add one.", initialManualsUnknown: "Unknown manual", initialManualsRemove: "Remove", minimalMode: "Minimal mode", minimalModeHint: "Only the final reply or status of each turn stays open.", minimalModeDefault: "Follow default", minimalModeOn: "On", minimalModeOff: "Off", imageGeneration: "Image generation", imageGenerationHint: "The image model served by this thread's upstream; Disabled turns image generation off.", imageGenerationDefault: "Follow default", imageGenerationDisabled: "Disabled", audioTranscription: "Speech-to-text", audioTranscriptionHint: "The speech-to-text model behind audio input; Disabled turns audio input off.", audioTranscriptionDefault: "Follow default", audioTranscriptionDisabled: "Disabled" },
-  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "上下文窗口限制", contextBudgetHint: "超过后自动压缩；留空跟随默认值。", loadedManualCap: "已加载手册上限", loadedManualCapHint: "本线程可同时保持加载的手册数；留空跟随默认值。", initialManuals: "初始手册", initialManualsHint: "线程一开始就加载，先于第一条消息。在这里添加或移除会立即加载或卸载；模型自己加载的手册不受影响。", initialManualsFollowing: "当前跟随账号默认。", initialManualsAdd: "添加手册…", initialManualsDefault: "跟随默认", initialManualsEmpty: "还没有初始手册：新线程从空开始，添加一个即可。", initialManualsUnknown: "未知手册", initialManualsRemove: "移除", minimalMode: "极简模式", minimalModeHint: "每轮仅展开最后一条回复或状态。", minimalModeDefault: "跟随默认", minimalModeOn: "开启", minimalModeOff: "关闭", imageGeneration: "图像生成", imageGenerationHint: "由该线程的上游提供的图像模型；选择关闭即禁用图像生成。", imageGenerationDefault: "跟随默认", imageGenerationDisabled: "关闭", audioTranscription: "语音识别", audioTranscriptionHint: "音频输入使用的语音识别模型；选择关闭即禁用音频输入。", audioTranscriptionDefault: "跟随默认", audioTranscriptionDisabled: "关闭" },
+  en: { settings: "Thread settings", model: "Model", reasoningEffort: "Reasoning effort", fastMode: "Fast mode", contextBudget: "Context budget", contextBudgetHint: "Tokens before automatic compaction; empty follows the default.", usdBudget: "Spend limit (USD)", usdBudgetHint: "The thread stops and waits once its settled spend reaches this amount. Empty follows the default; 0 means no limit.", loadedManualCap: "Loaded manuals", loadedManualCapHint: "Manuals this thread may keep loaded at once; empty follows the default.", initialManuals: "Initial manuals", initialManualsHint: "Loaded the moment the thread starts, before its first message. Adding or removing one here loads or releases it now; the model's own loads stay.", initialManualsFollowing: "Following the account default.", initialManualsAdd: "Add a manual…", initialManualsDefault: "Follow default", initialManualsEmpty: "No initial manual: a new thread starts empty until you add one.", initialManualsUnknown: "Unknown manual", initialManualsRemove: "Remove", minimalMode: "Minimal mode", minimalModeHint: "Only the final reply or status of each turn stays open.", minimalModeDefault: "Follow default", minimalModeOn: "On", minimalModeOff: "Off", imageGeneration: "Image generation", imageGenerationHint: "The image model served by this thread's upstream; Disabled turns image generation off.", imageGenerationDefault: "Follow default", imageGenerationDisabled: "Disabled", audioTranscription: "Speech-to-text", audioTranscriptionHint: "The speech-to-text model behind audio input; Disabled turns audio input off.", audioTranscriptionDefault: "Follow default", audioTranscriptionDisabled: "Disabled" },
+  zh: { settings: "线程设置", model: "模型", reasoningEffort: "推理强度", fastMode: "快速模式", contextBudget: "上下文窗口限制", contextBudgetHint: "超过后自动压缩；留空跟随默认值。", usdBudget: "花费上限（USD）", usdBudgetHint: "已结算花费达到该金额后本线程停止并转入受阻；留空跟随默认值，0 表示不限制。", loadedManualCap: "已加载手册上限", loadedManualCapHint: "本线程可同时保持加载的手册数；留空跟随默认值。", initialManuals: "初始手册", initialManualsHint: "线程一开始就加载，先于第一条消息。在这里添加或移除会立即加载或卸载；模型自己加载的手册不受影响。", initialManualsFollowing: "当前跟随账号默认。", initialManualsAdd: "添加手册…", initialManualsDefault: "跟随默认", initialManualsEmpty: "还没有初始手册：新线程从空开始，添加一个即可。", initialManualsUnknown: "未知手册", initialManualsRemove: "移除", minimalMode: "极简模式", minimalModeHint: "每轮仅展开最后一条回复或状态。", minimalModeDefault: "跟随默认", minimalModeOn: "开启", minimalModeOff: "关闭", imageGeneration: "图像生成", imageGenerationHint: "由该线程的上游提供的图像模型；选择关闭即禁用图像生成。", imageGenerationDefault: "跟随默认", imageGenerationDisabled: "关闭", audioTranscription: "语音识别", audioTranscriptionHint: "音频输入使用的语音识别模型；选择关闭即禁用音频输入。", audioTranscriptionDefault: "跟随默认", audioTranscriptionDisabled: "关闭" },
 } satisfies Record<"en" | "zh", Record<ThreadSettingsCopyKey, string>>
 
 // A model is chosen as an upstream/model pair; the encoded value keeps the two
@@ -61,7 +61,7 @@ export function imageModelOptions(catalogs: ModelCatalog[] | undefined, upstream
 /// answers with, and nothing else about the Manual.
 export type ManualChoice = { manual_id: string; name: string }
 
-export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, loadedManualCap, initialManuals, minimalMode, imageGeneration, audioTranscription, disabled, onModelChange, onReasoningChange, onFastChange }: {
+export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEffort, fast, language, contextBudget, usdBudget, loadedManualCap, initialManuals, minimalMode, imageGeneration, audioTranscription, disabled, onModelChange, onReasoningChange, onFastChange }: {
   model: string
   upstreamId: string | null
   catalogs: ModelCatalog[] | undefined
@@ -69,6 +69,7 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
   fast: boolean
   language: "en" | "zh"
   contextBudget: { override: number | null; fallback: number; onChange: (value: number | null) => void }
+  usdBudget?: { override: number | null; fallback: number; onChange: (value: number | null) => void }
   loadedManualCap: { override: number | null; fallback: number; onChange: (value: number | null) => void }
   /// The Manuals this Thread starts with: its own list, or the account default
   /// it follows when `override` is null. Changing the list binds what it gained
@@ -183,6 +184,26 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
         <p className="text-xs text-muted-foreground">{initialManuals.override === null ? `${t.initialManualsHint} ${t.initialManualsFollowing}` : t.initialManualsHint}</p>
       </div>
       <div className="flex shrink-0 flex-col gap-2">
+        {usdBudget && <div className="flex flex-col gap-2">
+          <Label htmlFor="thread-settings-usd-budget">{t.usdBudget}</Label>
+          <Input
+            id="thread-settings-usd-budget"
+            type="number"
+            min={0}
+            max={10000}
+            step={0.01}
+            inputMode="decimal"
+            disabled={disabled}
+            placeholder={String(usdBudget.fallback / 1_000_000_000)}
+            value={usdBudget.override === null ? "" : String(usdBudget.override / 1_000_000_000)}
+            onChange={(event) => {
+              const raw = event.target.value.trim()
+              const parsed = Number(raw)
+              usdBudget.onChange(raw === "" || !Number.isFinite(parsed) ? null : Math.round(Math.max(0, parsed) * 1_000_000_000))
+            }}
+          />
+          <p className="text-xs text-muted-foreground">{t.usdBudgetHint}</p>
+        </div>}
         <Label>{t.minimalMode}</Label>
         <Select value={minimalMode.override === null ? "default" : minimalMode.override ? "on" : "off"} onValueChange={(value) => minimalMode.onChange(value === "default" ? null : value === "on")} disabled={disabled}>
           <SelectTrigger className="w-full" aria-label={t.minimalMode}><SelectValue /></SelectTrigger>

@@ -1,5 +1,6 @@
 use super::tests::{create_test_thread, test_state};
 use super::*;
+use tokio::io::AsyncWriteExt;
 
 fn blocked_connection() -> Connection {
     let mut connection = Connection::open_in_memory().unwrap();
@@ -160,4 +161,159 @@ async fn the_blocked_view_lists_only_blocked_active_threads() {
     assert_eq!(ids, [waiting]);
     assert_eq!(page.total, 1);
     assert!(!ids.contains(&working));
+}
+
+// --- USD budget -----------------------------------------------------------
+
+fn budget_records(connection: &Connection, id: &str) -> i64 {
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM history_records WHERE thread_id=? AND kind='activity'
+               AND json_extract(payload,'$.budget_usd_nanos') IS NOT NULL",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_budget_stop_blocks_marks_one_record_and_stays_marked() {
+    let mut connection = blocked_connection();
+    insert_thread(&connection, "t");
+    let text = blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    assert!(text.starts_with("Budget exhausted:"), "{text}");
+    assert!(text.contains("$0.62"), "{text}");
+    assert!(text.contains("$0.50"), "{text}");
+    assert_eq!(blocked(&connection, "t"), 1);
+    assert_eq!(display_status(&connection, "t"), "blocked");
+    assert_eq!(budget_records(&connection, "t"), 1);
+    // Resuming the same Thread reaches the gate again; it must not stack up
+    // records or repaint the state the user is waiting on.
+    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    assert_eq!(budget_records(&connection, "t"), 1);
+}
+
+#[test]
+fn the_next_user_message_clears_a_budget_block() {
+    let mut connection = blocked_connection();
+    insert_thread(&connection, "t");
+    blocked::stop_for_budget(&mut connection, "t", 1_000, 2_000).unwrap();
+    assert_eq!(blocked(&connection, "t"), 1);
+    insert_record(&connection, "t", "input");
+    assert_eq!(blocked(&connection, "t"), 0);
+}
+
+#[tokio::test]
+async fn a_thread_at_its_budget_blocks_before_asking_the_upstream() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "budget-gate-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let input = user_db(&state, &user, true, {
+        let id = thread.id.clone();
+        move |c| {
+            let idx = insert_record(c, &id, "input");
+            c.execute(
+                "UPDATE threads SET budget_usd_nanos=200,status='running' WHERE id=?",
+                [&id],
+            )?;
+            c.execute(
+                "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,finished_at,cost_usd_nanos)
+                 VALUES(?,'inference','model','completed',?,?,250)",
+                params![id, now(), now()],
+            )?;
+            Ok(idx)
+        }
+    })
+    .await
+    .unwrap();
+    // An unreachable base URL: reaching the upstream at all fails the turn, so
+    // an Ok answer proves the gate stopped before any paid request.
+    let upstream = Upstream {
+        id: "fixture-upstream".to_owned(),
+        name: "fixture".to_owned(),
+        base_url: "http://127.0.0.1:1".to_owned(),
+        api_key: "fixture".to_owned(),
+    };
+    let (_tx, mut rx) = watch::channel(false);
+    let (_, text) = tokio::time::timeout(
+        Duration::from_secs(5),
+        request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(text.starts_with("Budget exhausted:"), "{text}");
+    user_db(&state, &user, false, move |c| {
+        assert_eq!(blocked(c, &thread.id), 1);
+        assert_eq!(budget_records(c, &thread.id), 1);
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_thread_under_its_budget_and_one_without_a_budget_both_run() {
+    // The gate must not fire, so the turn goes on to the upstream. A gateway
+    // that answers 400 is refused outright rather than retried, which keeps
+    // the negative case as fast as the positive one.
+    for (label, budget) in [("under", Some(200_i64)), ("none", None), ("off", Some(0))] {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, &format!("budget-open-{label}")).unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let input = user_db(&state, &user, true, {
+            let id = thread.id.clone();
+            move |c| {
+                let idx = insert_record(c, &id, "input");
+                c.execute(
+                    "UPDATE threads SET budget_usd_nanos=?,status='running' WHERE id=?",
+                    params![budget, id],
+                )?;
+                c.execute(
+                    "INSERT INTO reasoning_audits(thread_id,request_kind,model,status,started_at,finished_at,cost_usd_nanos)
+                     VALUES(?,'inference','model','completed',?,?,150)",
+                    params![id, now(), now()],
+                )?;
+                Ok(idx)
+            }
+        })
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let body = "{\"error\":{\"message\":\"refused\"}}";
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        });
+        let upstream = Upstream {
+            id: "fixture-upstream".to_owned(),
+            name: "fixture".to_owned(),
+            base_url: format!("http://{address}"),
+            api_key: "fixture".to_owned(),
+        };
+        let (_tx, mut rx) = watch::channel(false);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            request_agent(&state, &user, &thread, &upstream, input, &mut rx),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err(), "{label}: the turn must reach the upstream");
+        user_db(&state, &user, false, move |c| {
+            assert_eq!(blocked(c, &thread.id), 0);
+            assert_eq!(budget_records(c, &thread.id), 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 }
