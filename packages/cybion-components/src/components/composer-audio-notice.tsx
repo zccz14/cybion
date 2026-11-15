@@ -1,3 +1,4 @@
+import { Button } from "../ui/button"
 import type { ComposerAudioError } from "../hooks/use-composer-audio"
 
 const copy = {
@@ -51,17 +52,17 @@ export function ComposerAudioNotice({
 }) {
   if (restored > 0) {
     return (
-      <p role="status" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span>{copy[language].restored(restored)}</span>
+      <p role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <span className="min-w-0">{copy[language].restored(restored)}</span>
         {onRetry && (
-          <button type="button" onClick={onRetry} className="shrink-0 underline underline-offset-2 hover:text-foreground">
+          <Button type="button" size="sm" className="h-6 shrink-0 px-2 text-xs" onClick={onRetry}>
             {copy[language].sendAnyway}
-          </button>
+          </Button>
         )}
         {onDismissRestored && (
-          <button type="button" onClick={onDismissRestored} className="shrink-0 underline underline-offset-2 opacity-80 hover:opacity-100">
+          <Button type="button" size="sm" variant="ghost" className="h-6 shrink-0 px-2 text-xs" onClick={onDismissRestored}>
             {language === "zh" ? "知道了" : "Dismiss"}
-          </button>
+          </Button>
         )}
       </p>
     )
@@ -71,12 +72,12 @@ export function ComposerAudioNotice({
   const framed = typeof window !== "undefined" && window.self !== window.top
   const message = framed && error === "denied" ? copy[language].deniedFramed : copy[language][error]
   return (
-    <p role="status" className="flex items-start gap-2 text-xs text-destructive">
-      <span>{message}</span>
+    <p role="status" className="flex flex-wrap items-start gap-x-2 gap-y-1 text-xs text-destructive">
+      <span className="min-w-0">{message}</span>
       {onDismiss && (
-        <button type="button" onClick={onDismiss} className="shrink-0 underline underline-offset-2 opacity-80 hover:opacity-100">
+        <Button type="button" size="sm" variant="ghost" className="h-6 shrink-0 px-2 text-xs text-destructive" onClick={onDismiss}>
           {language === "zh" ? "知道了" : "Dismiss"}
-        </button>
+        </Button>
       )}
     </p>
   )
