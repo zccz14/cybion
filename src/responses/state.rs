@@ -59,8 +59,18 @@ impl ResponseState {
                 self.extra.clone_from(&response.extra);
                 if let Some(items) = response.extra.get("output").and_then(Value::as_array) {
                     for (output_index, item) in items.iter().enumerate() {
-                        let item = ResponseItem::from_value(item.clone())
-                            .map_err(|e| ResponsesStreamError::InvalidPayload(e.to_string()))?;
+                        // COMPATIBILITY: the same item can arrive well-formed on
+                        // output_item.* and malformed in the final output. The
+                        // stream already drops what it cannot read, and the turn's
+                        // text is on screen by now, so a single unreadable item
+                        // must not fail a turn that already succeeded.
+                        let item = match ResponseItem::from_value(item.clone()) {
+                            Ok(item) => item,
+                            Err(cause) => {
+                                tracing::warn!(%cause, "dropping an unreadable Responses output item");
+                                continue;
+                            }
+                        };
                         if item.id().is_some_and(|id| {
                             self.output
                                 .iter()

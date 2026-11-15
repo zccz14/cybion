@@ -80,6 +80,11 @@ response_items! {
     },
     AgentMessage("agent_message") { author: String, recipient: String, content: Vec<AgentMessageContent> },
     Reasoning("reasoning") {
+        // COMPATIBILITY: thinking-mode providers return the chain of thought as
+        // reasoning content and omit `summary` outright (DeepSeek), so a
+        // reasoning item without a summary is still a reasoning item — one with
+        // nothing to replay as a summary — not a malformed payload.
+        #[serde(default)]
         summary: Vec<ReasoningSummary>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<Vec<ReasoningContent>>,
