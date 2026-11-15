@@ -20,6 +20,8 @@ import { ComposerAudioNotice } from "./components/composer-audio-notice"
 import { ComposerDraftNotice } from "./components/composer-draft-notice"
 import { useComposerAttach } from "./hooks/use-composer-attach"
 import { useComposerAudio } from "./hooks/use-composer-audio"
+import { audioDraftScope } from "./lib/composer-audio-drafts"
+import { retryableSubmitFailure, submitRetryDelay } from "./lib/composer-submit-retry"
 import { useComposerDraft } from "./hooks/use-composer-draft"
 import { useComposerFiles } from "./hooks/use-composer-files"
 import { useComposerImages } from "./hooks/use-composer-images"
@@ -155,7 +157,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   const composer = useComposerDraft(userId, threadId)
   const { input, setInput, clearSubmitted } = composer
   const attachments = useComposerImages()
-  const audio = useComposerAudio()
+  const audio = useComposerAudio({ scope: audioDraftScope(userId, threadId) })
   const files = useComposerFiles()
   const attach = useComposerAttach({ images: attachments, audio, files })
   const loadAudio = loadAudioOverride ?? transport.audioObjectUrl
@@ -172,6 +174,9 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
       method: "POST",
       body: JSON.stringify({ input: value.input, images: value.images, audios: value.audios }),
     }),
+    // 网络断一下不该让一段话白讲：音频已经落在本地草稿里，这里先把几次自动重试走完。
+    retry: (attempt, error) => attempt < 3 && retryableSubmitFailure(error),
+    retryDelay: submitRetryDelay,
     onSuccess: (_request, submitted) => {
       clearSubmitted(submitted.draft)
       attachments.clear()
@@ -318,7 +323,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
       </MessageScroller>
     </MessageScrollerProvider>
     {!readOnly && <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submitInput() }}>
-      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} /></Field>
+      <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} restored={audio.restored} onDismissRestored={audio.dismissRestored} onRetry={() => submitInput()} /></Field>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <ComposerAttach language={language} disabled={busy} onFiles={attach} />

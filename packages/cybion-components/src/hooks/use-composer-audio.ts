@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { Dispatch, SetStateAction } from "react"
 import { audioDataUrlTooLarge, audioFileDataUrl, audioTooLarge, maxAudioBytes, recordingFile } from "../lib/composer-audio"
+import { readAudioDrafts, writeAudioDrafts } from "../lib/composer-audio-drafts"
 
 const ATTACH_EVENT = "cybion:attach-audio"
 const pendingAudio: string[] = []
@@ -43,7 +44,11 @@ function startFailure(failure: unknown): ComposerAudioError {
 /// Audio attachments for one composer: recording through the browser's
 /// MediaRecorder plus files picked from disk, both held as data URLs until the
 /// input is sent.
-export function useComposerAudio(): {
+///
+/// With a `scope` the clips outlive the page: every take is written to a local
+/// draft the moment it exists, so a failed send, a refresh or a closed tab leaves
+/// the speech recoverable instead of gone. Sending successfully clears it.
+export function useComposerAudio(options: { scope?: string } = {}): {
   audios: string[]
   phase: ComposerAudioPhase
   recording: boolean
@@ -63,12 +68,19 @@ export function useComposerAudio(): {
   remove: (index: number) => void
   clear: () => void
   dismissError: () => void
+  /// 页面打开时从本地草稿捡回来的段数；说一声，用户才知道那些话还在。
+  restored: number
+  dismissRestored: () => void
 } {
   const [audios, setAudios] = useState<string[]>([])
   const [phase, setPhase] = useState<ComposerAudioPhase>("idle")
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [elapsed, setElapsed] = useState(0)
   const [error, setError] = useState<ComposerAudioError | null>(null)
+  const [restored, setRestored] = useState(0)
+  const scope = options.scope ?? null
+  // 没接上本地草稿之前不要回写，否则首次渲染的空数组会把已存的录音删掉。
+  const [hydrated, setHydrated] = useState(scope === null)
   const recorder = useRef<MediaRecorder | null>(null)
   const stream = useRef<MediaStream | null>(null)
   const chunks = useRef<Blob[]>([])
@@ -83,6 +95,30 @@ export function useComposerAudio(): {
     const timer = window.setInterval(update, 500)
     return () => window.clearInterval(timer)
   }, [phase, startedAt])
+
+  useEffect(() => {
+    if (scope === null) {
+      setHydrated(true)
+      return
+    }
+    let live = true
+    void readAudioDrafts(scope).then((clips) => {
+      if (!live) return
+      if (clips.length > 0) {
+        setAudios((current) => (current.length > 0 ? current : clips.map((clip) => clip.dataUrl)))
+        setRestored(clips.length)
+      }
+      setHydrated(true)
+    })
+    return () => {
+      live = false
+    }
+  }, [scope])
+
+  useEffect(() => {
+    if (scope === null || !hydrated) return
+    void writeAudioDrafts(scope, audios.map((dataUrl) => ({ dataUrl, createdAt: Date.now() })))
+  }, [audios, hydrated, scope])
 
   useEffect(
     () => () => {
@@ -249,6 +285,7 @@ export function useComposerAudio(): {
   }, [])
   const clear = useCallback(() => setAudios([]), [])
   const dismissError = useCallback(() => setError(null), [])
+  const dismissRestored = useCallback(() => setRestored(0), [])
 
   return {
     audios,
@@ -264,6 +301,8 @@ export function useComposerAudio(): {
     remove,
     clear,
     dismissError,
+    restored,
+    dismissRestored,
   }
 }
 
