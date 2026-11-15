@@ -57,7 +57,7 @@ const zh: Record<keyof typeof en, string> = {
 
   chatQuestion: "对话框在哪里？", chatAnswer: "打开「我的对话」，点击「新建对话」。确认没有任何对话的工作区会直接显示输入框，手机也一样。",
   libraryQuestion: "资料库在哪里？", libraryAnswer: "Cybion 不托管独立的原始资料库。资料保存在设备或网络来源中；「手册」用于记录资料在哪里。",
-  budgetQuestion: "重放预算和这里的手册是一回事吗？", budgetAnswer: "不是。这里的手册记录资料在哪里、怎样获取；重放预算限制模型重放的对话信息量，超过后可自动压缩，并不是手册的存储空间配额。",
+  budgetQuestion: "上下文窗口限制和这里的手册是一回事吗？", budgetAnswer: "不是。这里的手册记录资料在哪里、怎样获取；上下文窗口限制约束模型重放的对话信息量，超过后可自动压缩，并不是手册的存储空间配额。",
   modelQuestion: "发送失败怎么办？", modelAnswer: "先查看错误信息。模型连接、授权或额度有问题时，检查「个人配置」和所选模型提供方；安装 Worker 不能解决模型服务错误。设备任务失败时，检查对应设备的连接和权限。",
   modelAction: "检查模型设置", preparing: "正在准备默认模型连接…", connectionFailed: "默认模型连接未能准备完成。",
   connectionRecovery: "可以重试连接，或检查模型设置。已配置的其他上游仍可使用，此提示不会阻止它们。",

@@ -879,7 +879,7 @@ const copy = {
     savingDefaults: "保存中…",
     defaultsSaved: "默认设置已保存",
     saveDefaultsError: "无法保存线程默认设置",
-    contextBudget: "重放预算",
+    contextBudget: "上下文窗口限制",
     contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为检查点；0 表示关闭，内置默认 200000。",
     minimalMode: "极简模式",
     minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
