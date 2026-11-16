@@ -1,6 +1,6 @@
 [package]
 name = "cybion"
-version = "0.6.99"
+version = "0.6.100"
 edition = "2024"
 license = "MIT"
 description = "Hosted multi-tenant AI execution service with paired Workers."
