@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { XIcon, ZapIcon } from "lucide-react"
 import { Button } from "../ui/button"
 import { Label } from "../ui/label"
@@ -84,6 +85,9 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
   onFastChange: (fast: boolean) => void
 }) {
   const t = copy[language]
+  // 输入期间保留用户敲进去的原始文本：受控 number 输入若直接用数字回填，
+  // 敲到 "0." 时会被 Number("0.") = 0 重写成 "0"，小数点再也打不进去。
+  const [budgetDraft, setBudgetDraft] = useState<string | null>(null)
   const stop = Math.max(0, REASONING_EFFORTS.indexOf(reasoningEffort as ReasoningEffort))
   return <Popover>
     <PopoverTrigger asChild>
@@ -188,19 +192,28 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
           <Label htmlFor="thread-settings-usd-budget">{t.usdBudget}</Label>
           <Input
             id="thread-settings-usd-budget"
-            type="number"
-            min={0}
-            max={10000}
-            step={0.01}
+            type="text"
             inputMode="decimal"
+            autoComplete="off"
             disabled={disabled}
             placeholder={String(usdBudget.fallback / 1_000_000_000)}
-            value={usdBudget.override === null ? "" : String(usdBudget.override / 1_000_000_000)}
+            value={budgetDraft ?? (usdBudget.override === null ? "" : String(usdBudget.override / 1_000_000_000))}
             onChange={(event) => {
-              const raw = event.target.value.trim()
+              // 只接受「数字 + 最多一个小数点」，逗号当作小数点；其余按键不落到草稿里。
+              // 用 text 而不是 number：number 输入在 "0." 这种中间态会被浏览器净化，
+              // 小数点留不住，也没法输入以 0 开头的小数。
+              const raw = event.target.value.replace(/,/g, ".")
+              if (!/^\d*\.?\d*$/.test(raw)) {
+                // 被拒的按键不会改状态，也就不会触发重渲染，这里直接把 DOM 值写回去。
+                event.target.value = budgetDraft ?? (usdBudget.override === null ? "" : String(usdBudget.override / 1_000_000_000))
+                return
+              }
+              setBudgetDraft(raw)
+              if (raw === "" || raw === ".") { usdBudget.onChange(null); return }
               const parsed = Number(raw)
-              usdBudget.onChange(raw === "" || !Number.isFinite(parsed) ? null : Math.round(Math.max(0, parsed) * 1_000_000_000))
+              if (Number.isFinite(parsed)) usdBudget.onChange(Math.round(Math.max(0, parsed) * 1_000_000_000))
             }}
+            onBlur={() => setBudgetDraft(null)}
           />
           <p className="text-xs text-muted-foreground">{t.usdBudgetHint}</p>
         </div>}
