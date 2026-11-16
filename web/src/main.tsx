@@ -72,6 +72,7 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } fro
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
 import { historyPayloadObject, historyPayloadText, type AudioTranscriptionFunctionCall } from "@zccz14/cybion-components/logic"
 import { formatBytes } from "@zccz14/cybion-components/logic"
+import { formatMoney, parseMoneyInput, sanitizeMoneyInput, MAX_BUDGET_USD_NANOS } from "@zccz14/cybion-components/logic"
 import { formattedTime } from "@zccz14/cybion-components/logic"
 import { type HistoryRecord, type ThreadHistoryWindow, type ThreadManualLoadsView } from "@zccz14/cybion-components"
 import { handleChatInputKeyDown } from "@zccz14/cybion-components/logic"
@@ -170,9 +171,12 @@ type ThreadDefaults = {
   /** Manuals a new Thread starts with; every one of them is bound before its
    * first input. */
   initial_manual_ids: string[]
+  /** Settled USD a Thread may reach before it stops, in nanodollars; 0 keeps the
+   * limit off. */
+  budget_usd_nanos: number
 }
 type ThreadStatus = "idle" | "running" | "failed"
-type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "initial_manual_ids"> & {
+type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "initial_manual_ids" | "budget_usd_nanos"> & {
   created_by: "web" | "api"
   external_ref: string | null
   id: string
@@ -189,6 +193,8 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "i
   /** The Manuals this Thread was created with; `null` follows the account
    * default list. */
   initial_manual_ids: string[] | null
+  /** `null` follows the account default; 0 means no limit. */
+  budget_usd_nanos: number | null
   archived_at: number | null
   context_tokens: number | null
   usage: ThreadUsage
@@ -205,7 +211,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids"> & { draft: string; input: string; images: string[]; audios: string[] } & {
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids" | "budget_usd_nanos"> & { draft: string; input: string; images: string[]; audios: string[] } & {
   // The same six settings the Thread panel edits, carried by the request that
   // creates the Thread. Omitted or null follows the account default, so a
   // fresh draft pins nothing until the composer changes something.
@@ -213,6 +219,7 @@ type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_
   minimal_mode?: boolean | null
   image_generation_model?: string | null
   max_loaded_manuals?: number | null
+  budget_usd_nanos?: number | null
   audio_transcription_model?: string | null
   initial_manual_ids?: string[] | null
 }
@@ -560,6 +567,9 @@ const copy = {
     imageGenerationModel: "Image generation model",
     imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
     loadedManualCap: "Loaded manuals",
+    usdBudget: "Spend limit (USD)",
+    usdBudgetDescription: "A thread stops and waits for you once its settled spend reaches this amount; 0 keeps the limit off. Each thread can still set a limit of its own.",
+    usdBudgetTooLarge: "The limit may not exceed $10,000.",
     initialManuals: "Initial manuals",
     initialManualsDescription: "Manuals every new thread loads as it starts, before its first message. They count against the loaded-Manual cap, and each thread can keep its own list.",
     initialManualsAdd: "Add a manual…",
@@ -887,6 +897,9 @@ const copy = {
     imageGenerationModel: "图像生成模型",
     imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
     loadedManualCap: "已加载手册上限",
+    usdBudget: "花费上限（USD）",
+    usdBudgetDescription: "已结算花费达到该金额后，线程会停下并等待你处理；0 表示不限制。每个线程仍可单独设置自己的上限。",
+    usdBudgetTooLarge: "上限不能超过 $10,000。",
     initialManuals: "初始手册",
     initialManualsDescription: "新线程一开始就自动加载的手册，先于第一条消息；它们计入已加载手册上限，每个线程还可以保留自己的列表。",
     initialManualsAdd: "添加手册…",
@@ -1480,7 +1493,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
   // Creation shows the same six settings the Thread panel edits; each stays
   // null until the composer changes it, which is what "follow the default" means.
-  const [createSettings, setCreateSettings] = useState<{ contextBudget: number | null; loadedManualCap: number | null; initialManuals: string[] | null; minimalMode: boolean | null; imageGeneration: string | null; audioTranscription: string | null }>({ contextBudget: null, loadedManualCap: null, initialManuals: null, minimalMode: null, imageGeneration: null, audioTranscription: null })
+  const [createSettings, setCreateSettings] = useState<{ contextBudget: number | null; loadedManualCap: number | null; initialManuals: string[] | null; minimalMode: boolean | null; imageGeneration: string | null; audioTranscription: string | null; usdBudget: number | null }>({ contextBudget: null, loadedManualCap: null, initialManuals: null, minimalMode: null, imageGeneration: null, audioTranscription: null, usdBudget: null })
   const editCreate = <K extends keyof typeof createSettings>(key: K, value: (typeof createSettings)[K]) => setCreateSettings((current) => ({ ...current, [key]: value }))
   const location = useLocation()
   const request = useApiRequest(sdk)
@@ -1520,7 +1533,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     if (!value || oversize || start.isPending) return
     // 一个字没打、只有一段语音，也是一条合法输入，不能按文本判空丢掉。
     if (composed === "" && attachments.images.length === 0 && audios.length === 0) return
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, context_budget_tokens: createSettings.contextBudget, minimal_mode: createSettings.minimalMode, image_generation_model: createSettings.imageGeneration, max_loaded_manuals: createSettings.loadedManualCap, audio_transcription_model: createSettings.audioTranscription, initial_manual_ids: createSettings.initialManuals, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, context_budget_tokens: createSettings.contextBudget, minimal_mode: createSettings.minimalMode, image_generation_model: createSettings.imageGeneration, max_loaded_manuals: createSettings.loadedManualCap, budget_usd_nanos: createSettings.usdBudget, audio_transcription_model: createSettings.audioTranscription, initial_manual_ids: createSettings.initialManuals, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1544,7 +1557,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} restored={audio.restored} onDismissRestored={audio.dismissRestored} onRetry={() => submit()} /></Field><div className="flex items-center gap-3"><ComposerAttach language={language} disabled={!value || start.isPending} onFiles={attach} />{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} contextBudget={{ override: createSettings.contextBudget, fallback: defaults.data?.context_budget_tokens ?? 200000, onChange: (next) => editCreate("contextBudget", next) }} loadedManualCap={{ override: createSettings.loadedManualCap, fallback: defaults.data?.max_loaded_manuals ?? 12, onChange: (next) => editCreate("loadedManualCap", next) }} initialManuals={{ override: createSettings.initialManuals, fallback: defaults.data?.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (next) => editCreate("initialManuals", next) }} minimalMode={{ override: createSettings.minimalMode, fallback: defaults.data?.minimal_mode ?? false, onChange: (next) => editCreate("minimalMode", next) }} imageGeneration={{ override: createSettings.imageGeneration, fallback: defaults.data?.image_generation_model ?? "", catalogs: imageModels.data?.upstreams, onChange: (next) => editCreate("imageGeneration", next) }} audioTranscription={{ override: createSettings.audioTranscription, fallback: defaults.data?.audio_transcription_model ?? null, catalogs: audioModels.data?.upstreams, onChange: (next) => editCreate("audioTranscription", next) }} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} phase={audio.phase} elapsed={audio.elapsed} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (!dataUrl) return; audio.attach(dataUrl); submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || composed === "" || oversize || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} restored={audio.restored} onDismissRestored={audio.dismissRestored} onRetry={() => submit()} /></Field><div className="flex items-center gap-3"><ComposerAttach language={language} disabled={!value || start.isPending} onFiles={attach} />{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} usdBudget={{ override: createSettings.usdBudget, fallback: defaults.data?.budget_usd_nanos ?? 0, onChange: (next) => editCreate("usdBudget", next) }} contextBudget={{ override: createSettings.contextBudget, fallback: defaults.data?.context_budget_tokens ?? 200000, onChange: (next) => editCreate("contextBudget", next) }} loadedManualCap={{ override: createSettings.loadedManualCap, fallback: defaults.data?.max_loaded_manuals ?? 12, onChange: (next) => editCreate("loadedManualCap", next) }} initialManuals={{ override: createSettings.initialManuals, fallback: defaults.data?.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (next) => editCreate("initialManuals", next) }} minimalMode={{ override: createSettings.minimalMode, fallback: defaults.data?.minimal_mode ?? false, onChange: (next) => editCreate("minimalMode", next) }} imageGeneration={{ override: createSettings.imageGeneration, fallback: defaults.data?.image_generation_model ?? "", catalogs: imageModels.data?.upstreams, onChange: (next) => editCreate("imageGeneration", next) }} audioTranscription={{ override: createSettings.audioTranscription, fallback: defaults.data?.audio_transcription_model ?? null, catalogs: audioModels.data?.upstreams, onChange: (next) => editCreate("audioTranscription", next) }} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} phase={audio.phase} elapsed={audio.elapsed} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (!dataUrl) return; audio.attach(dataUrl); submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || composed === "" || oversize || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -2689,6 +2702,36 @@ function loadedManualCap(value: number) {
   return Math.min(64, Math.max(1, Math.trunc(value)))
 }
 
+// The same money field the Thread panel uses: a draft keeps "0." in the box instead
+// of letting the number 0 overwrite it, and only complete amounts are committed.
+function UsdBudgetInput({ nanos, disabled, onChange }: { nanos: number; disabled: boolean; onChange: (nanos: number) => void }) {
+  const { t } = useUi()
+  const [draft, setDraft] = useState<string | null>(null)
+  const text = draft ?? formatMoney(nanos)
+  const tooLarge = nanos > MAX_BUDGET_USD_NANOS
+  return <>
+  <Input
+    id="default-thread-usd-budget"
+    type="text"
+    inputMode="decimal"
+    autoComplete="off"
+    placeholder="0"
+    disabled={disabled}
+    value={text}
+    onChange={(event) => {
+      const raw = sanitizeMoneyInput(event.target.value)
+      if (raw === null) { event.target.value = text; return }
+      setDraft(raw)
+      const parsed = parseMoneyInput(raw)
+      if (parsed !== null) onChange(parsed)
+    }}
+    onBlur={() => setDraft(null)}
+    aria-invalid={tooLarge}
+  />
+  {tooLarge && <p role="alert" className="text-xs text-destructive">{t("usdBudgetTooLarge")}</p>}
+  </>
+}
+
 function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t } = useUi()
   const client = useQueryClient()
@@ -2787,6 +2830,11 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
             <FieldDescription id="default-thread-loaded-manual-cap-description">{t("loadedManualCapDescription")}</FieldDescription>
           </Field>
           <Field data-disabled={save.isPending}>
+            <FieldLabel htmlFor="default-thread-usd-budget">{t("usdBudget")}</FieldLabel>
+            <UsdBudgetInput nanos={value.budget_usd_nanos} disabled={save.isPending} onChange={(budget_usd_nanos) => edit({ ...value, budget_usd_nanos })} />
+            <FieldDescription id="default-thread-usd-budget-description">{t("usdBudgetDescription")}</FieldDescription>
+          </Field>
+          <Field data-disabled={save.isPending}>
             <FieldLabel>{t("initialManuals")}</FieldLabel>
             <InitialManualsField value={value.initial_manual_ids} choices={manualChoices.data?.manuals} disabled={save.isPending} onChange={(initial_manual_ids) => edit({ ...value, initial_manual_ids })} />
             <FieldDescription id="default-thread-initial-manuals-description">{t("initialManualsDescription")}</FieldDescription>
@@ -2794,7 +2842,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
         <div className="flex flex-wrap items-center gap-3">
-          <Button disabled={!changed || save.isPending}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingDefaults") : t("saveDefaults")}</Button>
+          <Button disabled={!changed || save.isPending || value.budget_usd_nanos > MAX_BUDGET_USD_NANOS}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingDefaults") : t("saveDefaults")}</Button>
           <p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("defaultsSaved")}</p>
         </div>
       </form>}

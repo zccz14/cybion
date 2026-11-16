@@ -33,6 +33,7 @@ test("the defaults dirty check covers every field the server returns", () => {
     "audio_transcription_model",
     "max_loaded_manuals",
     "initial_manual_ids",
+    "budget_usd_nanos",
   ])
 })
 
