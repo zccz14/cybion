@@ -4,9 +4,9 @@ import { HourglassIcon, PlusIcon } from "lucide-react"
 import type { Language } from "../api"
 import { copyFor, fillCopy, type CopyKey } from "../copy"
 import { DEFAULT_BUDGET_RAISE_USD_NANOS, MAX_BUDGET_USD_NANOS, type BudgetStopNotice } from "../lib/budget-stop"
-import { formatMoney, formatSettledUsd, parseMoneyInput, sanitizeMoneyInput } from "../lib/money"
+import { formatSettledUsd } from "../lib/money"
 import { Button } from "../ui/button"
-import { Input } from "../ui/input"
+import { UsdBudgetInput } from "./usd-budget-input"
 
 /**
  * The record a Thread leaves when its USD budget stopped it, restated in the
@@ -27,8 +27,8 @@ export function BudgetStopNotice({ notice, language, time, recordId, onRaise, pe
   pending?: boolean
 }) {
   const t = (key: CopyKey) => copyFor(language, key)
-  const [draft, setDraft] = useState(formatMoney(DEFAULT_BUDGET_RAISE_USD_NANOS))
-  const added = parseMoneyInput(draft)
+  // One dollar by default: enough to finish a turn without making the user do arithmetic.
+  const [added, setAdded] = useState<number | null>(DEFAULT_BUDGET_RAISE_USD_NANOS)
   const limit = added === null ? null : notice.spentUsdNanos + added
   const overCeiling = limit !== null && limit > MAX_BUDGET_USD_NANOS
   return <div data-slot="budget-stop-notice" className="flex items-start gap-3 rounded-xl border border-amber-600/35 bg-amber-500/5 px-3 py-3 dark:border-amber-400/30 dark:bg-amber-400/5">
@@ -49,20 +49,7 @@ export function BudgetStopNotice({ notice, language, time, recordId, onRaise, pe
         <div className="flex flex-wrap items-end gap-2">
           <div className="flex min-w-0 flex-col gap-1">
             <label htmlFor={`budget-raise-${recordId}`} className="text-xs font-medium text-muted-foreground">{t("budgetRaiseLabel")}</label>
-            <Input
-              id={`budget-raise-${recordId}`}
-              type="text"
-              inputMode="decimal"
-              autoComplete="off"
-              aria-invalid={overCeiling}
-              className="h-8 w-28"
-              value={draft}
-              onChange={(event) => {
-                const raw = sanitizeMoneyInput(event.target.value)
-                if (raw === null) { event.target.value = draft; return }
-                setDraft(raw)
-              }}
-            />
+            <UsdBudgetInput id={`budget-raise-${recordId}`} value={added} disabled={pending} invalid={overCeiling} className="h-8 w-28" onChange={setAdded} />
           </div>
           <Button type="submit" size="sm" disabled={added === null || overCeiling || pending}><PlusIcon data-icon="inline-start" />{t("budgetRaiseAction")}</Button>
         </div>

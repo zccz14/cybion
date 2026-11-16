@@ -23,7 +23,7 @@ import { AuthMiniProvider, useAuthMini, type AuthMiniVerificationFailure } from 
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitProvider, useLinkit } from "linkit-react-components"
 import { AppLayout, Markdown, type AppNavGroup } from "@zccz14/ux"
-import { CybionThreadProvider, CybionThreadView, HistoryMessage } from "@zccz14/cybion-components"
+import { CybionThreadProvider, CybionThreadView, HistoryMessage, ThreadSettingsFields } from "@zccz14/cybion-components"
 import { listenForExtensionAttachments } from "./extension-bridge"
 import {
   ArchiveIcon,
@@ -72,7 +72,7 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } fro
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
 import { historyPayloadObject, historyPayloadText, type AudioTranscriptionFunctionCall } from "@zccz14/cybion-components/logic"
 import { formatBytes } from "@zccz14/cybion-components/logic"
-import { formatMoney, parseMoneyInput, sanitizeMoneyInput, MAX_BUDGET_USD_NANOS } from "@zccz14/cybion-components/logic"
+import { MAX_BUDGET_USD_NANOS } from "@zccz14/cybion-components/logic"
 import { formattedTime } from "@zccz14/cybion-components/logic"
 import { type HistoryRecord, type ThreadHistoryWindow, type ThreadManualLoadsView } from "@zccz14/cybion-components"
 import { handleChatInputKeyDown } from "@zccz14/cybion-components/logic"
@@ -151,7 +151,6 @@ import {
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
-import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
@@ -554,30 +553,10 @@ const copy = {
     threadDefaults: "New thread defaults",
     threadDefaultsDescription: "Applied when you create a thread. You can adjust these settings within each thread.",
     reasoningEffort: "Reasoning effort",
-    fastMode: "Fast mode",
-    fastModeDescription: "Use priority processing for new threads.",
     saveDefaults: "Save defaults",
     savingDefaults: "Saving…",
     defaultsSaved: "Defaults saved",
     saveDefaultsError: "Could not save thread defaults",
-    contextBudget: "Context budget",
-    contextBudgetDescription: "Automatic compaction checkpoints a thread once its replayed context exceeds this many tokens. 0 disables it; 200000 is the built-in default.",
-    minimalMode: "Minimal mode",
-    minimalModeDescription: "Show only the final reply or status of each turn; everything else stays folded. Threads without an override follow this default.",
-    imageGenerationModel: "Image generation model",
-    imageGenerationModelDescription: "Used by threads without their own choice; Disabled turns image generation off.",
-    loadedManualCap: "Loaded manuals",
-    usdBudget: "Spend limit (USD)",
-    usdBudgetDescription: "A thread stops and waits for you once its settled spend reaches this amount; 0 keeps the limit off. Each thread can still set a limit of its own.",
-    usdBudgetTooLarge: "The limit may not exceed $10,000.",
-    initialManuals: "Initial manuals",
-    initialManualsDescription: "Manuals every new thread loads as it starts, before its first message. They count against the loaded-Manual cap, and each thread can keep its own list.",
-    initialManualsAdd: "Add a manual…",
-    initialManualsEmpty: "No initial manual: a new thread starts empty.",
-    initialManualsUnknown: "Unknown manual",
-    initialManualsRemove: "Remove",
-    loadedManualCapDescription: "How many Manuals one thread may keep loaded at once. A further load is refused until the thread unloads one; 12 is the built-in default, 1–64 allowed.",
-    imageGenerationDisabled: "Disabled",
     normaiTitle: "NormAI upstream",
     normaiDescription: "Model inference runs through NormAI. Configure upstream providers and billing on NormAI; Cybion automatically issues and stores a dedicated consumer credential.",
     normaiConnected: "Connected",
@@ -884,30 +863,10 @@ const copy = {
     threadDefaults: "新线程默认设置",
     threadDefaultsDescription: "创建新线程时自动应用，也可以在每个线程中单独调整。",
     reasoningEffort: "推理强度",
-    fastMode: "Fast 模式",
-    fastModeDescription: "新线程默认使用优先处理。",
     saveDefaults: "保存默认设置",
     savingDefaults: "保存中…",
     defaultsSaved: "默认设置已保存",
     saveDefaultsError: "无法保存线程默认设置",
-    contextBudget: "上下文窗口限制",
-    contextBudgetDescription: "重放上下文超过该 token 数时自动压缩为检查点；0 表示关闭，内置默认 200000。",
-    minimalMode: "极简模式",
-    minimalModeDescription: "每轮仅保留最后一条回复或状态，其余全部折叠；未单独设置的线程跟随此默认值。",
-    imageGenerationModel: "图像生成模型",
-    imageGenerationModelDescription: "用于未单独设置的线程；选择关闭即禁用图像生成。",
-    loadedManualCap: "已加载手册上限",
-    usdBudget: "花费上限（USD）",
-    usdBudgetDescription: "已结算花费达到该金额后，线程会停下并等待你处理；0 表示不限制。每个线程仍可单独设置自己的上限。",
-    usdBudgetTooLarge: "上限不能超过 $10,000。",
-    initialManuals: "初始手册",
-    initialManualsDescription: "新线程一开始就自动加载的手册，先于第一条消息；它们计入已加载手册上限，每个线程还可以保留自己的列表。",
-    initialManualsAdd: "添加手册…",
-    initialManualsEmpty: "还没有初始手册：新线程从空开始。",
-    initialManualsUnknown: "未知手册",
-    initialManualsRemove: "移除",
-    loadedManualCapDescription: "单个线程用 load_manual 能同时保持加载的手册数量；超过后新的加载会被拒绝，需要先卸载一份。内置默认 12，可设 1–64。",
-    imageGenerationDisabled: "关闭",
     normaiTitle: "NormAI 上游",
     normaiDescription: "模型推理经由 NormAI 完成；上游提供商与计费都在 NormAI 配置，Cybion 会自动签发并保存专用消费者密钥。",
     normaiConnected: "已连接",
@@ -1119,9 +1078,6 @@ function useImageModels(sdk: AuthMiniApi) {
 
 // The account's console language, for the few labels this card writes inline
 // instead of through the copy dictionary.
-function isChineseUi() {
-  return typeof document !== "undefined" && document.documentElement.lang.startsWith("zh")
-}
 
 // The callable speech-to-text models an account can pick for audio input
 // (NormAI answers `?kind=sst` with its speech-to-text rows).
@@ -2672,31 +2628,6 @@ type ManualChoice = { manual_id: string; name: string }
 
 /// The account's initial list: the same chips and "add" picker the Thread
 /// settings popover offers, over `/api/manual-summaries` (names, not bodies).
-function InitialManualsField({ value, choices, disabled, onChange }: {
-  value: string[] | undefined
-  choices: ManualChoice[] | undefined
-  disabled: boolean
-  onChange: (ids: string[]) => void
-}) {
-  const { t } = useUi()
-  const listed = value ?? []
-  const names = new Map((choices ?? []).map((manual) => [manual.manual_id, manual.name]))
-  const chosen = new Set(listed)
-  const available = (choices ?? []).filter((manual) => !chosen.has(manual.manual_id))
-  return <>
-    <div data-slot="default-initial-manuals" className="flex flex-wrap gap-1">
-      {listed.length === 0 && <p className="text-sm text-muted-foreground">{t("initialManualsEmpty")}</p>}
-      {listed.map((id) => <span key={id} title={id} className="flex min-w-0 max-w-full items-center gap-1 rounded-full border bg-card px-2 py-0.5 text-xs">
-        <span className="truncate">{names.get(id) ?? t("initialManualsUnknown")}</span>
-        <button type="button" aria-label={`${t("initialManualsRemove")}: ${names.get(id) ?? id}`} title={t("initialManualsRemove")} disabled={disabled} className="shrink-0 rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onChange(listed.filter((item) => item !== id))}><XIcon className="size-3" /></button>
-      </span>)}
-    </div>
-    {available.length > 0 && <Select value="" disabled={disabled} onValueChange={(id) => { if (id && !chosen.has(id)) onChange([...listed, id]) }}>
-      <SelectTrigger className="w-full" aria-label={t("initialManualsAdd")}><SelectValue placeholder={t("initialManualsAdd")} /></SelectTrigger>
-      <SelectContent><SelectGroup>{available.map((manual) => <SelectItem key={manual.manual_id} value={manual.manual_id}>{manual.name}</SelectItem>)}</SelectGroup></SelectContent>
-    </Select>}
-  </>
-}
 
 function loadedManualCap(value: number) {
   return Math.min(64, Math.max(1, Math.trunc(value)))
@@ -2704,36 +2635,9 @@ function loadedManualCap(value: number) {
 
 // The same money field the Thread panel uses: a draft keeps "0." in the box instead
 // of letting the number 0 overwrite it, and only complete amounts are committed.
-function UsdBudgetInput({ nanos, disabled, onChange }: { nanos: number; disabled: boolean; onChange: (nanos: number) => void }) {
-  const { t } = useUi()
-  const [draft, setDraft] = useState<string | null>(null)
-  const text = draft ?? formatMoney(nanos)
-  const tooLarge = nanos > MAX_BUDGET_USD_NANOS
-  return <>
-  <Input
-    id="default-thread-usd-budget"
-    type="text"
-    inputMode="decimal"
-    autoComplete="off"
-    placeholder="0"
-    disabled={disabled}
-    value={text}
-    onChange={(event) => {
-      const raw = sanitizeMoneyInput(event.target.value)
-      if (raw === null) { event.target.value = text; return }
-      setDraft(raw)
-      const parsed = parseMoneyInput(raw)
-      if (parsed !== null) onChange(parsed)
-    }}
-    onBlur={() => setDraft(null)}
-    aria-invalid={tooLarge}
-  />
-  {tooLarge && <p role="alert" className="text-xs text-destructive">{t("usdBudgetTooLarge")}</p>}
-  </>
-}
 
 function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
-  const { t } = useUi()
+  const { t, language } = useUi()
   const client = useQueryClient()
   const queryKey = ["thread-defaults", sdk.session.getState().sessionId]
   const [draft, setDraft] = useState<ThreadDefaults | null>(null)
@@ -2763,82 +2667,27 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
       {defaults.isLoading && <div className="flex flex-col gap-4"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-9 w-36" /></div>}
       {value && <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (changed && !save.isPending) save.mutate(value) }}>
         <FieldGroup>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-model">{t("model")}</FieldLabel>
-            <Select value={modelSelection(value.upstream_id, value.model)} disabled={save.isPending} onValueChange={(selection) => { const parsed = parseModelSelection(selection); edit({ ...value, upstream_id: parsed.upstreamId, model: parsed.model }) }}>
-              <SelectTrigger id="default-thread-model"><SelectValue placeholder={value.model} /></SelectTrigger>
-              <SelectContent>{modelGroups(models.data?.upstreams, value.upstream_id, value.model).map((group) => (
-                <SelectGroup key={group.id}>
-                  {group.name && <SelectLabel>{group.name}</SelectLabel>}
-                  {group.models.map((model) => <SelectItem key={`${group.id}:${model}`} value={`${group.id}:${model}`}>{model}</SelectItem>)}
-                  {group.error && <SelectLabel className="text-destructive">{group.error}</SelectLabel>}
-                </SelectGroup>
-              ))}</SelectContent>
-            </Select>
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-reasoning">{t("reasoningEffort")}</FieldLabel>
-            <Select value={value.reasoning_effort} disabled={save.isPending} onValueChange={(effort) => edit({ ...value, reasoning_effort: effort as ThreadDefaults["reasoning_effort"] })}>
-              <SelectTrigger id="default-thread-reasoning"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectGroup>{REASONING_EFFORTS.map((effort) => <SelectItem key={effort} value={effort}>{effort}</SelectItem>)}</SelectGroup></SelectContent>
-            </Select>
-          </Field>
-          <Field orientation="horizontal" data-disabled={save.isPending}>
-            <FieldContent>
-              <FieldLabel htmlFor="default-thread-fast">{t("fastMode")}</FieldLabel>
-              <FieldDescription id="default-thread-fast-description">{t("fastModeDescription")}</FieldDescription>
-            </FieldContent>
-            <Switch id="default-thread-fast" aria-describedby="default-thread-fast-description" checked={value.service_tier_fast} disabled={save.isPending} onCheckedChange={(fast) => edit({ ...value, service_tier_fast: fast })} />
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-manual-budget">{t("contextBudget")}</FieldLabel>
-            <Input id="default-thread-manual-budget" type="number" min={0} max={10000000} step={1000} inputMode="numeric" disabled={save.isPending} value={String(value.context_budget_tokens)} onChange={(event) => { const parsed = Number(event.target.value); if (Number.isFinite(parsed)) edit({ ...value, context_budget_tokens: parsed }) }} />
-            <FieldDescription id="default-thread-manual-budget-description">{t("contextBudgetDescription")}</FieldDescription>
-          </Field>
-          <Field orientation="horizontal" data-disabled={save.isPending}>
-            <FieldContent>
-              <FieldLabel htmlFor="default-thread-minimal">{t("minimalMode")}</FieldLabel>
-              <FieldDescription id="default-thread-minimal-description">{t("minimalModeDescription")}</FieldDescription>
-            </FieldContent>
-            <Switch id="default-thread-minimal" aria-describedby="default-thread-minimal-description" checked={value.minimal_mode} disabled={save.isPending} onCheckedChange={(minimal_mode) => edit({ ...value, minimal_mode })} />
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-audio-model">{isChineseUi() ? "语音识别模型" : "Speech-to-text model"}</FieldLabel>
-            <Select value={value.audio_transcription_model ?? "off"} disabled={save.isPending} onValueChange={(selection) => edit({ ...value, audio_transcription_model: selection === "off" ? null : selection })}>
-              <SelectTrigger id="default-thread-audio-model"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectGroup>
-                <SelectItem value="off">{isChineseUi() ? "关闭" : "Disabled"}</SelectItem>
-                {imageModelOptions(audioModels.data?.upstreams, null, [value.audio_transcription_model]).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
-              </SelectGroup></SelectContent>
-            </Select>
-            <FieldDescription id="default-thread-audio-model-description">{isChineseUi() ? "音频输入使用该语音识别模型；列表为空时先在上游添加语音转写模型。" : "Audio input uses this speech-to-text model; add speech-to-text models to an upstream when the list is empty."}</FieldDescription>
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-image-model">{t("imageGenerationModel")}</FieldLabel>
-            <Select value={value.image_generation_model === "" ? "off" : value.image_generation_model} disabled={save.isPending} onValueChange={(selection) => edit({ ...value, image_generation_model: selection === "off" ? "" : selection })}>
-              <SelectTrigger id="default-thread-image-model"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectGroup>
-                <SelectItem value="off">{t("imageGenerationDisabled")}</SelectItem>
-                {imageModelOptions(imageModels.data?.upstreams, null, [value.image_generation_model]).map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
-              </SelectGroup></SelectContent>
-            </Select>
-            <FieldDescription id="default-thread-image-model-description">{t("imageGenerationModelDescription")}</FieldDescription>
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-loaded-manual-cap">{t("loadedManualCap")}</FieldLabel>
-            <Input id="default-thread-loaded-manual-cap" type="number" min={1} max={64} step={1} inputMode="numeric" disabled={save.isPending} value={String(value.max_loaded_manuals)} onChange={(event) => { const raw = event.target.value.trim(); if (raw === "") return; const parsed = Number(raw); if (Number.isFinite(parsed)) edit({ ...value, max_loaded_manuals: loadedManualCap(parsed) }) }} />
-            <FieldDescription id="default-thread-loaded-manual-cap-description">{t("loadedManualCapDescription")}</FieldDescription>
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel htmlFor="default-thread-usd-budget">{t("usdBudget")}</FieldLabel>
-            <UsdBudgetInput nanos={value.budget_usd_nanos} disabled={save.isPending} onChange={(budget_usd_nanos) => edit({ ...value, budget_usd_nanos })} />
-            <FieldDescription id="default-thread-usd-budget-description">{t("usdBudgetDescription")}</FieldDescription>
-          </Field>
-          <Field data-disabled={save.isPending}>
-            <FieldLabel>{t("initialManuals")}</FieldLabel>
-            <InitialManualsField value={value.initial_manual_ids} choices={manualChoices.data?.manuals} disabled={save.isPending} onChange={(initial_manual_ids) => edit({ ...value, initial_manual_ids })} />
-            <FieldDescription id="default-thread-initial-manuals-description">{t("initialManualsDescription")}</FieldDescription>
-          </Field>
+          <ThreadSettingsFields
+            mode="defaults"
+            idPrefix="default-thread"
+            language={language}
+            disabled={save.isPending}
+            catalogs={models.data?.upstreams}
+            model={value.model}
+            upstreamId={value.upstream_id}
+            reasoningEffort={value.reasoning_effort}
+            fast={value.service_tier_fast}
+            contextBudget={{ value: value.context_budget_tokens, fallback: value.context_budget_tokens, onChange: (next) => next !== null && edit({ ...value, context_budget_tokens: next }) }}
+            usdBudget={{ value: value.budget_usd_nanos, fallback: value.budget_usd_nanos, onChange: (next) => edit({ ...value, budget_usd_nanos: next ?? 0 }) }}
+            loadedManualCap={{ value: value.max_loaded_manuals, fallback: value.max_loaded_manuals, onChange: (next) => next !== null && edit({ ...value, max_loaded_manuals: loadedManualCap(next) }) }}
+            initialManuals={{ value: value.initial_manual_ids, fallback: value.initial_manual_ids, catalogs: manualChoices.data?.manuals, onChange: (next) => edit({ ...value, initial_manual_ids: next ?? [] }) }}
+            minimalMode={{ value: value.minimal_mode, fallback: value.minimal_mode, onChange: (next) => next !== null && edit({ ...value, minimal_mode: next }) }}
+            imageGeneration={{ value: value.image_generation_model, fallback: value.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (next) => edit({ ...value, image_generation_model: next ?? "" }) }}
+            audioTranscription={{ value: value.audio_transcription_model, fallback: value.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (next) => edit({ ...value, audio_transcription_model: next }) }}
+            onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })}
+            onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort: reasoning_effort as ThreadDefaults["reasoning_effort"] })}
+            onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })}
+          />
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
         <div className="flex flex-wrap items-center gap-3">

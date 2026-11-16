@@ -48,7 +48,12 @@ export { ComposerFileNotice, ComposerLengthNotice } from "./components/composer-
 export { ComposerAudio } from "./components/composer-audio"
 export { ComposerAudioNotice } from "./components/composer-audio-notice"
 export { ComposerDraftNotice } from "./components/composer-draft-notice"
-export { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "./components/thread-settings-popover"
+export { ThreadSettingsPopover } from "./components/thread-settings-popover"
+export { ThreadSettingsFields, REASONING_EFFORTS } from "./components/thread-settings-fields"
+export type { ReasoningEffort, ThreadSettingsValue } from "./components/thread-settings-fields"
+export { UsdBudgetInput } from "./components/usd-budget-input"
+export { imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "./lib/model-catalog"
+export type { ManualChoice, ModelCatalog } from "./lib/model-catalog"
 export { WorkerCallSummary } from "./components/worker-call-summary"
 
 // Record renderers, exported so a host can compose its own transcript instead of
