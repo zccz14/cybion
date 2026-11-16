@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Input } from "../ui/input"
 import { Slider } from "../ui/slider"
 import { Switch } from "../ui/switch"
+import { formatMoney, parseMoneyInput, sanitizeMoneyInput } from "../lib/money"
 
 const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
 type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
@@ -196,22 +197,20 @@ export function ThreadSettingsPopover({ model, upstreamId, catalogs, reasoningEf
             inputMode="decimal"
             autoComplete="off"
             disabled={disabled}
-            placeholder={String(usdBudget.fallback / 1_000_000_000)}
-            value={budgetDraft ?? (usdBudget.override === null ? "" : String(usdBudget.override / 1_000_000_000))}
+            placeholder={formatMoney(usdBudget.fallback)}
+            value={budgetDraft ?? (usdBudget.override === null ? "" : formatMoney(usdBudget.override))}
             onChange={(event) => {
               // 只接受「数字 + 最多一个小数点」，逗号当作小数点；其余按键不落到草稿里。
               // 用 text 而不是 number：number 输入在 "0." 这种中间态会被浏览器净化，
-              // 小数点留不住，也没法输入以 0 开头的小数。
-              const raw = event.target.value.replace(/,/g, ".")
-              if (!/^\d*\.?\d*$/.test(raw)) {
+              // 小数点留不住，也没法输入以 0 开头的小数。规则与预算卡片共用一份。
+              const raw = sanitizeMoneyInput(event.target.value)
+              if (raw === null) {
                 // 被拒的按键不会改状态，也就不会触发重渲染，这里直接把 DOM 值写回去。
-                event.target.value = budgetDraft ?? (usdBudget.override === null ? "" : String(usdBudget.override / 1_000_000_000))
+                event.target.value = budgetDraft ?? (usdBudget.override === null ? "" : formatMoney(usdBudget.override))
                 return
               }
               setBudgetDraft(raw)
-              if (raw === "" || raw === ".") { usdBudget.onChange(null); return }
-              const parsed = Number(raw)
-              if (Number.isFinite(parsed)) usdBudget.onChange(Math.round(Math.max(0, parsed) * 1_000_000_000))
+              usdBudget.onChange(parseMoneyInput(raw))
             }}
             onBlur={() => setBudgetDraft(null)}
           />

@@ -28,6 +28,7 @@ import { composeComposerInput, maxInputChars } from "./lib/composer-files"
 import { composerAction, handleChatInputKeyDown } from "./lib/chat-input"
 import { pollThreadHistory, oldestRecordId, recordInFlight, inFlightCallIds, loadedThreadRecords, type HistoryRecord, type ThreadHistoryWindow } from "./lib/thread-history"
 import { pendingResponseRecords, type ThreadResponseView } from "./lib/thread-response"
+import { newestBudgetRecordId } from "./lib/budget-stop"
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert"
 import { Button } from "./ui/button"
 import { Badge } from "./ui/badge"
@@ -222,6 +223,27 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
     mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; budget_usd_nanos?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null; audio_transcription_model?: string | null; max_loaded_manuals?: number | null; initial_manual_ids?: string[] | null }) => transport.request<Thread>(`/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
+  // Adding budget is two calls the user asked for with one click: raise the limit
+  // to the settled spend plus the amount, then resume. The amounts come from the
+  // record that stopped the Thread, so the new limit is the one the user just read.
+  const raiseBudget = useMutation({
+    mutationFn: (addedUsdNanos: number) => transport.request<Thread>(`/api/threads/${encodeURIComponent(threadId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ budget_usd_nanos: (thread.data?.usage.cost_usd_nanos ?? 0) + addedUsdNanos }),
+    }).then(() => transport.request<unknown>(`/api/threads/${encodeURIComponent(threadId)}/continue`, { method: "POST" })),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["history", threadId] }),
+        client.invalidateQueries({ queryKey: ["thread", threadId] }),
+        client.invalidateQueries({ queryKey: ["thread-response", threadId] }),
+        client.invalidateQueries({ queryKey: ["threads"] }),
+        client.invalidateQueries({ queryKey: ["reasoning-audits"] }),
+      ])
+    },
+  })
+  // Only the newest budget record offers the control: an older one may already
+  // have been answered, and raising its limit would resume nothing.
+  const actionableBudgetRecordId = useMemo(() => newestBudgetRecordId(durableRecords), [durableRecords])
   const running = thread.data?.status === "running"
   // Only stored records prove a call is still on the device: a streamed item the
   // preview renders carries the request's start time, not the call's own.
@@ -308,7 +330,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
             {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
             {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => renderRecord ? renderRecord(record, { inFlight: recordInFlight(record, inFlightCalls) }) : <HistoryMessage language={language} record={record} workers={workers} manuals={manuals} inFlight={recordInFlight(record, inFlightCalls)} loadAudio={loadAudio} />} />
+            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => renderRecord ? renderRecord(record, { inFlight: recordInFlight(record, inFlightCalls) }) : <HistoryMessage language={language} record={record} workers={workers} manuals={manuals} inFlight={recordInFlight(record, inFlightCalls)} loadAudio={loadAudio} onRaiseBudget={!readOnly && record.id === actionableBudgetRecordId && !running ? (addedUsdNanos: number) => raiseBudget.mutate(addedUsdNanos) : undefined} raisingBudget={raiseBudget.isPending} />} />
             {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
             {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
             {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} runningSummary={current.running_summary} language={language} /></div></MessageScrollerItem>}

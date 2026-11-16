@@ -6477,8 +6477,9 @@ fn persist_history_record(
     if record.kind == "input" {
         // The user speaking is what unblocks a Thread: they looked at it, so it
         // is no longer waiting on them. This is the one write path for input
-        // records, so the rule cannot be forgotten by a caller.
-        blocked::clear_on_input(connection, record.thread_id)?;
+        // records, so the rule cannot be forgotten by a caller. The user's own
+        // Continue clears it the same way, from `record_request`.
+        blocked::clear_on_user_action(connection, record.thread_id)?;
     }
     Ok(connection.last_insert_rowid())
 }

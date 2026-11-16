@@ -62,9 +62,20 @@ user's next message retracts, so it lives in its own `threads.blocked` flag
 rather than as a value of `status`. Keeping it out of `status` is what lets the
 flag survive the writes every turn boundary makes (idle on finalization, failed
 on error), and what keeps the `WHERE status='running'` guards meaningful. There
-is no unblock tool and no expiry: the kernel clears the flag where the input
-record is written, so no caller can forget it and the model cannot decide when
-it stops waiting.
+is no unblock tool and no expiry: the kernel clears the flag at the two writes
+only the user can cause — an `input` record, and a Continue they requested — so
+no caller can forget it and the model cannot decide when it stops waiting.
+
+Continue is the second one because of the budget stop: raising the limit is only
+an adjustment, and the Thread has to keep running afterwards instead of
+finalizing straight back into `blocked`. Compact is deliberately not a resume: it
+spends no budget, so it cannot be what answers a budget stop.
+
+The budget stop also leaves a record carrying `spent_usd_nanos` and
+`budget_usd_nanos`, not only the prose sentence. The package renders that record
+in the reader's language and, when the host is not read-only, offers the one
+control that resumes the Thread: add an amount, so the limit becomes the settled
+spend plus that amount, then continue.
 
 The same projection derives `running_summary`. When the Thread is running it
 prefers the newest `response_output` Worker call of the current turn that has no

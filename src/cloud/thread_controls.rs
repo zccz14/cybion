@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RequestOperation {
     Inference,
     Compact,
@@ -65,7 +65,7 @@ fn control_record(connection: &Connection, thread_id: &str, action: &str) -> Res
     )
 }
 
-fn record_request(
+pub(super) fn record_request(
     connection: &mut Connection,
     data_dir: &Path,
     thread_id: &str,
@@ -98,6 +98,14 @@ fn record_request(
                 ("continue", RequestOperation::Inference)
             };
             let id = control_record(&transaction, thread_id, action)?;
+            // Continue is the user's own action, so it unblocks the Thread the
+            // same way a new input does. A Thread stopped by its budget is the
+            // case that needs it: raising the limit and continuing must leave it
+            // running, not blocked again the moment the turn finalizes. Compact
+            // stays out of this — it spends no budget, so it is not a resume.
+            if operation == RequestOperation::Inference {
+                blocked::clear_on_user_action(&transaction, thread_id)?;
+            }
             (id, operation)
         }
     };

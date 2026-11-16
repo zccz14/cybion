@@ -22,7 +22,9 @@ import {
 } from "../lib/history-payload"
 import { threadControlAction, generatedImageSource } from "../lib/thread-response"
 import { manualLoadNotice } from "../lib/thread-manual-loads"
+import { budgetStopNotice } from "../lib/budget-stop"
 import { type HistoryRecord } from "../lib/thread-history"
+import { BudgetStopNotice } from "./budget-stop-notice"
 import { Badge } from "../ui/badge"
 import { Message, MessageContent, MessageFooter } from "../ui/message"
 import { AssistantMessage } from "./assistant-message"
@@ -90,13 +92,16 @@ function PayloadDetails({ language, record, label }: { language: Language; recor
  * Hosts that render records themselves pass their own component to `CybionThreadView`;
  * this is the default that ships with the package.
  */
-export const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals, inFlight, loadAudio }: {
+export const HistoryMessage = memo(function HistoryMessage({ language, record, workers, manuals, inFlight, loadAudio, onRaiseBudget, raisingBudget }: {
   language: Language
   record: HistoryRecord
   workers?: Worker[]
   manuals?: ReadonlyMap<string, ManualSummary>
   inFlight: boolean
   loadAudio?: (reference: string, mediaType: string | null) => Promise<string>
+  /** Adds budget to a Thread its limit stopped; the record offers the control only when the host can act. */
+  onRaiseBudget?: (addedUsdNanos: number) => void
+  raisingBudget?: boolean
 }) {
   const t = (key: CopyKey) => copyFor(language, key)
   const time = formattedTime(language, record.created_at)
@@ -124,6 +129,11 @@ export const HistoryMessage = memo(function HistoryMessage({ language, record, w
   const loadNotice = manualLoadNotice(record)
   if (loadNotice) {
     return <ManualLoadNotice notice={loadNotice} lookup={manuals} language={language} time={time} recordId={record.id} />
+  }
+
+  const budgetNotice = budgetStopNotice(record)
+  if (budgetNotice) {
+    return <BudgetStopNotice notice={budgetNotice} language={language} time={time} recordId={record.id} onRaise={onRaiseBudget} pending={raisingBudget} />
   }
 
   const text = historyPayloadText(record.payload)
@@ -267,4 +277,4 @@ export const HistoryMessage = memo(function HistoryMessage({ language, record, w
       </div>
     </div>
   </div>
-}, (previous, next) => previous.workers === next.workers && previous.manuals === next.manuals && previous.inFlight === next.inFlight && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot)
+}, (previous, next) => previous.workers === next.workers && previous.manuals === next.manuals && previous.inFlight === next.inFlight && previous.language === next.language && previous.record.id === next.record.id && previous.record.thread_id === next.record.thread_id && previous.record.kind === next.record.kind && previous.record.payload === next.record.payload && previous.record.created_at === next.record.created_at && previous.record.screenshot === next.record.screenshot && previous.onRaiseBudget === next.onRaiseBudget && previous.raisingBudget === next.raisingBudget)

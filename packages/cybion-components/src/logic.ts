@@ -2,6 +2,7 @@
 // composer hooks, with no components and therefore no stylesheet imports. A host
 // that keeps its own shell imports these from `@zccz14/cybion-components/logic`,
 // so it never has to copy the modules into its own tree.
+export * from "./lib/budget-stop"
 export * from "./lib/chat-input"
 export * from "./lib/checkpoint-text"
 export * from "./lib/composer-audio"
@@ -11,6 +12,7 @@ export * from "./lib/composer-files"
 export * from "./lib/composer-images"
 export * from "./lib/format"
 export * from "./lib/history-payload"
+export * from "./lib/money"
 export * from "./lib/thread-history"
 export * from "./lib/thread-manual-loads"
 export * from "./lib/thread-response"
