@@ -70,6 +70,46 @@ test("the popover groups models by upstream and edits reasoning effort and fast 
   await expect(popover).toBeHidden()
 })
 
+test("the spend limit follows the account default and accepts dollars", async ({ page }) => {
+  await page.goto("/e2e/thread-settings.html")
+  await page.getByRole("button", { name: "线程设置" }).click()
+  const popover = page.locator('[data-slot="popover-content"]')
+  const limit = popover.getByLabel("花费上限（USD）")
+  // 未设置时留空，只是把默认值放在占位符里。
+  await expect(limit).toHaveAttribute("placeholder", "10")
+  await expect(limit).toHaveValue("")
+  await expect(page.getByTestId("usd-budget")).toHaveText("null")
+  await expect(popover).toContainText("已结算花费达到该金额后本线程停止并转入受阻")
+  // 美元换算成纳美元整数，避免浮点。
+  await limit.fill("0.01")
+  await expect(page.getByTestId("usd-budget")).toHaveText("10000000")
+  // 0 表示不限制，与留空（跟随默认）是两件事。
+  await limit.fill("0")
+  await expect(page.getByTestId("usd-budget")).toHaveText("0")
+  await limit.fill("")
+  await expect(page.getByTestId("usd-budget")).toHaveText("null")
+  await page.getByRole("button", { name: "Language", exact: true }).click()
+  await expect(popover.getByLabel("Spend limit (USD)")).toBeVisible()
+  await page.keyboard.press("Escape")
+  await expect(popover).toBeHidden()
+})
+
+test("the spend limit stays reachable inside the scrolling panel on a narrow screen", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/e2e/thread-settings.html")
+  await page.getByRole("button", { name: "线程设置" }).click()
+  const popover = page.locator('[data-slot="popover-content"]')
+  const limit = popover.locator("#thread-settings-usd-budget")
+  await limit.scrollIntoViewIfNeeded()
+  await expect(limit).toBeVisible()
+  // 面板限高 24rem 并在内部滚动，字段滚进来后必须落在面板可见区内。
+  const panel = await popover.boundingBox()
+  const box = await limit.boundingBox()
+  expect(panel !== null && box !== null && box.y >= panel.y - 1 && box.y + box.height <= panel.y + panel.height + 1).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: "test-results/thread-settings-usd-budget.png" })
+})
+
 test("speech-to-text follows the account default and can be turned off", async ({ page }) => {
   await page.goto("/e2e/thread-settings.html")
   await page.getByRole("button", { name: "线程设置" }).click()

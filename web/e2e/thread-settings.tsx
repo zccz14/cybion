@@ -36,6 +36,7 @@ function Fixture() {
   const [effort, setEffort] = useState("medium")
   const [fast, setFast] = useState(false)
   const [budget, setBudget] = useState<number | null>(null)
+  const [usdBudget, setUsdBudget] = useState<number | null>(null)
   const [minimal, setMinimal] = useState<boolean | null>(null)
   const [imageModel, setImageModel] = useState<string | null>(null)
   const [audioModel, setAudioModel] = useState<string | null>(null)
@@ -52,6 +53,7 @@ function Fixture() {
       <span data-testid="effort">{effort}</span>
       <span data-testid="fast">{String(fast)}</span>
       <span data-testid="budget">{String(budget)}</span>
+      <span data-testid="usd-budget">{String(usdBudget)}</span>
       <span data-testid="minimal">{String(minimal)}</span>
       <span data-testid="image-model">{String(imageModel)}</span>
       <span data-testid="audio-model">{String(audioModel)}</span>
@@ -59,7 +61,7 @@ function Fixture() {
       <span data-testid="initial-manuals">{JSON.stringify(initialManuals)}</span>
     </div>
     <div className="mt-auto flex items-center justify-between gap-3 border-t pt-4">
-      <ThreadSettingsPopover model={model} upstreamId={upstreamId} catalogs={catalogs} reasoningEffort={effort} fast={fast} language={language} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} minimalMode={{ override: minimal, fallback: false, onChange: setMinimal }} imageGeneration={{ override: imageModel, fallback: "gpt-image-2", catalogs: imageCatalogs, onChange: setImageModel }} audioTranscription={{ override: audioModel, fallback: "whisper-1", catalogs: audioCatalogs, onChange: setAudioModel }} loadedManualCap={{ override: loadedCap, fallback: 12, onChange: setLoadedCap }} initialManuals={{ override: initialManuals, fallback: [manualChoices[0].manual_id], catalogs: manualChoices, onChange: setInitialManuals }} onModelChange={(upstreamId, model) => { setUpstreamId(upstreamId); setModel(model) }} onReasoningChange={setEffort} onFastChange={setFast} />
+      <ThreadSettingsPopover model={model} upstreamId={upstreamId} catalogs={catalogs} reasoningEffort={effort} fast={fast} language={language} usdBudget={{ override: usdBudget, fallback: 10_000_000_000, onChange: setUsdBudget }} contextBudget={{ override: budget, fallback: 200000, onChange: setBudget }} minimalMode={{ override: minimal, fallback: false, onChange: setMinimal }} imageGeneration={{ override: imageModel, fallback: "gpt-image-2", catalogs: imageCatalogs, onChange: setImageModel }} audioTranscription={{ override: audioModel, fallback: "whisper-1", catalogs: audioCatalogs, onChange: setAudioModel }} loadedManualCap={{ override: loadedCap, fallback: 12, onChange: setLoadedCap }} initialManuals={{ override: initialManuals, fallback: [manualChoices[0].manual_id], catalogs: manualChoices, onChange: setInitialManuals }} onModelChange={(upstreamId, model) => { setUpstreamId(upstreamId); setModel(model) }} onReasoningChange={setEffort} onFastChange={setFast} />
       <Button>发送</Button>
     </div>
   </main>
