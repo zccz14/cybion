@@ -9260,11 +9260,64 @@ fn responses_payload_with_options(
     payload
 }
 
+/// INVARIANT: 落库原样，回放清洗。上游条目先按收到的样子进历史，能不能回放由这里
+/// 决定：thinking 模型只认 `reasoning_text` / `summary_text` 两种 part，所以任何带
+/// `text` 的 part 都归一到这两种名字（上游改叫别的同样能回放），不带 `text` 的 part
+/// 与清洗后什么也不剩的条目才在这里消失。
+fn clean_replay_item(item: &mut Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("reasoning") => clean_reasoning_item(item),
+        // A message replays only the content parts a model can read.
+        Some("message") => item.get("content").is_none_or(Value::is_array),
+        _ => true,
+    }
+}
+
+fn clean_reasoning_item(item: &mut Value) -> bool {
+    let Some(object) = item.as_object_mut() else {
+        return false;
+    };
+    let content = normalized_parts(object.get("content"), "reasoning_text");
+    let summary = normalized_parts(object.get("summary"), "summary_text");
+    if content.is_empty() && summary.is_empty() {
+        return false;
+    }
+    set_parts(object, "content", content);
+    set_parts(object, "summary", summary);
+    true
+}
+
+fn set_parts(object: &mut serde_json::Map<String, Value>, key: &str, parts: Vec<Value>) {
+    if parts.is_empty() {
+        object.remove(key);
+    } else {
+        object.insert(key.to_owned(), Value::Array(parts));
+    }
+}
+
+/// Every part that carries text is kept, under the one name a thinking upstream
+/// reads; a part with no text carries nothing to replay.
+fn normalized_parts(parts: Option<&Value>, wire: &str) -> Vec<Value> {
+    parts
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    let text = part.get("text").and_then(Value::as_str)?;
+                    (!text.is_empty()).then(|| json!({"type": wire, "text": text}))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn sanitize_responses_input(payload: &mut Value) {
     let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) else {
         return;
     };
-    let items = std::mem::take(input);
+    let mut items = std::mem::take(input);
+    items.retain_mut(clean_replay_item);
     *input = replayable_context_items(items);
     for item in input {
         match item.get("type").and_then(Value::as_str) {
@@ -14551,6 +14604,38 @@ mod tests {
         assert_eq!(call.call_id, "call_1");
         assert_eq!(arguments["worker_id"], "worker-1");
         assert_eq!(response_text(&result.value).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn replay_reads_a_thinking_turn_whatever_the_provider_called_its_parts() {
+        // 落库原样、回放清洗：上游把 thinking 文本叫 `thought`，回放时归一到
+        // `reasoning_text`，文本一个字都不丢；清洗后什么都不剩的条目才不回放。
+        let payload = responses_payload(
+            "deepseek-flash",
+            json!([
+                {"type":"reasoning","summary":[{"type":"thought_summary","text":"plan"}],
+                 "content":[{"type":"thought","text":"private thinking"},
+                            {"type":"reasoning_text","text":""}]},
+                {"type":"reasoning","content":[{"type":"noise"}]},
+                {"role":"user","content":"hello"}
+            ]),
+            false,
+        );
+        let items = payload["input"].as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            2,
+            "a reasoning item with no text left to replay disappears here, not at ingest: {items:?}"
+        );
+        assert_eq!(
+            items[0]["content"],
+            json!([{"type":"reasoning_text","text":"private thinking"}])
+        );
+        assert_eq!(
+            items[0]["summary"],
+            json!([{"type":"summary_text","text":"plan"}])
+        );
+        assert_eq!(items[1]["content"], "hello");
     }
 
     #[test]

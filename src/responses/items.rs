@@ -30,9 +30,39 @@ macro_rules! response_items {
                     .and_then(|kind| kind.as_str().map(str::to_owned))
                     .ok_or_else(|| <serde_json::Error as serde::de::Error>::custom("response item requires string type"))?;
                 match kind.as_str() {
-                    $($wire => serde_json::from_value(value).map(Self::$variant),)*
-                    "compaction_summary" => serde_json::from_value(value).map(Self::Compaction),
-                    _ => Ok(Self::Other { kind, fields: serde_json::from_value(value)? }),
+                    $($wire => match serde_json::from_value(value.clone()) {
+                        Ok(item) => Ok(Self::$variant(item)),
+                        Err(cause) => Self::verbatim(kind, value, cause),
+                    },)*
+                    "compaction_summary" => match serde_json::from_value(value.clone()) {
+                        Ok(item) => Ok(Self::Compaction(item)),
+                        Err(cause) => Self::verbatim(kind, value, cause),
+                    },
+                    _ => Self::reassembled(kind, value),
+                }
+            }
+
+            /// INVARIANT: 落库原样，回放清洗。一条读不懂的条目在这里不消失——它按收到的
+            /// JSON 原样进历史（`Other`），能不能回放由回放侧清洗决定。丢弃一条条目会
+            /// 让历史缺一块，而历史是 append-only，缺的那块后面没有任何机会补回来。
+            fn verbatim(
+                kind: String,
+                value: Value,
+                cause: serde_json::Error,
+            ) -> serde_json::Result<Self> {
+                tracing::warn!(%kind, %cause, "keeping an unreadable response item verbatim");
+                Self::reassembled(kind, value)
+            }
+
+            fn reassembled(kind: String, value: Value) -> serde_json::Result<Self> {
+                match value {
+                    Value::Object(fields) => Ok(Self::Other {
+                        kind,
+                        fields: fields.into_iter().collect(),
+                    }),
+                    _ => Err(<serde_json::Error as serde::de::Error>::custom(
+                        "response item requires an object body",
+                    )),
                 }
             }
 
