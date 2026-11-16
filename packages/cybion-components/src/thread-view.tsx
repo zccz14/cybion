@@ -241,6 +241,9 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
       ])
     },
   })
+  // Only the newest budget record offers the control: an older one may already
+  // have been answered, and raising its limit would resume nothing.
+  const actionableBudgetRecordId = useMemo(() => newestBudgetRecordId(durableRecords), [durableRecords])
   const running = thread.data?.status === "running"
   // Only stored records prove a call is still on the device: a streamed item the
   // preview renders carries the request's start time, not the call's own.
@@ -285,9 +288,6 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
     submitInput([clip])
   }
   const hasHistory = durableRecords.some((record) => record.kind !== "activity")
-  // Only the newest budget record offers the control: an older one may already
-  // have been answered, and raising its limit would resume nothing.
-  const actionableBudgetRecordId = useMemo(() => newestBudgetRecordId(durableRecords), [durableRecords])
   const action = composerAction(input, attachments.images.length + files.files.length, running)
   return <section className={threadRootClass(className)}>
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
