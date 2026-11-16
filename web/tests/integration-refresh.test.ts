@@ -5,6 +5,8 @@ import test from "node:test"
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const popover = readPackageSource("components/thread-settings-popover.tsx")
+// The fields are shared with the account defaults form, so the pickers live here now.
+const fields = readPackageSource("components/thread-settings-fields.tsx")
 
 test("personal configuration manages multiple Responses-compatible upstreams without exposing keys", () => {
   assert.match(source, /apiBaseUrlDescription: "Cybion sends model requests to this URL with \/responses appended\./)
@@ -24,17 +26,20 @@ test("each upstream owns its model catalog and the model pickers group by upstre
   const view = readPackageSource("thread-view.tsx")
   assert.match(source, /"\/api\/integrations\/upstreams\/models"/)
   assert.match(source, /function useUpstreamModels/)
-  assert.match(source, /modelGroups\(models\.data\?\.upstreams, value\.upstream_id, value\.model\)/)
-  // The new-Thread composer picks from the polled account catalog; the
-  // conversation composer picks from the catalog the view fetched itself.
-  assert.equal(source.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 1)
+  // The grouping moved into the shared fields component; the card hands it the
+  // polled catalog and the picker groups by upstream there.
+  assert.match(source, /catalogs=\{models\.data\?\.upstreams\}/)
+  assert.match(fields, /modelGroups\(catalogs, upstreamId, model\)/)
+  // The new-Thread composer picks from the polled account catalog, and so does the
+  // account defaults form, which now renders the same shared fields.
+  assert.equal(source.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 2)
   assert.equal(view.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 1)
   assert.match(source, /upstreamId=\{value\.upstream_id\}/)
   assert.match(view, /upstreamId=\{current\.upstream_id\}/)
   assert.match(view, /onModelChange=\{\(upstream_id, model\) => settings\.mutate\(\{ upstream_id, model \}\)\}/)
   assert.match(source, /availableModels: "Available models"/)
   assert.match(source, /availableModels: "可用模型"/)
-  assert.match(popover, /<SelectGroup key=\{group\.id\}>/)
-  assert.match(popover, /\{group\.name && <SelectLabel>\{group\.name\}<\/SelectLabel>\}/)
+  assert.match(fields, /<SelectGroup key=\{group\.id\}>/)
+  assert.match(fields, /\{group\.name && <SelectLabel>\{group\.name\}<\/SelectLabel>\}/)
   assert.doesNotMatch(source, /THREAD_MODELS/)
 })

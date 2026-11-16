@@ -117,14 +117,22 @@ test("history renders reasoning summaries", () => {
 
 test("thread settings live in the composer popover and the image tool follows its configured model", () => {
   const popover = readPackageSource("components/thread-settings-popover.tsx")
+  // The fields themselves are shared with the account defaults form, so the
+  // reasoning scale and the fast switch live in one component, not in the shell.
+  const fields = readPackageSource("components/thread-settings-fields.tsx")
   const view = readPackageSource("thread-view.tsx")
   assert.match(source, /import \{ ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection \} from "@zccz14\/cybion-components"/)
   // One picker for the new-Thread composer, one for the conversation composer.
   assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 1)
   assert.equal(view.match(/<ThreadSettingsPopover /g)?.length, 1)
-  assert.match(popover, /REASONING_EFFORTS = \["low", "medium", "high", "xhigh", "max"\]/)
-  assert.match(popover, /ZapIcon/)
-  assert.match(popover, /<Switch aria-label=\{t\.fastMode\}/)
+  // The scale is the Thread type's own union, so the panel cannot offer an effort
+  // the API refuses; both surfaces read this one list.
+  assert.match(fields, /REASONING_EFFORTS = \["none", "low", "medium", "high", "xhigh", "max"\]/)
+  assert.match(fields, /ZapIcon/)
+  assert.match(fields, /<Switch aria-label=\{copyFor\(language, "fastMode"\)\}/)
+  // One panel, two surfaces: the popover renders only the shell.
+  assert.match(popover, /<ThreadSettingsFields/)
+  assert.doesNotMatch(popover, /REASONING_EFFORTS\.map/)
   assert.doesNotMatch(source, /id="new-thread-web-search"/)
   assert.doesNotMatch(source, /id="default-thread-web-search"/)
   assert.doesNotMatch(source, /settings\.mutate\(\{ web_search/)
