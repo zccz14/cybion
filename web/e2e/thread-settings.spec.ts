@@ -80,9 +80,20 @@ test("the spend limit follows the account default and accepts dollars", async ({
   await expect(limit).toHaveValue("")
   await expect(page.getByTestId("usd-budget")).toHaveText("null")
   await expect(popover).toContainText("已结算花费达到该金额后本线程停止并转入受阻")
+  // 逐键敲 0.0：小数点必须留在框里，不能被 Number("0.") = 0 塌成 0。
+  await limit.pressSequentially("0.0", { delay: 30 })
+  await expect(limit).toHaveValue("0.0")
+  await limit.pressSequentially("1", { delay: 30 })
+  await expect(limit).toHaveValue("0.01")
   // 美元换算成纳美元整数，避免浮点。
-  await limit.fill("0.01")
   await expect(page.getByTestId("usd-budget")).toHaveText("10000000")
+  // 非数字按键被挡回去，内容不变。
+  await limit.pressSequentially("abc")
+  await expect(limit).toHaveValue("0.01")
+  // 失焦回到规范写法。
+  await limit.fill("0.010")
+  await limit.blur()
+  await expect(limit).toHaveValue("0.01")
   // 0 表示不限制，与留空（跟随默认）是两件事。
   await limit.fill("0")
   await expect(page.getByTestId("usd-budget")).toHaveText("0")
