@@ -99,14 +99,25 @@ fn every_codex_response_item_has_typed_fields_and_survives_replay() {
         assert_eq!(restored.value()["future_field"], wire["future_field"]);
         assert_eq!(restored.kind(), wire["type"].as_str().unwrap());
     }
-    for invalid in [
+    // INVARIANT: 落库原样、回放清洗。一条读不懂的条目既不能毁掉这一轮，也不能消失——
+    // 它按收到的 JSON 原样进历史，能不能送出去由 `clean_replay_item` 决定。
+    for unreadable in [
         json!({"type":"function_call","id":"not-a-call-id","name":"bash","arguments":"{}"}),
         json!({"type":"function_call","call_id":"c","name":"bash","arguments":{}}),
         json!({"type":"message","role":"assistant","content":"not-an-array"}),
         json!({"type":"reasoning","summary":"not-an-array"}),
         json!({"type":"custom_tool_call","call_id":123,"name":"tool","input":"x"}),
     ] {
-        assert!(ResponseItem::from_value(invalid).is_err());
+        let kept = ResponseItem::from_value(unreadable.clone()).unwrap();
+        assert_eq!(
+            kept.value(),
+            unreadable,
+            "an unreadable item round-trips verbatim"
+        );
+    }
+    // Only a response item that is not an object at all has nothing to store.
+    for unstorable in [json!(["not-an-object"]), json!({"type": 7})] {
+        assert!(ResponseItem::from_value(unstorable).is_err());
     }
 }
 
@@ -521,7 +532,9 @@ fn a_reasoning_item_without_a_summary_is_still_a_reasoning_item() {
 }
 
 #[test]
-fn an_unreadable_final_output_item_does_not_fail_the_turn() {
+fn an_unreadable_output_item_is_kept_verbatim_and_never_dropped() {
+    // 落库原样：一条读不懂的条目既不能毁掉这一轮，也不能消失。它按收到的 JSON 进历史，
+    // 回放时才由 `clean_replay_item` 决定还能不能送出去。
     let event = snapshot(json!([
         {"id":"rs","type":"reasoning","content":[{"type":"reasoning_text","text":"plan"}]},
         {"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},
@@ -529,9 +542,34 @@ fn an_unreadable_final_output_item_does_not_fail_the_turn() {
     ]));
     let mut state = ResponseState::default();
     state.apply(&event).unwrap();
-    assert_eq!(state.output.len(), 2);
+    assert_eq!(state.output.len(), 3);
     assert_eq!(state.output[0].item.kind(), "reasoning");
     assert_eq!(state.output[1].item.text(), "done");
+    assert_eq!(state.output[2].item.kind(), "message");
+    assert_eq!(state.output[2].item.id(), Some("m2"));
+    assert_eq!(
+        state.output[2].item.value()["content"],
+        json!("not-an-array")
+    );
+}
+
+#[test]
+fn a_reasoning_item_whose_parts_the_wire_model_does_not_know_survives() {
+    // 上游把 thinking 文本放在一个没见过的 part 名字下：整条条目原样留下，一个字都不丢。
+    let reasoning = item(json!({
+        "id": "rs-odd",
+        "type": "reasoning",
+        "summary": [{"type": "thought_summary", "text": "plan"}],
+        "content": [{"type": "thought", "text": "private thinking"}],
+    }));
+    assert_eq!(reasoning.kind(), "reasoning");
+    assert_eq!(reasoning.id(), Some("rs-odd"));
+    assert_eq!(reasoning.value()["content"][0]["type"], json!("thought"));
+    assert_eq!(
+        reasoning.value()["content"][0]["text"],
+        json!("private thinking")
+    );
+    assert_eq!(reasoning.value()["summary"][0]["text"], json!("plan"));
 }
 
 fn snapshot(output: Value) -> ResponseEvent {
