@@ -7,7 +7,8 @@
 //! a blocked Thread has to survive both.
 //!
 //! There is no unblock tool. The user's next message clears the flag (see
-//! `clear_on_input`, called from the one place that writes an `input` record), so
+//! `clear_on_user_action`, called from the one place that writes an `input` record
+//! and from the user's own Continue), so
 //! the model never decides when it stops waiting.
 
 use super::*;
@@ -88,11 +89,19 @@ fn dollars(nanos: i64) -> String {
     }
 }
 
-/// The user spoke, so the Thread is no longer waiting on them. Every input
-/// record passes through here; a system-written input (a continuation nudge, if
-/// one is ever added) must not, or it would silently unblock a Thread no human
-/// ever looked at.
-pub(super) fn clear_on_input(connection: &Connection, thread_id: &str) -> Result<(), ApiError> {
+/// The user acted on the Thread, so it is no longer waiting on them. Two writes
+/// pass through here, and both are the user's own: an `input` record (they
+/// spoke) and a Continue they requested themselves. A system-written input (a
+/// continuation nudge, if one is ever added) must not, or it would silently
+/// unblock a Thread no human ever looked at.
+///
+/// A Thread stopped by its budget needs the second one as much as the first:
+/// raising the limit is only an adjustment, and the Thread has to keep running
+/// afterwards instead of reporting itself blocked again on finalization.
+pub(super) fn clear_on_user_action(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<(), ApiError> {
     connection.execute(
         "UPDATE threads SET blocked=0 WHERE id=? AND blocked=1",
         [thread_id],

@@ -30,6 +30,21 @@ const copy = {
   recordToolOutput: { en: "Worker result", zh: "Worker 结果" },
   recordReasoning: { en: "Reasoning", zh: "推理 (Reasoning)" },
   recordActivity: { en: "Activity", zh: "活动记录" },
+  recordBudgetExhausted: { en: "Spend limit reached", zh: "已达花费上限" },
+  // The Controller writes this record in English because it is also what the model reads.
+  // The panel restates it from the amounts on the record, so the conversation reads in the
+  // language the reader picked.
+  budgetExhausted: {
+    en: "Budget exhausted: {spent} settled of the {budget} limit.",
+    zh: "预算已耗尽：已结算 {spent}，上限 {budget}。",
+  },
+  budgetRaiseHint: {
+    en: "Add budget to keep going: the limit becomes the settled spend plus this amount, and the Thread continues.",
+    zh: "追加预算即可继续：上限将变为「已结算花费 + 这笔金额」，随后线程继续执行。",
+  },
+  budgetRaiseLabel: { en: "Budget to add (USD)", zh: "追加预算（USD）" },
+  budgetRaiseAction: { en: "Add and continue", zh: "追加并继续" },
+  budgetRaiseNewLimit: { en: "New limit: {limit}", zh: "新上限：{limit}" },
   recordContext: { en: "Injected context", zh: "注入的上下文" },
   recordProtocol: { en: "Protocol event", zh: "协议事件" },
   generatedImage: { en: "Generated image", zh: "生成的图片" },
@@ -62,4 +77,9 @@ export type CopyKey = keyof typeof copy
 
 export function copyFor(language: Language, key: CopyKey): string {
   return copy[key][language]
+}
+
+/** A copy line that names values, e.g. the amounts a budget record carries. */
+export function fillCopy(template: string, values: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (match, name: string) => values[name] ?? match)
 }

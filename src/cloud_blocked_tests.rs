@@ -203,6 +203,76 @@ fn the_next_user_message_clears_a_budget_block() {
     assert_eq!(blocked(&connection, "t"), 0);
 }
 
+// Raising the limit is only an adjustment; the user then resumes the Thread with
+// Continue, which writes a `thread_control` record rather than an `input` one. If
+// that path left `blocked=1` alone, the Thread would run the turn the user paid
+// for and then paint itself as blocked again the moment it finalized.
+#[test]
+fn the_users_own_continue_clears_a_budget_block() {
+    let mut connection = blocked_connection();
+    insert_thread(&connection, "t");
+    // Continue needs protocol history to resume from; write it raw so the seeded
+    // record cannot clear the flag this test is about.
+    connection
+        .execute(
+            "INSERT INTO history_records(thread_id,kind,payload,created_at)
+             VALUES('t','input','{\"content\":\"hello\"}',?)",
+            [now()],
+        )
+        .unwrap();
+    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    assert_eq!(blocked(&connection, "t"), 1);
+    assert_eq!(display_status(&connection, "t"), "blocked");
+
+    let (idx, operation) = thread_controls::record_request(
+        &mut connection,
+        &std::env::temp_dir(),
+        "t",
+        thread_controls::RequestInput::Continue,
+    )
+    .unwrap();
+    assert_eq!(operation, RequestOperation::Inference);
+    // A control record, not an input: the model still gets no new words from the user.
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT kind FROM history_records WHERE id=?",
+                [idx],
+                |row| { row.get::<_, String>(0) }
+            )
+            .unwrap(),
+        "activity"
+    );
+    assert_eq!(blocked(&connection, "t"), 0);
+    // The turn is queued now, so the projection reports what it is doing rather
+    // than the state it was waiting in.
+    assert_eq!(display_status(&connection, "t"), "running");
+}
+
+// Compact spends no budget, so it is not a resume and must not quietly lift a
+// block the user never answered.
+#[test]
+fn compact_does_not_clear_a_budget_block() {
+    let mut connection = blocked_connection();
+    insert_thread(&connection, "t");
+    connection
+        .execute(
+            "INSERT INTO history_records(thread_id,kind,payload,created_at)
+             VALUES('t','input','{\"content\":\"hello\"}',?)",
+            [now()],
+        )
+        .unwrap();
+    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    thread_controls::record_request(
+        &mut connection,
+        &std::env::temp_dir(),
+        "t",
+        thread_controls::RequestInput::Compact,
+    )
+    .unwrap();
+    assert_eq!(blocked(&connection, "t"), 1);
+}
+
 #[tokio::test]
 async fn a_thread_at_its_budget_blocks_before_asking_the_upstream() {
     let (_root, state) = test_state();
