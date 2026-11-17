@@ -23,7 +23,19 @@ import { AuthMiniProvider, useAuthMini, type AuthMiniVerificationFailure } from 
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitProvider, useLinkit } from "linkit-react-components"
 import { AppLayout, Markdown, type AppNavGroup } from "@zccz14/ux"
-import { CybionThreadProvider, CybionThreadView, HistoryMessage, ThreadSettingsFields } from "@zccz14/cybion-components"
+import {
+  CybionThreadProvider,
+  CybionThreadView,
+  HistoryMessage,
+  ThreadSettingsFields,
+  ThreadSettingsPopover,
+  threadSettingsDefaults,
+  threadSettingsForNewThread,
+  threadSettingsFromDefaults,
+  threadSettingsFromThread,
+  sameThreadSettings,
+  type ThreadSettings,
+} from "@zccz14/cybion-components"
 import { listenForExtensionAttachments } from "./extension-bridge"
 import {
   ArchiveIcon,
@@ -72,11 +84,10 @@ import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } fro
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
 import { historyPayloadObject, historyPayloadText, type AudioTranscriptionFunctionCall } from "@zccz14/cybion-components/logic"
 import { formatBytes } from "@zccz14/cybion-components/logic"
-import { MAX_BUDGET_USD_NANOS } from "@zccz14/cybion-components/logic"
+import { budgetTooLarge } from "@zccz14/cybion-components/logic"
 import { formattedTime } from "@zccz14/cybion-components/logic"
 import { type HistoryRecord, type ThreadHistoryWindow, type ThreadManualLoadsView } from "@zccz14/cybion-components"
 import { handleChatInputKeyDown } from "@zccz14/cybion-components/logic"
-import { defaultsChanged } from "@/lib/thread-defaults"
 import { useComposerDraft } from "@zccz14/cybion-components/logic"
 import { composerDraftKey } from "@zccz14/cybion-components/logic"
 import { useComposerImages } from "@zccz14/cybion-components/logic"
@@ -122,7 +133,6 @@ import { DndContext, DragOverlay, MouseSensor, TouchSensor, closestCenter, useDr
 import { collectSubtreeIds, commonAncestorIds, manualAncestorIds, manualCurrentPlacement, manualPlacementFor, manualTreeIndex, flattenTree, trashedRoots, visibleManuals, type ManualDropZone } from "@/lib/manuals-tree"
 import { manualDraft, draftsMatch, shouldAutosave, type ManualDraft } from "@/lib/manual-drafts"
 import { ThreadListPane } from "@/components/thread-list"
-import { ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "@zccz14/cybion-components"
 import { ThreadManualLoads } from "@/components/thread-manual-loads"
 import { ThreadNotes } from "@/components/thread-notes"
 import type { ThreadUsage } from "@zccz14/cybion-components/logic"
@@ -1064,32 +1074,6 @@ function useUpstreamModels(sdk: AuthMiniApi) {
   })
 }
 
-// Image generation models come from the same catalog, narrowed to the
-// upstreams' image lists (NormAI answers `?kind=image` with its callable
-// image models).
-function useImageModels(sdk: AuthMiniApi) {
-  return useQuery({
-    queryKey: ["upstream-image-models"],
-    queryFn: ({ signal }) => api<UpstreamModels>(sdk, "/api/integrations/upstreams/models?kind=image", { signal }),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  })
-}
-
-// The account's console language, for the few labels this card writes inline
-// instead of through the copy dictionary.
-
-// The callable speech-to-text models an account can pick for audio input
-// (NormAI answers `?kind=sst` with its speech-to-text rows).
-function useAudioModels(sdk: AuthMiniApi) {
-  return useQuery({
-    queryKey: ["upstream-audio-models"],
-    queryFn: ({ signal }) => api<UpstreamModels>(sdk, "/api/integrations/upstreams/models?kind=sst", { signal }),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  })
-}
-
 listenForExtensionAttachments()
 
 function App() {
@@ -1340,6 +1324,7 @@ function WorkspaceShell({
             reloadLabel={t("reload")}
           />}
         >
+          <CybionThreadProvider queryClient={queryClient} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={API_BASE} getToken={() => accessToken(sdk)} identity={userId} language={language}>
           <Routes>
             <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
             <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
@@ -1368,6 +1353,7 @@ function WorkspaceShell({
             <Route path="/help" element={<Page title={t("help")} description={onboardingCopy[language].helpDescription}><UsageHelp language={language} /></Page>} />
             <Route path="*" element={<Navigate to="/threads" replace />} />
           </Routes>
+          </CybionThreadProvider>
         </ErrorBoundary>
   </AppLayout>
 }
@@ -1441,16 +1427,12 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
-  const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const models = useUpstreamModels(sdk)
-  const imageModels = useImageModels(sdk)
-  const audioModels = useAudioModels(sdk)
-  const manualChoices = useQuery({ queryKey: ["manual-summaries"], queryFn: ({ signal }) => api<{ manuals: ManualChoice[] }>(sdk, "/api/manual-summaries", { signal }) })
-  const [draft, setDraft] = useState<ThreadDefaults | null>(null)
-  // Creation shows the same six settings the Thread panel edits; each stays
-  // null until the composer changes it, which is what "follow the default" means.
-  const [createSettings, setCreateSettings] = useState<{ contextBudget: number | null; loadedManualCap: number | null; initialManuals: string[] | null; minimalMode: boolean | null; imageGeneration: string | null; audioTranscription: string | null; usdBudget: number | null }>({ contextBudget: null, loadedManualCap: null, initialManuals: null, minimalMode: null, imageGeneration: null, audioTranscription: null, usdBudget: null })
-  const editCreate = <K extends keyof typeof createSettings>(key: K, value: (typeof createSettings)[K]) => setCreateSettings((current) => ({ ...current, [key]: value }))
+  // Creation is the same settings form the account defaults and a Thread's panel
+  // render, seeded from the defaults: a Thread that does not exist yet names a
+  // model and follows the account for the rest until the composer pins one.
+  const settingsDefaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
+  const [settings, setSettings] = useState<ThreadSettings | null>(null)
+  const value = settings ?? (settingsDefaults.data ? threadSettingsForNewThread(threadSettingsFromDefaults(settingsDefaults.data)) : null)
   const location = useLocation()
   const request = useApiRequest(sdk)
   const composer = useComposerDraft(userId, null)
@@ -1465,7 +1447,6 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     seed(initialInput)
     navigate({ pathname: location.pathname, search: location.search, hash: location.hash }, { replace: true, state })
   }, [location, navigate, seed])
-  const value = draft ?? defaults.data
   const start = useMutation({
     mutationFn: (payload: StartThreadInput) => api<RequestAck>(sdk, "/api/threads/start", { method: "POST", body: JSON.stringify({ ...payload, draft: undefined, input: payload.input.trim() }) }),
     onSuccess: (_request, payload) => {
@@ -1476,8 +1457,8 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
       void client.invalidateQueries({ queryKey: ["threads"] })
     },
   })
-  const edit = (next: ThreadDefaults) => {
-    setDraft(next)
+  const edit = (next: ThreadSettings) => {
+    setSettings(next)
     start.reset()
   }
   // Attachments travel inside the message text, so the Controller receives the
@@ -1489,7 +1470,9 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     if (!value || oversize || start.isPending) return
     // 一个字没打、只有一段语音，也是一条合法输入，不能按文本判空丢掉。
     if (composed === "" && attachments.images.length === 0 && audios.length === 0) return
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, context_budget_tokens: createSettings.contextBudget, minimal_mode: createSettings.minimalMode, image_generation_model: createSettings.imageGeneration, max_loaded_manuals: createSettings.loadedManualCap, budget_usd_nanos: createSettings.usdBudget, audio_transcription_model: createSettings.audioTranscription, initial_manual_ids: createSettings.initialManuals, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
+    // The one value the form holds is exactly what starts the Thread: no setting is
+    // copied by hand, so the composer cannot show one thing and send another.
+    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, context_budget_tokens: value.context_budget_tokens, minimal_mode: value.minimal_mode, image_generation_model: value.image_generation_model, max_loaded_manuals: value.max_loaded_manuals, budget_usd_nanos: value.budget_usd_nanos, audio_transcription_model: value.audio_transcription_model, initial_manual_ids: value.initial_manual_ids, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1504,8 +1487,8 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 sm:py-8">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-          {defaults.error && <RequestError error={defaults.error} onRetry={() => void defaults.refetch()} />}
-          {defaults.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-24" /><Skeleton className="h-20" /></div>}
+          {settingsDefaults.error && <RequestError error={settingsDefaults.error} onRetry={() => void settingsDefaults.refetch()} />}
+          {settingsDefaults.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-24" /><Skeleton className="h-20" /></div>}
           <ConversationWelcome language={language} />
           {connection.isPending && !value?.upstream_id && <p role="status" className="text-sm text-muted-foreground">{help.preparing}</p>}
           {connection.error && <Alert><CircleAlertIcon /><AlertTitle>{help.connectionFailed}</AlertTitle><AlertDescription className="space-y-3"><p>{help.connectionRecovery}</p><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={connection.isFetching} onClick={() => void connection.refetch()}>{help.retryConnection}</Button><Button asChild size="sm" variant="outline"><Link to="/configuration">{help.modelAction}</Link></Button></div></AlertDescription></Alert>}
@@ -1513,7 +1496,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
         </div>
       </div>
       <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submit() }}>
-        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} restored={audio.restored} onDismissRestored={audio.dismissRestored} onRetry={() => submit()} /></Field><div className="flex items-center gap-3"><ComposerAttach language={language} disabled={!value || start.isPending} onFiles={attach} />{value && <ThreadSettingsPopover model={value.model} upstreamId={value.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={value.reasoning_effort} fast={value.service_tier_fast} language={language} disabled={start.isPending} usdBudget={{ override: createSettings.usdBudget, fallback: defaults.data?.budget_usd_nanos ?? 0, onChange: (next) => editCreate("usdBudget", next) }} contextBudget={{ override: createSettings.contextBudget, fallback: defaults.data?.context_budget_tokens ?? 200000, onChange: (next) => editCreate("contextBudget", next) }} loadedManualCap={{ override: createSettings.loadedManualCap, fallback: defaults.data?.max_loaded_manuals ?? 12, onChange: (next) => editCreate("loadedManualCap", next) }} initialManuals={{ override: createSettings.initialManuals, fallback: defaults.data?.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (next) => editCreate("initialManuals", next) }} minimalMode={{ override: createSettings.minimalMode, fallback: defaults.data?.minimal_mode ?? false, onChange: (next) => editCreate("minimalMode", next) }} imageGeneration={{ override: createSettings.imageGeneration, fallback: defaults.data?.image_generation_model ?? "", catalogs: imageModels.data?.upstreams, onChange: (next) => editCreate("imageGeneration", next) }} audioTranscription={{ override: createSettings.audioTranscription, fallback: defaults.data?.audio_transcription_model ?? null, catalogs: audioModels.data?.upstreams, onChange: (next) => editCreate("audioTranscription", next) }} onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })} onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort })} onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} phase={audio.phase} elapsed={audio.elapsed} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (!dataUrl) return; audio.attach(dataUrl); submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || composed === "" || oversize || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
+        <div className="mx-auto w-full max-w-3xl">{input === "" && <div className="mb-3"><ConversationExamples language={language} onChoose={(example) => { seed(example); inputRef.current?.focus() }} /></div>}<FieldGroup><Field><FieldLabel className="sr-only" htmlFor="new-thread-input">{t("newThreadPrompt")}</FieldLabel><Textarea id="new-thread-input" ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("newThreadPrompt")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={!value || start.isPending} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} restored={audio.restored} onDismissRestored={audio.dismissRestored} onRetry={() => submit()} /></Field><div className="flex items-center gap-3"><ComposerAttach language={language} disabled={!value || start.isPending} onFiles={attach} />{value && <ThreadSettingsPopover value={value} onChange={edit} language={language} disabled={start.isPending} />}<div className="ml-auto flex items-center gap-2"><ComposerAudio language={language} recording={audio.recording} phase={audio.phase} elapsed={audio.elapsed} disabled={!value || start.isPending} onStart={audio.start} onSend={() => void audio.finish().then((dataUrl) => { if (!dataUrl) return; audio.attach(dataUrl); submit([dataUrl]) })} onCancel={audio.cancel} /><Button disabled={!value || composed === "" || oversize || start.isPending || audio.recording}>{start.isPending ? <Spinner /> : <SendIcon data-icon="inline-start" />}{t("startThread")}</Button></div></div></FieldGroup></div>
       </form>
     </section>
   </main>
@@ -2622,30 +2605,12 @@ function MetricCard({ label, value, detail, progress }: { label: string; value: 
   return <Card><CardHeader><CardDescription>{label}</CardDescription><CardTitle className="text-2xl tabular-nums">{value}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{detail}{progress !== undefined && <Progress className="mt-3" value={Math.max(0, Math.min(100, progress))} />}</CardContent></Card>
 }
 
-// The controller refuses a cap outside 1–64; clamping in the field keeps a
-// keystroke from becoming a save that fails silently.
-type ManualChoice = { manual_id: string; name: string }
-
-/// The account's initial list: the same chips and "add" picker the Thread
-/// settings popover offers, over `/api/manual-summaries` (names, not bodies).
-
-function loadedManualCap(value: number) {
-  return Math.min(64, Math.max(1, Math.trunc(value)))
-}
-
-// The same money field the Thread panel uses: a draft keeps "0." in the box instead
-// of letting the number 0 overwrite it, and only complete amounts are committed.
-
 function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
   const client = useQueryClient()
   const queryKey = ["thread-defaults", sdk.session.getState().sessionId]
-  const [draft, setDraft] = useState<ThreadDefaults | null>(null)
+  const [draft, setDraft] = useState<ThreadSettings | null>(null)
   const defaults = useQuery({ queryKey, queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const models = useUpstreamModels(sdk)
-  const imageModels = useImageModels(sdk)
-  const audioModels = useAudioModels(sdk)
-  const manualChoices = useQuery({ queryKey: ["manual-summaries"], queryFn: ({ signal }) => api<{ manuals: ManualChoice[] }>(sdk, "/api/manual-summaries", { signal }) })
   const save = useMutation({
     mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
     onMutate: () => client.cancelQueries({ queryKey }),
@@ -2654,9 +2619,16 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
       setDraft(null)
     },
   })
-  const value = draft ?? defaults.data
-  const changed = value && defaults.data && defaultsChanged(value, defaults.data)
-  function edit(next: ThreadDefaults) {
+  // The account defaults are the one surface with nothing to follow: the same
+  // settings value, with every field holding a concrete default.
+  const saved = defaults.data ? threadSettingsFromDefaults(defaults.data) : null
+  const value = draft ?? saved
+  // What would be sent, compared field by field against what the server holds: an
+  // emptied box keeps the saved amount, so clearing one is not a change, and a
+  // setting added later joins the dirty check by itself.
+  const payload = value !== null && saved !== null ? threadSettingsDefaults(value, saved) : null
+  const changed = payload !== null && !sameThreadSettings(threadSettingsFromDefaults(payload), saved!)
+  function edit(next: ThreadSettings) {
     setDraft(next)
     save.reset()
   }
@@ -2665,33 +2637,13 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
     <CardContent>
       {defaults.error && <RequestError error={defaults.error} onRetry={() => void defaults.refetch()} />}
       {defaults.isLoading && <div className="flex flex-col gap-4"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-9 w-36" /></div>}
-      {value && <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (changed && !save.isPending) save.mutate(value) }}>
+      {value && saved && <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (changed && !save.isPending && !budgetTooLarge(value.budget_usd_nanos)) save.mutate(payload!) }}>
         <FieldGroup>
-          <ThreadSettingsFields
-            mode="defaults"
-            idPrefix="default-thread"
-            language={language}
-            disabled={save.isPending}
-            catalogs={models.data?.upstreams}
-            model={value.model}
-            upstreamId={value.upstream_id}
-            reasoningEffort={value.reasoning_effort}
-            fast={value.service_tier_fast}
-            contextBudget={{ value: value.context_budget_tokens, fallback: value.context_budget_tokens, onChange: (next) => next !== null && edit({ ...value, context_budget_tokens: next }) }}
-            usdBudget={{ value: value.budget_usd_nanos, fallback: value.budget_usd_nanos, onChange: (next) => edit({ ...value, budget_usd_nanos: next ?? 0 }) }}
-            loadedManualCap={{ value: value.max_loaded_manuals, fallback: value.max_loaded_manuals, onChange: (next) => next !== null && edit({ ...value, max_loaded_manuals: loadedManualCap(next) }) }}
-            initialManuals={{ value: value.initial_manual_ids, fallback: value.initial_manual_ids, catalogs: manualChoices.data?.manuals, onChange: (next) => edit({ ...value, initial_manual_ids: next ?? [] }) }}
-            minimalMode={{ value: value.minimal_mode, fallback: value.minimal_mode, onChange: (next) => next !== null && edit({ ...value, minimal_mode: next }) }}
-            imageGeneration={{ value: value.image_generation_model, fallback: value.image_generation_model, catalogs: imageModels.data?.upstreams, onChange: (next) => edit({ ...value, image_generation_model: next ?? "" }) }}
-            audioTranscription={{ value: value.audio_transcription_model, fallback: value.audio_transcription_model, catalogs: audioModels.data?.upstreams, onChange: (next) => edit({ ...value, audio_transcription_model: next }) }}
-            onModelChange={(upstream_id, model) => edit({ ...value, upstream_id, model })}
-            onReasoningChange={(reasoning_effort) => edit({ ...value, reasoning_effort: reasoning_effort as ThreadDefaults["reasoning_effort"] })}
-            onFastChange={(service_tier_fast) => edit({ ...value, service_tier_fast })}
-          />
+          <ThreadSettingsFields mode="defaults" idPrefix="default-thread" value={value} onChange={edit} language={language} disabled={save.isPending} />
         </FieldGroup>
         {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
         <div className="flex flex-wrap items-center gap-3">
-          <Button disabled={!changed || save.isPending || value.budget_usd_nanos > MAX_BUDGET_USD_NANOS}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingDefaults") : t("saveDefaults")}</Button>
+          <Button disabled={!changed || save.isPending || budgetTooLarge(value.budget_usd_nanos)}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingDefaults") : t("saveDefaults")}</Button>
           <p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("defaultsSaved")}</p>
         </div>
       </form>}
