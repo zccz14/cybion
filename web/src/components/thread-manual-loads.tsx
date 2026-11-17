@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom"
 import type { ManualSummary } from "@zccz14/cybion-components"
-import type { ThreadManualLoadsView } from "@zccz14/cybion-components"
+import { ThreadManualLoadsView } from "@zccz14/cybion-components/internal"
 
 const copy = {
   zh: {

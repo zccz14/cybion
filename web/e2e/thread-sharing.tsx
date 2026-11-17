@@ -8,8 +8,8 @@ import { TooltipProvider } from "../src/components/ui/tooltip"
 
 import { Markdown } from "@zccz14/ux"
 
-import { historyPayloadText } from "@zccz14/cybion-components/logic"
-import { screenshotImageSource, viewedImageSource } from "@zccz14/cybion-components/logic"
+import { historyPayloadText } from "@zccz14/cybion-components/internal"
+import { screenshotImageSource, viewedImageSource } from "@zccz14/cybion-components/internal"
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import type { SharingRequest } from "../src/lib/thread-sharing"
 import { adoptLinkitFixtureSession, LinkitFixtureProviders } from "./linkit-fixture"

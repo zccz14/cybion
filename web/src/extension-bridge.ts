@@ -1,4 +1,4 @@
-import { attachComposerAudio, attachComposerImages } from "@zccz14/cybion-components"
+import { attachComposerAudio, attachComposerImages } from "@zccz14/cybion-components/internal"
 
 /**
  * 浏览器扩展的侧边栏把本应用嵌在 iframe 里。跨域，扩展碰不到这里的组件状态，

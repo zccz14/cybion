@@ -1,7 +1,7 @@
 import * as React from "react"
 import { Popover as PopoverPrimitive } from "radix-ui"
 
-import { cn } from "@zccz14/cybion-components/logic"
+import { cn } from "@zccz14/cybion-components/internal"
 
 function Popover({
   ...props

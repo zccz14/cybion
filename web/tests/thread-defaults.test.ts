@@ -73,11 +73,14 @@ test("the schema carries one converter per source and one writer per target", ()
   assert.match(newThread, /model: defaults\.model/)
 })
 
-test("the defaults card compares the whole payload instead of naming fields by hand", () => {
-  assert.match(source, /const payload = value !== null && saved !== null \? threadSettingsDefaults\(value, saved\) : null/)
-  assert.match(source, /const changed = payload !== null && !sameThreadSettings\(threadSettingsFromDefaults\(payload\), saved!\)/)
-  assert.doesNotMatch(source, /defaultsChanged\(/)
-  assert.doesNotMatch(source, /value\.max_loaded_manuals !== defaults\.data\.max_loaded_manuals/)
-  // The card renders the same control the other two surfaces render.
-  assert.match(source, /<ThreadSettingsFields mode="defaults" idPrefix="default-thread" value=\{value\} onChange=\{edit\}/)
+test("the defaults card keeps no settings algorithm of its own", () => {
+  // 读取、草稿、脏检查、PUT 负载都在包里的钩子里：宿主这张卡片只排版。
+  assert.match(source, /const form = useThreadDefaultsForm\(\{ queryKey: \["thread-defaults"/)
+  assert.match(source, /form\.canSave/)
+  assert.match(source, /form\.save\(\)/)
+  for (const algorithm of ["threadSettingsDefaults", "sameThreadSettings", "threadSettingsFromDefaults", "threadSettingsFromThread", "threadSettingsPatch", "budgetTooLarge", "defaultsChanged"]) {
+    assert.doesNotMatch(source, new RegExp(`\\b${algorithm}\\b`), `${algorithm} belongs inside the package`)
+  }
+  // 而包内确实有那份实现，且由一个钩子拥有。
+  assert.match(readPackageSource("hooks/use-thread-settings-form.ts"), /export function useThreadDefaultsForm\(/)
 })

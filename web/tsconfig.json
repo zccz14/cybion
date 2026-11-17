@@ -19,14 +19,14 @@
       "@/*": [
         "./src/*"
       ],
-      "@zccz14/cybion-components/logic": [
-        "../packages/cybion-components/src/logic.ts"
-      ],
       "@zccz14/cybion-components/internal": [
-        "../packages/cybion-components/src/internal.ts"
+        "../packages/cybion-components/dist/internal.d.ts"
       ],
       "@zccz14/cybion-components": [
         "../packages/cybion-components/dist/index.d.ts"
+      ],
+      "@zccz14/cybion-components/logic": [
+        "../packages/cybion-components/src/logic.ts"
       ]
     },
     "resolveJsonModule": true,

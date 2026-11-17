@@ -1,6 +1,6 @@
 import * as React from "react"
 
-import { cn } from "@zccz14/cybion-components/logic"
+import { cn } from "@zccz14/cybion-components/internal"
 
 function Input({ className, type, ...props }: React.ComponentProps<"input">) {
   return (

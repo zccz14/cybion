@@ -3,7 +3,7 @@
 import * as React from "react"
 import { Separator as SeparatorPrimitive } from "radix-ui"
 
-import { cn } from "@zccz14/cybion-components/logic"
+import { cn } from "@zccz14/cybion-components/internal"
 
 function Separator({
   className,

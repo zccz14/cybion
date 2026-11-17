@@ -123,9 +123,15 @@ test("thread settings are one form control the three surfaces render", () => {
   const button = readPackageSource("components/thread-settings-button.tsx")
   const schema = readPackageSource("lib/thread-settings.ts")
   const view = readPackageSource("thread-view.tsx")
+  // 三个界面都是同一个控件，而每个界面的数据流由包里的钩子拥有：宿主只把关卡
+  // 的值递进去，不比较、不拼负载。
   assert.match(source, /<ThreadSettingsPopover value=\{value\} onChange=\{edit\}/)
-  // The account defaults card renders the same control in its own mode.
-  assert.match(source, /<ThreadSettingsFields mode="defaults" idPrefix="default-thread" value=\{value\} onChange=\{edit\}/)
+  assert.match(source, /<ThreadSettingsFields mode="defaults" idPrefix="default-thread" value=\{value\} onChange=\{form\.onChange\}/)
+  assert.match(source, /const form = useThreadDefaultsForm\(/)
+  assert.match(source, /const settings = useNewThreadSettings\(/)
+  // 宿主不再自己转值、比较或拼负载——这些算法签名也不在公开面上。
+  assert.doesNotMatch(source, /threadSettings(FromThread|FromDefaults|ForNewThread|Defaults|Patch|Overrides)\(/)
+  assert.doesNotMatch(source, /sameThreadSettings\(/)
   assert.equal(view.match(/<ThreadSettingsButton /g)?.length, 1)
   assert.doesNotMatch(view, /<ThreadSettingsPopover /)
   // The control takes a value and gives back the next one; it neither reads a

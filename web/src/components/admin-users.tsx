@@ -4,7 +4,7 @@ import { LinkitUserInfo } from "linkit-react-components"
 import { ArrowDownIcon, ArrowUpIcon, ArrowUpDownIcon, RefreshCwIcon } from "lucide-react"
 
 import { accountMetricNotes } from "@/lib/account-metrics"
-import { formattedTime } from "@zccz14/cybion-components/logic"
+import { formattedTime } from "@zccz14/cybion-components/internal"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
