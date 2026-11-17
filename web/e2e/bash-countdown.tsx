@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client"
 
 import "../src/styles.css"
-import { BashCommand } from "@zccz14/cybion-components"
+import { BashCommand } from "@zccz14/cybion-components/internal"
 
 const now = Math.floor(Date.now() / 1000)
 const call = (delaySeconds: number | null, timeoutSeconds: number | null) => ({ callId: "call-1", workerId: "worker-1", summary: "检查工作区", command: "pwd", delaySeconds, timeoutSeconds })

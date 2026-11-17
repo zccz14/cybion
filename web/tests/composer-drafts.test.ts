@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { composerDraftKey, removeSubmittedDraft } from "@zccz14/cybion-components/logic"
+import { composerDraftKey } from "@zccz14/cybion-components/logic"
+import { removeSubmittedDraft } from "@zccz14/cybion-components/logic"
 import { readPackageSource } from "./package-source.ts"
 
 test("draft keys isolate users, threads and the shared new-thread composer", () => {

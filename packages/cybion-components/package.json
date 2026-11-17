@@ -24,6 +24,11 @@
       "types": "./dist/logic.d.ts",
       "import": "./dist/logic.js",
       "default": "./dist/logic.js"
+    },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "import": "./dist/internal.js",
+      "default": "./dist/internal.js"
     }
   },
   "publishConfig": {

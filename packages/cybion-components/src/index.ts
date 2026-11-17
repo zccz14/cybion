@@ -1,88 +1,53 @@
-export { CybionThreadClient, CybionApiError } from "./api"
-export type {
-  CybionClientOptions, CybionTokenProvider, HistoryWindow, Language, RequestAck,
-  Thread, ThreadDefaults, UpstreamCatalog, UpstreamModels,
-} from "./api"
-export { CybionThreadProvider, useCybion } from "./provider"
+/**
+ * What a host may depend on. Three jobs, and nothing else:
+ *
+ * 1. drop the whole conversation in — `CybionThreadProvider` + `CybionThreadView`;
+ * 2. compose your own shell out of the same parts the packaged view uses —
+ *    `HistoryMessage`, `ThreadHistory`, the composer widgets, the settings form,
+ *    the usage panels;
+ * 3. read the wire shapes those parts take.
+ *
+ * Everything else stays inside the package. Record renderers (one card per tool),
+ * the low-level client, the copy dictionary and the transcript/scroll internals
+ * are implementation: exporting them froze signatures no host ever called, and
+ * every one of them had to keep working forever. `tests/public-api.test.ts`
+ * freezes this list, so adding a line here is a deliberate act, not a side effect.
+ */
+export { CybionThreadProvider } from "./provider"
 export type { CybionLink, CybionLinkProps, CybionThreadProviderProps } from "./provider"
 export { CybionThreadView } from "./thread-view"
 export type { CybionThreadViewProps } from "./thread-view"
-export { attachComposerAudio } from "./hooks/use-composer-audio"
-export { attachComposerImages } from "./hooks/use-composer-images"
-export { useComposerAttach } from "./hooks/use-composer-attach"
-export { useComposerFiles } from "./hooks/use-composer-files"
-export type { ComposerFile, SkippedFile, SkippedFileReason } from "./lib/composer-files"
+
+// The transcript: one record as the conversation shows it, and the list that
+// groups the records into turns.
 export { HistoryMessage } from "./components/history-message"
-export { BudgetStopNotice } from "./components/budget-stop-notice"
+export { ThreadHistory } from "./components/thread-history"
 export type { ManualSummary, Worker } from "./components/history-message"
-export { threadImage } from "./lib/thread-history"
-export type { HistoryRecord, ThreadHistoryEntry, ThreadHistoryWindow, ThreadImage } from "./lib/thread-history"
+export type { HistoryRecord, ThreadHistoryWindow } from "./lib/thread-history"
 export type { ThreadResponseView } from "./lib/thread-response"
 export type { ThreadUsage } from "./lib/thread-usage"
 export type { ThreadDisplayStatus } from "./lib/thread-status"
-export { copyFor, fillCopy } from "./copy"
-export type { CopyKey } from "./copy"
-export { ThreadHistory } from "./components/thread-history"
-
-// The transcript's own logic, exported so a host can decide what folds into a
-// process group, where that group's spend sits, and which record a history page
-// starts from — without keeping a second copy of any of it.
-export {
-  attachThreadProcessSpend, formatThreadProcessDuration, formatThreadProcessSpend, groupThreadHistory,
-  groupThreadHistoryMinimal, inFlightCallIds, isControllerNotice, isRestartNotice, isRetryNotice,
-  liveThreadProcessKey, loadedThreadRecords, newestRecordId, oldestRecordId, pollThreadHistory,
-  recordInFlight, threadHistoryRecordKey, threadProcessDuration,
-} from "./lib/thread-history"
-export { budgetStopNotice, DEFAULT_BUDGET_RAISE_USD_NANOS, MAX_BUDGET_USD_NANOS } from "./lib/budget-stop"
-export type { BudgetStopNotice as BudgetStopNoticeView } from "./lib/budget-stop"
-export { isManualNotice, manualLoadNotice } from "./lib/thread-manual-loads"
 export type { ThreadManualLoadsView } from "./lib/thread-manual-loads"
-export { ThreadUsagePanel, ThreadContextUsage, ThreadUsageSummary, ThreadUsageDetails } from "./components/thread-usage"
-export { ThreadStatusSummary, ThreadStatusBadge } from "./components/thread-status"
+export type { Language, Thread, ThreadDefaults } from "./api"
 
-// Hosts that compose their own list, composer and settings pages need the same
-// widgets the packaged view uses, so they import them instead of copying them.
+// Usage, as a row, a panel and a set of rows.
+export { ThreadUsagePanel, ThreadUsageSummary, ThreadUsageDetails } from "./components/thread-usage"
+
+// The composer, for a host that lays out its own input row.
 export { ComposerAttach } from "./components/composer-attach"
 export { ComposerAttachments } from "./components/composer-attachments"
 export { ComposerFileNotice, ComposerLengthNotice } from "./components/composer-file-notice"
 export { ComposerAudio } from "./components/composer-audio"
 export { ComposerAudioNotice } from "./components/composer-audio-notice"
 export { ComposerDraftNotice } from "./components/composer-draft-notice"
-export { ThreadSettingsPopover } from "./components/thread-settings-popover"
-export { ThreadSettingsFields } from "./components/thread-settings-fields"
-export { ThreadSettingsButton } from "./components/thread-settings-button"
-export {
-  REASONING_EFFORTS, THREAD_SETTINGS_FIELDS, budgetTooLarge, sameThreadSettings,
-  threadSettingsDefaults, threadSettingsForNewThread, threadSettingsFromDefaults, threadSettingsFromThread,
-  threadSettingsOverrides, threadSettingsPatch,
-} from "./lib/thread-settings"
-export type { ReasoningEffort, ThreadSettings, ThreadSettingsOverrides } from "./lib/thread-settings"
-export { UsdBudgetInput } from "./components/usd-budget-input"
-export { imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "./lib/model-catalog"
-export type { ManualChoice, ModelCatalog } from "./lib/model-catalog"
-export { WorkerCallSummary } from "./components/worker-call-summary"
+export { attachComposerAudio } from "./hooks/use-composer-audio"
+export { attachComposerImages } from "./hooks/use-composer-images"
+export type { ComposerFile, SkippedFile, SkippedFileReason } from "./lib/composer-files"
 
-// Record renderers, exported so a host can compose its own transcript instead of
-// taking the whole view, and so tests can exercise them one by one.
-export { AssistantMessage } from "./components/assistant-message"
-export { CopyReplyButton } from "./components/copy-reply-button"
-export { AudioMessage } from "./components/audio-message"
-export { UserInputMessage } from "./components/user-input-message"
-export { CheckpointMessage } from "./components/checkpoint-message"
-export { BashCommand } from "./components/bash-command"
-export { WebSearchCall } from "./components/web-search-call"
-export { ImageGenerationCall } from "./components/image-generation-call"
-export { BrowserControlCall } from "./components/browser-control-call"
-export { ComputerUseCall } from "./components/computer-use-call"
-export { ViewImageCall } from "./components/view-image-call"
-export { ScreenshotOutput } from "./components/screenshot-output"
-export { ViewedOutput } from "./components/viewed-output"
-export { ManualLoadNotice } from "./components/manual-load-notice"
-export { HistoryRecordPayload } from "./components/history-record-payload"
-export { CybionToolCall } from "./components/cybion-tool-call"
-export { ThreadImageGroup } from "./components/thread-image-group"
-export {
-  MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem,
-  MessageScrollerProvider, MessageScrollerViewport,
-} from "./ui/message-scroller"
-export { ThreadProcessGroup } from "./components/thread-process-group"
+// The settings form: one control, the two shells over it, and the schema readers
+// and writers that let a host hold the value itself.
+export { ThreadSettingsFields } from "./components/thread-settings-fields"
+export { ThreadSettingsPopover } from "./components/thread-settings-popover"
+export { ThreadSettingsButton } from "./components/thread-settings-button"
+export { REASONING_EFFORTS, budgetTooLarge, sameThreadSettings, threadSettingsDefaults, threadSettingsForNewThread, threadSettingsFromDefaults, threadSettingsFromThread } from "./lib/thread-settings"
+export type { ReasoningEffort, ThreadSettings } from "./lib/thread-settings"

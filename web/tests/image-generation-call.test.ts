@@ -9,7 +9,7 @@ import { readPackageSource } from "./package-source.ts"
 test("image generation calls render the prompt and reference positions in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { ImageGenerationCall } = await server.ssrLoadModule("@zccz14/cybion-components")
+    const { ImageGenerationCall } = await server.ssrLoadModule("@zccz14/cybion-components/internal")
     const render = (language: string, referenceImages: number[]) => renderToStaticMarkup(createElement(ImageGenerationCall, {
       language, call: { prompt: "柴犬 <script>alert(1)</script>", referenceImages }, time: "12:34:56",
       children: createElement("details", null, "Raw protocol"),

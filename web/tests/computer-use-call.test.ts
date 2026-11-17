@@ -9,7 +9,7 @@ import { readPackageSource } from "./package-source.ts"
 test("desktop control calls render action details with escaped text in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { ComputerUseCall } = await server.ssrLoadModule("@zccz14/cybion-components")
+    const { ComputerUseCall } = await server.ssrLoadModule("@zccz14/cybion-components/internal")
     const render = (language: string, call: Record<string, unknown>) => renderToStaticMarkup(createElement(ComputerUseCall, {
       language, call: { summary: null, ...call }, time: "12:34:56", children: createElement("details", null, "Raw protocol"),
     }))

@@ -20,6 +20,11 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // 仓库内的走查页与单测要渲染包内并不对外导出的记录卡片（每张卡片各自一条
+      // 回归用例）。它们不是包的消费者，所以走源码而不是公开入口：公开面收窄
+      // 的时候，这些测试不必跟着改，也不会反过来把内部实现钉成契约。
+      '@zccz14/cybion-components/src': path.resolve(__dirname, '../packages/cybion-components/src'),
+      '@zccz14/cybion-components/internal': path.resolve(__dirname, '../packages/cybion-components/dist/internal.js'),
       '@zccz14/cybion-components/logic': path.resolve(__dirname, '../packages/cybion-components/dist/logic.js'),
       '@zccz14/cybion-components': path.resolve(__dirname, '../packages/cybion-components/dist/index.js'),
     },

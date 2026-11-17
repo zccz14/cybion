@@ -22,7 +22,7 @@ const checkpoint = `# Durable working context
 test("checkpoint cards stay in the conversation with their body folded behind the summary", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { CheckpointMessage } = await server.ssrLoadModule("@zccz14/cybion-components")
+    const { CheckpointMessage } = await server.ssrLoadModule("@zccz14/cybion-components/internal")
     const record = { id: 6, thread_id: "thread-a", kind: "checkpoint", payload: { role: "developer", content: checkpoint }, created_at: 1_800_003_681 }
     const render = (language: string) => renderToStaticMarkup(createElement(CheckpointMessage, { language, record }))
     const zh = render("zh")
@@ -56,7 +56,7 @@ test("checkpoint cards stay in the conversation with their body folded behind th
 test("a checkpoint without a prose line previews the hint while its body still carries the Markdown", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { CheckpointMessage } = await server.ssrLoadModule("@zccz14/cybion-components")
+    const { CheckpointMessage } = await server.ssrLoadModule("@zccz14/cybion-components/internal")
     const record = { id: 7, thread_id: "thread-a", kind: "checkpoint", payload: { role: "developer", content: "# Durable working context\n\n```json\n[]\n```\n" }, created_at: 1_800_003_681 }
     const render = (language: string) => renderToStaticMarkup(createElement(CheckpointMessage, { language, record }))
     assert.ok(render("zh").includes(">上下文已压缩为 Markdown，点开可读<"))

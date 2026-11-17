@@ -2,7 +2,11 @@
   "compilerOptions": {
     "target": "ES2022",
     "useDefineForClassFields": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "allowJs": false,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -12,9 +16,18 @@
     "moduleResolution": "Bundler",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"],
-      "@zccz14/cybion-components/logic": ["../packages/cybion-components/src/logic.ts"],
-      "@zccz14/cybion-components": ["../packages/cybion-components/dist/index.d.ts"]
+      "@/*": [
+        "./src/*"
+      ],
+      "@zccz14/cybion-components/logic": [
+        "../packages/cybion-components/src/logic.ts"
+      ],
+      "@zccz14/cybion-components/internal": [
+        "../packages/cybion-components/src/internal.ts"
+      ],
+      "@zccz14/cybion-components": [
+        "../packages/cybion-components/dist/index.d.ts"
+      ]
     },
     "resolveJsonModule": true,
     "isolatedModules": true,
@@ -22,5 +35,7 @@
     "allowImportingTsExtensions": true,
     "jsx": "react-jsx"
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ]
 }

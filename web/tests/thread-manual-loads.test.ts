@@ -9,7 +9,7 @@ import { createTestServer } from "./vite-server.ts"
 // through Vite's alias — so the test loads it the same way the page does.
 const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
 after(() => server.close())
-const { manualLoadNotice } = await server.ssrLoadModule("@zccz14/cybion-components") as typeof import("@zccz14/cybion-components")
+const { manualLoadNotice } = await server.ssrLoadModule("@zccz14/cybion-components/internal") as typeof import("@zccz14/cybion-components")
 
 const manual = "8F1D2E3A-4B5C-6D7E-8F90-1A2B3C4D5E6F"
 const loaded: HistoryRecord = {
