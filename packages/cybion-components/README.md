@@ -30,46 +30,72 @@ import "@zccz14/cybion-components/styles.css"
 
 ## 公开面
 
-包只有三个入口：`@zccz14/cybion-components`（组件）、`@zccz14/cybion-components/logic`（不依赖 React 的解析与输入区钩子）、`@zccz14/cybion-components/styles.css`（样式表）。
+两个入口：`@zccz14/cybion-components`（组件与钩子）、`@zccz14/cybion-components/styles.css`（样式表）。`/logic` 是纯解析与格式化的子路径，测试用；`/internal` 是**本仓库内部**入口，不是契约。
 
-导出的名字就是契约：宿主一旦引用，形状就不能随便改。所以这里只放**宿主真的要用的东西**——嵌入整个对话、或用自己的外壳拼装同一批部件所需的那部分。`tests/public-api.test.ts` 冻结了这份清单，新增一行是刻意决定，不是副作用。
+导出的东西只有两类：**组件**，和**替组件把数据流做完的钩子**。一个能渲染表单、却把读取/比较/保存留给调用方的组件没有封装任何东西——它把内部实现写成了调用方的待办清单。所以设置面板配三个钩子，而不是导出 `threadSettingsPatch` 那类算法（那些名字留在包内）。`tests/public-api.test.ts` 冻结整份清单。
 
-### 主入口
+## Props
 
-| 导出 | 作用 |
+下表是每个组件的完整 props。所有组件的 `language` 都是 `"en" | "zh"`。
+
+### 嵌入整个对话
+
+| 组件 | Props |
 | --- | --- |
-| `CybionThreadProvider` | 绑定一个 Cybion 源（`baseUrl` + `getToken` + `identity`），把查询缓存、语言、路由链接注入下层 |
-| `CybionThreadView` | 完整对话：标题、状态、用量、历史、底部输入区。必填参数只有 `threadId` |
-| `CybionThreadProviderProps` / `CybionThreadViewProps` / `CybionLink` / `CybionLinkProps` | 上面两个组件的参数类型，以及宿主注入路由链接的签名 |
-| `HistoryMessage` | 一条历史记录的默认渲染器；`renderRecord` 不传时就是它 |
-| `ThreadHistory` | 记录列表：合并连续过程、成组图片、维护滚动锚点 |
-| `ThreadUsagePanel` / `ThreadUsageSummary` / `ThreadUsageDetails` | 累计用量面板、行内摘要与明细 |
-| `ComposerAttach` / `ComposerAttachments` | 附件按钮与已附加项的胶囊列表 |
-| `ComposerFileNotice` / `ComposerLengthNotice` / `ComposerDraftNotice` | 「未添加」原因、超长提示、草稿无法保存的警告 |
-| `ComposerAudio` / `ComposerAudioNotice` | 录音按钮与录音失败、草稿恢复提示 |
-| `attachComposerAudio` / `attachComposerImages` | 从扩展或外部把语音、图片送进当前输入区 |
-| `ThreadSettingsFields` | 唯一的设置表单控件：`value` 进、`onChange` 出，默认值与模型目录由它自己从 Provider 读取 |
-| `ThreadSettingsPopover` / `ThreadSettingsButton` | 上面那个控件的弹出外壳，以及只给 `threadId` 就能用的开箱按钮 |
-| `ThreadSettings` / `ReasoningEffort` / `REASONING_EFFORTS` | 设置 schema 与推理强度档位 |
-| `threadSettingsFromThread` / `threadSettingsFromDefaults` / `threadSettingsForNewThread` | 从线程行、账号默认、新建草稿构造这个值 |
-| `threadSettingsDefaults` / `sameThreadSettings` / `budgetTooLarge` | 生成默认设置的 PUT 负载、比较两个值、判断金额是否超上限 |
+| `CybionThreadProvider` | `baseUrl: string` · `getToken: () => string \| Promise<string>` · `identity?: string` · `sessionId?: string` · `language?: Language` · `queryClient?: QueryClient` · `link?: CybionLink` · `fetch?: typeof fetch` · `children: ReactNode` |
+| `CybionThreadView` | `threadId: string`（唯一必填）· `className?: string` · `onTitleChange?: (title: string) => void` · `onThreadChange?: (thread: Thread) => void` · `onRecordsChange?: (records: HistoryRecord[]) => void` · `workers?: Worker[]` · `manuals?: ReadonlyMap<string, ManualSummary>` · `loadAudio?: (reference: string, mediaType: string \| null) => Promise<string>` · `renderRecord?: (record: HistoryRecord, context: { inFlight: boolean }) => ReactNode` · `headerActions?: ReactNode` · `headerLeading?: ReactNode` · `transcriptFooter?: ReactNode` · `olderPages?: ThreadHistoryWindow[]` · `onOlderPage?: (threadId: string, page: ThreadHistoryWindow) => void` · `readOnly?: boolean` |
 
-`Thread`、`ThreadDefaults`、`HistoryRecord`、`ThreadHistoryWindow`、`ThreadResponseView`、`ThreadUsage`、`ThreadDisplayStatus`、`ThreadManualLoadsView`、`ManualSummary`、`Worker`、`Language`、`ComposerFile`、`SkippedFile` 等是这些组件收发的数据形状。
+### 历史
 
-### `/logic`
-
-宿主自己写列表、状态行、输入区时需要的那部分，不含任何组件与样式表：
-
-| 主题 | 提供 |
+| 组件 | Props |
 | --- | --- |
-| 线程设置 | 与主入口同一套 schema 读取与写入函数 |
-| 历史与状态 | `newestRecordId`、`oldestRecordId`、`historyPayloadObject`、`historyPayloadText`、`pendingResponseRecords`、`threadStatusLabel`、`threadStatusText`、`manualLoadNotice`、`emptyThreadUsage` |
-| 输入区 | `composerAction`、`handleChatInputKeyDown`、`composerDraftKey`、`composeComposerInput`、`maxInputChars`、`audioDraftScope`、`useComposerAttach` / `useComposerAudio` / `useComposerDraft` / `useComposerFiles` / `useComposerImages`、`attachComposerAudio`、`attachComposerImages` |
-| 展示 | `formatBytes`、`formatRelativeTime`、`formatStatsDuration`、`formattedTime`、`useNowSeconds`、`cn`、`errorMessage` |
+| `HistoryMessage` | `record: HistoryRecord` · `inFlight: boolean` · `workers?: Worker[]` · `manuals?: ReadonlyMap<string, ManualSummary>` · `loadAudio?: (reference: string, mediaType: string \| null) => Promise<string>` · `onRaiseBudget?: (addedUsdNanos: number) => void` · `raisingBudget?: boolean` |
+| `ThreadHistory` | `records: readonly HistoryRecord[]` · `minimal: boolean` · `running: boolean` · `renderRecord: (record: HistoryRecord) => ReactNode` |
 
-### 包内部
+### 用量与状态
 
-记录卡片（每张工具卡一张）、底层 API 客户端、文案表、滚动容器原语、转录分组与轮询都属于实现：只有包自己会把它们拼起来，所以它们不进公开面，签名可以随时改。`@zccz14/cybion-components/internal` 与 `/internal-logic` 是**仓库内**测试与走查页的入口，明确不属于公开契约。
+| 组件 | Props |
+| --- | --- |
+| `ThreadUsagePanel` / `ThreadUsageSummary` / `ThreadUsageDetails` | `usage: ThreadUsage` |
+| `ThreadStatusBadge` | `status: ThreadDisplayStatus` · `runningSummary?: string \| null` |
+
+### 输入区
+
+| 组件 | Props |
+| --- | --- |
+| `ComposerAttach` | `disabled: boolean` · `onFiles: (files: File[]) => void` |
+| `ComposerAttachments` | `images: string[]` · `audios?: string[]` · `files?: ComposerFile[]` · `onRemove: (index: number) => void` · `onRemoveAudio?: (index: number) => void` · `onRemoveFile?: (index: number) => void` |
+| `ComposerAudio` | `recording: boolean` · `disabled: boolean` · `phase?: ComposerAudioPhase` · `elapsed?: number` · `onStart: () => Promise<boolean>` · `onSend: () => void` · `onCancel: () => void` |
+| `ComposerAudioNotice` | `error: ComposerAudioError \| null` · `restored?: number` · `onDismiss?: () => void` · `onDismissRestored?: () => void` · `onRetry?: () => void` |
+| `ComposerFileNotice` | `skipped: SkippedFile[]` |
+| `ComposerLengthNotice` | `chars: number` · `limit: number` |
+| `ComposerDraftNotice` | `storageError: boolean` |
+
+### 设置
+
+| 组件 | Props |
+| --- | --- |
+| `ThreadSettingsFields` | `value: ThreadSettings` · `onChange: (value: ThreadSettings) => void` · `mode?: "override" \| "defaults"` · `idPrefix?: string` · `disabled?: boolean` |
+| `ThreadSettingsPopover` | `value: ThreadSettings` · `onChange: (value: ThreadSettings) => void` · `disabled?: boolean` |
+| `ThreadSettingsButton` | `threadId: string` · `value?: Thread` · `disabled?: boolean` · `className?: string` · `defaultOpen?: boolean` |
+
+`mode="override"` 用于线程（每项可「跟随默认」），`mode="defaults"` 用于账号默认（值本身就是默认）。
+
+## 钩子
+
+每个钩子把某个界面的数据流整段包好，宿主只递值。
+
+| 钩子 | 返回 |
+| --- | --- |
+| `useThreadDefaultsForm({ queryKey? })` | `value: ThreadSettings \| null` · `onChange` · `changed` · `canSave` · `save()` · `pending` · `error: Error \| null` · `saved` · `loading` · `retry()` |
+| `useNewThreadSettings({ queryKey? })` | `value: ThreadSettings \| null` · `onChange` · `model`（`model`/`upstream_id`/`reasoning_effort`/`service_tier_fast`）· `payload`（其余七项，随第一条消息发出）· `loading` · `error` · `retry()` |
+| `useThreadSettingsPanel(threadId, { value?, enabled? })` | `value: ThreadSettings \| null` · `onChange`（只 PATCH 变化的字段）· `pending` · `thread` |
+| `useComposerDraft(identity, threadId \| null)` | `input` · `setInput` · `seed` · `clearSubmitted` · `storageError` |
+| `useComposerFiles()` / `useComposerImages()` / `useComposerAudio({ scope })` | 附件状态与增删 |
+| `useComposerAttach({ images, audio, files })` | `(files: File[]) => void`，按类型分流 |
+| `useNowSeconds()` | 定时刷新的当前秒数（相对时间用） |
+
+`ThreadSettings` 的十一项与 `/api/thread-defaults`、Thread 行同名：`model`、`upstream_id`、`reasoning_effort`、`service_tier_fast`、`context_budget_tokens`、`minimal_mode`、`image_generation_model`、`audio_transcription_model`、`max_loaded_manuals`、`initial_manual_ids`、`budget_usd_nanos`。七项可为 `null`，含义是「跟随账号默认」。
 
 ## 主题
 

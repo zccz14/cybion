@@ -17,7 +17,7 @@ import { Message, MessageContent, MessageFooter, MessageGroup } from "../src/com
 import { TooltipProvider } from "../src/components/ui/tooltip"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
 import type { ThreadDisplayStatus } from "@zccz14/cybion-components"
-import { emptyThreadUsage } from "@zccz14/cybion-components/logic"
+import { emptyThreadUsage } from "@zccz14/cybion-components/internal"
 import "../src/styles.css"
 import "linkit-react-components/styles.css"
 

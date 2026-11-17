@@ -2,9 +2,9 @@ import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerProvider, MessageScrollerViewport } from "../src/components/ui/message-scroller"
-import { historyPayloadText } from "@zccz14/cybion-components/logic"
+import { historyPayloadText } from "@zccz14/cybion-components/internal"
 import { type HistoryRecord } from "@zccz14/cybion-components"
-import { threadImage } from "@zccz14/cybion-components/logic"
+import { threadImage } from "@zccz14/cybion-components/internal"
 import "../src/styles.css"
 import { ThreadHistory } from "@zccz14/cybion-components"
 

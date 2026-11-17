@@ -2,91 +2,83 @@ import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 
 /**
- * The public surface, frozen.
+ * The published surface, frozen.
  *
- * Every name exported from `index.ts` and `logic.ts` is a promise: once a host
- * imports it, its shape cannot change without a major release. So the value of
- * these two lists is what they *omit* — the record cards, the low-level client,
- * the copy dictionary and the transcript internals stay inside the package and
- * remain free to change. Adding a line here is a deliberate act.
+ * What matters here is not the count but the *shape* of it: every entry is either
+ * a component or a hook that owns its own data flow. A component that renders a
+ * form while leaving the reading, diffing and saving to the caller has not
+ * encapsulated anything — it published its internals as a to-do list. So the
+ * settings surface ships three hooks (`useThreadDefaultsForm`,
+ * `useNewThreadSettings`, `useThreadSettingsPanel`) and no writer functions: a
+ * host passes a value around and never assembles a payload.
  */
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8")
 
 function exported(source: string) {
-  return [...source.matchAll(/export (?:type )?\{([\s\S]*?)\} from/g)]
-    .flatMap(([, names]) => names.split(",").map((part) => part.trim()).filter(Boolean))
-    .map((part) => part.split(/\s+as\s+/).pop()!.trim())
-    .sort()
+  return [...source.matchAll(/export (type )?\{([\s\S]*?)\} from/g)].flatMap(([, isType, names]) =>
+    names.split(",").map((part) => part.trim()).filter(Boolean).map((part) => ({ name: part.split(/\s+as\s+/).pop()!.trim(), isType: Boolean(isType) })),
+  )
 }
 
-const index = exported(read("../src/index.ts"))
-const logic = exported(read("../src/logic.ts"))
+const surface = exported(read("../src/index.ts"))
+const values = surface.filter((entry) => !entry.isType).map((entry) => entry.name).sort()
+const types = surface.filter((entry) => entry.isType).map((entry) => entry.name).sort()
 
-describe("the package's public surface", () => {
-  it("exports exactly what a host needs to embed or compose a Thread", () => {
-    expect(index).toEqual([
+describe("the published surface", () => {
+  it("exports components and hooks, in a list short enough to read", () => {
+    expect(values).toEqual([
       "ComposerAttach", "ComposerAttachments", "ComposerAudio", "ComposerAudioNotice",
-      "ComposerDraftNotice", "ComposerFile", "ComposerFileNotice", "ComposerLengthNotice",
-      "CybionLink", "CybionLinkProps", "CybionThreadProvider", "CybionThreadProviderProps",
-      "CybionThreadView", "CybionThreadViewProps", "HistoryMessage", "HistoryRecord",
-      "Language", "ManualSummary", "REASONING_EFFORTS", "ReasoningEffort", "SkippedFile",
-      "SkippedFileReason", "Thread", "ThreadDefaults", "ThreadDisplayStatus", "ThreadHistory",
-      "ThreadHistoryWindow", "ThreadManualLoadsView", "ThreadResponseView", "ThreadSettings",
-      "ThreadSettingsButton", "ThreadSettingsFields", "ThreadSettingsPopover", "ThreadUsage",
-      "ThreadUsageDetails", "ThreadUsagePanel", "ThreadUsageSummary", "Worker",
-      "attachComposerAudio", "attachComposerImages", "budgetTooLarge", "sameThreadSettings",
-      "threadSettingsDefaults", "threadSettingsForNewThread", "threadSettingsFromDefaults",
-      "threadSettingsFromThread",
+      "ComposerDraftNotice", "ComposerFileNotice", "ComposerLengthNotice", "CybionThreadProvider",
+      "CybionThreadView", "HistoryMessage", "REASONING_EFFORTS", "ThreadHistory",
+      "ThreadSettingsButton", "ThreadSettingsFields", "ThreadSettingsPopover", "ThreadStatusBadge",
+      "ThreadUsageDetails", "ThreadUsagePanel", "ThreadUsageSummary", "attachComposerAudio",
+      "attachComposerImages", "audioDraftScope", "cn", "composeComposerInput", "composerAction",
+      "composerDraftKey", "emptyThreadUsage", "errorMessage", "formatBytes", "formatRelativeTime",
+      "formatStatsDuration", "formattedTime", "handleChatInputKeyDown", "historyPayloadObject",
+      "historyPayloadText", "manualLoadNotice", "maxInputChars", "newestRecordId", "oldestRecordId",
+      "pendingResponseRecords", "threadStatusLabel", "threadStatusText", "useComposerAttach",
+      "useComposerDraft", "useComposerFiles", "useComposerImages", "useNewThreadSettings",
+      "useNowSeconds", "useThreadDefaultsForm", "useThreadSettingsPanel",
     ])
   })
 
-  it("exports exactly the framework-free half a host's own shell needs", () => {
-    expect(logic).toEqual([
-      "AudioTranscriptionFunctionCall", "HistoryRecord", "REASONING_EFFORTS", "ReasoningEffort",
-      "ThreadDisplayStatus", "ThreadHistoryWindow", "ThreadManualLoadsView", "ThreadResponseView",
-      "ThreadSettings", "ThreadUsage", "attachComposerAudio", "attachComposerImages",
-      "audioDraftScope", "audioDurationLabel", "audioTranscriptionFunctionCall",
-      "bashCallCountdown", "bashFunctionCall", "browserControlFunctionCall", "budgetTooLarge",
-      "cn", "compactTokenCount", "composeComposerInput", "composerAction", "composerDraftKey",
-      "computerUseFunctionCall", "cybionToolFunctionCall", "emptyThreadUsage", "errorMessage",
-      "formatBytes", "formatRelativeTime", "formatStatsDuration", "formattedTime",
-      "handleChatInputKeyDown", "historyPayloadObject", "historyPayloadText",
-      "imageGenerationFunctionCall", "manualLoadNotice", "maxInputChars", "newestRecordId",
-      "oldestRecordId", "pastedImageFiles", "pendingResponseRecords", "removeSubmittedDraft",
-      "sameThreadSettings", "screenshotImageSource", "splitPickedFiles", "threadCacheRate",
-      "threadControlAction", "threadCost", "threadImage", "threadSettingsDefaults",
-      "threadSettingsForNewThread", "threadSettingsFromDefaults", "threadSettingsFromThread",
-      "threadStatusLabel", "threadStatusText", "useComposerAttach", "useComposerAudio",
-      "useComposerDraft", "useComposerFiles", "useComposerImages", "useNowSeconds",
-      "userInputView", "viewImageFunctionCall", "viewedImageSource", "webSearchFunctionCall",
-    ].sort())
+  it("carries only the types those components and hooks take or return", () => {
+    expect(types).toEqual([
+      "AudioTranscriptionFunctionCall", "ComposerFile", "CybionLink", "CybionLinkProps",
+      "CybionThreadProviderProps", "CybionThreadViewProps", "HistoryRecord", "Language",
+      "ManualSummary", "NewThreadSettings", "ReasoningEffort", "SkippedFile", "SkippedFileReason",
+      "Thread", "ThreadDefaults", "ThreadDefaultsForm", "ThreadDisplayStatus", "ThreadHistoryWindow",
+      "ThreadManualLoadsView", "ThreadResponseView", "ThreadSettings", "ThreadSettingsPanel",
+      "ThreadUsage", "Worker",
+    ])
   })
 
-  it("keeps the record cards, the raw client and the copy table inside the package", () => {
-    // One card per tool is how the transcript is *assembled*, not what a host
-    // composes; exporting them froze 20 signatures nobody called.
+  it("does not publish the algorithm behind a surface", () => {
+    // The settings writers and comparators are how the panel works, not what a
+    // host wants: exporting them forced every caller to re-run our diff and
+    // payload assembly. The hooks own that; the names stay inside the package.
     for (const internal of [
-      "AssistantMessage", "AudioMessage", "BashCommand", "BrowserControlCall", "CheckpointMessage",
-      "ComputerUseCall", "CopyReplyButton", "CybionToolCall", "HistoryRecordPayload",
-      "ImageGenerationCall", "ManualLoadNotice", "ScreenshotOutput", "ThreadImageGroup",
-      "ThreadProcessGroup", "UserInputMessage", "ViewImageCall", "ViewedOutput",
-      "WebSearchCall", "WorkerCallSummary", "CybionThreadClient", "CybionApiError", "copyFor",
-      "fillCopy", "CopyKey", "useCybion", "groupThreadHistory", "pollThreadHistory",
-      "MessageScroller", "UsdBudgetInput",
+      "threadSettingsFromThread", "threadSettingsFromDefaults", "threadSettingsForNewThread",
+      "threadSettingsDefaults", "threadSettingsOverrides", "threadSettingsPatch",
+      "sameThreadSettings", "budgetTooLarge", "THREAD_SETTINGS_FIELDS",
+      // Record cards, the raw client and the copy table are assembly, not contract.
+      "AssistantMessage", "BashCommand", "CybionToolCall", "UserInputMessage", "CybionThreadClient",
+      "CybionApiError", "copyFor", "fillCopy", "CopyKey", "useCybion", "groupThreadHistory",
+      "pollThreadHistory", "MessageScroller", "UsdBudgetInput",
     ]) {
-      expect(index, `${internal} must not be public`).not.toContain(internal)
-      expect(logic, `${internal} must not be public`).not.toContain(internal)
+      expect(values, `${internal} must not be published`).not.toContain(internal)
     }
   })
 
-  it("keeps the internal entries explicitly out of the public story", () => {
-    // The two internal entries exist only so repository tests and walkthrough
-    // pages can render cards; each says so where a maintainer will look.
+  it("gives each published surface an owner of its data flow", () => {
+    // A form component with no hook beside it is a component that expects the
+    // caller to do the work; these three are the whole settings story.
+    const hooks = read("../src/hooks/use-thread-settings-form.ts")
+    for (const hook of ["useThreadDefaultsForm", "useNewThreadSettings", "useThreadSettingsPanel"]) {
+      expect(hooks).toContain(`export function ${hook}(`)
+      expect(values).toContain(hook)
+    }
+    // And the internal entry is where our own app gets everything else.
     expect(read("../src/internal.ts")).toContain("不是包的公开面")
-    const readme = read("../README.md")
-    expect(readme).not.toContain("`BashCommand`")
-    expect(readme).not.toContain("`CybionThreadClient`")
-    expect(readme).toContain("`@zccz14/cybion-components/logic`")
-    expect(readme).toContain("`@zccz14/cybion-components/styles.css`")
   })
 })

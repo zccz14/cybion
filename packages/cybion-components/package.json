@@ -19,12 +19,12 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./styles.css": "./dist/styles.css",
     "./logic": {
       "types": "./dist/logic.d.ts",
       "import": "./dist/logic.js",
       "default": "./dist/logic.js"
     },
+    "./styles.css": "./dist/styles.css",
     "./internal": {
       "types": "./dist/internal.d.ts",
       "import": "./dist/internal.js",

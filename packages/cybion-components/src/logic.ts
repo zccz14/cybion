@@ -1,67 +1,37 @@
-// The framework-free half of the package: parsing, formatting, grouping and the
-// composer hooks, with no components and therefore no stylesheet imports. A host
-// that keeps its own shell imports these from `@zccz14/cybion-components/logic`,
-// so it never has to copy the modules into its own tree.
-//
-// INVARIANT: every name is listed one by one; this file never `export *`s. A
-// barrel that re-exports whole modules silently turns each internal helper into a
-// promise the package cannot take back — a signature nobody outside asked for
-// still cannot change. What is named here is what a host may rely on; everything
-// else stays reachable inside the package (`../lib/...`) and is free to change.
-// `tests/public-api.test.ts` freezes exactly this list.
-
-// One Thread's settings: the schema, how to read it from each source, and the
-// writers for both endpoints.
-export {
-  REASONING_EFFORTS, budgetTooLarge, sameThreadSettings, threadSettingsDefaults,
-  threadSettingsForNewThread, threadSettingsFromDefaults, threadSettingsFromThread,
-} from "./lib/thread-settings"
+/**
+ * 纯逻辑（无组件、无样式表）。
+ *
+ * 存在的理由只有一个：有一批用例断言的是解析与换算本身，它们跑在 Node 里，
+ * 不能把组件（及其 CSS）拖进来。这里因此只放不渲染任何东西的名字。
+ *
+ * 它不是第二个公开面——宿主从 `index.ts` 取组件与钩子。这里的内容随内部实现
+ * 一起演进，需要时随时可改。
+ */
+export { REASONING_EFFORTS } from "./lib/thread-settings"
 export type { ReasoningEffort, ThreadSettings } from "./lib/thread-settings"
-
-// The transcript, as far as a host's own chrome needs to know it: which record a
-// page starts or ends at, what a payload says, and what a status reads as.
-export { newestRecordId, oldestRecordId } from "./lib/thread-history"
+export { newestRecordId, oldestRecordId, threadImage } from "./lib/thread-history"
 export type { HistoryRecord, ThreadHistoryWindow } from "./lib/thread-history"
-export { historyPayloadObject, historyPayloadText } from "./lib/history-payload"
+export {
+  audioTranscriptionFunctionCall, bashCallCountdown, bashFunctionCall, browserControlFunctionCall,
+  computerUseFunctionCall, cybionToolFunctionCall, historyPayloadObject, historyPayloadText,
+  imageGenerationFunctionCall, screenshotImageSource, userInputView, viewImageFunctionCall,
+  viewedImageSource, webSearchFunctionCall,
+} from "./lib/history-payload"
 export type { AudioTranscriptionFunctionCall } from "./lib/history-payload"
-export { pendingResponseRecords } from "./lib/thread-response"
+export { pendingResponseRecords, threadControlAction } from "./lib/thread-response"
 export type { ThreadResponseView } from "./lib/thread-response"
 export { threadStatusLabel, threadStatusText } from "./lib/thread-status"
 export type { ThreadDisplayStatus } from "./lib/thread-status"
-export { emptyThreadUsage } from "./lib/thread-usage"
+export { compactTokenCount, emptyThreadUsage, threadCacheRate, threadCost } from "./lib/thread-usage"
 export type { ThreadUsage } from "./lib/thread-usage"
 export { manualLoadNotice } from "./lib/thread-manual-loads"
 export type { ThreadManualLoadsView } from "./lib/thread-manual-loads"
-
-// The composer a host drives itself: the same draft, attachment and audio rules
-// the packaged view follows.
-export { composerAction, handleChatInputKeyDown } from "./lib/chat-input"
-export { composerDraftKey } from "./lib/composer-drafts"
-export { composeComposerInput, maxInputChars } from "./lib/composer-files"
-export { audioDraftScope } from "./lib/composer-audio-drafts"
-export { useComposerAttach } from "./hooks/use-composer-attach"
-export { attachComposerAudio, useComposerAudio } from "./hooks/use-composer-audio"
-export { useComposerDraft } from "./hooks/use-composer-draft"
-export { useComposerFiles } from "./hooks/use-composer-files"
-export { attachComposerImages, useComposerImages } from "./hooks/use-composer-images"
-
-// The parsers each record card is asserted through: a host that renders its own
-// cards reads the same payloads with the same rules.
-export {
-  audioTranscriptionFunctionCall, bashCallCountdown, bashFunctionCall, browserControlFunctionCall,
-  computerUseFunctionCall, cybionToolFunctionCall, imageGenerationFunctionCall, screenshotImageSource,
-  userInputView, viewImageFunctionCall, viewedImageSource, webSearchFunctionCall,
-} from "./lib/history-payload"
 export { audioDurationLabel } from "./lib/composer-audio"
-export { compactTokenCount, threadCacheRate, threadCost } from "./lib/thread-usage"
-export { threadControlAction } from "./lib/thread-response"
-export { threadImage } from "./lib/thread-history"
+export { composerAction, handleChatInputKeyDown } from "./lib/chat-input"
+export { composerDraftKey, removeSubmittedDraft } from "./lib/composer-drafts"
+export { composeComposerInput, maxInputChars, splitPickedFiles } from "./lib/composer-files"
 export { pastedImageFiles } from "./lib/composer-images"
-export { splitPickedFiles } from "./lib/composer-files"
-export { removeSubmittedDraft } from "./lib/composer-drafts"
-
-// Display helpers, so a host's own rows read exactly like the package's.
+export { audioDraftScope } from "./lib/composer-audio-drafts"
 export { formatBytes } from "./lib/format"
 export { formatRelativeTime, formatStatsDuration, formattedTime } from "./lib/time"
-export { useNowSeconds } from "./hooks/use-now"
 export { cn, errorMessage } from "./lib/utils"

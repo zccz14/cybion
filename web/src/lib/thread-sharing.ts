@@ -1,6 +1,6 @@
-import type { ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
-import type { ThreadUsage } from "@zccz14/cybion-components/logic"
-import type { ThreadResponseView } from "@zccz14/cybion-components/logic"
+import type { ThreadDisplayStatus } from "@zccz14/cybion-components/internal"
+import type { ThreadUsage } from "@zccz14/cybion-components/internal"
+import type { ThreadResponseView } from "@zccz14/cybion-components/internal"
 
 export type SharingRequest = <T>(path: string, init?: RequestInit) => Promise<T>
 export type ThreadGrant = {

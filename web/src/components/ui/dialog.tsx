@@ -1,7 +1,7 @@
 import * as React from "react"
 import { Dialog as DialogPrimitive } from "radix-ui"
 
-import { cn } from "@zccz14/cybion-components/logic"
+import { cn } from "@zccz14/cybion-components/internal"
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
 

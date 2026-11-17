@@ -23,19 +23,8 @@ import { AuthMiniProvider, useAuthMini, type AuthMiniVerificationFailure } from 
 import type { AuthMiniApi } from "auth-mini/sdk/browser"
 import { LinkitProvider, useLinkit } from "linkit-react-components"
 import { AppLayout, Markdown, type AppNavGroup } from "@zccz14/ux"
-import {
-  CybionThreadProvider,
-  CybionThreadView,
-  HistoryMessage,
-  ThreadSettingsFields,
-  ThreadSettingsPopover,
-  threadSettingsDefaults,
-  threadSettingsForNewThread,
-  threadSettingsFromDefaults,
-  threadSettingsFromThread,
-  sameThreadSettings,
-  type ThreadSettings,
-} from "@zccz14/cybion-components"
+import { CybionThreadProvider, CybionThreadView } from "@zccz14/cybion-components"
+import { HistoryMessage, ThreadSettingsFields, ThreadSettingsPopover, useNewThreadSettings, useThreadDefaultsForm, type ThreadSettings } from "@zccz14/cybion-components/internal"
 import { listenForExtensionAttachments } from "./extension-bridge"
 import {
   ArchiveIcon,
@@ -82,27 +71,27 @@ import { onboardingCopy, needsFirstConversationCheck } from "@/lib/onboarding"
 import { ConceptHelp, UsageHelp, ConversationWelcome, ConversationExamples } from "@/components/onboarding"
 
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "@/lib/thread-search"
-import { historyPayloadObject, historyPayloadText, type AudioTranscriptionFunctionCall } from "@zccz14/cybion-components/logic"
-import { formatBytes } from "@zccz14/cybion-components/logic"
-import { budgetTooLarge } from "@zccz14/cybion-components/logic"
-import { formattedTime } from "@zccz14/cybion-components/logic"
-import { type HistoryRecord, type ThreadHistoryWindow, type ThreadManualLoadsView } from "@zccz14/cybion-components"
-import { handleChatInputKeyDown } from "@zccz14/cybion-components/logic"
-import { useComposerDraft } from "@zccz14/cybion-components/logic"
-import { composerDraftKey } from "@zccz14/cybion-components/logic"
-import { useComposerImages } from "@zccz14/cybion-components/logic"
-import { useComposerAudio } from "@zccz14/cybion-components/logic"
-import { audioDraftScope } from "@zccz14/cybion-components/logic"
-import { useComposerFiles } from "@zccz14/cybion-components/logic"
-import { useComposerAttach } from "@zccz14/cybion-components/logic"
-import { composeComposerInput, maxInputChars } from "@zccz14/cybion-components/logic"
+import { historyPayloadObject, historyPayloadText, type AudioTranscriptionFunctionCall } from "@zccz14/cybion-components/internal"
+import { formatBytes } from "@zccz14/cybion-components/internal"
+import { formattedTime } from "@zccz14/cybion-components/internal"
+import { type HistoryRecord, type ThreadHistoryWindow } from "@zccz14/cybion-components"
+import { type ThreadManualLoadsView } from "@zccz14/cybion-components/internal"
+import { handleChatInputKeyDown } from "@zccz14/cybion-components/internal"
+import { useComposerDraft } from "@zccz14/cybion-components/internal"
+import { composerDraftKey } from "@zccz14/cybion-components/internal"
+import { useComposerImages } from "@zccz14/cybion-components/internal"
+import { useComposerAudio } from "@zccz14/cybion-components/internal"
+import { audioDraftScope } from "@zccz14/cybion-components/internal"
+import { useComposerFiles } from "@zccz14/cybion-components/internal"
+import { useComposerAttach } from "@zccz14/cybion-components/internal"
+import { composeComposerInput, maxInputChars } from "@zccz14/cybion-components/internal"
 import { useIsDesktopLayout } from "@/hooks/use-mobile"
-import { ComposerAttach } from "@zccz14/cybion-components"
-import { ComposerAttachments } from "@zccz14/cybion-components"
-import { ComposerFileNotice, ComposerLengthNotice } from "@zccz14/cybion-components"
-import { ComposerAudio } from "@zccz14/cybion-components"
-import { ComposerAudioNotice } from "@zccz14/cybion-components"
-import { ComposerDraftNotice } from "@zccz14/cybion-components"
+import { ComposerAttach } from "@zccz14/cybion-components/internal"
+import { ComposerAttachments } from "@zccz14/cybion-components/internal"
+import { ComposerFileNotice, ComposerLengthNotice } from "@zccz14/cybion-components/internal"
+import { ComposerAudio } from "@zccz14/cybion-components/internal"
+import { ComposerAudioNotice } from "@zccz14/cybion-components/internal"
+import { ComposerDraftNotice } from "@zccz14/cybion-components/internal"
 import { CybionMark } from "@/components/cybion-mark"
 import { auditCacheRate, gatewayAuditUrl } from "@/lib/reasoning-audit"
 
@@ -135,9 +124,9 @@ import { manualDraft, draftsMatch, shouldAutosave, type ManualDraft } from "@/li
 import { ThreadListPane } from "@/components/thread-list"
 import { ThreadManualLoads } from "@/components/thread-manual-loads"
 import { ThreadNotes } from "@/components/thread-notes"
-import type { ThreadUsage } from "@zccz14/cybion-components/logic"
-import { errorMessage } from "@zccz14/cybion-components/logic"
-import type { ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
+import type { ThreadUsage } from "@zccz14/cybion-components/internal"
+import { errorMessage } from "@zccz14/cybion-components/internal"
+import type { ThreadDisplayStatus } from "@zccz14/cybion-components/internal"
 import {
   Dialog,
   DialogContent,
@@ -1427,12 +1416,10 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const navigate = useNavigate()
   const desktop = useIsDesktopLayout()
   const client = useQueryClient()
-  // Creation is the same settings form the account defaults and a Thread's panel
-  // render, seeded from the defaults: a Thread that does not exist yet names a
-  // model and follows the account for the rest until the composer pins one.
-  const settingsDefaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const [settings, setSettings] = useState<ThreadSettings | null>(null)
-  const value = settings ?? (settingsDefaults.data ? threadSettingsForNewThread(threadSettingsFromDefaults(settingsDefaults.data)) : null)
+  // 新建页的同一套设置：起始值、跟随默认的语义、随第一条消息发出的字段，全部由
+  // 包里的钩子给出，这里只管排版。
+  const settings = useNewThreadSettings()
+  const value = settings.value
   const location = useLocation()
   const request = useApiRequest(sdk)
   const composer = useComposerDraft(userId, null)
@@ -1458,7 +1445,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     },
   })
   const edit = (next: ThreadSettings) => {
-    setSettings(next)
+    settings.onChange(next)
     start.reset()
   }
   // Attachments travel inside the message text, so the Controller receives the
@@ -1472,7 +1459,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
     if (composed === "" && attachments.images.length === 0 && audios.length === 0) return
     // The one value the form holds is exactly what starts the Thread: no setting is
     // copied by hand, so the composer cannot show one thing and send another.
-    start.mutate({ model: value.model, upstream_id: value.upstream_id, reasoning_effort: value.reasoning_effort, service_tier_fast: value.service_tier_fast, context_budget_tokens: value.context_budget_tokens, minimal_mode: value.minimal_mode, image_generation_model: value.image_generation_model, max_loaded_manuals: value.max_loaded_manuals, budget_usd_nanos: value.budget_usd_nanos, audio_transcription_model: value.audio_transcription_model, initial_manual_ids: value.initial_manual_ids, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
+    start.mutate({ ...settings.model!, ...settings.payload!, draft: input, input: composed, images: attachments.images, audios }, { onSuccess: (request) => navigate({ pathname: `/threads/${request.thread_id}`, search: location.search }) })
   }
   return <main className="flex min-h-[calc(100svh-3.5rem)] flex-col lg:flex-row">
     {desktop && <aside className="border-b bg-sidebar/40 p-3 lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
@@ -1487,8 +1474,8 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 sm:py-8">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-          {settingsDefaults.error && <RequestError error={settingsDefaults.error} onRetry={() => void settingsDefaults.refetch()} />}
-          {settingsDefaults.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-24" /><Skeleton className="h-20" /></div>}
+          {settings.error && <RequestError error={settings.error} onRetry={settings.retry} />}
+          {settings.loading && <div className="flex flex-col gap-3"><Skeleton className="h-24" /><Skeleton className="h-20" /></div>}
           <ConversationWelcome language={language} />
           {connection.isPending && !value?.upstream_id && <p role="status" className="text-sm text-muted-foreground">{help.preparing}</p>}
           {connection.error && <Alert><CircleAlertIcon /><AlertTitle>{help.connectionFailed}</AlertTitle><AlertDescription className="space-y-3"><p>{help.connectionRecovery}</p><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={connection.isFetching} onClick={() => void connection.refetch()}>{help.retryConnection}</Button><Button asChild size="sm" variant="outline"><Link to="/configuration">{help.modelAction}</Link></Button></div></AlertDescription></Alert>}
@@ -2607,44 +2594,21 @@ function MetricCard({ label, value, detail, progress }: { label: string; value: 
 
 function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
-  const client = useQueryClient()
-  const queryKey = ["thread-defaults", sdk.session.getState().sessionId]
-  const [draft, setDraft] = useState<ThreadSettings | null>(null)
-  const defaults = useQuery({ queryKey, queryFn: ({ signal }) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { signal }) })
-  const save = useMutation({
-    mutationFn: (value: ThreadDefaults) => api<ThreadDefaults>(sdk, "/api/thread-defaults", { method: "PUT", body: JSON.stringify(value) }),
-    onMutate: () => client.cancelQueries({ queryKey }),
-    onSuccess: (value) => {
-      client.setQueryData(queryKey, value)
-      setDraft(null)
-    },
-  })
-  // The account defaults are the one surface with nothing to follow: the same
-  // settings value, with every field holding a concrete default.
-  const saved = defaults.data ? threadSettingsFromDefaults(defaults.data) : null
-  const value = draft ?? saved
-  // What would be sent, compared field by field against what the server holds: an
-  // emptied box keeps the saved amount, so clearing one is not a change, and a
-  // setting added later joins the dirty check by itself.
-  const payload = value !== null && saved !== null ? threadSettingsDefaults(value, saved) : null
-  const changed = payload !== null && !sameThreadSettings(threadSettingsFromDefaults(payload), saved!)
-  function edit(next: ThreadSettings) {
-    setDraft(next)
-    save.reset()
-  }
+  // 读取、草稿、脏检查、PUT 负载全部在包里：这张卡片只负责排版和文案。
+  const form = useThreadDefaultsForm({ queryKey: ["thread-defaults", sdk.session.getState().sessionId] })
+  const value = form.value
   return <Card>
     <CardHeader><CardTitle>{t("threadDefaults")}</CardTitle><CardDescription>{t("threadDefaultsDescription")}</CardDescription></CardHeader>
     <CardContent>
-      {defaults.error && <RequestError error={defaults.error} onRetry={() => void defaults.refetch()} />}
-      {defaults.isLoading && <div className="flex flex-col gap-4"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-9 w-36" /></div>}
-      {value && saved && <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (changed && !save.isPending && !budgetTooLarge(value.budget_usd_nanos)) save.mutate(payload!) }}>
+      {form.error && <RequestError error={form.error} onRetry={form.retry} />}
+      {form.loading && <div className="flex flex-col gap-4"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-9 w-36" /></div>}
+      {value && <form className="flex max-w-xl flex-col gap-5" onSubmit={(event) => { event.preventDefault(); form.save() }}>
         <FieldGroup>
-          <ThreadSettingsFields mode="defaults" idPrefix="default-thread" value={value} onChange={edit} language={language} disabled={save.isPending} />
+          <ThreadSettingsFields mode="defaults" idPrefix="default-thread" value={value} onChange={form.onChange} language={language} disabled={form.pending} />
         </FieldGroup>
-        {save.error && <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("saveDefaultsError")}</AlertTitle><AlertDescription>{errorMessage(save.error)}</AlertDescription></Alert>}
         <div className="flex flex-wrap items-center gap-3">
-          <Button disabled={!changed || save.isPending || budgetTooLarge(value.budget_usd_nanos)}>{save.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{save.isPending ? t("savingDefaults") : t("saveDefaults")}</Button>
-          <p role="status" className="text-sm text-muted-foreground">{save.isSuccess && t("defaultsSaved")}</p>
+          <Button disabled={!form.canSave}>{form.pending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{form.pending ? t("savingDefaults") : t("saveDefaults")}</Button>
+          <p role="status" className="text-sm text-muted-foreground">{form.saved && t("defaultsSaved")}</p>
         </div>
       </form>}
     </CardContent>

@@ -1,7 +1,7 @@
 import * as React from "react"
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui"
 
-import { cn } from "@zccz14/cybion-components/logic"
+import { cn } from "@zccz14/cybion-components/internal"
 import { CheckIcon, ChevronRightIcon } from "lucide-react"
 
 function DropdownMenu({

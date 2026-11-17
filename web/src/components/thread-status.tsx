@@ -1,11 +1,11 @@
 import { CheckIcon, CirclePauseIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIcon, TriangleAlertIcon } from "lucide-react"
 import { NavLink, useLocation } from "react-router-dom"
-import { useNowSeconds } from "@zccz14/cybion-components/logic"
-import { formatRelativeTime } from "@zccz14/cybion-components/logic"
-import { threadStatusLabel, threadStatusText, type ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
-import { cn } from "@zccz14/cybion-components/logic"
-import type { ThreadUsage } from "@zccz14/cybion-components/logic"
-import { ThreadUsageSummary, ThreadUsageDetails } from "@zccz14/cybion-components"
+import { useNowSeconds } from "@zccz14/cybion-components/internal"
+import { formatRelativeTime } from "@zccz14/cybion-components/internal"
+import { threadStatusLabel, threadStatusText, type ThreadDisplayStatus } from "@zccz14/cybion-components/internal"
+import { cn } from "@zccz14/cybion-components/internal"
+import type { ThreadUsage } from "@zccz14/cybion-components/internal"
+import { ThreadUsageSummary, ThreadUsageDetails } from "@zccz14/cybion-components/internal"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 type StatusProps = { status: ThreadDisplayStatus; language: "en" | "zh"; runningSummary?: string | null }

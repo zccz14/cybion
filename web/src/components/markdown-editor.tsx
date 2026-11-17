@@ -50,7 +50,7 @@ import {
 import { Markdown as MarkdownPreview } from "@zccz14/ux"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { cn } from "@zccz14/cybion-components/logic"
+import { cn } from "@zccz14/cybion-components/internal"
 
 export type MarkdownEditorLanguage = "en" | "zh"
 

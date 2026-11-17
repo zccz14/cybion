@@ -1,4 +1,4 @@
-import { cn } from "@zccz14/cybion-components/logic"
+import { cn } from "@zccz14/cybion-components/internal"
 
 function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
   return (

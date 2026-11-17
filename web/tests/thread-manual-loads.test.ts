@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test, { after } from "node:test"
-import type { HistoryRecord } from "@zccz14/cybion-components"
+import type { HistoryRecord } from "@zccz14/cybion-components/logic"
 import { readPackageSource } from "./package-source.ts"
 import { createTestServer } from "./vite-server.ts"
 

@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
-import { formattedTime } from "@zccz14/cybion-components/logic"
+import { formattedTime } from "@zccz14/cybion-components/internal"
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 type Status = {

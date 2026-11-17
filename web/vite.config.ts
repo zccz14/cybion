@@ -24,8 +24,8 @@ export default defineConfig({
       // 回归用例）。它们不是包的消费者，所以走源码而不是公开入口：公开面收窄
       // 的时候，这些测试不必跟着改，也不会反过来把内部实现钉成契约。
       '@zccz14/cybion-components/src': path.resolve(__dirname, '../packages/cybion-components/src'),
-      '@zccz14/cybion-components/internal': path.resolve(__dirname, '../packages/cybion-components/dist/internal.js'),
       '@zccz14/cybion-components/logic': path.resolve(__dirname, '../packages/cybion-components/dist/logic.js'),
+      '@zccz14/cybion-components/internal': path.resolve(__dirname, '../packages/cybion-components/dist/internal.js'),
       '@zccz14/cybion-components': path.resolve(__dirname, '../packages/cybion-components/dist/index.js'),
     },
     dedupe: ['@tanstack/react-query', 'react', 'react-dom', '@zccz14/ux', '@shadcn/react', 'lucide-react', 'radix-ui', '@base-ui/react', 'embla-carousel-react', 'class-variance-authority', 'clsx', 'tailwind-merge'],

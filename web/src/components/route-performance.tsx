@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
-import { cn, errorMessage } from "@zccz14/cybion-components/logic"
+import { cn, errorMessage } from "@zccz14/cybion-components/internal"
 import {
   errorRate,
   formatLatency,
@@ -23,7 +23,7 @@ import {
   type RoutePerformanceWindow,
   type RouteSortKey,
 } from "@/lib/route-performance"
-import { formattedTime } from "@zccz14/cybion-components/logic"
+import { formattedTime } from "@zccz14/cybion-components/internal"
 
 const copy = {
   en: {
