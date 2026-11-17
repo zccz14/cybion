@@ -120,11 +120,14 @@ test("thread settings live in the composer popover and the image tool follows it
   // The fields themselves are shared with the account defaults form, so the
   // reasoning scale and the fast switch live in one component, not in the shell.
   const fields = readPackageSource("components/thread-settings-fields.tsx")
+  const button = readPackageSource("components/thread-settings-button.tsx")
   const view = readPackageSource("thread-view.tsx")
   assert.match(source, /import \{ ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection \} from "@zccz14\/cybion-components"/)
-  // One picker for the new-Thread composer, one for the conversation composer.
+  // One picker for the new-Thread composer, which hands its own draft state in; the
+  // conversation uses the drop-in button that reads and writes the Thread itself.
   assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 1)
-  assert.equal(view.match(/<ThreadSettingsPopover /g)?.length, 1)
+  assert.equal(view.match(/<ThreadSettingsButton /g)?.length, 1)
+  assert.doesNotMatch(view, /<ThreadSettingsPopover /)
   // The scale is the Thread type's own union, so the panel cannot offer an effort
   // the API refuses; both surfaces read this one list.
   assert.match(fields, /REASONING_EFFORTS = \["none", "low", "medium", "high", "xhigh", "max"\]/)
@@ -141,14 +144,14 @@ test("thread settings live in the composer popover and the image tool follows it
   // Web search stays always-on; image generation follows the model chosen at
   // the Thread and account levels, read from the upstream image catalogs.
   assert.match(source, /"\/api\/integrations\/upstreams\/models\?kind=image"/)
-  assert.match(view, /imageGeneration=\{\{ override: current\.image_generation_model/)
+  assert.match(button, new RegExp("imageGeneration=\\{\\{ value: current\\.image_generation_model"))
   assert.match(popover, /imageModelOptions/)
   // The six settings are required props: neither call site may leave one out,
   // so both panels always offer the same options.
   for (const name of ["contextBudget", "loadedManualCap", "initialManuals", "minimalMode", "imageGeneration", "audioTranscription"]) {
     assert.doesNotMatch(popover, new RegExp(`  ${name}\\?\\s*:`), `${name} must not be optional`)
     assert.match(source, new RegExp(`${name}=\\{`), `composer passes ${name}`)
-    assert.match(view, new RegExp(`${name}=\\{`), `conversation passes ${name}`)
+    assert.match(button, new RegExp(`usdBudget=\\{{|contextBudget=\\{{|loadedManualCap=\\{{|initialManuals=\\{{|minimalMode=\\{{|imageGeneration=\\{{|audioTranscription=\\{{`), "conversation button supplies the settings")
   }
 })
 

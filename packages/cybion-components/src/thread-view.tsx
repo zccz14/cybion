@@ -5,11 +5,11 @@ import {
 
 import { Markdown } from "@zccz14/ux"
 
-import type { Language, Thread, ThreadDefaults, RequestAck, UpstreamModels } from "./api"
+import type { Language, Thread, ThreadDefaults, RequestAck } from "./api"
 import { useCybion } from "./provider"
 import { HistoryMessage, type ManualSummary, type Worker } from "./components/history-message"
 import { ThreadHistory } from "./components/thread-history"
-import { ThreadSettingsPopover, type ManualChoice } from "./components/thread-settings-popover"
+import { ThreadSettingsButton } from "./components/thread-settings-button"
 import { ThreadContextUsage, ThreadUsagePanel } from "./components/thread-usage"
 import { ThreadStatusBadge, ThreadStatusSummary } from "./components/thread-status"
 import { ComposerAttach } from "./components/composer-attach"
@@ -108,14 +108,6 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
     enabled: Boolean(threadId),
   })
   const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => transport.request<ThreadDefaults>("/api/thread-defaults", { signal }) })
-  const models = useModels()
-  const imageModels = useModels("image")
-  const audioModels = useModels("sst")
-  // The settings picker names Manuals; their bodies stay on the Manuals page.
-  const manualChoices = useQuery({
-    queryKey: ["manual-summaries", userId],
-    queryFn: ({ signal }) => transport.request<{ manuals: ManualChoice[] }>("/api/manual-summaries", { signal }),
-  })
   // The conversation opens on the window that starts at the most recent user input instead of
   // the whole thread; older pages load on demand, each one a whole turn that starts at the
   // previous input record, until `has_older` clears.
@@ -218,10 +210,6 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
       void client.invalidateQueries({ queryKey: ["threads"] })
       void client.invalidateQueries({ queryKey: ["reasoning-audits"] })
     },
-  })
-  const settings = useMutation({
-    mutationFn: (value: { model?: string; upstream_id?: string; reasoning_effort?: Thread["reasoning_effort"]; service_tier_fast?: boolean; context_budget_tokens?: number | null; budget_usd_nanos?: number | null; minimal_mode?: boolean | null; image_generation_model?: string | null; audio_transcription_model?: string | null; max_loaded_manuals?: number | null; initial_manual_ids?: string[] | null }) => transport.request<Thread>(`/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(value) }),
-    onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread", threadId] }); void client.invalidateQueries({ queryKey: ["threads"] }) },
   })
   // Adding budget is two calls the user asked for with one click: raise the limit
   // to the settled spend plus the amount, then resume. The amounts come from the
@@ -345,7 +333,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <ComposerAttach language={language} disabled={busy} onFiles={attach} />
-            <ThreadSettingsPopover model={current.model} upstreamId={current.upstream_id} catalogs={models.data?.upstreams} reasoningEffort={current.reasoning_effort} fast={current.service_tier_fast} language={language} usdBudget={{ override: current.budget_usd_nanos, fallback: defaults.data?.budget_usd_nanos ?? 0, onChange: (budget_usd_nanos) => settings.mutate({ budget_usd_nanos }) }} contextBudget={{ override: current.context_budget_tokens, fallback: defaults.data?.context_budget_tokens ?? FALLBACK_CONTEXT_BUDGET, onChange: (context_budget_tokens) => settings.mutate({ context_budget_tokens }) }} loadedManualCap={{ override: current.max_loaded_manuals, fallback: defaults.data?.max_loaded_manuals ?? FALLBACK_LOADED_MANUALS, onChange: (max_loaded_manuals) => settings.mutate({ max_loaded_manuals }) }} initialManuals={{ override: current.initial_manual_ids ?? null, fallback: defaults.data?.initial_manual_ids ?? [], catalogs: manualChoices.data?.manuals, onChange: (initial_manual_ids) => settings.mutate({ initial_manual_ids }) }} minimalMode={{ override: current.minimal_mode, fallback: defaults.data?.minimal_mode ?? false, onChange: (minimal_mode) => settings.mutate({ minimal_mode }) }} imageGeneration={{ override: current.image_generation_model, fallback: defaults.data?.image_generation_model ?? "", catalogs: imageModels.data?.upstreams, onChange: (image_generation_model) => settings.mutate({ image_generation_model }) }} audioTranscription={{ override: current.audio_transcription_model, fallback: defaults.data?.audio_transcription_model ?? null, catalogs: audioModels.data?.upstreams, onChange: (audio_transcription_model) => settings.mutate({ audio_transcription_model }) }} onModelChange={(upstream_id, model) => settings.mutate({ upstream_id, model })} onReasoningChange={(reasoning_effort) => settings.mutate({ reasoning_effort })} onFastChange={(service_tier_fast) => settings.mutate({ service_tier_fast })} />
+            <ThreadSettingsButton threadId={threadId} value={current} disabled={busy} />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
@@ -392,17 +380,3 @@ function RequestError({ error, onRetry }: { error: unknown; onRetry?: () => void
   return <Alert variant="destructive"><CircleAlertIcon /><AlertTitle>{t("loadError")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span className="break-words">{errorMessage(error)}</span>{onRetry && <Button size="sm" variant="outline" onClick={onRetry}>{t("retry")}</Button>}</AlertDescription></Alert>
 }
 
-// `GET /api/thread-defaults` answers these; the literals only stand in for the
-// moment before it lands, so the panel never shows an empty fallback.
-const FALLBACK_CONTEXT_BUDGET = 200000
-const FALLBACK_LOADED_MANUALS = 12
-
-function useModels(kind?: "image" | "sst") {
-  const { client } = useCybion()
-  return useQuery({
-    queryKey: [kind === "image" ? "upstream-image-models" : kind === "sst" ? "upstream-audio-models" : "upstream-models"],
-    queryFn: ({ signal }) => client.request<UpstreamModels>(`/api/integrations/upstreams/models${kind ? `?kind=${kind}` : ""}`, { signal }),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  })
-}

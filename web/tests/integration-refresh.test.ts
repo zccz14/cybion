@@ -7,6 +7,7 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const popover = readPackageSource("components/thread-settings-popover.tsx")
 // The fields are shared with the account defaults form, so the pickers live here now.
 const fields = readPackageSource("components/thread-settings-fields.tsx")
+const button = readPackageSource("components/thread-settings-button.tsx")
 
 test("personal configuration manages multiple Responses-compatible upstreams without exposing keys", () => {
   assert.match(source, /apiBaseUrlDescription: "Cybion sends model requests to this URL with \/responses appended\./)
@@ -33,10 +34,13 @@ test("each upstream owns its model catalog and the model pickers group by upstre
   // The new-Thread composer picks from the polled account catalog, and so does the
   // account defaults form, which now renders the same shared fields.
   assert.equal(source.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 2)
-  assert.equal(view.match(/catalogs=\{models\.data\?\.upstreams\}/g)?.length, 1)
+  // The conversation's panel is the drop-in button: it fetches its own catalogs
+  // through the provider, so the thread view passes none of them.
+  assert.doesNotMatch(view, /catalogs=\{/)
+  assert.match(view, /<ThreadSettingsButton threadId=\{threadId\} value=\{current\}/)
   assert.match(source, /upstreamId=\{value\.upstream_id\}/)
-  assert.match(view, /upstreamId=\{current\.upstream_id\}/)
-  assert.match(view, /onModelChange=\{\(upstream_id, model\) => settings\.mutate\(\{ upstream_id, model \}\)\}/)
+  assert.match(fields, /modelSelection\(upstreamId, model\)/)
+  assert.match(button, /onModelChange=\{\(upstream_id, model\) => settings\.mutate\(\{ upstream_id, model \}\)\}/)
   assert.match(source, /availableModels: "Available models"/)
   assert.match(source, /availableModels: "可用模型"/)
   assert.match(fields, /<SelectGroup key=\{group\.id\}>/)
