@@ -1,7 +1,8 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { CybionThreadProvider, ThreadSettingsPopover, type ModelCatalog, type ThreadSettings } from "@zccz14/cybion-components"
+import { CybionThreadProvider, ThreadSettingsPopover, type ThreadSettings } from "@zccz14/cybion-components"
+import { type ModelCatalog } from "@zccz14/cybion-components/logic"
 import { Button } from "../src/components/ui/button"
 import "../src/styles.css"
 

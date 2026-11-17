@@ -9,7 +9,7 @@ import { readPackageSource } from "./package-source.ts"
 test("web search calls render the query with escaped text in both languages", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { WebSearchCall } = await server.ssrLoadModule("@zccz14/cybion-components")
+    const { WebSearchCall } = await server.ssrLoadModule("@zccz14/cybion-components/internal")
     const call = { query: "最新版 Rust 发布了吗 <script>alert(1)</script>" }
     const render = (language: string) => renderToStaticMarkup(createElement(WebSearchCall, {
       language, call, time: "12:34:56", children: createElement("details", null, "Raw protocol"),

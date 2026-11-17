@@ -2,7 +2,8 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { readPackageSource } from "./package-source.ts"
 import test from "node:test"
-import { threadStatusLabel, threadStatusText, type ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
+import { type ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
+import { threadStatusLabel, threadStatusText } from "@zccz14/cybion-components/logic"
 
 const statuses: ThreadDisplayStatus[] = ["ready", "running", "compacting", "completed", "failed", "stopped", "blocked"]
 

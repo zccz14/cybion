@@ -20,7 +20,10 @@ const externalPackages = [
 export default defineConfig({
   build: {
     lib: {
-      entry: { index: "src/index.ts", logic: "src/logic.ts" },
+      // `internal` is documented as unstable: repository tests and walkthrough pages
+      // render record cards that no host assembles. Publishing it under a name that
+      // says "not contract" keeps `index.ts` small without hiding tested code.
+      entry: { index: "src/index.ts", logic: "src/logic.ts", internal: "src/internal.ts" },
       formats: ["es"],
       fileName: (_format, entryName) => `${entryName}.js`,
     },

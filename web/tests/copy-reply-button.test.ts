@@ -9,7 +9,7 @@ import { readPackageSource } from "./package-source.ts"
 test("the reply copy button labels itself in both languages and owns a status line", async () => {
   const server = await createTestServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, include: [] }, appType: "custom" })
   try {
-    const { CopyReplyButton } = await server.ssrLoadModule("@zccz14/cybion-components")
+    const { CopyReplyButton } = await server.ssrLoadModule("@zccz14/cybion-components/internal")
     const zh = renderToStaticMarkup(createElement(CopyReplyButton, { text: "回复内容", language: "zh" }))
     assert.match(zh, /<button[^>]*type="button"/)
     assert.ok(zh.includes('aria-label="复制"'))

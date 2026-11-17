@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client"
 
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import "../src/styles.css"
-import { CheckpointMessage } from "@zccz14/cybion-components"
+import { CheckpointMessage } from "@zccz14/cybion-components/internal"
 
 const base = 1_800_000_000
 const checkpoint = `# Durable working context

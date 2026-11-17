@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client"
 
 import { Message, MessageContent } from "../src/components/ui/message"
 import "../src/styles.css"
-import { UserInputMessage } from "@zccz14/cybion-components"
+import { UserInputMessage } from "@zccz14/cybion-components/internal"
 
 function tinyPng() {
   const canvas = document.createElement("canvas")

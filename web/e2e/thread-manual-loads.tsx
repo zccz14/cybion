@@ -7,11 +7,12 @@ import { MessageScroller, MessageScrollerContent, MessageScrollerProvider, Messa
 
 import { ThreadManualLoads } from "../src/components/thread-manual-loads"
 import { historyPayloadText } from "@zccz14/cybion-components/logic"
-import { manualLoadNotice } from "@zccz14/cybion-components"
+import { manualLoadNotice } from "@zccz14/cybion-components/logic"
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import { formattedTime } from "@zccz14/cybion-components/logic"
 import "../src/styles.css"
-import { CybionThreadProvider, ManualLoadNotice, ThreadHistory } from "@zccz14/cybion-components"
+import { CybionThreadProvider, ThreadHistory } from "@zccz14/cybion-components"
+import { ManualLoadNotice } from "@zccz14/cybion-components/internal"
 
 const manual = "8f1d2e3a-4b5c-6d7e-8f90-1a2b3c4d5e6f"
 const edited = "c0ffee00-1111-2222-3333-444455556666"

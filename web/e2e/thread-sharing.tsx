@@ -8,13 +8,14 @@ import { TooltipProvider } from "../src/components/ui/tooltip"
 
 import { Markdown } from "@zccz14/ux"
 
-import { historyPayloadText, screenshotImageSource, viewedImageSource } from "@zccz14/cybion-components/logic"
+import { historyPayloadText } from "@zccz14/cybion-components/logic"
+import { screenshotImageSource, viewedImageSource } from "@zccz14/cybion-components/logic"
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import type { SharingRequest } from "../src/lib/thread-sharing"
 import { adoptLinkitFixtureSession, LinkitFixtureProviders } from "./linkit-fixture"
 import "../src/styles.css"
 import "linkit-react-components/styles.css"
-import { ScreenshotOutput, UserInputMessage, ViewedOutput } from "@zccz14/cybion-components"
+import { ScreenshotOutput, UserInputMessage, ViewedOutput } from "@zccz14/cybion-components/internal"
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 Object.assign(window, { sharingFixtureCache: () => client.getQueryCache().getAll().map((q) => ({ key: q.queryKey, data: q.state.data })) })
 function Reader({ language, sessionId, userId, request }: { language: "en" | "zh"; sessionId: string; userId: string; request: SharingRequest }) {

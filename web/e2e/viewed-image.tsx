@@ -2,7 +2,7 @@ import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
 
 import "../src/styles.css"
-import { ViewedOutput } from "@zccz14/cybion-components"
+import { ViewedOutput } from "@zccz14/cybion-components/internal"
 
 function tinyPng() {
   const canvas = document.createElement("canvas")

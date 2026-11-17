@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
-import { composeComposerInput, splitPickedFiles } from "@zccz14/cybion-components/logic"
+import { composeComposerInput } from "@zccz14/cybion-components/logic"
+import { splitPickedFiles } from "@zccz14/cybion-components/logic"
 import { readPackageSource } from "./package-source.ts"
 
 test("one pick is split into images, audio, text files and the rest", () => {

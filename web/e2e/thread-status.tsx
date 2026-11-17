@@ -4,7 +4,7 @@ import { HashRouter } from "react-router-dom"
 import { ThreadLink, ThreadStatusBadge } from "../src/components/thread-status"
 import { CybionMark } from "../src/components/cybion-mark"
 import { TooltipProvider } from "../src/components/ui/tooltip"
-import type { ThreadDisplayStatus } from "@zccz14/cybion-components/logic"
+import type { ThreadDisplayStatus } from "@zccz14/cybion-components"
 import { emptyThreadUsage } from "@zccz14/cybion-components/logic"
 import "../src/styles.css"
 

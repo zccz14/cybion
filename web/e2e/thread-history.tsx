@@ -5,9 +5,11 @@ import { MessageScroller, MessageScrollerButton, MessageScrollerContent, Message
 import { historyPayloadText } from "@zccz14/cybion-components/logic"
 import type { HistoryRecord } from "@zccz14/cybion-components"
 import { formattedTime } from "@zccz14/cybion-components/logic"
-import { pendingResponseRecords, type ThreadResponseView } from "@zccz14/cybion-components/logic"
+import { type ThreadResponseView } from "@zccz14/cybion-components"
+import { pendingResponseRecords } from "@zccz14/cybion-components/logic"
 import "../src/styles.css"
-import { AssistantMessage, ThreadHistory } from "@zccz14/cybion-components"
+import { ThreadHistory } from "@zccz14/cybion-components"
+import { AssistantMessage } from "@zccz14/cybion-components/internal"
 
 // 11 列的宽表格，且单元格里是不可断行的 id 与哈希：对话栏放不下，
 // 只能靠表格自己的横向滚动看全。
