@@ -115,44 +115,52 @@ test("history renders reasoning summaries", () => {
   assert.match(source, /function reasoningSummary\(record: HistoryRecord\)/)
 })
 
-test("thread settings live in the composer popover and the image tool follows its configured model", () => {
+test("thread settings are one form control the three surfaces render", () => {
   const popover = readPackageSource("components/thread-settings-popover.tsx")
-  // The fields themselves are shared with the account defaults form, so the
-  // reasoning scale and the fast switch live in one component, not in the shell.
+  // One control, one schema: the fields are a plain value/onChange form, so the
+  // account defaults, the new-Thread composer and a Thread's panel cannot drift.
   const fields = readPackageSource("components/thread-settings-fields.tsx")
   const button = readPackageSource("components/thread-settings-button.tsx")
+  const schema = readPackageSource("lib/thread-settings.ts")
   const view = readPackageSource("thread-view.tsx")
-  assert.match(source, /import \{ ThreadSettingsPopover, imageModelOptions, modelGroups, modelSelection, parseModelSelection \} from "@zccz14\/cybion-components"/)
-  // One picker for the new-Thread composer, which hands its own draft state in; the
-  // conversation uses the drop-in button that reads and writes the Thread itself.
-  assert.equal(source.match(/<ThreadSettingsPopover /g)?.length, 1)
+  assert.match(source, /<ThreadSettingsPopover value=\{value\} onChange=\{edit\}/)
+  // The account defaults card renders the same control in its own mode.
+  assert.match(source, /<ThreadSettingsFields mode="defaults" idPrefix="default-thread" value=\{value\} onChange=\{edit\}/)
   assert.equal(view.match(/<ThreadSettingsButton /g)?.length, 1)
   assert.doesNotMatch(view, /<ThreadSettingsPopover /)
-  // The scale is the Thread type's own union, so the panel cannot offer an effort
-  // the API refuses; both surfaces read this one list.
-  assert.match(fields, /REASONING_EFFORTS = \["none", "low", "medium", "high", "xhigh", "max"\]/)
+  // The control takes a value and gives back the next one; it neither reads a
+  // Thread nor writes one, which is what keeps it usable on all three surfaces.
+  assert.match(fields, /<K extends keyof ThreadSettings>\(field: K, next: ThreadSettings\[K\]\) => onChange\(\{ \.\.\.value, \[field\]: next \}\)/)
+  assert.doesNotMatch(fields, /useThread\(|mutate\(|fetch\(/)
+  // The scale is the schema's own union, so the panel cannot offer an effort the
+  // API refuses; every surface reads this one list.
+  assert.match(schema, /REASONING_EFFORTS = \["none", "low", "medium", "high", "xhigh", "max"\]/)
   assert.match(fields, /ZapIcon/)
   assert.match(fields, /<Switch aria-label=\{copyFor\(language, "fastMode"\)\}/)
-  // One panel, two surfaces: the popover renders only the shell.
-  assert.match(popover, /<ThreadSettingsFields/)
+  // The popover is only the shell over that control.
+  assert.match(popover, /<ThreadSettingsFields mode="override" idPrefix="thread-settings" value=\{value\} onChange=\{onChange\}/)
   assert.doesNotMatch(popover, /REASONING_EFFORTS\.map/)
   assert.doesNotMatch(source, /id="new-thread-web-search"/)
   assert.doesNotMatch(source, /id="default-thread-web-search"/)
   assert.doesNotMatch(source, /settings\.mutate\(\{ web_search/)
   assert.doesNotMatch(source, /\.web_search\b/)
   assert.doesNotMatch(source, /\.image_generation\b/)
-  // Web search stays always-on; image generation follows the model chosen at
-  // the Thread and account levels, read from the upstream image catalogs.
-  assert.match(source, /"\/api\/integrations\/upstreams\/models\?kind=image"/)
-  assert.match(button, new RegExp("imageGeneration=\\{\\{ value: current\\.image_generation_model"))
+  // Web search stays always-on; image generation follows the model chosen at the
+  // Thread and account levels, read from the upstream image catalogs.
+  assert.match(source, /"\/api\/integrations\/upstreams\/models"/)
+  assert.match(fields, /imageModelOptions\(imageModels\.data\?\.upstreams, value\.upstream_id/)
   assert.match(popover, /imageModelOptions/)
-  // The six settings are required props: neither call site may leave one out,
-  // so both panels always offer the same options.
-  for (const name of ["contextBudget", "loadedManualCap", "initialManuals", "minimalMode", "imageGeneration", "audioTranscription"]) {
-    assert.doesNotMatch(popover, new RegExp(`  ${name}\\?\\s*:`), `${name} must not be optional`)
-    assert.match(source, new RegExp(`${name}=\\{`), `composer passes ${name}`)
-    assert.match(button, new RegExp(`usdBudget=\\{{|contextBudget=\\{{|loadedManualCap=\\{{|initialManuals=\\{{|minimalMode=\\{{|imageGeneration=\\{{|audioTranscription=\\{{`), "conversation button supplies the settings")
+  // Every setting the schema names reaches the control from one value: no call
+  // site copies a field by hand, so none of them can leave one out.
+  for (const name of ["context_budget_tokens", "max_loaded_manuals", "initial_manual_ids", "minimal_mode", "image_generation_model", "audio_transcription_model", "budget_usd_nanos"]) {
+    assert.match(schema, new RegExp(`\\b${name}\\b`), `the schema carries ${name}`)
+    assert.match(fields, new RegExp(`value\\.${name}|fallback\\.${name}|"${name}"`), `the control renders ${name}`)
+    assert.doesNotMatch(source, new RegExp(`${name}=\\{`), `the host may not pass ${name} by hand`)
   }
+  // The Thread's own surface PATCHes only what changed, computed by the schema.
+  assert.match(button, /threadSettingsPatch\(next, saved\)/)
+  assert.match(button, /settings\.mutate\(patch\)/)
+  assert.doesNotMatch(button, /usdBudget=\{\{/)
 })
 
 test("the tools page groups the shared tool catalog by responsible party", () => {

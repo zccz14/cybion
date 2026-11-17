@@ -66,7 +66,7 @@ describe("the thread settings button", () => {
       if (path.startsWith("/api/integrations/upstreams/models")) return catalogs
       if (path === "/api/manual-summaries") return { manuals: [] }
       return {}
-    })
+    }, true)
     fixture.render()
     // Opened by threadId alone: the trigger names the model and the effort.
     const trigger = await screen.findByRole("button", { name: "线程设置: deepseek-flash (medium)" })

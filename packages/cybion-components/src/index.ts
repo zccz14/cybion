@@ -49,9 +49,14 @@ export { ComposerAudio } from "./components/composer-audio"
 export { ComposerAudioNotice } from "./components/composer-audio-notice"
 export { ComposerDraftNotice } from "./components/composer-draft-notice"
 export { ThreadSettingsPopover } from "./components/thread-settings-popover"
-export { ThreadSettingsFields, REASONING_EFFORTS } from "./components/thread-settings-fields"
+export { ThreadSettingsFields } from "./components/thread-settings-fields"
 export { ThreadSettingsButton } from "./components/thread-settings-button"
-export type { ReasoningEffort, ThreadSettingsValue } from "./components/thread-settings-fields"
+export {
+  REASONING_EFFORTS, THREAD_SETTINGS_FIELDS, budgetTooLarge, sameThreadSettings,
+  threadSettingsDefaults, threadSettingsForNewThread, threadSettingsFromDefaults, threadSettingsFromThread,
+  threadSettingsOverrides, threadSettingsPatch,
+} from "./lib/thread-settings"
+export type { ReasoningEffort, ThreadSettings, ThreadSettingsOverrides } from "./lib/thread-settings"
 export { UsdBudgetInput } from "./components/usd-budget-input"
 export { imageModelOptions, modelGroups, modelSelection, parseModelSelection } from "./lib/model-catalog"
 export type { ManualChoice, ModelCatalog } from "./lib/model-catalog"

@@ -36,7 +36,9 @@ export async function stubWorkspace(page: Page, options: {
   const profile = { user_id: "onboarding-user", username: "onboarding", intro: "", lang: language, theme, avatar_url: null }
   const release = JSON.parse(readFileSync(new URL("../../worker-release.json", import.meta.url), "utf8"))
   const upstream = { id: options.fallbackReady ? "manual-upstream" : "normai-upstream", name: options.fallbackReady ? "Manual" : "NormAI", base_url: options.fallbackReady ? "https://model.fixture" : "https://normai.ntnl.io", api_key_configured: true }
-  const defaults = { model: "deepseek-flash", upstream_id: options.connectionFails && !options.fallbackReady ? null : upstream.id, reasoning_effort: "medium", service_tier_fast: false, context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "", initial_manual_ids: [] as string[], budget_usd_nanos: 0 }
+  // Every field `GET /api/thread-defaults` answers: the settings form reads the
+  // whole value, so a missing one would render as an empty default.
+  const defaults = { model: "deepseek-flash", upstream_id: options.connectionFails && !options.fallbackReady ? null : upstream.id, reasoning_effort: "medium", service_tier_fast: false, context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "", audio_transcription_model: null as string | null, max_loaded_manuals: 12, initial_manual_ids: [] as string[], budget_usd_nanos: 0 }
   const thread = { ...defaults, id: "created-thread", title: "Fixture conversation", status: "idle", display_status: "ready", usage: emptyThreadUsage, context_tokens: 0, archived_at: null, created_at: now, updated_at: now, created_by: "web", external_ref: null }
   const notifications = { enabled: true, configured: true, bot_id: "fixture-bot", recipient_username: "onboarding", last_attempt_at: null, last_success_at: null, last_error: null, conversation_id: null, message_id: null }
   // Mirror the controller: every group keeps fractional-style keys in array order.
