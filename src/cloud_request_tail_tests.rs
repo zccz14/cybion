@@ -235,7 +235,7 @@ fn the_context_sentence_warns_before_a_compaction() {
         "{text}"
     );
     assert!(
-        text.contains("Less than one more request at the current rate."),
+        text.contains("About 10 more requests at the current rate."),
         "{text}"
     );
     assert!(text.contains("Compaction is close"), "{text}");
@@ -266,7 +266,7 @@ fn the_context_sentence_counts_the_requests_the_budget_still_buys() {
     let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
     let text = tail_text(&compiled.items);
     assert!(
-        text.contains("About 4 more requests at the current rate."),
+        text.contains("About 9 more requests at the current rate."),
         "{text}"
     );
     assert!(
