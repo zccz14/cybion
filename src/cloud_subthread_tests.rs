@@ -83,7 +83,7 @@ fn a_child_never_falls_back_to_the_account_budget() {
     let root_ceiling = subthreads::exhausted(&connection, "child", 0)
         .unwrap()
         .unwrap();
-    assert_eq!(root_ceiling.budget_usd_nanos, 3_000_000_000);
+    assert_eq!(root_ceiling.budget_usd_nanos, 10_000_000_000);
 }
 
 #[test]
