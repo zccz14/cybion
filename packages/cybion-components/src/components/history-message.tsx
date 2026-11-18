@@ -15,6 +15,7 @@ import {
   historyPayloadObject,
   historyPayloadText,
   imageGenerationFunctionCall,
+  reasoningPayloadText,
   screenshotImageSource,
   viewImageFunctionCall,
   viewedImageSource,
@@ -57,17 +58,6 @@ function historyRecordLabel(record: HistoryRecord, t: (key: CopyKey) => string) 
 
 function isReasoningRecord(record: HistoryRecord) {
   return historyPayloadObject(record.payload)?.type === "reasoning"
-}
-
-function reasoningSummary(record: HistoryRecord) {
-  const summary = historyPayloadObject(record.payload)?.summary
-  if (!Array.isArray(summary)) return ""
-  return summary
-    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-    .filter((item) => typeof item.text === "string")
-    .map((item) => item.text as string)
-    .filter((text) => text.trim())
-    .join("\n\n")
 }
 
 function historyRecordSummary(text: string) {
@@ -139,8 +129,8 @@ export const HistoryMessage = memo(function HistoryMessage({ language, record, w
   const text = historyPayloadText(record.payload)
 
   if (isReasoningRecord(record)) {
-    const summary = reasoningSummary(record)
-    return <div className="relative flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-3 py-3 dark:border-border dark:bg-card">
+    const reasoning = reasoningPayloadText(record.payload)
+    return <div data-slot="reasoning-message" className="relative flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-3 py-3 dark:border-border dark:bg-card">
       <div aria-hidden="true" className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
         <SparklesIcon className="size-4" />
       </div>
@@ -149,7 +139,7 @@ export const HistoryMessage = memo(function HistoryMessage({ language, record, w
           <span className="text-sm font-medium text-primary">{t("recordReasoning")}</span>
           <time className="text-xs text-muted-foreground">{time}</time>
         </div>
-        {summary ? <div className="mt-2 break-words text-sm"><Markdown content={summary} /></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
+        {reasoning ? <div className="mt-2 break-words text-sm"><Markdown content={reasoning} /></div> : <p className="mt-2 text-sm text-muted-foreground">—</p>}
         <PayloadDetails language={language} record={record} label={t("recordPayload")} />
       </div>
     </div>
