@@ -42,17 +42,28 @@ pub(super) fn block(connection: &Connection, thread_id: &str) -> Result<bool, Ap
 /// `blocked=1` is written conditionally so a Thread that is already blocked
 /// keeps its original state and does not gain a second record: resuming a
 /// running Thread after a Controller restart reaches this gate again.
+/// `ceiling` names the Thread whose budget ran out when it was not this one:
+/// a child spends its parent's money too, and a record that blamed the wrong
+/// Thread would send its reader to the wrong settings page.
 pub(super) fn stop_for_budget(
     connection: &mut Connection,
     thread_id: &str,
     budget_usd_nanos: i64,
     spent_usd_nanos: i64,
+    ceiling: Option<&str>,
 ) -> Result<String, ApiError> {
-    let content = format!(
-        "Budget exhausted: {spent} settled of the {budget} limit. Raise the limit in Thread settings, then send a message to continue.",
-        spent = dollars(spent_usd_nanos),
-        budget = dollars(budget_usd_nanos),
-    );
+    let content = match ceiling {
+        None => format!(
+            "Budget exhausted: {spent} settled of the {budget} limit. Raise the limit in Thread settings, then send a message to continue.",
+            spent = dollars(spent_usd_nanos),
+            budget = dollars(budget_usd_nanos),
+        ),
+        Some(parent) => format!(
+            "Budget exhausted: {spent} settled of the {budget} the parent Thread 「{parent}」 allows for its whole branch. It can raise this Thread's slice, or you can raise that Thread's limit in its settings; then send a message to continue.",
+            spent = dollars(spent_usd_nanos),
+            budget = dollars(budget_usd_nanos),
+        ),
+    };
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = transaction.execute(
         "UPDATE threads SET blocked=1 WHERE id=? AND blocked=0",
@@ -80,13 +91,28 @@ pub(super) fn stop_for_budget(
 
 /// A settled amount the way the Thread reads it elsewhere: cents, and anything
 /// under a cent does not read as no money at all.
-fn dollars(nanos: i64) -> String {
+pub(super) fn dollars(nanos: i64) -> String {
     let value = nanos as f64 / 1_000_000_000.0;
     if value > 0.0 && value < 0.01 {
         "<$0.01".to_owned()
     } else {
         format!("${value:.2}")
     }
+}
+
+/// The Thread above answered, so the child is no longer waiting on it. The
+/// parent is a principal like the user — it granted the slice, it can widen it,
+/// and a child stopped on its ceiling has nowhere else to go. This is still not
+/// something the kernel may do on its own: only an action the parent took.
+pub(super) fn clear_on_parent_action(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<(), ApiError> {
+    connection.execute(
+        "UPDATE threads SET blocked=0 WHERE id=? AND blocked=1",
+        [thread_id],
+    )?;
+    Ok(())
 }
 
 /// The user acted on the Thread, so it is no longer waiting on them. Two writes

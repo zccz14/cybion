@@ -180,7 +180,7 @@ fn budget_records(connection: &Connection, id: &str) -> i64 {
 fn a_budget_stop_blocks_marks_one_record_and_stays_marked() {
     let mut connection = blocked_connection();
     insert_thread(&connection, "t");
-    let text = blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    let text = blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000, None).unwrap();
     assert!(text.starts_with("Budget exhausted:"), "{text}");
     assert!(text.contains("$0.62"), "{text}");
     assert!(text.contains("$0.50"), "{text}");
@@ -189,7 +189,7 @@ fn a_budget_stop_blocks_marks_one_record_and_stays_marked() {
     assert_eq!(budget_records(&connection, "t"), 1);
     // Resuming the same Thread reaches the gate again; it must not stack up
     // records or repaint the state the user is waiting on.
-    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000, None).unwrap();
     assert_eq!(budget_records(&connection, "t"), 1);
 }
 
@@ -197,7 +197,7 @@ fn a_budget_stop_blocks_marks_one_record_and_stays_marked() {
 fn the_next_user_message_clears_a_budget_block() {
     let mut connection = blocked_connection();
     insert_thread(&connection, "t");
-    blocked::stop_for_budget(&mut connection, "t", 1_000, 2_000).unwrap();
+    blocked::stop_for_budget(&mut connection, "t", 1_000, 2_000, None).unwrap();
     assert_eq!(blocked(&connection, "t"), 1);
     insert_record(&connection, "t", "input");
     assert_eq!(blocked(&connection, "t"), 0);
@@ -220,7 +220,7 @@ fn the_users_own_continue_clears_a_budget_block() {
             [now()],
         )
         .unwrap();
-    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000, None).unwrap();
     assert_eq!(blocked(&connection, "t"), 1);
     assert_eq!(display_status(&connection, "t"), "blocked");
 
@@ -262,7 +262,7 @@ fn compact_does_not_clear_a_budget_block() {
             [now()],
         )
         .unwrap();
-    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000).unwrap();
+    blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000, None).unwrap();
     thread_controls::record_request(
         &mut connection,
         &std::env::temp_dir(),

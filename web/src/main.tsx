@@ -123,6 +123,7 @@ import { collectSubtreeIds, commonAncestorIds, manualAncestorIds, manualCurrentP
 import { manualDraft, draftsMatch, shouldAutosave, type ManualDraft } from "@/lib/manual-drafts"
 import { ThreadListPane } from "@/components/thread-list"
 import { ThreadManualLoads } from "@/components/thread-manual-loads"
+import { ThreadBranch } from "@/components/thread-branch"
 import { ThreadNotes } from "@/components/thread-notes"
 import type { ThreadUsage } from "@zccz14/cybion-components/internal"
 import { errorMessage } from "@zccz14/cybion-components/internal"
@@ -1585,6 +1586,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
         transcriptFooter={<>
           {openThreadNotes.length > 0 && <div className="border-t pt-3"><ThreadNotes notes={openThreadNotes} language={language} /></div>}
           {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
+          <ThreadBranch threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
         </>}
       />
     </CybionThreadProvider>
