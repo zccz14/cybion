@@ -3904,6 +3904,30 @@ fn resolve_thread_upstream(
     Ok(id)
 }
 
+/// Resolves the endpoint a child runs on. A subcontract stays where its parent
+/// runs unless the caller names another endpoint that really exists: the
+/// endpoint is plumbing the parent already answered, so an id that is stale or
+/// copied from somewhere else is skipped instead of blocking the work. Only a
+/// branch with no usable endpoint anywhere is refused.
+fn resolve_child_upstream(
+    connection: &Connection,
+    requested: Option<String>,
+    parent: &ThreadView,
+    default: Option<String>,
+) -> Result<String, ApiError> {
+    for candidate in [requested, parent.upstream_id.clone(), default]
+        .into_iter()
+        .flatten()
+    {
+        if upstreams::exists(connection, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+    Err(ApiError::conflict(
+        "configure a Responses-compatible upstream first",
+    ))
+}
+
 /// Loads the upstream a thread runs on, failing when the thread has none.
 async fn load_thread_upstream(
     state: &AppState,
@@ -4406,14 +4430,17 @@ async fn create_thread_for(
         if let Some(parent_thread_id) = parent_thread_id.as_deref() {
             let parent = load_thread(&transaction, parent_thread_id)?;
             subthreads::check_child(&transaction, &parent, budget_usd_nanos, &defaults)?;
-            // A child names its own model and endpoint or names neither. Naming
-            // neither keeps the pair the parent already runs on: they are one
-            // decision, and a child that silently landed on a different
-            // endpoint than its parent is not a subcontract any more.
-            if model.is_none() && upstream_id.is_none() {
-                model = Some(parent.model.clone());
-                upstream_id = parent.upstream_id.clone();
-            }
+            // A child inherits its parent's model and endpoint half by half.
+            // They are plumbing the parent already answered, so naming a model
+            // alone changes the model and keeps the endpoint, and a caller that
+            // names neither gets the pair its parent runs on.
+            model = Some(model.unwrap_or_else(|| parent.model.clone()));
+            upstream_id = Some(resolve_child_upstream(
+                &transaction,
+                upstream_id,
+                &parent,
+                defaults.upstream_id.clone(),
+            )?);
         }
         let loaded_manual_cap = max_loaded_manuals.unwrap_or(defaults.max_loaded_manuals);
         manual_loads::initial_ids_within_cap(&initial_manual_ids, loaded_manual_cap)?;

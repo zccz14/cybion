@@ -464,8 +464,12 @@ struct CreateThreadArguments {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChildSettings {
+    /// Model the child runs on; omitted keeps the parent's model.
     #[serde(default)]
     model: Option<String>,
+    /// Endpoint the child runs on; omitted — or naming one this account does
+    /// not have — keeps the parent's endpoint, so a caller normally leaves it
+    /// out entirely.
     #[serde(default)]
     upstream_id: Option<String>,
     #[serde(default)]
@@ -552,14 +556,11 @@ pub(super) async fn create_tool_output(
         initial_manual_ids: None,
         max_loaded_manuals: None,
     });
-    // A model name without the upstream that serves it would silently land on
-    // the account default upstream, which may not carry that model at all, so
-    // the pair travels together or not at all.
-    if settings.model.is_some() != settings.upstream_id.is_some() {
-        return Err(ApiError::bad_request(
-            "settings.model and settings.upstream_id must be given together",
-        ));
-    }
+    // A model may be named on its own: the child keeps its parent's endpoint
+    // unless the caller names one this account really has. The endpoint is
+    // plumbing the parent already answered, so nothing here makes the caller
+    // repeat it.
+    let requested_upstream = settings.upstream_id.clone();
     let budget_usd_nanos = arguments.budget_usd.map(slice_usd_nanos).transpose()?;
     let task = input_message(arguments.task, Vec::new(), Vec::new())?;
     let child = create_thread_for(
@@ -592,7 +593,7 @@ pub(super) async fn create_tool_output(
         pool(connection, &parent)
     })
     .await?;
-    Ok(json!({
+    let mut output = json!({
         "thread_id": child_id,
         "title": child.title,
         "model": child.model,
@@ -601,7 +602,21 @@ pub(super) async fn create_tool_output(
         // The pool comes back with every grant, so a parent never has to do the
         // arithmetic itself or spend a read to learn what it has left.
         "parent": pool,
-    }))
+    });
+    // An endpoint this account does not have is not fatal — the child runs on
+    // its parent's — but it is not silent either: say where it actually runs.
+    if let Some(requested) =
+        requested_upstream.filter(|id| child.upstream_id.as_deref() != Some(id.as_str()))
+    {
+        output["upstream_notice"] = json!(format!(
+            "upstream_id {requested} is not one of this account's endpoints; the child runs on {}",
+            child
+                .upstream_id
+                .as_deref()
+                .unwrap_or("the account default")
+        ));
+    }
+    Ok(output)
 }
 
 pub(super) async fn list_tool_output(
