@@ -63,8 +63,11 @@ function dotClass(node: BranchNode): string {
 // Same row shape as the notes and manual rows in the same footer: one line per
 // thing, money on the right, and no control the server would refuse — a slice
 // is raised by the Thread above it, a turn is stopped here.
-export function ThreadBranch({ threadId, language, request }: {
+export function ThreadBranch({ threadId, active, language, request }: {
   threadId: string
+  /** Whether this Thread can have a branch or a ceiling of its own. A Thread
+   * with neither asks for nothing: the row does not exist for it. */
+  active: boolean
   language: "en" | "zh"
   request: ThreadBranchRequest
 }) {
@@ -75,7 +78,7 @@ export function ThreadBranch({ threadId, language, request }: {
     queryFn: ({ signal }) => request<BranchView>(`/api/threads/${encodeURIComponent(threadId)}/branches`, { signal }),
     refetchInterval: 5000,
     staleTime: 5000,
-    enabled: Boolean(threadId),
+    enabled: active && Boolean(threadId),
   })
   const stop = useMutation({
     mutationFn: (id: string) => request<unknown>(`/api/threads/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
