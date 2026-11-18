@@ -378,3 +378,122 @@ async fn the_thread_list_shows_only_root_threads() {
     assert!(page.items.is_empty());
     assert_eq!(page.total, 0);
 }
+
+/// A model is a choice; the endpoint is plumbing. Naming a model alone keeps the
+/// endpoint the parent already runs on, so a caller never has to hand
+/// `create_thread` an `upstream_id`.
+#[tokio::test]
+async fn a_child_naming_only_a_model_keeps_its_parents_endpoint() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "child-model-only").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+    let parent = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({
+            "upstream_id": upstream.id,
+            "budget_usd_nanos": 1_000_000_000i64,
+        }))
+        .unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    let created = subthreads::create_tool_output(
+        &state,
+        &user,
+        &parent.id,
+        &json!({"task": "research", "settings": {"model": "gpt-6-astra"}}).to_string(),
+    )
+    .await
+    .unwrap();
+    let child = read_thread_for(
+        &state,
+        &user,
+        created["thread_id"].as_str().unwrap().to_owned(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(child.model, "gpt-6-astra");
+    assert_eq!(child.upstream_id, Some(upstream.id));
+    // Nothing surprising happened, so nothing is reported.
+    assert!(created.get("upstream_notice").is_none());
+
+    // Naming nothing inherits both halves of the pair the parent runs on.
+    let bare = subthreads::create_tool_output(
+        &state,
+        &user,
+        &parent.id,
+        &json!({"task": "follow up"}).to_string(),
+    )
+    .await
+    .unwrap();
+    let bare = read_thread_for(
+        &state,
+        &user,
+        bare["thread_id"].as_str().unwrap().to_owned(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bare.model, parent.model);
+    assert_eq!(bare.upstream_id, parent.upstream_id);
+}
+
+/// An endpoint id this account does not have — deleted, or copied from another
+/// install — is skipped rather than fatal: the child runs where its parent runs,
+/// and the tool says where that is.
+#[tokio::test]
+async fn a_stale_upstream_id_falls_back_to_the_parents_endpoint() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "child-stale-upstream").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+    let parent = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({
+            "upstream_id": upstream.id,
+            "budget_usd_nanos": 1_000_000_000i64,
+        }))
+        .unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    let stale = Uuid::now_v7().to_string();
+    let created = subthreads::create_tool_output(
+        &state,
+        &user,
+        &parent.id,
+        &json!({"task": "research", "settings": {"upstream_id": stale}}).to_string(),
+    )
+    .await
+    .unwrap();
+    let child = read_thread_for(
+        &state,
+        &user,
+        created["thread_id"].as_str().unwrap().to_owned(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(child.upstream_id, Some(upstream.id));
+    assert_eq!(child.model, parent.model);
+    let notice = created["upstream_notice"].as_str().unwrap();
+    assert!(notice.contains(&stale), "{notice}");
+}
+
+/// A Thread a person starts is not a subcontract: an endpoint they name has to
+/// exist, because nothing above them can answer for it.
+#[tokio::test]
+async fn a_root_thread_still_refuses_an_unknown_upstream() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "root-stale-upstream").unwrap();
+    let error = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({ "upstream_id": Uuid::now_v7().to_string() })).unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+}

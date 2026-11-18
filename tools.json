@@ -507,7 +507,7 @@
     {
       "type": "function",
       "name": "create_thread",
-      "description": "Hand one task to a new child Thread and give it a slice of this Thread's USD budget. It starts at once, and its final message is its deliverable: a child cannot see this Thread's history, so state the goal, the acceptance test and the shape of the answer in `task`. Returns immediately with the child's id and this Thread's remaining pool; use wait_for_thread to collect the result and list_thread_tree to see the branch. Omit `budget_usd` to leave the child without a ceiling of its own — every ceiling above it still applies. Its settings come from the account defaults, never from this Thread's own.",
+      "description": "Hand one task to a new child Thread and give it a slice of this Thread's USD budget. It starts at once, and its final message is its deliverable: a child cannot see this Thread's history, so state the goal, the acceptance test and the shape of the answer in `task`. Returns immediately with the child's id and this Thread's remaining pool; use wait_for_thread to collect the result and list_thread_tree to see the branch. Omit `budget_usd` to leave the child without a ceiling of its own — every ceiling above it still applies. Its settings come from the account defaults, except `model` and `upstream_id`, which follow this Thread's unless you name them — normally you name neither.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -525,13 +525,15 @@
           },
           "settings": {
             "type": "object",
-            "description": "该子线程自己的设置；省略的字段跟随账户默认，绝不复制本线程的设置。",
+            "description": "该子线程自己的设置；省略 model 或 upstream_id 就沿用父线程那一项，其余省略的字段跟随账户默认。",
             "properties": {
               "model": {
-                "type": "string"
+                "type": "string",
+                "description": "模型名；省略就沿用父线程的模型。"
               },
               "upstream_id": {
-                "type": "string"
+                "type": "string",
+                "description": "模型端点 id；一般不用填——省略（或填了本账户没有的 id）就跟随父线程的端点。"
               },
               "reasoning_effort": {
                 "type": "string",
