@@ -118,7 +118,7 @@ fn status(connection: &Connection) -> Result<NotificationStatus, ApiError> {
 
 pub(super) async fn read(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<NotificationStatus>, ApiError> {
     user_db(&state, &identity.user, true, |connection| {
         status(connection)
@@ -147,7 +147,7 @@ pub(super) struct NotificationSwitch {
 /// The Bot connection itself is maintained by `ensure` independently.
 pub(super) async fn set_notifications(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<NotificationSwitch>,
 ) -> Result<Json<NotificationStatus>, ApiError> {
     let _guard = lock_integrations(&state, format!("linkit:{}", identity.user.id)).await;
@@ -270,7 +270,7 @@ async fn repair_bot(
 /// channel is always ready and self-repairing.
 pub(super) async fn ensure(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<NotificationStatus>, ApiError> {
     let _guard = lock_integrations(&state, format!("linkit:{}", identity.user.id)).await;
     let mut settings = user_db(&state, &identity.user, true, |connection| {
@@ -280,7 +280,7 @@ pub(super) async fn ensure(
     let owner = checked(
         request(
             &state,
-            &identity.bearer,
+            identity.session_bearer()?,
             reqwest::Method::GET,
             &["api", "me"],
         )?
@@ -307,7 +307,13 @@ pub(super) async fn ensure(
     // Checkpoints written for this user's threads follow this preference; an
     // unset or unrecognized tag keeps the English default.
     settings.linkit_language = profile.lang.unwrap_or_default().trim().to_owned();
-    repair_bot(&state, &identity.user, &identity.bearer, &mut settings).await?;
+    repair_bot(
+        &state,
+        &identity.user,
+        identity.session_bearer()?,
+        &mut settings,
+    )
+    .await?;
     save_settings(&state, &identity.user, &settings).await?;
     if !token_matches(&state, &settings).await? {
         return Err(ApiError::unavailable(
@@ -409,7 +415,7 @@ async fn record_delivery(
 
 pub(super) async fn test(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<DeliveryReceipt>, ApiError> {
     let settings = user_db(&state, &identity.user, true, |connection| {
         integration_settings(connection)

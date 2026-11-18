@@ -290,7 +290,7 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, and Windows, with Android and iOS apps in early development; pairing, remote upgrades, and worker sharing. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
 | Models & tools | NormAI upstream out of the box; fallback upstreams with per-upstream model catalogs; web search, image generation, and audio transcription tools; per-thread model, reasoning effort, context budget, and speech-to-text model. | [Service overview](docs/introduction.md) · [Audio input](docs/audio-input.md) |
-| Integration API | Per-user API keys; create Threads, append inputs, and read history; `external_ref` mapping for integrations; short-lived Thread identity tokens the Thread presents to the service that created it. | [Integration API](#integration-api) · [Thread identity](docs/thread-identity.md) |
+| Integration API | Per-user API keys that drive the whole console API (everything but managing keys); `/v1/threads` for create, input and history; `external_ref` mapping for integrations; short-lived Thread identity tokens the Thread presents to the service that created it. | [Integration API](#integration-api) · [Thread identity](docs/thread-identity.md) |
 | Isolation & audit | One SQLite database per user with owner-only permissions; append-only history; usage statistics; system resource monitor for the root user. | [History](docs/history.md) · [Usage](docs/usage-statistics.md) · [Boundary](docs/product-boundary.md) |
 
 ## How it fits together
@@ -315,6 +315,16 @@ Create an API key in the Cybion UI. The key is scoped to one Auth Mini user and
 is shown only once. Both web entries serve the same API: from mainland China,
 put `https://cybion.ntnl.top` where the commands below use
 `https://cybion.ntnl.io`.
+
+A key is a full credential for its account, not a narrow one: it authenticates
+every route the web console authenticates, so an integration can drive Threads,
+Manuals, Notes, Workers, Ultimate Machines and sharing through `/api/...` exactly
+as the browser does. The one surface it cannot reach is managing keys — listing,
+minting and revoking a key needs a live browser session — so a leaked key can
+never outlive its own revocation. Two integration routes also stay session-only
+because they hand your Auth Mini identity to another service: NormAI credential
+issuance (`/api/integrations/normai`, `/api/integrations/normai/rotate`) and
+Linkit bot setup. Treat a key like a password for the whole account.
 
 ```sh
 export CYBION_API_KEY='cyb_<user-id>_<secret>'

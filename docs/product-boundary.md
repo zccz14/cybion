@@ -37,10 +37,11 @@ the first authenticated browser session initializes that key atomically.
   answers the call itself with an outcome-unknown
   `timeout_cancel_unconfirmed` failure that asks the model to clean up a
   possibly leaked execution before continuing.
-- Threads record their creation origin: `web` for the browser and `api` for
-  `/v1/threads` calls, where the creating API key id is stored and an optional
-  caller-supplied `external_ref` can map the Thread to the integration's own
-  identifier. The web UI marks API Threads in the thread list and header.
+- Threads record their creation origin: `web` for the browser and `api` when an
+  API key created them, whether through `/v1/threads` or `/api/threads`; the
+  creating key id is stored and an optional caller-supplied `external_ref` can
+  map the Thread to the integration's own identifier. The web UI marks API
+  Threads in the thread list and header.
 - A Thread can prove its own identity. `create_thread_token` signs a
   sixty-second EdDSA JWT whose `sub` is that Thread's id, and the public half
   is published at `GET /.well-known/jwks.json`. The two signing keys live in the

@@ -1,4 +1,4 @@
-use super::{ApiError, AppState, BrowserIdentity, user_db};
+use super::{ApiError, AppState, Caller, user_db};
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
@@ -52,7 +52,7 @@ pub(super) struct HistoryPage {
 
 pub(super) async fn list(
     State(state): State<AppState>,
-    Extension(identity): Extension<BrowserIdentity>,
+    Extension(identity): Extension<Caller>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryPage>, ApiError> {
     user_db(&state, &identity.user, true, move |connection| {
@@ -64,7 +64,7 @@ pub(super) async fn list(
 
 pub(super) async fn read(
     State(state): State<AppState>,
-    Extension(identity): Extension<BrowserIdentity>,
+    Extension(identity): Extension<Caller>,
     Path(id): Path<i64>,
 ) -> Result<Json<RawHistoryRecord>, ApiError> {
     user_db(&state, &identity.user, true, move |connection| {
@@ -189,7 +189,7 @@ fn load_page(connection: &mut Connection, query: HistoryQuery) -> Result<History
 mod tests {
     use super::*;
     use crate::cloud::{
-        self,
+        self, Credential,
         tests::{create_test_thread, test_state},
     };
     use axum::http::StatusCode;
@@ -466,9 +466,11 @@ mod tests {
             Ok(())
         }).await.unwrap();
         let identity = |user| {
-            Extension(BrowserIdentity {
+            Extension(Caller {
                 user,
-                bearer: String::new(),
+                credential: Credential::Session {
+                    bearer: String::new(),
+                },
             })
         };
         let page = list(

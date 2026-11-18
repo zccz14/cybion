@@ -275,7 +275,7 @@ fn sync_grants(c: &Connection, owner: &str) -> Result<(), ApiError> {
 
 pub(super) async fn list_grants(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(worker): AxumPath<String>,
 ) -> Result<Json<Vec<Grant>>, ApiError> {
     user_db(&state, &identity.user, false, move |c| {
@@ -291,7 +291,7 @@ pub(super) async fn list_grants(
 }
 pub(super) async fn grant(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((worker, grantee)): AxumPath<(String, String)>,
 ) -> Result<Json<Grant>, ApiError> {
     let grantee = user_id(&grantee)?;
@@ -306,7 +306,7 @@ pub(super) async fn grant(
 }
 pub(super) async fn revoke(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((worker, grantee)): AxumPath<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let grantee = user_id(&grantee)?;
@@ -383,7 +383,7 @@ fn views(c: &Connection, owner: &str) -> Result<Vec<WorkerView>, ApiError> {
 }
 pub(super) async fn list_workers(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Vec<WorkerView>>, ApiError> {
     let owner = identity.user.id.clone();
     user_db(&state, &identity.user, true, move |c| views(c, &owner))
@@ -392,7 +392,7 @@ pub(super) async fn list_workers(
 }
 pub(super) async fn read_worker(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<WorkerView>, ApiError> {
     let caller = identity.user.id.clone();
@@ -421,7 +421,7 @@ pub(super) async fn read_worker(
 }
 pub(super) async fn update_worker(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<UpdateWorkerInput>,
 ) -> Result<Json<WorkerView>, ApiError> {
@@ -447,7 +447,7 @@ pub(super) async fn update_worker(
 }
 pub(super) async fn delete_worker(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let _lock = state.worker_pairing_lock.lock().await;
@@ -527,7 +527,7 @@ fn audit_select(detail: bool) -> String {
 }
 pub(super) async fn worker_call_audits(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<WorkerCallAuditQuery>,
 ) -> Result<Json<WorkerCallAuditPage>, ApiError> {
     let owner = identity.user.id.clone();
@@ -602,7 +602,7 @@ fn audit_page(
 }
 pub(super) async fn call_detail(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<WorkerCallAuditView>, ApiError> {
     let owner = identity.user.id.clone();

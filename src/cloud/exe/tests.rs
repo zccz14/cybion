@@ -643,9 +643,11 @@ async fn adding_a_device_lists_it_once_and_shows_the_account_address() {
     // A test must never reach the real relay.
     state.exe_api_url = "http://127.0.0.1:9".into();
     let user = user_for_subject(&state, "exe-add-owner").unwrap();
-    let identity = BrowserIdentity {
+    let identity = Caller {
         user: user.clone(),
-        bearer: "fixture".into(),
+        credential: Credential::Session {
+            bearer: "fixture".into(),
+        },
     };
     let device = Identity::from_seed([11u8; 32]).address();
     let added = add_device(

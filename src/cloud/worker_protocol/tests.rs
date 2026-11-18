@@ -352,9 +352,11 @@ async fn upgrades_require_owner_online_capable_worker_and_browser_authentication
     create_test_thread(&state, &other).await;
     let error = request_upgrade(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: other,
-            bearer: "fixture".into(),
+            credential: Credential::Session {
+                bearer: "fixture".into(),
+            },
         }),
         AxumPath(worker.clone()),
     )
@@ -415,9 +417,11 @@ async fn android_workers_queue_the_android_app_release_for_upgrade() {
     .unwrap();
     let _ = request_upgrade(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: "fixture".into(),
+            credential: Credential::Session {
+                bearer: "fixture".into(),
+            },
         }),
         AxumPath(worker.clone()),
     )

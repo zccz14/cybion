@@ -70,7 +70,7 @@ pub(super) struct Metrics {
 
 pub(super) async fn list(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Users>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
         return Err(ApiError::forbidden("administrator access is required"));

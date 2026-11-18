@@ -170,9 +170,11 @@ async fn browser_read_resolves_common_nodes() {
     let root_id = common_root_id();
     let Json(view) = read_manual_api(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         AxumPath(root_id),
         Query(common_manuals::LanguageQuery { lang: None }),
@@ -192,9 +194,11 @@ async fn browser_reads_serve_the_requested_language() {
 
     let Json(view) = read_manual_api(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         AxumPath(common_root_id()),
         Query(common_manuals::LanguageQuery {
@@ -211,9 +215,11 @@ async fn browser_reads_serve_the_requested_language() {
     );
 
     let Json(tree) = common_manuals::documents(
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user,
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         Query(common_manuals::LanguageQuery {
             lang: Some("zh".to_string()),

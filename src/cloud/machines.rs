@@ -95,7 +95,7 @@ fn load_machine(connection: &Connection, id: &str) -> Result<MachineView, ApiErr
 
 pub(super) async fn list(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Vec<MachineView>>, ApiError> {
     Ok(Json(list_for(&state, &identity.user).await?))
 }
@@ -122,7 +122,7 @@ pub(super) struct CreateMachineInput {
 
 pub(super) async fn create(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<CreateMachineInput>,
 ) -> Result<Json<MachineView>, ApiError> {
     Ok(Json(create_for(&state, &identity.user, input).await?))
@@ -195,7 +195,7 @@ pub(super) struct UpdateMachineInput {
 
 pub(super) async fn update(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<UpdateMachineInput>,
 ) -> Result<Json<MachineView>, ApiError> {
@@ -224,7 +224,7 @@ pub(super) async fn update_for(
 
 pub(super) async fn delete(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     delete_for(&state, &identity.user, &id).await?;
@@ -483,7 +483,7 @@ pub(super) fn update_machine(
 
 pub(super) async fn run_now(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = record_id(&id)?;

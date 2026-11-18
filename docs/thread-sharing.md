@@ -84,8 +84,9 @@ projection cannot authorize reads. A valid grant can be opened directly by link
 even before discovery sync. Record queries retain the source Thread constraint;
 record IDs and the same Thread IDs in different users' databases cannot select a
 foreign record. B's existing owner endpoints still resolve B's database only.
-Browser share endpoints do not accept integration API keys. No shared execution
-or configuration endpoint exists. Recognized write methods return 405; unknown
+Browser share endpoints take the same credentials as the rest of the console API
+— a session or an API key — and a key still reads only what its own account may
+read. No shared execution or configuration endpoint exists. Recognized write methods return 405; unknown
 API paths return 404 instead of falling through to the SPA.
 
 Successful shared reads and owner grant routes carry `Cache-Control: no-store`.

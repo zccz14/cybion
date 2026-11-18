@@ -392,7 +392,7 @@ pub(super) async fn cross_out_tool_output(
 
 pub(super) async fn list_notes(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<NotesView>, ApiError> {
     let (open, done) = user_db(&state, &identity.user, true, |connection| list(connection)).await?;
     Ok(Json(NotesView { open, done }))
@@ -410,7 +410,7 @@ fn note_id_argument(value: &str) -> Result<String, ApiError> {
 /// apply to the person who wrote the note.
 pub(super) async fn cross_out_note(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<NoteView>, ApiError> {
     let id = note_id_argument(&id)?;
@@ -432,7 +432,7 @@ pub(super) async fn cross_out_note(
 
 pub(super) async fn delete_note(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = note_id_argument(&id)?;
@@ -467,7 +467,7 @@ pub(super) async fn settings(
 
 pub(super) async fn update_settings(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<UpdateNoteSettingsInput>,
 ) -> Result<Json<NoteSettingsView>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
