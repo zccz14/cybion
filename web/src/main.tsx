@@ -179,8 +179,9 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "i
   created_by: "web" | "api"
   external_ref: string | null
   id: string
-  /** Threads this one created, from the same row the list reads. */
-  branches: number
+  /** Threads this one created, from the same row the list reads. Optional so a
+   * controller that predates branches still describes a Thread. */
+  branches?: number
   title: string
   status: ThreadStatus
   display_status: ThreadDisplayStatus
@@ -1596,7 +1597,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
         transcriptFooter={<>
           {openThreadNotes.length > 0 && <div className="border-t pt-3"><ThreadNotes notes={openThreadNotes} language={language} /></div>}
           {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
-          <ThreadBranch threadId={threadId} active={current !== null && (current.branches > 0 || current.budget_usd_nanos !== null)} language={language} request={(path, init) => api(sdk, path, init)} />
+          <ThreadBranch threadId={threadId} active={(current?.branches ?? 0) > 0 || (current?.budget_usd_nanos ?? null) !== null} language={language} request={(path, init) => api(sdk, path, init)} />
         </>}
       />
     </CybionThreadProvider>
