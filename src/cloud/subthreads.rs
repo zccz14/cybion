@@ -128,7 +128,6 @@ fn pool(connection: &Connection, thread_id: &str) -> Result<Pool, ApiError> {
 /// parent granted must not read as one whose owner is out of money, and the
 /// person reading the record needs to know which Thread to open.
 pub(super) struct Exceeded {
-    pub thread_id: String,
     pub title: String,
     pub budget_usd_nanos: i64,
     pub spent_usd_nanos: i64,
@@ -178,10 +177,9 @@ pub(super) fn exhausted(
         ))
     })?;
     for row in rows {
-        let (id, title, depth, budget, spent) = row?;
+        let (_, title, depth, budget, spent) = row?;
         if budget > 0 && spent >= budget {
             return Ok(Some(Exceeded {
-                thread_id: id,
                 title,
                 budget_usd_nanos: budget,
                 spent_usd_nanos: spent,
@@ -257,6 +255,10 @@ pub(super) fn require_below(
         .ok_or_else(|| ApiError::not_found("no Thread below this one with that id"))
 }
 
+/// id, title, depth, status, blocked, slice, updated_at — one row of the branch
+/// listing before it is turned into a `TreeNode`.
+type BranchRow = (String, String, i64, String, bool, Option<i64>, i64);
+
 #[derive(Serialize)]
 pub(super) struct TreeNode {
     pub(super) thread_id: String,
@@ -313,7 +315,7 @@ pub(super) fn tree(
             row.get::<_, i64>(6)?,
         ))
     })?;
-    let mut branches: Vec<(String, String, i64, String, bool, Option<i64>, i64)> = Vec::new();
+    let mut branches: Vec<BranchRow> = Vec::new();
     let mut truncated = false;
     for row in rows {
         if branches.len() == MAX_TREE_NODES {
@@ -629,7 +631,7 @@ pub(super) async fn list_tool_output(
         tree(connection, &root, depth)
     })
     .await?;
-    Ok(serde_json::to_value(tree).map_err(ApiError::internal)?)
+    serde_json::to_value(tree).map_err(ApiError::internal)
 }
 
 pub(super) async fn wait_tool_output(

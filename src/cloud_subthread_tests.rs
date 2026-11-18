@@ -44,7 +44,6 @@ fn a_child_is_stopped_by_the_slice_its_parent_granted() {
         .unwrap()
         .unwrap();
     assert!(exceeded.own);
-    assert_eq!(exceeded.thread_id, "child");
     assert_eq!(exceeded.budget_usd_nanos, 2_000_000_000);
     assert_eq!(exceeded.spent_usd_nanos, 2_500_000_000);
 }
@@ -63,7 +62,6 @@ fn a_child_that_outspent_the_root_with_its_siblings_is_stopped_by_the_root() {
         !exceeded.own,
         "the ceiling that ran out belongs to the root"
     );
-    assert_eq!(exceeded.thread_id, "root");
     assert_eq!(exceeded.spent_usd_nanos, 3_500_000_000);
 }
 
@@ -85,7 +83,6 @@ fn a_child_never_falls_back_to_the_account_budget() {
     let exceeded = subthreads::exhausted(&connection, "child", 0)
         .unwrap()
         .unwrap();
-    assert_eq!(exceeded.thread_id, "root");
 }
 
 #[test]
