@@ -40,7 +40,9 @@ fn a_child_is_stopped_by_the_slice_its_parent_granted() {
     thread(&connection, "root", None, Some(10_000_000_000));
     thread(&connection, "child", Some("root"), Some(2_000_000_000));
     spend(&connection, "child", 2_500_000_000);
-    let exceeded = subthreads::exhausted(&connection, "child", 0).unwrap().unwrap();
+    let exceeded = subthreads::exhausted(&connection, "child", 0)
+        .unwrap()
+        .unwrap();
     assert!(exceeded.own);
     assert_eq!(exceeded.thread_id, "child");
     assert_eq!(exceeded.budget_usd_nanos, 2_000_000_000);
@@ -54,8 +56,13 @@ fn a_child_that_outspent_the_root_with_its_siblings_is_stopped_by_the_root() {
     thread(&connection, "child", Some("root"), None);
     spend(&connection, "root", 1_000_000_000);
     spend(&connection, "child", 2_500_000_000);
-    let exceeded = subthreads::exhausted(&connection, "child", 0).unwrap().unwrap();
-    assert!(!exceeded.own, "the ceiling that ran out belongs to the root");
+    let exceeded = subthreads::exhausted(&connection, "child", 0)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !exceeded.own,
+        "the ceiling that ran out belongs to the root"
+    );
     assert_eq!(exceeded.thread_id, "root");
     assert_eq!(exceeded.spent_usd_nanos, 3_500_000_000);
 }
@@ -68,10 +75,16 @@ fn a_child_never_falls_back_to_the_account_budget() {
     spend(&connection, "child", 9_000_000_000);
     // The account default would have stopped it; a child reads its own column
     // only, and it has none.
-    assert!(subthreads::exhausted(&connection, "child", 1_000_000_000).unwrap().is_none());
+    assert!(
+        subthreads::exhausted(&connection, "child", 1_000_000_000)
+            .unwrap()
+            .is_none()
+    );
     // The root still bounds the branch, which is what the child's spend hits.
     spend(&connection, "child", 2_000_000_000);
-    let exceeded = subthreads::exhausted(&connection, "child", 0).unwrap().unwrap();
+    let exceeded = subthreads::exhausted(&connection, "child", 0)
+        .unwrap()
+        .unwrap();
     assert_eq!(exceeded.thread_id, "root");
 }
 
@@ -143,7 +156,11 @@ fn the_tree_reports_flat_nodes_with_depth_and_branch_spend() {
         .collect::<Vec<_>>();
     assert_eq!(ids, [("first", 1), ("second", 1), ("leaf", 2)]);
     // A branch's spend is the Thread's own plus everything under it.
-    let first = tree.nodes.iter().find(|node| node.thread_id == "first").unwrap();
+    let first = tree
+        .nodes
+        .iter()
+        .find(|node| node.thread_id == "first")
+        .unwrap();
     assert_eq!(first.subtree_spent_usd, 0.5);
     assert_eq!(first.children, 1);
     // Depth 1 stops at the direct children.
@@ -252,22 +269,26 @@ async fn the_tools_grant_read_and_steer_within_the_branch() {
 
     // A child may not steer the Thread above it, and a slice may not outgrow
     // the pool it is drawn from.
-    assert!(subthreads::control_tool_output(
-        &state,
-        &user,
-        &child_id,
-        &json!({"thread_id": parent.id, "action": "stop"}).to_string(),
-    )
-    .await
-    .is_err());
-    assert!(subthreads::control_tool_output(
-        &state,
-        &user,
-        &parent.id,
-        &json!({"thread_id": child_id, "action": "top_up", "budget_usd": 9.0}).to_string(),
-    )
-    .await
-    .is_err());
+    assert!(
+        subthreads::control_tool_output(
+            &state,
+            &user,
+            &child_id,
+            &json!({"thread_id": parent.id, "action": "stop"}).to_string(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        subthreads::control_tool_output(
+            &state,
+            &user,
+            &parent.id,
+            &json!({"thread_id": child_id, "action": "top_up", "budget_usd": 9.0}).to_string(),
+        )
+        .await
+        .is_err()
+    );
     let raised = subthreads::control_tool_output(
         &state,
         &user,

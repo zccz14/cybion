@@ -229,7 +229,11 @@ pub(super) fn check_child(
 /// True when `target` sits below `caller`. A Thread steers only its own branch:
 /// one that could steer its parent would let a subcontracted Thread rewrite the
 /// plan that sent it.
-pub(super) fn is_below(connection: &Connection, caller: &str, target: &str) -> Result<bool, ApiError> {
+pub(super) fn is_below(
+    connection: &Connection,
+    caller: &str,
+    target: &str,
+) -> Result<bool, ApiError> {
     Ok(connection.query_row(
         "WITH RECURSIVE up(id,parent_thread_id) AS (
            SELECT id,parent_thread_id FROM threads WHERE id=?1
@@ -243,7 +247,11 @@ pub(super) fn is_below(connection: &Connection, caller: &str, target: &str) -> R
 
 /// Refuses a target this Thread does not own. Everything a Thread may do to a
 /// child passes through here, so the rule is written once.
-pub(super) fn require_below(connection: &Connection, caller: &str, target: &str) -> Result<(), ApiError> {
+pub(super) fn require_below(
+    connection: &Connection,
+    caller: &str,
+    target: &str,
+) -> Result<(), ApiError> {
     is_below(connection, caller, target)?
         .then_some(())
         .ok_or_else(|| ApiError::not_found("no Thread below this one with that id"))
@@ -336,17 +344,19 @@ pub(super) fn tree(
     }
     let nodes = branches
         .into_iter()
-        .map(|(id, title, depth, status, blocked, budget, updated_at)| TreeNode {
-            subtree_spent_usd: usd(subtree.get(&id).copied().unwrap_or(0)),
-            children: children.get(&id).copied().unwrap_or(0),
-            thread_id: id,
-            title,
-            depth,
-            status,
-            blocked,
-            budget_usd: budget.filter(|nanos| *nanos > 0).map(usd),
-            updated_at,
-        })
+        .map(
+            |(id, title, depth, status, blocked, budget, updated_at)| TreeNode {
+                subtree_spent_usd: usd(subtree.get(&id).copied().unwrap_or(0)),
+                children: children.get(&id).copied().unwrap_or(0),
+                thread_id: id,
+                title,
+                depth,
+                status,
+                blocked,
+                budget_usd: budget.filter(|nanos| *nanos > 0).map(usd),
+                updated_at,
+            },
+        )
         .collect();
     Ok(TreeView {
         pool: pool(connection, root_id)?,
@@ -530,8 +540,9 @@ pub(super) async fn create_tool_output(
     thread_id: &str,
     input: &str,
 ) -> Result<Value, ApiError> {
-    let arguments: CreateThreadArguments = serde_json::from_str(input)
-        .map_err(|error| ApiError::bad_request(format!("create_thread arguments are invalid: {error}")))?;
+    let arguments: CreateThreadArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!("create_thread arguments are invalid: {error}"))
+    })?;
     let settings = arguments.settings.unwrap_or(ChildSettings {
         model: None,
         upstream_id: None,
@@ -575,7 +586,10 @@ pub(super) async fn create_tool_output(
     let child_id = child.id.clone();
     start(state.clone(), user.clone(), child_id.clone(), task);
     let parent = thread_id.to_owned();
-    let pool = user_db(state, user, false, move |connection| pool(connection, &parent)).await?;
+    let pool = user_db(state, user, false, move |connection| {
+        pool(connection, &parent)
+    })
+    .await?;
     Ok(json!({
         "thread_id": child_id,
         "title": child.title,
@@ -595,8 +609,9 @@ pub(super) async fn list_tool_output(
     input: &str,
 ) -> Result<Value, ApiError> {
     let caller = thread_id.to_owned();
-    let arguments: ListThreadTreeArguments = serde_json::from_str(input)
-        .map_err(|error| ApiError::bad_request(format!("list_thread_tree arguments are invalid: {error}")))?;
+    let arguments: ListThreadTreeArguments = serde_json::from_str(input).map_err(|error| {
+        ApiError::bad_request(format!("list_thread_tree arguments are invalid: {error}"))
+    })?;
     let depth = arguments.depth.unwrap_or(DEFAULT_TREE_DEPTH);
     if !(1..=MAX_TREE_DEPTH).contains(&depth) {
         return Err(ApiError::bad_request(format!(
@@ -640,15 +655,20 @@ pub(super) async fn wait_tool_output(
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
     loop {
         let id = target.clone();
-        let (status, blocked, _) =
-            user_db(state, user, false, move |connection| state_of(connection, &id)).await?;
+        let (status, blocked, _) = user_db(state, user, false, move |connection| {
+            state_of(connection, &id)
+        })
+        .await?;
         let settled = status != "running";
         if settled || std::time::Instant::now() >= deadline {
             let id = target.clone();
-            let (answer, clipped) =
-                user_db(state, user, false, move |connection| answer(connection, &id)).await?;
+            let (answer, clipped) = user_db(state, user, false, move |connection| {
+                answer(connection, &id)
+            })
+            .await?;
             let id = target.clone();
-            let spend = user_db(state, user, false, move |connection| pool(connection, &id)).await?;
+            let spend =
+                user_db(state, user, false, move |connection| pool(connection, &id)).await?;
             return Ok(json!({
                 "thread_id": target,
                 "settled": settled,
@@ -696,9 +716,11 @@ pub(super) async fn control_tool_output(
             );
         }
         "top_up" => {
-            let nanos = slice_usd_nanos(arguments.budget_usd.ok_or_else(|| {
-                ApiError::bad_request("top_up needs budget_usd")
-            })?)?;
+            let nanos = slice_usd_nanos(
+                arguments
+                    .budget_usd
+                    .ok_or_else(|| ApiError::bad_request("top_up needs budget_usd"))?,
+            )?;
             let id = target.clone();
             user_db(state, user, true, move |connection| {
                 allot(connection, &id, Some(nanos))
@@ -715,8 +737,10 @@ pub(super) async fn control_tool_output(
         }
     }
     let id = target.clone();
-    let (status, blocked, _) =
-        user_db(state, user, false, move |connection| state_of(connection, &id)).await?;
+    let (status, blocked, _) = user_db(state, user, false, move |connection| {
+        state_of(connection, &id)
+    })
+    .await?;
     let id = target.clone();
     let child = user_db(state, user, false, move |connection| pool(connection, &id)).await?;
     let caller = thread_id.to_owned();
@@ -754,7 +778,8 @@ fn allot(
     let slice = budget_usd_nanos.unwrap_or(0);
     if ceiling > 0 && slice > 0 {
         let spent = subtree_spent(&transaction, &parent_id)?;
-        let promised = allotted(&transaction, &parent_id)? - child.budget_usd_nanos.unwrap_or(0).max(0);
+        let promised =
+            allotted(&transaction, &parent_id)? - child.budget_usd_nanos.unwrap_or(0).max(0);
         if spent + promised + slice > ceiling {
             return Err(ApiError::conflict(format!(
                 "this Thread can offer {} more: {} is settled, {} is promised to its other children, \

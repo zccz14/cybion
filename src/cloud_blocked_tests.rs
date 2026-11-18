@@ -180,7 +180,8 @@ fn budget_records(connection: &Connection, id: &str) -> i64 {
 fn a_budget_stop_blocks_marks_one_record_and_stays_marked() {
     let mut connection = blocked_connection();
     insert_thread(&connection, "t");
-    let text = blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000, None).unwrap();
+    let text =
+        blocked::stop_for_budget(&mut connection, "t", 500_000_000, 620_000_000, None).unwrap();
     assert!(text.starts_with("Budget exhausted:"), "{text}");
     assert!(text.contains("$0.62"), "{text}");
     assert!(text.contains("$0.50"), "{text}");

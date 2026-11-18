@@ -4314,12 +4314,16 @@ fn load_thread(connection: &Connection, id: &str) -> Result<ThreadView, ApiError
 #[derive(Clone, Debug)]
 enum ThreadOrigin {
     Web,
-    Api { key_id: String },
+    Api {
+        key_id: String,
+    },
     /// A Thread a model subcontracted through `create_thread`: it inherits its
     /// creator's provenance and draws its budget slice from `parent_thread_id`.
     /// Only the Controller builds this variant, so the HTTP API can never name
     /// a parent and a Thread a person created is always a root.
-    Child { parent_thread_id: String },
+    Child {
+        parent_thread_id: String,
+    },
 }
 
 impl ThreadOrigin {
@@ -5066,7 +5070,9 @@ async fn thread_branches(
         subthreads::tree(connection, &id, depth)
     })
     .await?;
-    Ok(Json(serde_json::to_value(tree).map_err(ApiError::internal)?))
+    Ok(Json(
+        serde_json::to_value(tree).map_err(ApiError::internal)?,
+    ))
 }
 
 #[derive(Deserialize)]
