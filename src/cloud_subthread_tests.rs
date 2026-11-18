@@ -298,3 +298,83 @@ async fn the_tools_grant_read_and_steer_within_the_branch() {
     assert_eq!(raised["budget_usd"], json!(1.0));
     assert_eq!(raised["parent"]["remaining_usd"], json!(1.0));
 }
+
+/// The Thread list is the top level, not the whole forest: a Thread a model
+/// subcontracted stays in the branch that granted it, so one task never reads
+/// as two conversations in the list.
+#[tokio::test]
+async fn the_thread_list_shows_only_root_threads() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "thread-list-roots").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+    let parent = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({
+            "title": "Parent",
+            "upstream_id": upstream.id,
+            "budget_usd_nanos": 1_000_000_000i64,
+        }))
+        .unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    let child = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({
+            "title": "Subcontract",
+            "budget_usd_nanos": 200_000_000i64,
+        }))
+        .unwrap(),
+        ThreadOrigin::Child {
+            parent_thread_id: parent.id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let page = list_threads_for(
+        &state,
+        &user,
+        ThreadListFilter::active(),
+        DEFAULT_THREAD_LIST_LIMIT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page.items.len(),
+        1,
+        "only the Thread a person started is listed"
+    );
+    assert_eq!(page.items[0].id, parent.id);
+    assert_eq!(
+        page.total, 1,
+        "the count follows the same filter as the page"
+    );
+    // Hidden from the list is not gone: the parent still reports the branch,
+    // and the child still opens from its own URL.
+    assert_eq!(page.items[0].branches, 1);
+    assert_eq!(
+        read_thread_for(&state, &user, child.id.clone())
+            .await
+            .unwrap()
+            .id,
+        child.id
+    );
+
+    // Every view of the list is about the top level, search included: a
+    // subcontract does not become a conversation because someone typed its
+    // title into the search box.
+    let searched = ThreadListFilter {
+        q: Some("Subcontract".to_owned()),
+        ..ThreadListFilter::active()
+    };
+    let page = list_threads_for(&state, &user, searched, DEFAULT_THREAD_LIST_LIMIT, None)
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.total, 0);
+}

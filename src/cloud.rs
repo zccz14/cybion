@@ -4535,11 +4535,20 @@ async fn list_threads_for(
     cursor: Option<ThreadCursor>,
 ) -> Result<ThreadListPage, ApiError> {
     user_db(state, user, true, move |connection| {
-        let mut conditions = vec![if filter.archived {
-            "t.archived_at IS NOT NULL"
-        } else {
-            "t.archived_at IS NULL"
-        }];
+        let mut conditions = vec![
+            if filter.archived {
+                "t.archived_at IS NOT NULL"
+            } else {
+                "t.archived_at IS NULL"
+            },
+            // The list is the top level, not the whole forest: a Thread a model
+            // subcontracted belongs to the branch that granted it, is reached
+            // from that branch, and would otherwise show up as a second row a
+            // person never asked for. Hiding it here hides it from `total` and
+            // from every view (search included) as well; the Thread still opens
+            // from its own URL.
+            "t.parent_thread_id IS NULL",
+        ];
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(status) = &filter.status {
             conditions.push("t.status = ?");
