@@ -497,3 +497,103 @@ async fn a_root_thread_still_refuses_an_unknown_upstream() {
     .unwrap_err();
     assert_eq!(error.status, StatusCode::NOT_FOUND);
 }
+
+fn wrote(connection: &Connection, thread_id: &str, kind: &str, payload: Value) {
+    connection
+        .execute(
+            "INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES(?,?,?,?)",
+            params![thread_id, kind, payload.to_string(), now()],
+        )
+        .unwrap();
+}
+
+/// A snapshot is what one request returned; history is what the Thread said. A
+/// turn that ends on a tool call leaves the snapshot without text, and the
+/// parent must still get the conclusion the Thread already wrote.
+#[test]
+fn an_answer_falls_back_to_the_last_message_of_the_turn() {
+    let connection = connection();
+    thread(&connection, "child", None, None);
+    wrote(
+        &connection,
+        "child",
+        "input",
+        json!({"content": "读这三份财报"}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "response_output",
+        json!({"type":"message","content":[{"type":"output_text","text":"结论：三份财报都读完了。"}]}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "response_output",
+        json!({"type":"function_call","name":"bash","arguments":"{}"}),
+    );
+    let (text, clipped) = subthreads::answer(&connection, "child").unwrap();
+    assert_eq!(text, "结论：三份财报都读完了。");
+    assert!(!clipped);
+}
+
+/// Some Responses-compatible gateways name a message part `text` instead of
+/// `output_text`; a message is a message either way.
+#[test]
+fn an_answer_accepts_the_older_text_part() {
+    let connection = connection();
+    thread(&connection, "child", None, None);
+    wrote(
+        &connection,
+        "child",
+        "input",
+        json!({"content": "读这三份财报"}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "response_output",
+        json!({"type":"message","content":[{"type":"text","text":"结论：都读完了。"}]}),
+    );
+    let (text, _) = subthreads::answer(&connection, "child").unwrap();
+    assert_eq!(text, "结论：都读完了。");
+}
+
+/// An empty answer is a fact about the turn: name the stop behind it, because
+/// raising a slice, asking a person and retrying are different next steps.
+#[test]
+fn an_empty_answer_names_the_stop_that_left_it_empty() {
+    let connection = connection();
+    thread(&connection, "budget", None, None);
+    wrote(
+        &connection,
+        "budget",
+        "activity",
+        json!({
+            "role": "system",
+            "content": "Budget exhausted: $0.20 settled of the $0.10 limit.",
+            "budget_usd_nanos": 100_000_000i64,
+            "spent_usd_nanos": 200_000_000i64,
+        }),
+    );
+    let reason = subthreads::empty_answer(&connection, "budget", "idle", true).unwrap();
+    assert_eq!(reason["kind"], "budget");
+    assert!(
+        reason["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Budget exhausted")
+    );
+
+    thread(&connection, "waiting", None, None);
+    let reason = subthreads::empty_answer(&connection, "waiting", "idle", true).unwrap();
+    assert_eq!(reason["kind"], "blocked");
+
+    thread(&connection, "failed", None, None);
+    let reason = subthreads::empty_answer(&connection, "failed", "failed", false).unwrap();
+    assert_eq!(reason["kind"], "failed");
+
+    thread(&connection, "quiet", None, None);
+    let reason = subthreads::empty_answer(&connection, "quiet", "idle", false).unwrap();
+    assert_eq!(reason["kind"], "no-message");
+}
