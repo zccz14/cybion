@@ -13,7 +13,6 @@ import { createServer, type InlineConfig, type ViteDevServer } from "vite"
 // call sites so no future test can reintroduce it.
 export function createTestServer(options: InlineConfig): Promise<ViteDevServer> {
   return createServer({
-    appType: "custom",
     ...options,
     cacheDir: "node_modules/.vite-tests",
     server: { ...options.server, middlewareMode: true, hmr: false },
