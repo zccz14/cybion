@@ -3,7 +3,6 @@ import { GitBranchIcon, SquareIcon } from "lucide-react"
 import { Link } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { errorMessage } from "@zccz14/cybion-components/logic"
 
 type BranchPool = {
   thread_id: string
@@ -83,7 +82,10 @@ export function ThreadBranch({ threadId, language, request }: {
     onSuccess: () => { void client.invalidateQueries({ queryKey: ["thread-branch", threadId] }) },
   })
   const view = branch.data
-  if (!view) return null
+  // The row is an addition to a footer that must never grow a line of its own
+  // when the branch is unknown: a Thread served by an older controller, or a
+  // response that is not the branch view, simply has nothing to say here.
+  if (!view || !view.pool || !Array.isArray(view.nodes)) return null
   // A Thread that never subcontracted and carries no ceiling has nothing to
   // say here, and most Threads are that Thread: the row stays out of the way.
   if (view.pool.budget_usd === null && view.nodes.length === 0) return null
@@ -115,6 +117,5 @@ export function ThreadBranch({ threadId, language, request }: {
         </Button>}
       </li>)}
     </ul>}
-    {branch.error && <p className="mt-1 text-xs text-destructive">{errorMessage(branch.error)}</p>}
   </div>
 }
