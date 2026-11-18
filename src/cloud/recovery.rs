@@ -213,13 +213,17 @@ pub(super) async fn retry(
     }).await
 }
 
+/// Settles every committed call a restart or a stale tail left unanswered.
+/// `true` reports that one of them asked for a checkpoint, because the request
+/// is answered here and only the caller can still honour it.
 pub(super) async fn settle_tools(
     state: &AppState,
     user: &User,
     thread: &ThreadView,
     input: i64,
     cancellation: &mut watch::Receiver<bool>,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
+    let mut checkpoint_requested = false;
     let id = thread.id.clone();
     // INVARIANT: a delayed call counts down from the record that committed it,
     // so a restart in the middle of the wait keeps waiting only what is left.
@@ -308,10 +312,11 @@ pub(super) async fn settle_tools(
                     .await?;
                 }
             }
+            Some(PendingToolCall::Compact(_)) => checkpoint_requested = true,
             Some(PendingToolCall::Answered(_)) | None => {}
         }
     }
-    Ok(())
+    Ok(checkpoint_requested)
 }
 
 pub(super) fn retry_after(headers: &HeaderMap) -> Option<u64> {

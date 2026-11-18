@@ -366,6 +366,7 @@ export type CybionToolFunctionCall =
   | { tool: "cross_out_notes"; noteIds: string[] }
   | { tool: "block_thread" }
   | { tool: "create_thread_token" }
+  | { tool: "compact_context" }
 
 export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall | null {
   const object = historyPayloadObject(payload)
@@ -407,6 +408,8 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
       return { tool: "block_thread" }
     case "create_thread_token":
       return { tool: "create_thread_token" }
+    case "compact_context":
+      return { tool: "compact_context" }
     case "list_manuals":
       return { tool: "list_manuals" }
     case "cybion_list_workers":

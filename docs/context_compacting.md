@@ -49,6 +49,29 @@ inference; the effort is bounded, and the reactive overflow path remains the saf
 Each `agent` request also compacts reactively: when the upstream reports a
 context-window error, the controller compacts and retries.
 
+## Thread-requested compaction
+
+A Thread that is running out of room can ask for its own checkpoint with
+`compact_context`. The call is answered like any other Controller tool, and then
+the loop compacts the range it just compiled and derives the next request of the
+same turn from the checkpoint. Nothing waits for the user. The behaviour this
+replaces is the one the budget line used to suggest — finish tidily and stop —
+because a Thread that has to end a turn to buy room spends that last request on
+the smallest piece of work that makes stopping look reasonable.
+
+The tool takes no arguments. The checkpoint is written by the compaction pass
+under the contract `validate_checkpoint_text` enforces, so a summary supplied by
+the caller would be a second writer of the same artifact. That is also why the
+answered call rides the source range and not the tail: a call the checkpoint
+summarized must never replay without its answer. A restart between the call and
+the checkpoint is covered by `settle_tools`, which answers the call and reports
+that the checkpoint is still owed.
+
+Compaction stays bounded the way the automatic path is: every request costs an
+inference, so the tool asks for a context that is actually short rather than
+merely untidy, and the proactive check still fires on its own when an estimate
+crosses the budget before any inference.
+
 ## Reduction algorithm
 
 The working state is an optional compacted prefix followed by a contiguous raw

@@ -1727,7 +1727,7 @@ async fn inference_keeps_worker_tools_when_the_last_online_worker_disconnects() 
     .unwrap()
     .unwrap();
     let requests = server.await.unwrap();
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 18);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 19);
     let names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -1817,6 +1817,7 @@ async fn inference_injects_web_search_and_the_configured_image_tool() {
             "cross_out_notes",
             "create_thread_token",
             "block_thread",
+            "compact_context",
             "bash",
             "browser_control",
             "computer_use",
