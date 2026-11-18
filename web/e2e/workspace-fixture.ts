@@ -133,6 +133,15 @@ export async function stubWorkspace(page: Page, options: {
         Object.assign(reference, request.postDataJSON())
         return json(reference)
       }
+      // A fixture Thread has no branch and no ceiling of its own, which is what
+      // an empty branch view says; the row stays out of the transcript.
+      if (/^\/api\/threads\/[^/]+\/branches$/.test(path)) {
+        return json({
+          pool: { thread_id: path.split("/").at(-2), budget_usd: null, subtree_spent_usd: 0, allotted_usd: 0, remaining_usd: null },
+          nodes: [],
+          truncated: false,
+        })
+      }
       if (path === "/api/notes") {
         return json({ open: notes.filter((note) => note.done_at === null), done: notes.filter((note) => note.done_at !== null) })
       }
