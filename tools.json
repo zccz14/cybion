@@ -493,6 +493,16 @@
         "properties": {},
         "additionalProperties": false
       }
+    },
+    {
+      "type": "function",
+      "name": "compact_context",
+      "description": "Shrink this Thread's context into a checkpoint and keep working in the same turn: the controller replaces the conversation so far with a validated checkpoint, and the next request of this same turn starts from it. Use it when the budget line says the context is running low — it is the alternative to ending the turn, and a Thread must not trade a small piece of work for a stop. It takes no arguments because the compaction pass writes what must survive; every original record stays readable afterwards. A compaction costs an inference, so call it when the context is actually short, not to tidy up.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
     }
   ]
 }

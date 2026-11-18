@@ -234,7 +234,46 @@ fn the_context_sentence_warns_before_a_compaction() {
         text.contains("Context 900 of the 1.0k budget (90%)"),
         "{text}"
     );
+    assert!(
+        text.contains("Less than one more request at the current rate."),
+        "{text}"
+    );
     assert!(text.contains("Compaction is close"), "{text}");
+    // The pressure line names the way out. Telling a Thread whose context is
+    // nearly gone to end the turn tidily is how it learns to stop early instead.
+    assert!(text.contains("compact_context"), "{text}");
+    assert!(
+        text.contains("instead of trading a small piece of work"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_context_sentence_counts_the_requests_the_budget_still_buys() {
+    let connection = tail_connection();
+    let directory = tempfile::tempdir().unwrap();
+    record(&connection, "input", json!({"role":"user","content":"go"}));
+    connection
+        .execute(
+            "UPDATE threads SET context_budget_tokens=1000 WHERE id='th'",
+            [],
+        )
+        .unwrap();
+    audit(&connection, 100, 100, 0);
+    let tail = request_tail::append(&connection, "th", None)
+        .unwrap()
+        .unwrap();
+    let compiled = compile_thread_context(&connection, directory.path(), "th", tail).unwrap();
+    let text = tail_text(&compiled.items);
+    assert!(
+        text.contains("About 4 more requests at the current rate."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Context 100 of the 1.0k budget (10%)"),
+        "{text}"
+    );
+    assert!(!text.contains("Compaction is close"), "{text}");
 }
 
 #[test]

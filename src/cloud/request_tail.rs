@@ -23,8 +23,9 @@ use super::*;
 /// `manual_loaded` and `context` records do.
 pub(super) const TYPE: &str = "request_tail";
 
-/// A Thread at this share of its context budget is told to narrow its next
-/// steps instead of being surprised by a compaction.
+/// A Thread at this share of its context budget is told what to do about it:
+/// `compact_context` buys room, and the alternative the budget line must never
+/// suggest is ending the turn with a small piece of work.
 const CONTEXT_PRESSURE_PERCENT: i128 = 80;
 
 /// A turn that opens after this much silence is a new session to the model, not
@@ -235,6 +236,17 @@ fn dollars(nanos: i64) -> String {
 }
 
 impl Spend {
+    /// What one request of this Thread has cost in context so far. The measured
+    /// last input alone would understate a turn that just read a large file, and
+    /// the settled totals are the only numbers the Thread could also read
+    /// itself.
+    fn average_request_tokens(&self) -> Option<i64> {
+        if self.requests <= 0 || self.input_tokens + self.output_tokens <= 0 {
+            return None;
+        }
+        Some((self.input_tokens + self.output_tokens) / self.requests)
+    }
+
     /// The one line the Thread reads about itself. Reported usage and settled
     /// amounts only: an unsettled call is never priced as free.
     fn line(&self) -> String {
@@ -299,9 +311,22 @@ impl Spend {
             tokens(input),
             tokens(budget)
         );
+        // The share says how full the Thread is; a request count says what is
+        // left to spend it on, which is the thing a Thread deciding whether to
+        // start a long job actually needs.
+        if let Some(average) = self.average_request_tokens()
+            && average > 0
+        {
+            let left = (budget - input).max(0);
+            line.push_str(&match left / average {
+                0 => " Less than one more request at the current rate.".to_owned(),
+                rounds => format!(" About {rounds} more requests at the current rate."),
+            });
+        }
         if share >= CONTEXT_PRESSURE_PERCENT {
             line.push_str(
-                " Compaction is close: prefer narrow reads, and write what matters into your reply.",
+                " Compaction is close: call compact_context to shrink the context and keep \
+                 working, instead of trading a small piece of work for ending the turn.",
             );
         }
         Some(line)

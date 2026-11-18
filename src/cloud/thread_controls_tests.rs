@@ -44,6 +44,21 @@ async fn reply(socket: &mut tokio::net::TcpStream, text: &str) {
     socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
 }
 
+/// One assistant turn that calls a tool: the shape `start_response_tool`
+/// intercepts, and the only way a Thread can ask for a checkpoint.
+async fn reply_function_call(
+    socket: &mut tokio::net::TcpStream,
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+) {
+    let body = json!({"id":"response", "output":[{
+        "type":"function_call","id":"fc","call_id":call_id,"name":name,"arguments":arguments
+    }]})
+    .to_string();
+    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+}
+
 async fn reply_completed(socket: &mut tokio::net::TcpStream, text: &str) {
     let body = json!({"id":"response", "end_turn":true, "output":[{
         "type":"message","id":"message","role":"assistant",
@@ -55,7 +70,7 @@ async fn reply_completed(socket: &mut tokio::net::TcpStream, text: &str) {
 
 fn checkpoint_body(marker: &str) -> String {
     format!(
-        "# Durable working context\n\n## Concepts and terminology\n- {marker}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record anchors\n\n## Active decisions and constraints\n- preserve history\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
+        "# Durable working context\n\n## Concepts and terminology\n- {marker}\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record anchors\n\n## Active decisions and constraints\n- preserve history\n\n## Standing commitments\n- none\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]"
     )
 }
 
@@ -518,7 +533,7 @@ async fn compact_appends_one_checkpoint_and_does_not_resume_inference() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_json_request(&mut socket).await;
-        reply(&mut socket, "# Durable working context\n\n## Concepts and terminology\n- preserved\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1\n\n## Active decisions and constraints\n- preserve history\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]").await;
+        reply(&mut socket, "# Durable working context\n\n## Concepts and terminology\n- preserved\n\n## Resources and authoritative locations\n- test\n\n## Chronicle timeline\n- record #1\n\n## Active decisions and constraints\n- preserve history\n\n## Standing commitments\n- none\n\n## Current objective and next step\n- continue\n\n## Open work and evidence routes\n[]").await;
         assert!(
             tokio::time::timeout(Duration::from_millis(200), listener.accept())
                 .await
@@ -1361,6 +1376,96 @@ async fn proactive_compaction_checkpoints_the_context_before_an_oversized_infere
         history.iter().any(|record| record.kind == "checkpoint"),
         "the proactive checkpoint must be durable"
     );
+    assert_eq!(
+        read_thread_for(&state, &user, thread.id.clone())
+            .await
+            .unwrap()
+            .status,
+        "idle"
+    );
+}
+
+/// A Thread that runs out of room has two moves: ask for a checkpoint, or end
+/// the turn with whatever small piece of work still fits. This is the first one:
+/// the call is answered, the context is compacted inside the same turn, and the
+/// next request continues the task from the fresh checkpoint instead of waiting
+/// for the user to say "carry on".
+#[tokio::test]
+async fn the_thread_can_checkpoint_and_keep_working_in_the_same_turn() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "compact-tool-user").unwrap();
+    let thread = create_test_thread(&state, &user).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    bind_model(&state, &user, &thread, listener.local_addr().unwrap()).await;
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut socket).await;
+            match index {
+                0 => {
+                    reply_function_call(&mut socket, "call-compact", "compact_context", "{}").await
+                }
+                1 => reply(&mut socket, &checkpoint_body("thread-asked")).await,
+                _ => reply_completed(&mut socket, "kept working").await,
+            }
+            requests.push(request);
+        }
+        requests
+    });
+    enqueue(
+        state.clone(),
+        user.clone(),
+        thread.id.clone(),
+        RequestInput::Prompt(user_text("please continue")),
+    )
+    .await
+    .unwrap();
+    wait_finished(&state, &user, &thread).await;
+    let requests = server.await.unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the call is answered, the context is compacted, and the turn continues without the user"
+    );
+    let source = requests[1]["input"].as_array().unwrap();
+    assert!(
+        source
+            .iter()
+            .any(|item| item["call_id"].as_str() == Some("call-compact")),
+        "the checkpoint summarizes the answered call, never a call without its answer"
+    );
+    assert!(
+        source
+            .last()
+            .and_then(|item| item["content"].as_str())
+            .is_some_and(|text| text.contains("Checkpoint compaction")),
+        "the second request is the compaction instruction"
+    );
+    assert!(
+        requests[2]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("# Durable working context"))),
+        "the rest of the turn replays the fresh checkpoint"
+    );
+    let history = history_for(&state, &user, thread.id.clone(), 0)
+        .await
+        .unwrap();
+    let checkpoint = history
+        .iter()
+        .position(|record| record.kind == "checkpoint")
+        .expect("the checkpoint the Thread asked for must be durable");
+    let answered = history
+        .iter()
+        .position(|record| {
+            record.kind == "tool_output" && record.payload.to_string().contains("call-compact")
+        })
+        .expect("the call must be answered");
+    assert!(answered < checkpoint);
     assert_eq!(
         read_thread_for(&state, &user, thread.id.clone())
             .await
