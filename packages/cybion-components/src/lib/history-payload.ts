@@ -367,6 +367,10 @@ export type CybionToolFunctionCall =
   | { tool: "block_thread" }
   | { tool: "create_thread_token" }
   | { tool: "compact_context" }
+  | { tool: "create_thread"; title: string | null; budgetUsd: number | null }
+  | { tool: "list_thread_tree" }
+  | { tool: "wait_for_thread"; threadId: string }
+  | { tool: "control_thread"; threadId: string; action: string }
 
 export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall | null {
   const object = historyPayloadObject(payload)
@@ -410,6 +414,23 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
       return { tool: "create_thread_token" }
     case "compact_context":
       return { tool: "compact_context" }
+    case "create_thread":
+      return {
+        tool: "create_thread",
+        title: nonEmptyString(args.title),
+        budgetUsd: typeof args.budget_usd === "number" ? args.budget_usd : null,
+      }
+    case "list_thread_tree":
+      return { tool: "list_thread_tree" }
+    case "wait_for_thread": {
+      const threadId = nonEmptyString(args.thread_id)
+      return threadId === null ? null : { tool: "wait_for_thread", threadId }
+    }
+    case "control_thread": {
+      const threadId = nonEmptyString(args.thread_id)
+      const action = nonEmptyString(args.action)
+      return threadId === null || action === null ? null : { tool: "control_thread", threadId, action }
+    }
     case "list_manuals":
       return { tool: "list_manuals" }
     case "cybion_list_workers":

@@ -54,6 +54,7 @@ mod route_performance;
 mod run_phase;
 mod sql_performance;
 mod stats;
+mod subthreads;
 mod thread_controls;
 mod thread_sharing;
 mod thread_tokens;
@@ -172,7 +173,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // hosted database, because the index batches below only run on a version change.
 // 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
 // with, and the User default that fills the list of a new Thread.
-const USER_SCHEMA_VERSION: i64 = 61;
+const USER_SCHEMA_VERSION: i64 = 62;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1061,6 +1062,7 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
         .route("/api/threads/{id}/cancel", post(thread_controls::cancel))
+        .route("/api/threads/{id}/branches", get(thread_branches))
         .route(
             "/api/threads/{id}/continue",
             post(thread_controls::continue_thread),
@@ -1725,6 +1727,10 @@ CREATE TABLE IF NOT EXISTS threads (
   -- Settled USD spend this Thread may reach before the kernel stops it and
   -- blocks it on its user. NULL follows `thread_defaults`; 0 means no limit.
   budget_usd_nanos INTEGER,
+  -- The Thread that created this one and owns the slice of budget it spends.
+  -- NULL marks a root Thread: the only one whose budget falls back to the User
+  -- default, and the one a person created rather than another Thread.
+  parent_thread_id TEXT REFERENCES threads(id) ON DELETE CASCADE,
   initial_manual_ids TEXT,
   archived_at INTEGER,
   -- Waiting on the user: its own axis, because `status` is written on every
@@ -2228,6 +2234,9 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if version < 61 {
         migrate_thread_budget(&transaction)?;
     }
+    if version < 62 {
+        migrate_thread_parent(&transaction)?;
+    }
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
@@ -2329,6 +2338,29 @@ fn migrate_thread_budget(transaction: &rusqlite::Transaction<'_>) -> Result<(), 
             ))?;
         }
     }
+    Ok(())
+}
+
+/// Threads gain `parent_thread_id`: the Thread that created this one and owns
+/// the slice of budget it may spend. The index answers both directions the
+/// feature asks for — a Thread's children for the branch view, and the walk
+/// from a Thread up to the ceilings that bound it. A fresh database already
+/// carries the column from `THREAD_SCHEMA`, so the upgrade probes first, but
+/// the index is created unconditionally: it has to land on every database.
+fn migrate_thread_parent(transaction: &rusqlite::Transaction<'_>) -> Result<(), ApiError> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='parent_thread_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        transaction.execute_batch(
+            "ALTER TABLE threads ADD COLUMN parent_thread_id TEXT REFERENCES threads(id) ON DELETE CASCADE;",
+        )?;
+    }
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS threads_parent ON threads(parent_thread_id, updated_at DESC);",
+    )?;
     Ok(())
 }
 
@@ -2658,6 +2690,7 @@ fn migrate_user_schema_through_53(
             "TEXT NOT NULL DEFAULT '[]'",
         ),
         ("threads", "budget_usd_nanos", "INTEGER"),
+        ("threads", "parent_thread_id", "TEXT"),
         (
             "thread_defaults",
             "budget_usd_nanos",
@@ -2936,6 +2969,13 @@ struct ThreadView {
     /// kernel stops it and blocks it on its user. `None` follows the user
     /// default and `0` means no limit.
     budget_usd_nanos: Option<i64>,
+    /// The Thread that created this one. `None` marks a root Thread: it is the
+    /// only one whose budget falls back to the User default, and the one a
+    /// person started rather than another Thread. Deleting it takes its whole
+    /// branch with it, which is why the API asks before it does.
+    parent_thread_id: Option<String>,
+    /// How many Threads this one created, for the branch badge in the console.
+    branches: i64,
     /// The Manuals this Thread started with, bound into `thread_manual_loads`
     /// before its first input. `None` follows the user default list.
     initial_manual_ids: Option<Vec<String>>,
@@ -3676,6 +3716,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
     let cost_usd_nanos: i64 = row.get(25)?;
     let cost_settled_requests: i64 = row.get(26)?;
     let budget_usd_nanos: Option<i64> = row.get(28)?;
+    let parent_thread_id: Option<String> = row.get(29)?;
     Ok(ThreadView {
         id: row.get(0)?,
         purpose: row.get(17)?,
@@ -3697,6 +3738,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         image_generation_model: row.get(21)?,
         max_loaded_manuals,
         budget_usd_nanos,
+        parent_thread_id,
+        branches: row.get(30)?,
         initial_manual_ids: initial_manual_ids
             .as_deref()
             .map(|raw| manual_loads::parse_initial_ids(Some(raw))),
@@ -4218,7 +4261,12 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
            ORDER BY r.id DESC LIMIT 1
          )
        ) END AS running_summary,
-       t.budget_usd_nanos
+       t.budget_usd_nanos,
+       t.parent_thread_id,
+       -- How many Threads this one created. Served by `threads_parent`, so the
+       -- list pays one index lookup per row and the console can show a branch
+       -- badge without a second request.
+       (SELECT COUNT(*) FROM threads c WHERE c.parent_thread_id=t.id)
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT MAX(id) FROM (
@@ -4266,7 +4314,42 @@ fn load_thread(connection: &Connection, id: &str) -> Result<ThreadView, ApiError
 #[derive(Clone, Debug)]
 enum ThreadOrigin {
     Web,
-    Api { key_id: String },
+    Api {
+        key_id: String,
+    },
+    /// A Thread a model subcontracted through `create_thread`: it inherits its
+    /// creator's provenance and draws its budget slice from `parent_thread_id`.
+    /// Only the Controller builds this variant, so the HTTP API can never name
+    /// a parent and a Thread a person created is always a root.
+    Child {
+        parent_thread_id: String,
+    },
+}
+
+impl ThreadOrigin {
+    /// Who the new Thread reports as its creator, and the parent whose pool it
+    /// draws on. A child inherits its parent's provenance: work asked for
+    /// through an API key stays API work when a Thread subcontracts it.
+    fn resolve(
+        &self,
+        connection: &Connection,
+    ) -> Result<(String, Option<String>, Option<String>), ApiError> {
+        Ok(match self {
+            ThreadOrigin::Web => ("web".to_owned(), None, None),
+            ThreadOrigin::Api { key_id } => ("api".to_owned(), Some(key_id.clone()), None),
+            ThreadOrigin::Child { parent_thread_id } => {
+                let (created_by, api_key_id) = connection
+                    .query_row(
+                        "SELECT created_by,api_key_id FROM threads WHERE id=?",
+                        [parent_thread_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .optional()?
+                    .ok_or_else(|| ApiError::not_found("parent thread not found"))?;
+                (created_by, api_key_id, Some(parent_thread_id.clone()))
+            }
+        })
+    }
 }
 
 async fn create_thread_for(
@@ -4304,10 +4387,6 @@ async fn create_thread_for(
         .map(image_generation_model)
         .transpose()?;
     let audio_transcription_model = optional_model(input.audio_transcription_model);
-    let (created_by, api_key_id) = match origin {
-        ThreadOrigin::Web => ("web", None),
-        ThreadOrigin::Api { key_id } => ("api", Some(key_id)),
-    };
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let defaults = load_thread_defaults(&transaction)?;
@@ -4317,6 +4396,25 @@ async fn create_thread_for(
         // here, so the first input already compiles with the copies in front of
         // the model. Fitting the cap is what makes that promise affordable.
         let budget_usd_nanos = input.budget_usd_nanos.map(budget_usd_nanos).transpose()?;
+        let (created_by, api_key_id, parent_thread_id) = origin.resolve(&transaction)?;
+        // A child is created under its parent's ceilings: the depth bounds how
+        // far a branch may grow, and its slice must fit what the parent has not
+        // already promised or spent. Both are read in this same write
+        // transaction, so two children created at once cannot overcommit.
+        let mut model = model;
+        let mut upstream_id = upstream_id;
+        if let Some(parent_thread_id) = parent_thread_id.as_deref() {
+            let parent = load_thread(&transaction, parent_thread_id)?;
+            subthreads::check_child(&transaction, &parent, budget_usd_nanos, &defaults)?;
+            // A child names its own model and endpoint or names neither. Naming
+            // neither keeps the pair the parent already runs on: they are one
+            // decision, and a child that silently landed on a different
+            // endpoint than its parent is not a subcontract any more.
+            if model.is_none() && upstream_id.is_none() {
+                model = Some(parent.model.clone());
+                upstream_id = parent.upstream_id.clone();
+            }
+        }
         let loaded_manual_cap = max_loaded_manuals.unwrap_or(defaults.max_loaded_manuals);
         manual_loads::initial_ids_within_cap(&initial_manual_ids, loaded_manual_cap)?;
         let upstream_id = resolve_thread_upstream(&transaction, upstream_id, defaults.upstream_id)?;
@@ -4335,6 +4433,8 @@ async fn create_thread_for(
             image_generation_model,
             max_loaded_manuals,
             budget_usd_nanos,
+            parent_thread_id: parent_thread_id.clone(),
+            branches: 0,
             initial_manual_ids: Some(initial_manual_ids.clone()),
             audio_transcription_model,
             archived_at: None,
@@ -4347,7 +4447,7 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,budget_usd_nanos,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,budget_usd_nanos,parent_thread_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
@@ -4366,6 +4466,7 @@ async fn create_thread_for(
                 thread.max_loaded_manuals,
                 thread.audio_transcription_model,
                 thread.budget_usd_nanos,
+                thread.parent_thread_id,
                 thread.created_at,
                 thread.updated_at
             ],
@@ -4953,6 +5054,30 @@ async fn start_thread(
     Ok(Json(
         enqueue_request(state, identity.user, thread.id, message).await?,
     ))
+}
+
+/// The branch below one Thread, as the console shows it and as
+/// `list_thread_tree` reports it to a model: one read model, two callers.
+async fn thread_branches(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Caller>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<BranchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let id = thread_id(&id)?;
+    let depth = query.depth.unwrap_or(1).clamp(1, subthreads::MAX_DEPTH);
+    let tree = user_db(&state, &identity.user, false, move |connection| {
+        subthreads::tree(connection, &id, depth)
+    })
+    .await?;
+    Ok(Json(
+        serde_json::to_value(tree).map_err(ApiError::internal)?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct BranchQuery {
+    depth: Option<i64>,
 }
 
 async fn read_thread(
@@ -6316,6 +6441,8 @@ async fn process_request(
         )),
         Err(error) => Err((
             ThreadView {
+                parent_thread_id: None,
+                branches: 0,
                 id: thread_id.clone(),
                 purpose: "work".to_owned(),
                 created_by: "web".to_owned(),
@@ -7533,12 +7660,30 @@ async fn request_agent(
         // freezes no tail record for one and spends nothing shrinking its
         // context first. Settled cost only: an unsettled call is never counted
         // as free, and this is therefore a bound one request wide.
-        let budget = thread.budget_usd_nanos.unwrap_or(defaults.budget_usd_nanos);
-        if budget > 0 && thread.usage.cost_usd_nanos >= budget {
-            let spent = thread.usage.cost_usd_nanos;
+        //
+        // Every ceiling above the Thread is checked, not only its own: what a
+        // child spends is spent under its parent's budget too, so a branch can
+        // never outlive the Thread that paid for it.
+        let exceeded = user_db(state, user, false, {
+            let id = thread.id.clone();
+            let default_budget = defaults.budget_usd_nanos;
+            move |connection| subthreads::exhausted(connection, &id, default_budget)
+        })
+        .await
+        .map_err(|error| (thread.clone(), Box::new(error)))?;
+        if let Some(exceeded) = exceeded {
             let stopped = user_db(state, user, true, {
                 let id = thread.id.clone();
-                move |connection| blocked::stop_for_budget(connection, &id, budget, spent)
+                let ceiling = (!exceeded.own).then(|| exceeded.title.clone());
+                move |connection| {
+                    blocked::stop_for_budget(
+                        connection,
+                        &id,
+                        exceeded.budget_usd_nanos,
+                        exceeded.spent_usd_nanos,
+                        ceiling.as_deref(),
+                    )
+                }
             })
             .await
             .map_err(|error| (thread.clone(), Box::new(error)))?;
@@ -10463,6 +10608,10 @@ async fn controller_tool_output(
         "cross_out_notes" => notes::cross_out_tool_output(state, user, thread_id, input).await,
         "block_thread" => blocked::tool_output(state, user, thread_id, input).await,
         "create_thread_token" => thread_tokens::tool_output(state, thread_id, input).await,
+        "create_thread" => subthreads::create_tool_output(state, user, thread_id, input).await,
+        "list_thread_tree" => subthreads::list_tool_output(state, user, thread_id, input).await,
+        "wait_for_thread" => subthreads::wait_tool_output(state, user, thread_id, input).await,
+        "control_thread" => subthreads::control_tool_output(state, user, thread_id, input).await,
         "cybion_list_ultimate_machines" => machines::list_tool_output(state, user).await,
         "cybion_get_ultimate_machine" => machines::get_tool_output(state, user, input).await,
         "cybion_set_ultimate_machine" => machines::set_tool_output(state, user, input).await,
@@ -11375,6 +11524,10 @@ async fn worker_call_received(
     .await?;
     Ok(Json(json!({"ok":true})))
 }
+
+#[cfg(test)]
+#[path = "cloud_subthread_tests.rs"]
+mod subthread_tests;
 
 #[cfg(test)]
 #[path = "cloud_cost_tests.rs"]
@@ -13657,7 +13810,7 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 24);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -14239,7 +14392,7 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true, false);
-        assert_eq!(tools.as_array().unwrap().len(), 16);
+        assert_eq!(tools.as_array().unwrap().len(), 20);
         assert_eq!(tools[0]["name"], "list_manuals");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "load_manual");
@@ -14264,18 +14417,23 @@ mod tests {
         assert_eq!(tools[12]["parameters"]["required"], json!(null));
         assert_eq!(tools[13]["name"], "compact_context");
         assert_eq!(tools[13]["parameters"]["properties"], json!({}));
-        assert_eq!(tools[14], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[15], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[14]["name"], "create_thread");
+        assert_eq!(tools[14]["parameters"]["required"], json!(["task"]));
+        assert_eq!(tools[15]["name"], "list_thread_tree");
+        assert_eq!(tools[16]["name"], "wait_for_thread");
+        assert_eq!(tools[17]["name"], "control_thread");
+        assert_eq!(tools[18], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[19], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true, false);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 20);
-        assert_eq!(worker_and_native[14]["name"], "bash");
-        assert_eq!(worker_and_native[17]["name"], "view_image");
-        assert_eq!(worker_and_native[18]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[19]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 24);
+        assert_eq!(worker_and_native[18]["name"], "bash");
+        assert_eq!(worker_and_native[21]["name"], "view_image");
+        assert_eq!(worker_and_native[22]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[23]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 15);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 19);
         assert_eq!(
-            web_search_only[14],
+            web_search_only[18],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false, false);
@@ -14300,7 +14458,11 @@ mod tests {
                 "cross_out_notes",
                 "create_thread_token",
                 "block_thread",
-                "compact_context"
+                "compact_context",
+                "create_thread",
+                "list_thread_tree",
+                "wait_for_thread",
+                "control_thread"
             ]
         );
         assert_eq!(
@@ -14336,7 +14498,15 @@ mod tests {
         assert_eq!(names(note_tools()), ["add_notes", "cross_out_notes"]);
         assert_eq!(
             names(thread_tools()),
-            ["create_thread_token", "block_thread", "compact_context"]
+            [
+                "create_thread_token",
+                "block_thread",
+                "compact_context",
+                "create_thread",
+                "list_thread_tree",
+                "wait_for_thread",
+                "control_thread"
+            ]
         );
         assert_eq!(
             names(worker_tools()),
@@ -14613,7 +14783,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0], TOOL_CATALOG["kernel"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["kernel"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["kernel"][2]);
@@ -14626,8 +14796,13 @@ mod tests {
         assert_eq!(tools[11], TOOL_CATALOG["thread"][0]);
         assert_eq!(tools[12], TOOL_CATALOG["thread"][1]);
         assert_eq!(tools[13], TOOL_CATALOG["thread"][2]);
-        assert_eq!(tools[14], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[15], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[14]["name"], "create_thread");
+        assert_eq!(tools[14]["parameters"]["required"], json!(["task"]));
+        assert_eq!(tools[15]["name"], "list_thread_tree");
+        assert_eq!(tools[16]["name"], "wait_for_thread");
+        assert_eq!(tools[17]["name"], "control_thread");
+        assert_eq!(tools[18], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[19], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

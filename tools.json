@@ -503,6 +503,140 @@
         "properties": {},
         "additionalProperties": false
       }
+    },
+    {
+      "type": "function",
+      "name": "create_thread",
+      "description": "Hand one task to a new child Thread and give it a slice of this Thread's USD budget. It starts at once, and its final message is its deliverable: a child cannot see this Thread's history, so state the goal, the acceptance test and the shape of the answer in `task`. Returns immediately with the child's id and this Thread's remaining pool; use wait_for_thread to collect the result and list_thread_tree to see the branch. Omit `budget_usd` to leave the child without a ceiling of its own — every ceiling above it still applies. Its settings come from the account defaults, never from this Thread's own.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "它的第一条输入：目标、验收标准、交付物形态。"
+          },
+          "title": {
+            "type": "string",
+            "description": "1-160 字符；省略为 Untitled thread。"
+          },
+          "budget_usd": {
+            "type": "number",
+            "description": "从本线程剩余额度里划给它的上限，美元；省略=它没有自身上限。"
+          },
+          "settings": {
+            "type": "object",
+            "description": "该子线程自己的设置；省略的字段跟随账户默认，绝不复制本线程的设置。",
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "upstream_id": {
+                "type": "string"
+              },
+              "reasoning_effort": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              "initial_manual_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "max_loaded_manuals": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "list_thread_tree",
+      "description": "List the Threads below this one with their status, whether each waits on you, what it was promised and what it settled, plus this Thread's own pool — budget, subtree spend, what is promised to children and what is left. `depth` 1 lists direct children; 3 is as deep as a branch may grow.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "description": "省略=本线程；只能看自己下面的分支。"
+          },
+          "depth": {
+            "type": "integer",
+            "description": "1-3，默认 1。"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "wait_for_thread",
+      "description": "Wait for a child Thread to settle, then read its final message and its spend. Returns as soon as the child settles or when `timeout_seconds` runs out: `settled: false` means it is still working, `blocked: true` means it stopped and is waiting on you. Waiting holds no request, so a long wait costs nothing until it answers.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "description": "默认 60，上限 300。"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "control_thread",
+      "description": "Steer one of the Threads below this one. `message` sends it an input, which also clears it when it stopped to wait on you. `top_up` sets a new slice of this Thread's budget it may spend, and raising it resumes a child stopped on its ceiling. `stop` cancels the turn it is running. Only Threads below this one can be steered: a parent is not yours to steer.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "message",
+              "top_up",
+              "stop"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "description": "action=message 时必填。"
+          },
+          "budget_usd": {
+            "type": "number",
+            "description": "action=top_up 时必填：新的上限，美元。"
+          }
+        },
+        "required": [
+          "thread_id",
+          "action"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

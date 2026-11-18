@@ -8,13 +8,13 @@ const copy = {
     listManuals: "List manuals", listWorkers: "List Workers", loadManual: "Load manual", unloadManual: "Unload manual", writeManual: "Edit manual", createManual: "Create manual", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
     getMachine: "Read Ultimate Machine", updateMachine: "Update Ultimate Machine", createMachine: "Create Ultimate Machine", deleteMachine: "Delete Ultimate Machine",
     name: "Name", worker: "Worker", interval: "Interval", state: "State", enabled: "Enabled", paused: "Paused", command: "Command", intent: "Intent",
-    addNotes: "Add notes", crossOutNotes: "Cross out notes", blockThread: "Block the Thread", signThreadToken: "Sign a Thread token", compactContext: "Checkpoint the context",
+    addNotes: "Add notes", crossOutNotes: "Cross out notes", blockThread: "Block the Thread", signThreadToken: "Sign a Thread token", compactContext: "Checkpoint the context", createThread: "Subcontract a Thread", listBranch: "Read the branch", waitThread: "Wait for a child Thread", controlThread: "Steer a child Thread",
   },
   zh: {
     listManuals: "列出手册", listWorkers: "列出 Worker", loadManual: "加载手册", unloadManual: "卸载手册", writeManual: "编辑手册", createManual: "新建手册", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
     getMachine: "读取终极机器", updateMachine: "更新终极机器", createMachine: "创建终极机器", deleteMachine: "删除终极机器",
     name: "名称", worker: "Worker", interval: "间隔", state: "状态", enabled: "启用", paused: "已暂停", command: "命令", intent: "意图",
-    addNotes: "添加便签", crossOutNotes: "划掉便签", blockThread: "标记受阻", signThreadToken: "签发 Thread 令牌", compactContext: "压缩上下文",
+    addNotes: "添加便签", crossOutNotes: "划掉便签", blockThread: "标记受阻", signThreadToken: "签发 Thread 令牌", compactContext: "压缩上下文", createThread: "分包一个线程", listBranch: "查看分支", waitThread: "等待子线程", controlThread: "指挥子线程",
   },
 } as const
 
@@ -50,6 +50,10 @@ export function CybionToolCall({ language, call, workers, manuals, time, childre
       case "block_thread": return text.blockThread
       case "create_thread_token": return text.signThreadToken
       case "compact_context": return text.compactContext
+      case "create_thread": return text.createThread
+      case "list_thread_tree": return text.listBranch
+      case "wait_for_thread": return text.waitThread
+      case "control_thread": return text.controlThread
     }
   })()
   return <div className="relative flex items-start gap-3 px-1">
@@ -116,6 +120,10 @@ function CybionToolDetail({ language, call, workers, manuals }: {
     case "cybion_list_ultimate_machines":
     case "block_thread":
     case "compact_context":
+    case "create_thread":
+    case "list_thread_tree":
+    case "wait_for_thread":
+    case "control_thread":
       return null
     case "cybion_set_ultimate_machine": {
       const rows: string[] = []

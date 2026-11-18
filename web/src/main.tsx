@@ -123,6 +123,7 @@ import { collectSubtreeIds, commonAncestorIds, manualAncestorIds, manualCurrentP
 import { manualDraft, draftsMatch, shouldAutosave, type ManualDraft } from "@/lib/manual-drafts"
 import { ThreadListPane } from "@/components/thread-list"
 import { ThreadManualLoads } from "@/components/thread-manual-loads"
+import { ThreadBranch } from "@/components/thread-branch"
 import { ThreadNotes } from "@/components/thread-notes"
 import type { ThreadUsage } from "@zccz14/cybion-components/internal"
 import { errorMessage } from "@zccz14/cybion-components/internal"
@@ -178,6 +179,9 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "i
   created_by: "web" | "api"
   external_ref: string | null
   id: string
+  /** Threads this one created, from the same row the list reads. Optional so a
+   * controller that predates branches still describes a Thread. */
+  branches?: number
   title: string
   status: ThreadStatus
   display_status: ThreadDisplayStatus
@@ -609,6 +613,10 @@ const copy = {
     toolCreateThreadToken: "Sign a Thread token",
     toolBlockThread: "Block the Thread",
     toolCompactContext: "Checkpoint the context",
+    toolCreateThread: "Subcontract a Thread",
+    toolListThreadTree: "Read the branch",
+    toolWaitForThread: "Wait for a child Thread",
+    toolControlThread: "Steer a child Thread",
     toolListManuals: "List manuals",
     toolListWorkers: "List Workers",
     toolListUltimateMachines: "List Ultimate Machines",
@@ -920,6 +928,10 @@ const copy = {
     toolCreateThreadToken: "签发 Thread 令牌",
     toolBlockThread: "标记受阻",
     toolCompactContext: "压缩上下文",
+    toolCreateThread: "分包一个线程",
+    toolListThreadTree: "查看分支",
+    toolWaitForThread: "等待子线程",
+    toolControlThread: "指挥子线程",
     toolListManuals: "列出手册",
     toolListWorkers: "列出 Worker",
     toolListUltimateMachines: "列出终极机器",
@@ -1585,6 +1597,7 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
         transcriptFooter={<>
           {openThreadNotes.length > 0 && <div className="border-t pt-3"><ThreadNotes notes={openThreadNotes} language={language} /></div>}
           {manualLoads.data !== undefined && (manualLoads.data.head !== null || manualLoads.data.loaded.length > 0) && <div className="border-t pt-3"><ThreadManualLoads view={manualLoads.data} lookup={manualLookup} language={language} /></div>}
+          <ThreadBranch threadId={threadId} active={(current?.branches ?? 0) > 0 || (current?.budget_usd_nanos ?? 0) > 0} language={language} request={(path, init) => api(sdk, path, init)} />
         </>}
       />
     </CybionThreadProvider>
@@ -2881,6 +2894,10 @@ const toolLabels: Record<string, CopyKey> = {
   create_thread_token: "toolCreateThreadToken",
   block_thread: "toolBlockThread",
   compact_context: "toolCompactContext",
+  create_thread: "toolCreateThread",
+  list_thread_tree: "toolListThreadTree",
+  wait_for_thread: "toolWaitForThread",
+  control_thread: "toolControlThread",
   cybion_list_ultimate_machines: "toolListUltimateMachines",
   cybion_get_ultimate_machine: "toolGetUltimateMachine",
   cybion_set_ultimate_machine: "toolSetUltimateMachine",
