@@ -236,15 +236,17 @@ fn dollars(nanos: i64) -> String {
 }
 
 impl Spend {
-    /// What one request of this Thread has cost in context so far. The measured
-    /// last input alone would understate a turn that just read a large file, and
-    /// the settled totals are the only numbers the Thread could also read
-    /// itself.
-    fn average_request_tokens(&self) -> Option<i64> {
-        if self.requests <= 0 || self.input_tokens + self.output_tokens <= 0 {
+    /// What one request adds to this Thread's context, which is what decides how
+    /// many are left: every request replays the same prefix, so the reply and
+    /// the tool results are the only things that grow it. Counting the settled
+    /// input instead prices that replay again on every request and tells a
+    /// Thread at 44% that it has one request left, which is the same story that
+    /// makes a Thread stop early.
+    fn average_growth_tokens(&self) -> Option<i64> {
+        if self.requests <= 0 || self.output_tokens <= 0 {
             return None;
         }
-        Some((self.input_tokens + self.output_tokens) / self.requests)
+        Some((self.output_tokens / self.requests).max(1))
     }
 
     /// The one line the Thread reads about itself. Reported usage and settled
@@ -314,12 +316,11 @@ impl Spend {
         // The share says how full the Thread is; a request count says what is
         // left to spend it on, which is the thing a Thread deciding whether to
         // start a long job actually needs.
-        if let Some(average) = self.average_request_tokens()
-            && average > 0
-        {
+        if let Some(growth) = self.average_growth_tokens() {
             let left = (budget - input).max(0);
-            line.push_str(&match left / average {
+            line.push_str(&match left / growth {
                 0 => " Less than one more request at the current rate.".to_owned(),
+                1 => " About 1 more request at the current rate.".to_owned(),
                 rounds => format!(" About {rounds} more requests at the current rate."),
             });
         }
