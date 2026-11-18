@@ -13810,7 +13810,7 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 24);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -14425,15 +14425,15 @@ mod tests {
         assert_eq!(tools[18], TOOL_CATALOG["native"]["normai_web_search"]);
         assert_eq!(tools[19], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true, false);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 20);
-        assert_eq!(worker_and_native[14]["name"], "bash");
-        assert_eq!(worker_and_native[17]["name"], "view_image");
-        assert_eq!(worker_and_native[18]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[19]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 24);
+        assert_eq!(worker_and_native[18]["name"], "bash");
+        assert_eq!(worker_and_native[21]["name"], "view_image");
+        assert_eq!(worker_and_native[22]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[23]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 15);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 19);
         assert_eq!(
-            web_search_only[14],
+            web_search_only[18],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false, false);
@@ -14783,7 +14783,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0], TOOL_CATALOG["kernel"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["kernel"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["kernel"][2]);
