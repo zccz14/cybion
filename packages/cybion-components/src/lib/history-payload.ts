@@ -14,11 +14,24 @@ function textParts(value: unknown, separator: string) {
   }).join(separator)
 }
 
+/// The text a reasoning item shows: the summary the upstream wrote for it, and
+/// when that is empty the reasoning text itself, which some upstreams keep in
+/// `content` as parts typed `reasoning_text`. Both are the same thinking, so a
+/// card that only read the summary showed nothing while the text sat in the payload.
+export function reasoningPayloadText(payload: unknown): string {
+  const object = historyPayloadObject(payload)
+  if (object?.type !== "reasoning") return ""
+  const summary = textParts(object.summary, "\n\n")
+  if (summary.trim()) return summary
+  const content = textParts(object.content, "\n\n")
+  return content.trim() ? content : ""
+}
+
 export function historyPayloadText(payload: unknown): string {
   const object = historyPayloadObject(payload)
   if (object?.type === "reasoning") {
-    const summary = textParts(object.summary, "\n\n")
-    if (summary) return summary
+    const reasoning = reasoningPayloadText(payload)
+    if (reasoning) return reasoning
   }
   if (typeof object?.content === "string") return object.content
   if (object?.type === "message") return textParts(object.content, "")

@@ -39,8 +39,13 @@ Conversation history returns the same five fields, with `payload` decoded as
 JSON, plus `screenshot: true` on tool outputs whose Worker call ledger entry is
 a `browser_control`/`computer_use` screenshot. The conversation renders inputs,
 messages, reasoning summaries, tool results, checkpoints, and runtime activity
-directly from `kind` and `payload`. Every built-in tool call renders through
-its own card: `bash` commands, `browser_control` actions, `computer_use`
+directly from `kind` and `payload`. A reasoning card shows the item's `summary`;
+when that is empty it shows the item's own `content` parts (the `reasoning_text`
+entries), because some upstreams ship the thinking there and leave `summary` an
+empty array — the card then shows the reasoning instead of an empty box, and only
+an item with no text at all keeps the placeholder. Every built-in tool call
+renders through its own card: `bash` commands, `browser_control` actions,
+`computer_use`
 actions, `view_image` pictures, `normai_web_search` queries,
 `normai_image_generation` prompts, and the controller-side context and machine
 tools. A Worker tool card shows the one-sentence `summary` the model wrote
