@@ -761,7 +761,7 @@ fn exe_address(c: &Connection, worker_id: &str) -> Result<Option<String>, ApiErr
 /// meant to see — plus the devices that address can reach.
 pub(super) async fn read(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Value>, ApiError> {
     let user = identity.user;
     let (address, created_at) = identity_for(&state, &user).await?;
@@ -802,7 +802,7 @@ pub(super) struct AddDeviceInput {
 /// can grant, so this only decides which addresses this account watches.
 pub(super) async fn add_device(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<AddDeviceInput>,
 ) -> Result<Json<Value>, ApiError> {
     let user = identity.user;

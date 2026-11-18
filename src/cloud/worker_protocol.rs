@@ -414,7 +414,7 @@ fn semver(v: &str) -> Option<(u64, u64, u64)> {
 
 pub(super) async fn request_upgrade(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let id = record_id(&id)?;

@@ -481,9 +481,11 @@ async fn a_manual_tree_lists_direct_children_and_reaches_further_levels_without_
     );
     let Json(api_content) = read_manual_api(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         AxumPath(parent.to_owned()),
         Query(common_manuals::LanguageQuery { lang: None }),
@@ -827,9 +829,11 @@ async fn write_manual_trash_keeps_the_original_place_for_restore() {
     assert_eq!(children["children"], json!([]));
     let Json(views) = list_manuals(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
     )
     .await
@@ -853,9 +857,11 @@ async fn write_manual_trash_keeps_the_original_place_for_restore() {
     // Restore returns the row to the tree exactly where it sat.
     let Json(restored) = restore_manual(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         AxumPath(child.to_owned()),
     )
@@ -868,9 +874,11 @@ async fn write_manual_trash_keeps_the_original_place_for_restore() {
     assert_eq!(children["children"][0]["manual_id"], json!(child));
     let error = restore_manual(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         AxumPath(child.to_owned()),
     )
@@ -1207,9 +1215,11 @@ async fn the_owner_locks_a_manual_from_the_page_and_keeps_editing_it() {
     let page = |locked: Option<bool>, description: Option<&str>, content: Option<&str>| {
         update_manual(
             State(state.clone()),
-            axum::Extension(BrowserIdentity {
+            axum::Extension(Caller {
                 user: user.clone(),
-                bearer: String::new(),
+                credential: Credential::Session {
+                    bearer: String::new(),
+                },
             }),
             AxumPath(manual.to_owned()),
             Json(UpdateManualInput {

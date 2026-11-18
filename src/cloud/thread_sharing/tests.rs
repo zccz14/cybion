@@ -771,6 +771,8 @@ async fn http_browser_auth_readonly_isolation_live_response_revocation_and_api_k
             .status(),
         StatusCode::NOT_FOUND
     );
+    // A console key now reaches the shared-thread routes too, and still reads
+    // only what its own account may read: the grant is B's, not the key's.
     assert_eq!(
         client
             .get(&shared)
@@ -779,7 +781,7 @@ async fn http_browser_auth_readonly_isolation_live_response_revocation_and_api_k
             .await
             .unwrap()
             .status(),
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
     assert_eq!(
         client
@@ -951,9 +953,11 @@ async fn supervisor_recovers_unsynced_grants_and_deletion_without_source_history
     recovery::resume_running(&state).await.unwrap();
     let visible = list(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: b.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         Query(ListQuery::default()),
     )
@@ -971,9 +975,11 @@ async fn supervisor_recovers_unsynced_grants_and_deletion_without_source_history
     // Even before the discovery tombstone has propagated, hydration denies it.
     let visible = list(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: b.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         }),
         Query(ListQuery::default()),
     )

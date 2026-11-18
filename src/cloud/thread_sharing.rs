@@ -209,7 +209,7 @@ pub(super) fn sync_grants(c: &Connection, owner: &str) -> Result<(), ApiError> {
 
 async fn list_grants(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Vec<Grant>>, ApiError> {
     let id = thread_id(&id)?;
@@ -221,7 +221,7 @@ async fn list_grants(
 }
 async fn grant(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((id, grantee)): AxumPath<(String, String)>,
 ) -> Result<Json<Grant>, ApiError> {
     let id = thread_id(&id)?;
@@ -236,7 +236,7 @@ async fn grant(
 }
 async fn revoke(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((id, grantee)): AxumPath<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let id = thread_id(&id)?;
@@ -329,7 +329,7 @@ fn shared_view(
 }
 async fn read(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((owner, id)): AxumPath<(String, String)>,
 ) -> Result<Json<SharedThread>, ApiError> {
     let id = thread_id(&id)?;
@@ -416,7 +416,7 @@ fn discovery(
 }
 async fn list(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<SharedPage>, ApiError> {
     let (rows, next_cursor) =
@@ -450,7 +450,7 @@ struct Visibility {
 }
 async fn visibility(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((owner, id)): AxumPath<(String, String)>,
     Json(input): Json<Visibility>,
 ) -> Result<StatusCode, ApiError> {
@@ -531,7 +531,7 @@ fn shared_records(records: Vec<HistoryRecord>) -> Vec<HistoryRecord> {
 
 async fn history_window(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((owner, id)): AxumPath<(String, String)>,
     Query(query): Query<ThreadHistoryWindowQuery>,
 ) -> Result<Json<ThreadHistoryWindow>, ApiError> {
@@ -552,7 +552,7 @@ async fn history_window(
 }
 async fn history(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((owner, id)): AxumPath<(String, String)>,
     Query(query): Query<ThreadHistoryQuery>,
 ) -> Result<Json<Vec<HistoryRecord>>, ApiError> {
@@ -576,7 +576,7 @@ struct SharedResponse {
 }
 async fn response(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath((owner, id)): AxumPath<(String, String)>,
 ) -> Result<Json<Option<SharedResponse>>, ApiError> {
     let id = thread_id(&id)?;

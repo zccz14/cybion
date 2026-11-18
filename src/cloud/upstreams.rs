@@ -193,7 +193,7 @@ fn require_unique_name(connection: &Connection, name: &str, exclude: &str) -> Re
 
 pub(super) async fn list(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Vec<UpstreamView>>, ApiError> {
     let views: Vec<UpstreamView> = user_db(&state, &identity.user, true, move |connection| {
         Ok(load_all(connection)?.iter().map(view).collect())
@@ -204,7 +204,7 @@ pub(super) async fn list(
 
 pub(super) async fn create(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<CreateUpstreamInput>,
 ) -> Result<Json<UpstreamView>, ApiError> {
     let name = validate_name(&input.name)?;
@@ -239,7 +239,7 @@ pub(super) async fn create(
 
 pub(super) async fn update(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<UpdateUpstreamInput>,
 ) -> Result<Json<UpstreamView>, ApiError> {
@@ -275,7 +275,7 @@ pub(super) async fn update(
 
 pub(super) async fn delete(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = upstream_id(&id)?;
@@ -308,7 +308,7 @@ pub(super) struct ModelsQuery {
 
 pub(super) async fn models(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<ModelsQuery>,
 ) -> Result<Json<UpstreamModelsView>, ApiError> {
     let kind = match query.kind.as_deref().unwrap_or_default() {

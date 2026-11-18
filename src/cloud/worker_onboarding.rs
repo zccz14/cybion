@@ -193,7 +193,7 @@ pub(super) async fn poll(
 
 pub(super) async fn read(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(value): AxumPath<String>,
 ) -> Result<Json<PairingView>, ApiError> {
     let code = code(&value)?;
@@ -218,7 +218,7 @@ pub(super) struct ApproveInput {
 
 pub(super) async fn approve(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(value): AxumPath<String>,
     Json(input): Json<ApproveInput>,
 ) -> Result<Json<PairingView>, ApiError> {
@@ -289,7 +289,7 @@ pub(super) async fn approve(
 
 pub(super) async fn cancel(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(value): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let code = code(&value)?;
@@ -493,7 +493,7 @@ fn latest_check(connection: &Connection, worker_id: &str) -> Result<Option<Check
 
 pub(super) async fn check_read(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(worker_id): AxumPath<String>,
 ) -> Result<Json<Option<CheckView>>, ApiError> {
     let id = record_id(&worker_id)?;
@@ -504,7 +504,7 @@ pub(super) async fn check_read(
 
 pub(super) async fn check_start(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(worker_id): AxumPath<String>,
 ) -> Result<Json<Option<CheckView>>, ApiError> {
     let id = record_id(&worker_id)?;

@@ -18,19 +18,19 @@ struct NormaiCredential {
 
 pub(super) async fn connect(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<UpstreamView>, ApiError> {
     Ok(Json(
-        connect_for(&state, &identity.user, &identity.bearer).await?,
+        connect_for(&state, &identity.user, identity.session_bearer()?).await?,
     ))
 }
 
 pub(super) async fn rotate(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<UpstreamView>, ApiError> {
     Ok(Json(
-        rotate_for(&state, &identity.user, &identity.bearer).await?,
+        rotate_for(&state, &identity.user, identity.session_bearer()?).await?,
     ))
 }
 

@@ -120,10 +120,12 @@ async fn fixture() -> NormaiFixture {
     }
 }
 
-fn identity(f: &NormaiFixture) -> axum::Extension<BrowserIdentity> {
-    axum::Extension(BrowserIdentity {
+fn identity(f: &NormaiFixture) -> axum::Extension<Caller> {
+    axum::Extension(Caller {
         user: f.user.clone(),
-        bearer: "owner-auth-fixture".into(),
+        credential: Credential::Session {
+            bearer: "owner-auth-fixture".into(),
+        },
     })
 }
 

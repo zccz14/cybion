@@ -1,10 +1,12 @@
 use super::*;
 use crate::cloud::tests::test_state;
 
-fn identity(state: &AppState, name: &str) -> BrowserIdentity {
-    BrowserIdentity {
+fn identity(state: &AppState, name: &str) -> Caller {
+    Caller {
         user: user_for_subject(state, name).unwrap(),
-        bearer: String::new(),
+        credential: Credential::Session {
+            bearer: String::new(),
+        },
     }
 }
 async fn begin(state: &AppState) -> Value {

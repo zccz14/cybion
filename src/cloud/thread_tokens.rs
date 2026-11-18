@@ -238,7 +238,7 @@ pub(super) async fn jwks_document(State(state): State<AppState>) -> Json<Value> 
 /// next mint signs with material verifiers already trust.
 pub(super) async fn rotate(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Value>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
         return Err(ApiError::forbidden("administrator access is required"));

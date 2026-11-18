@@ -235,16 +235,46 @@ struct User {
     path: PathBuf,
 }
 
+/// Who is calling, and what proved it. The console API accepts either a live
+/// browser session or a key minted in the console; the integration API (`/v1`)
+/// accepts only keys, and the key routes accept only a session — so a leaked key
+/// can never mint or revoke another key.
 #[derive(Clone, Debug)]
-struct BrowserIdentity {
+struct Caller {
     user: User,
-    bearer: String,
+    credential: Credential,
 }
 
+/// The two credentials Cybion accepts. A session is the Auth Mini JWT minted for
+/// a live sign-in; a key is minted in the console and kept here by row id,
+/// because a Thread records which key created it.
 #[derive(Clone, Debug)]
-struct ApiIdentity {
-    user: User,
-    key_id: String,
+enum Credential {
+    Session { bearer: String },
+    Key { id: String },
+}
+
+impl Caller {
+    /// The key behind this request, when it was a key rather than a session.
+    fn key_id(&self) -> Option<&str> {
+        match &self.credential {
+            Credential::Session { .. } => None,
+            Credential::Key { id } => Some(id),
+        }
+    }
+
+    /// The Auth Mini bearer the request carried. A few endpoints hand it to
+    /// another service so the request arrives there as the signed-in user —
+    /// NormAI issuing a consumer key, Linkit setting up the bot — and a key has
+    /// no such bearer to hand over.
+    fn session_bearer(&self) -> Result<&str, ApiError> {
+        match &self.credential {
+            Credential::Session { bearer } => Ok(bearer),
+            Credential::Key { .. } => Err(ApiError::forbidden(
+                "this endpoint needs a signed-in browser session, not an API key",
+            )),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -605,7 +635,7 @@ struct AudioObjectQuery {
 /// because the reference is a content hash in their store.
 async fn read_audio_object(
     State(state): State<AppState>,
-    axum::Extension(_identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(_identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<AudioObjectQuery>,
 ) -> Result<([(axum::http::HeaderName, String); 1], Vec<u8>), ApiError> {
@@ -1008,7 +1038,7 @@ async fn audio_transcription_tool_output(
 }
 
 fn app(state: AppState) -> Router {
-    let browser_api = Router::new()
+    let console_api = Router::new()
         .merge(thread_sharing::routes())
         .merge(machines::routes())
         .route("/api/me", get(me))
@@ -1120,8 +1150,6 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/exe", get(exe::read))
         .route("/api/exe/devices", post(exe::add_device))
-        .route("/api/api-keys", get(list_api_keys).post(create_api_key))
-        .route("/api/api-keys/{id}", delete(delete_api_key))
         .route(
             "/api/workers",
             get(list_workers)
@@ -1136,6 +1164,13 @@ fn app(state: AppState) -> Router {
             "/api/workers/{id}/upgrade",
             post(worker_protocol::request_upgrade),
         )
+        .route_layer(from_fn_with_state(state.clone(), console_auth));
+
+    // The only surface an API key cannot reach: managing keys themselves. Every
+    // other route above accepts a key, so an integration drives the whole console.
+    let key_api = Router::new()
+        .route("/api/api-keys", get(list_api_keys).post(create_api_key))
+        .route("/api/api-keys/{id}", delete(delete_api_key))
         .route_layer(from_fn_with_state(state.clone(), browser_auth));
 
     let external_api = Router::new()
@@ -1202,7 +1237,8 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/api/config", get(public_config))
         .route("/.well-known/jwks.json", get(thread_tokens::jwks_document))
-        .merge(browser_api)
+        .merge(console_api)
+        .merge(key_api)
         .merge(external_api)
         .merge(worker_api)
         .fallback(static_asset)
@@ -1335,10 +1371,7 @@ fn bearer(headers: &HeaderMap) -> Result<String, ApiError> {
         .ok_or_else(|| ApiError::unauthorized("Bearer token is required"))
 }
 
-async fn browser_identity(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<BrowserIdentity, ApiError> {
+async fn browser_identity(state: &AppState, headers: &HeaderMap) -> Result<Caller, ApiError> {
     let bearer = bearer(headers)?;
     let layer = state
         .auth
@@ -1358,13 +1391,48 @@ async fn browser_identity(
         .verify(&bearer)
         .await
         .map_err(|_| ApiError::unauthorized("invalid or expired bearer token"))?;
-    Ok(BrowserIdentity {
+    Ok(Caller {
         user: user_for_subject(state, &principal.subject)?,
-        bearer,
+        credential: Credential::Session { bearer },
     })
 }
 
+/// Whether the request carries a Cybion API key. Keys are minted with a `cyb_`
+/// prefix, so one header read tells the two credentials apart without spending a
+/// JWKS lookup on a request that will never need it.
+fn is_api_key(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| value.starts_with("cyb_"))
+}
+
+/// The console API (`/api`) accepts either credential: the Auth Mini JWT a
+/// signed-in browser carries, or a key minted in the console. Both reach the
+/// same handlers, so an integration drives exactly what the web console drives.
+async fn console_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    let identity = if is_api_key(request.headers()) {
+        api_identity(&state, request.headers()).await
+    } else {
+        browser_identity(&state, request.headers()).await
+    };
+    match identity {
+        Ok(identity) => {
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+/// The key-management routes stay closed to keys. A key that could mint another
+/// key would outlive its own revocation, so only a live session reaches them.
 async fn browser_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    if is_api_key(request.headers()) {
+        return ApiError::forbidden("API keys cannot manage API keys; sign in to the console")
+            .into_response();
+    }
     match browser_identity(&state, request.headers()).await {
         Ok(identity) => {
             request.extensions_mut().insert(identity);
@@ -3907,7 +3975,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
 
 async fn read_thread_defaults(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<ThreadDefaults>, ApiError> {
     user_db(&state, &identity.user, true, |connection| {
         load_thread_defaults(connection)
@@ -3918,7 +3986,7 @@ async fn read_thread_defaults(
 
 async fn update_thread_defaults(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<ThreadDefaults>,
 ) -> Result<Json<ThreadDefaults>, ApiError> {
     let defaults = ThreadDefaults {
@@ -4457,7 +4525,7 @@ async fn read_thread_for(
 
 async fn me(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Value>, ApiError> {
     let is_admin = is_admin(&state, &identity.user.id, true).await?;
     user_db(&state, &identity.user, true, |_| Ok(())).await?;
@@ -4469,7 +4537,7 @@ async fn me(
 }
 
 async fn status(
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({
         "hosted": true,
@@ -4491,7 +4559,7 @@ async fn experimental_features(
 
 async fn update_experimental_features(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<UpdateExperimentalFeaturesInput>,
 ) -> Result<Json<ExperimentalFeaturesView>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
@@ -4516,7 +4584,7 @@ async fn update_experimental_features(
 
 async fn system_resources(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<resources::SystemResourcesSnapshot>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
         return Err(ApiError::forbidden("administrator access is required"));
@@ -4527,7 +4595,7 @@ async fn system_resources(
 
 async fn insights(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<InsightsQuery>,
 ) -> Result<Json<Insights>, ApiError> {
     let range = insight_range(query.range.as_deref())?;
@@ -4583,7 +4651,7 @@ struct SqlPerformanceToggle {
 /// administrator reads it.
 async fn sql_performance_view(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<SqlPerformanceQuery>,
 ) -> Result<Json<sql_performance::SqlPerformance>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
@@ -4603,7 +4671,7 @@ async fn sql_performance_view(
 /// reporting it.
 async fn set_sql_performance(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<SqlPerformanceToggle>,
 ) -> Result<Json<Value>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
@@ -4618,7 +4686,7 @@ async fn set_sql_performance(
 /// reads it.
 async fn route_performance_view(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<RoutePerformanceQuery>,
 ) -> Result<Json<route_performance::RoutePerformance>, ApiError> {
     if !is_admin(&state, &identity.user.id, false).await? {
@@ -4638,7 +4706,7 @@ async fn route_performance_view(
 
 async fn reasoning_audits(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<ReasoningAuditQuery>,
 ) -> Result<Json<ReasoningAuditPage>, ApiError> {
     let page = query.page.unwrap_or(1).max(1);
@@ -4785,7 +4853,7 @@ fn thread_list_cursor(value: &str) -> Result<ThreadCursor, ApiError> {
 
 async fn list_threads(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<ThreadListPage>, ApiError> {
     let filter = ThreadListFilter {
@@ -4823,19 +4891,30 @@ async fn list_threads(
     ))
 }
 
+/// A Thread keeps the credential that created it: a console key is recorded as
+/// `api` exactly like an integration key, so the two read the same in the list.
+fn thread_origin(identity: &Caller) -> ThreadOrigin {
+    match identity.key_id() {
+        Some(key_id) => ThreadOrigin::Api {
+            key_id: key_id.to_owned(),
+        },
+        None => ThreadOrigin::Web,
+    }
+}
+
 async fn create_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<CreateThreadInput>,
 ) -> Result<Json<ThreadView>, ApiError> {
     Ok(Json(
-        create_thread_for(&state, &identity.user, input, ThreadOrigin::Web).await?,
+        create_thread_for(&state, &identity.user, input, thread_origin(&identity)).await?,
     ))
 }
 
 async fn start_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<StartThreadInput>,
 ) -> Result<Json<RequestView>, ApiError> {
     let upstream_id = input.upstream_id.clone();
@@ -4868,7 +4947,7 @@ async fn start_thread(
             audio_transcription_model: input.audio_transcription_model,
             budget_usd_nanos: input.budget_usd_nanos,
         },
-        ThreadOrigin::Web,
+        thread_origin(&identity),
     )
     .await?;
     Ok(Json(
@@ -4878,7 +4957,7 @@ async fn start_thread(
 
 async fn read_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ThreadView>, ApiError> {
     Ok(Json(
@@ -4888,7 +4967,7 @@ async fn read_thread(
 
 async fn update_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<UpdateThreadInput>,
 ) -> Result<Json<ThreadView>, ApiError> {
@@ -5086,7 +5165,7 @@ async fn request_thread_title(
 
 async fn generate_thread_title(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ThreadView>, ApiError> {
     let id = thread_id(&id)?;
@@ -5102,7 +5181,7 @@ struct DeleteThreadView {
 
 async fn delete_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<DeleteThreadView>, ApiError> {
     let id = thread_id(&id)?;
@@ -5134,7 +5213,7 @@ struct ThreadHistoryQuery {
 
 async fn thread_history(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ThreadHistoryQuery>,
 ) -> Result<Json<Vec<HistoryRecord>>, ApiError> {
@@ -5201,7 +5280,7 @@ fn load_thread_response(
 
 async fn thread_response(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Option<ThreadResponseView>>, ApiError> {
     Ok(Json(
@@ -5211,7 +5290,7 @@ async fn thread_response(
 
 async fn external_thread_response(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Option<ThreadResponseView>>, ApiError> {
     Ok(Json(
@@ -5268,7 +5347,7 @@ struct ThreadHistoryWindow {
 
 async fn thread_history_window(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ThreadHistoryWindowQuery>,
 ) -> Result<Json<ThreadHistoryWindow>, ApiError> {
@@ -5388,7 +5467,7 @@ struct ThreadManualLoadsView {
 
 async fn thread_manual_loads(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ThreadManualLoadsView>, ApiError> {
     let id = thread_id(&id)?;
@@ -5454,7 +5533,7 @@ fn context_fingerprint(name: &str, description: &str, content: &str) -> String {
 
 async fn thread_input(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<InputRequest>,
 ) -> Result<Json<RequestView>, ApiError> {
@@ -5474,7 +5553,7 @@ async fn thread_input(
 
 async fn list_api_keys(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Vec<ApiKeyView>>, ApiError> {
     let keys = user_db(&state, &identity.user, true, |connection| {
         let mut statement = connection.prepare(
@@ -5501,7 +5580,7 @@ async fn list_api_keys(
 
 async fn create_api_key(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<CreateApiKeyInput>,
 ) -> Result<Json<CreatedApiKey>, ApiError> {
     require_user_upstream(&state, &identity.user).await?;
@@ -5532,7 +5611,7 @@ async fn create_api_key(
 
 async fn delete_api_key(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = record_id(&id)?;
@@ -5776,7 +5855,7 @@ fn context_hidden(connection: &Connection, id: &str) -> Result<bool, ApiError> {
 
 async fn list_manuals(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Vec<ManualView>>, ApiError> {
     let manuals = user_db(&state, &identity.user, true, |connection| {
         let mut statement = connection.prepare(
@@ -5796,7 +5875,7 @@ async fn list_manuals(
 /// `GET /api/manuals` carries every body for the Manuals page.
 async fn list_manual_summaries(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
 ) -> Result<Json<Value>, ApiError> {
     let mut manuals = vec![common_manuals::root_summary(
         common_manuals::SOURCE_LANGUAGE,
@@ -5827,7 +5906,7 @@ async fn list_manual_summaries(
 
 async fn create_manual(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<CreateManualInput>,
 ) -> Result<Json<ManualView>, ApiError> {
     let name = context_name(input.name)?;
@@ -5868,7 +5947,7 @@ async fn create_manual(
 
 async fn move_manual(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<MoveManualInput>,
 ) -> Result<Json<ManualView>, ApiError> {
@@ -5907,7 +5986,7 @@ async fn move_manual(
 
 async fn restore_manual(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ManualView>, ApiError> {
     let id = manual_id(&id)?;
@@ -5933,7 +6012,7 @@ async fn restore_manual(
 
 async fn read_manual_api(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<common_manuals::LanguageQuery>,
 ) -> Result<Json<ManualReadView>, ApiError> {
@@ -5995,7 +6074,7 @@ async fn local_manual(
 
 async fn update_manual(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<UpdateManualInput>,
 ) -> Result<Json<ManualView>, ApiError> {
@@ -6065,7 +6144,7 @@ async fn update_manual(
 
 async fn delete_manual(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = manual_id(&id)?;
@@ -6082,7 +6161,7 @@ async fn delete_manual(
 
 async fn create_worker_pairing(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<CreateWorkerInput>,
 ) -> Result<Json<WorkerPairing>, ApiError> {
     let worker_id = Uuid::new_v4().to_string();
@@ -10797,7 +10876,7 @@ fn parse_api_key(value: &str) -> Result<(String, String), ApiError> {
     }
 }
 
-async fn api_identity(state: &AppState, headers: &HeaderMap) -> Result<ApiIdentity, ApiError> {
+async fn api_identity(state: &AppState, headers: &HeaderMap) -> Result<Caller, ApiError> {
     let raw_key = bearer(headers)?;
     let (user_id, secret) = parse_api_key(&raw_key)?;
     let user = user_from_id(state, user_id)?;
@@ -10820,7 +10899,10 @@ async fn api_identity(state: &AppState, headers: &HeaderMap) -> Result<ApiIdenti
         Ok(key_id)
     })
     .await?;
-    Ok(ApiIdentity { user, key_id })
+    Ok(Caller {
+        user,
+        credential: Credential::Key { id: key_id },
+    })
 }
 
 async fn api_key_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
@@ -10835,18 +10917,21 @@ async fn api_key_auth(State(state): State<AppState>, mut request: Request, next:
 
 async fn external_create_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     Json(input): Json<CreateThreadInput>,
 ) -> Result<Json<ThreadView>, ApiError> {
-    let ApiIdentity { user, key_id } = identity;
+    let key_id = identity
+        .key_id()
+        .ok_or_else(|| ApiError::unauthorized("API key is required"))?
+        .to_owned();
     Ok(Json(
-        create_thread_for(&state, &user, input, ThreadOrigin::Api { key_id }).await?,
+        create_thread_for(&state, &identity.user, input, ThreadOrigin::Api { key_id }).await?,
     ))
 }
 
 async fn external_read_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ThreadView>, ApiError> {
     Ok(Json(
@@ -10856,7 +10941,7 @@ async fn external_read_thread(
 
 async fn external_thread_history(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Vec<HistoryRecord>>, ApiError> {
     Ok(Json(
@@ -10866,7 +10951,7 @@ async fn external_thread_history(
 
 async fn external_thread_input(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<InputRequest>,
 ) -> Result<Json<RequestView>, ApiError> {
@@ -10892,7 +10977,7 @@ async fn external_thread_input(
 /// then sends the first human message.
 async fn external_thread_context(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<ApiIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<ThreadContextInput>,
 ) -> Result<Json<ContextView>, ApiError> {
@@ -11306,6 +11391,10 @@ mod response_tests;
 #[cfg(test)]
 #[path = "cloud_settings_tests.rs"]
 mod settings_tests;
+
+#[cfg(test)]
+#[path = "cloud_api_access_tests.rs"]
+mod api_access_tests;
 
 #[cfg(test)]
 #[path = "cloud_schema_tests.rs"]
@@ -12058,9 +12147,11 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let router = Router::new()
             .route("/api/threads/{id}/history", get(thread_history))
-            .layer(axum::Extension(BrowserIdentity {
+            .layer(axum::Extension(Caller {
                 user: user.clone(),
-                bearer: String::new(),
+                credential: Credential::Session {
+                    bearer: String::new(),
+                },
             }))
             .with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -12117,10 +12208,12 @@ mod tests {
         server.abort();
     }
 
-    fn test_identity(user: &User) -> axum::Extension<BrowserIdentity> {
-        axum::Extension(BrowserIdentity {
+    fn test_identity(user: &User) -> axum::Extension<Caller> {
+        axum::Extension(Caller {
             user: user.clone(),
-            bearer: String::new(),
+            credential: Credential::Session {
+                bearer: String::new(),
+            },
         })
     }
 
@@ -12237,9 +12330,11 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let router = Router::new()
             .route("/api/threads", get(list_threads))
-            .layer(axum::Extension(BrowserIdentity {
+            .layer(axum::Extension(Caller {
                 user,
-                bearer: String::new(),
+                credential: Credential::Session {
+                    bearer: String::new(),
+                },
             }))
             .with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -12620,10 +12715,12 @@ mod tests {
         server.abort();
     }
 
-    fn api_identity(user: &User) -> axum::Extension<ApiIdentity> {
-        axum::Extension(ApiIdentity {
+    fn api_identity(user: &User) -> axum::Extension<Caller> {
+        axum::Extension(Caller {
             user: user.clone(),
-            key_id: "test-key".to_owned(),
+            credential: Credential::Key {
+                id: "test-key".to_owned(),
+            },
         })
     }
 
@@ -13120,9 +13217,11 @@ mod tests {
                 "/api/threads/{id}/history/window",
                 get(thread_history_window),
             )
-            .layer(axum::Extension(BrowserIdentity {
+            .layer(axum::Extension(Caller {
                 user: user.clone(),
-                bearer: String::new(),
+                credential: Credential::Session {
+                    bearer: String::new(),
+                },
             }))
             .with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

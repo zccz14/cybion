@@ -606,9 +606,11 @@ async fn committed_stream_dispatch_management_and_callback_unavailable_recipient
     .unwrap();
     user_db(&state,&a,false,|db|{db.execute("INSERT INTO workers(id,label,token_hash,created_at,status,last_seen_at,boot_id,version) VALUES(?,'Device','fixture',1,'online',?,'boot','0.2.0')",params![W,now()])?;change_grant(db,"a",W,"b",false)?;sync_grants(db,"a")}).await.unwrap();
     let identity = || {
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: b.clone(),
-            bearer: "fixture".into(),
+            credential: Credential::Session {
+                bearer: "fixture".into(),
+            },
         })
     };
     let view = read_worker(State(state.clone()), identity(), AxumPath(W.into()))
@@ -722,9 +724,11 @@ async fn committed_stream_dispatch_management_and_callback_unavailable_recipient
     );
     let detail = call_detail(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: a.clone(),
-            bearer: "fixture".into(),
+            credential: Credential::Session {
+                bearer: "fixture".into(),
+            },
         }),
         AxumPath(id),
     )
@@ -735,9 +739,11 @@ async fn committed_stream_dispatch_management_and_callback_unavailable_recipient
     assert_eq!(detail.arguments["command"], "pwd");
     delete_worker(
         State(state.clone()),
-        axum::Extension(BrowserIdentity {
+        axum::Extension(Caller {
             user: a.clone(),
-            bearer: "fixture".into(),
+            credential: Credential::Session {
+                bearer: "fixture".into(),
+            },
         }),
         AxumPath(W.into()),
     )

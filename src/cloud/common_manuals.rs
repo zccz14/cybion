@@ -139,7 +139,7 @@ fn locate<'a>(
 /// `GET /api/common-manuals?lang=` so users browse exactly what Threads can
 /// read, in the language the UI shows.
 pub(super) async fn documents(
-    axum::Extension(_identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(_identity): axum::Extension<Caller>,
     axum::extract::Query(query): axum::extract::Query<LanguageQuery>,
 ) -> Json<Value> {
     Json(tree_view(parse_language(query.lang.as_deref())))

@@ -212,7 +212,7 @@ pub(super) async fn cancel_for(
 
 pub(super) async fn cancel(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ThreadView>, ApiError> {
     Ok(Json(
@@ -222,7 +222,7 @@ pub(super) async fn cancel(
 
 pub(super) async fn continue_thread(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;
@@ -235,7 +235,7 @@ pub(super) async fn continue_thread(
 
 pub(super) async fn compact(
     State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<BrowserIdentity>,
+    axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<RequestView>, ApiError> {
     let id = thread_id(&id)?;

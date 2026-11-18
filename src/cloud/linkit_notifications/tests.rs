@@ -189,10 +189,12 @@ async fn fixture() -> Fixture {
     }
 }
 
-fn identity(f: &Fixture) -> axum::Extension<BrowserIdentity> {
-    axum::Extension(BrowserIdentity {
+fn identity(f: &Fixture) -> axum::Extension<Caller> {
+    axum::Extension(Caller {
         user: f.user.clone(),
-        bearer: "owner-auth-fixture".into(),
+        credential: Credential::Session {
+            bearer: "owner-auth-fixture".into(),
+        },
     })
 }
 async fn upstream_of(f: &Fixture) -> Upstream {

@@ -1,10 +1,12 @@
 use super::tests::test_state;
 use super::*;
 
-fn identity(user: &User) -> axum::Extension<BrowserIdentity> {
-    axum::Extension(BrowserIdentity {
+fn identity(user: &User) -> axum::Extension<Caller> {
+    axum::Extension(Caller {
         user: user.clone(),
-        bearer: String::new(),
+        credential: Credential::Session {
+            bearer: String::new(),
+        },
     })
 }
 

@@ -343,10 +343,12 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     issuer_task.abort();
 }
 
-fn browser_identity_for(user: &User) -> axum::Extension<BrowserIdentity> {
-    axum::Extension(BrowserIdentity {
+fn browser_identity_for(user: &User) -> axum::Extension<Caller> {
+    axum::Extension(Caller {
         user: user.clone(),
-        bearer: String::new(),
+        credential: Credential::Session {
+            bearer: String::new(),
+        },
     })
 }
 
@@ -766,9 +768,11 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     for model in [None, Some("gpt-5.6-sol")] {
         let thread = external_create_thread(
             State(state.clone()),
-            axum::Extension(ApiIdentity {
+            axum::Extension(Caller {
                 user: user.clone(),
-                key_id: "settings-key".to_owned(),
+                credential: Credential::Key {
+                    id: "settings-key".to_owned(),
+                },
             }),
             Json(CreateThreadInput {
                 budget_usd_nanos: None,

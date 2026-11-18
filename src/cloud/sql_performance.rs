@@ -39,10 +39,11 @@ const BAND_COUNT: usize = BANDS_US.len();
 /// that finds no free slot is counted as unattributed instead of claiming
 /// memory inside a request.
 const SLOTS: usize = 4096;
-/// Linear probe depth before a key counts as unattributed. Eight keeps the
-/// probe bound visible while tolerating occasional hash clustering at the load
-/// this table runs at.
-const PROBE: usize = 8;
+/// Linear probe depth before a key counts as unattributed. The probe only runs
+/// past the first slot when a statement is seen for the first time, so a wide
+/// depth costs nothing in a request and keeps hash clustering from silently
+/// dropping a measurement once the table is half full.
+const PROBE: usize = 32;
 
 /// A statement at or above this is also kept one by one. The settlement scan
 /// this module was written for cost 18 ms warm and 92 ms cold, so a second

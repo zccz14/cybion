@@ -58,10 +58,12 @@ fn set_user_initial(connection: &Connection, ids: &[&str]) {
         .unwrap();
 }
 
-fn identity(user: &User) -> axum::Extension<BrowserIdentity> {
-    axum::Extension(BrowserIdentity {
+fn identity(user: &User) -> axum::Extension<Caller> {
+    axum::Extension(Caller {
         user: user.clone(),
-        bearer: String::new(),
+        credential: Credential::Session {
+            bearer: String::new(),
+        },
     })
 }
 

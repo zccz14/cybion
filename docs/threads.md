@@ -154,8 +154,9 @@ databases are unaffected.
 ## Origin and external references
 
 A Thread records where it came from. Browser sessions create `web` Threads.
-`/v1/threads` creates `api` Threads and stores the API key id that created
-them, so integration traffic can be attributed and audited. An integration
+`POST /v1/threads` and `POST /api/threads` with an API key create `api` Threads
+and store the key id that created them, so integration traffic can be attributed
+and audited. An integration
 client may also send an optional `external_ref` at creation (1-200 visible
 characters after trimming) mapping the Thread to its own identifier, such as a
 room or task.
