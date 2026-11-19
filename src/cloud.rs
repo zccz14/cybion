@@ -2974,6 +2974,9 @@ struct ThreadView {
     /// person started rather than another Thread. Deleting it takes its whole
     /// branch with it, which is why the API asks before it does.
     parent_thread_id: Option<String>,
+    /// Title of the Thread that created this one; `None` for a root Thread. A
+    /// child opened from its own URL shows the way back by name.
+    parent_title: Option<String>,
     /// How many Threads this one created, for the branch badge in the console.
     branches: i64,
     /// The Manuals this Thread started with, bound into `thread_manual_loads`
@@ -3740,6 +3743,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         budget_usd_nanos,
         parent_thread_id,
         branches: row.get(30)?,
+        parent_title: row.get(31)?,
         initial_manual_ids: initial_manual_ids
             .as_deref()
             .map(|raw| manual_loads::parse_initial_ids(Some(raw))),
@@ -4290,7 +4294,10 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        -- How many Threads this one created. Served by `threads_parent`, so the
        -- list pays one index lookup per row and the console can show a branch
        -- badge without a second request.
-       (SELECT COUNT(*) FROM threads c WHERE c.parent_thread_id=t.id)
+       (SELECT COUNT(*) FROM threads c WHERE c.parent_thread_id=t.id),
+       -- The Thread this one was subcontracted from, by name: a child that
+       -- opened from its own URL has no list row to read it from.
+       (SELECT title FROM threads p WHERE p.id=t.parent_thread_id)
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT MAX(id) FROM (
@@ -4461,6 +4468,9 @@ async fn create_thread_for(
             max_loaded_manuals,
             budget_usd_nanos,
             parent_thread_id: parent_thread_id.clone(),
+            // A freshly created Thread is handed back as it was written; the
+            // read model fills the parent's title on the next load.
+            parent_title: None,
             branches: 0,
             initial_manual_ids: Some(initial_manual_ids.clone()),
             audio_transcription_model,
@@ -6478,6 +6488,7 @@ async fn process_request(
         Err(error) => Err((
             ThreadView {
                 parent_thread_id: None,
+                parent_title: None,
                 branches: 0,
                 id: thread_id.clone(),
                 purpose: "work".to_owned(),
