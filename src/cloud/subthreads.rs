@@ -417,18 +417,90 @@ fn child_counts(connection: &Connection, root_id: &str) -> Result<HashMap<String
     Ok(counts)
 }
 
-/// The last thing a Thread said, which is what it was asked to deliver.
-fn answer(connection: &Connection, thread_id: &str) -> Result<(String, bool), ApiError> {
-    let text = load_thread_response(connection, thread_id)?
+/// The last thing a Thread said in its newest turn, which is what it was asked
+/// to deliver.
+///
+/// The response snapshot is the first place to look, but it is only what one
+/// request returned: a turn that ended in a tool call, a stop, or a request the
+/// store never finished leaves a snapshot without text even after the Thread has
+/// spoken. History is the canonical store — it is what the conversation renders
+/// — so the newest message of the current turn is the fallback.
+pub(super) fn answer(connection: &Connection, thread_id: &str) -> Result<(String, bool), ApiError> {
+    let mut text = load_thread_response(connection, thread_id)?
         .and_then(|stored| serde_json::to_value(&stored.response).ok())
         .and_then(|value| response_text(&value))
         .unwrap_or_default();
+    if text.trim().is_empty() {
+        text = last_turn_message(connection, thread_id)?;
+    }
     if text.chars().count() > MAX_ANSWER_CHARS {
         let mut clipped = text.chars().take(MAX_ANSWER_CHARS).collect::<String>();
         clipped.push('…');
         return Ok((clipped, true));
     }
     Ok((text, false))
+}
+
+/// The newest message the Thread wrote in its current turn, read from history;
+/// empty when the turn produced no message at all.
+fn last_turn_message(connection: &Connection, thread_id: &str) -> Result<String, ApiError> {
+    let payload: Option<String> = connection
+        .query_row(
+            "SELECT payload FROM history_records
+              WHERE thread_id=?1 AND kind='response_output' AND json_valid(payload)
+                AND json_extract(payload,'$.type')='message'
+                AND id > COALESCE((SELECT MAX(id) FROM history_records
+                                    WHERE thread_id=?1 AND kind='input'),0)
+              ORDER BY id DESC LIMIT 1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(payload) = payload else {
+        return Ok(String::new());
+    };
+    let item: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+    Ok(response_text(&json!({ "output": [item] })).unwrap_or_default())
+}
+
+/// Why a settled Thread had no message to hand back.
+///
+/// A Thread stopped by its budget, or waiting on a person, stops on purpose and
+/// says nothing; a parent that reads only an empty `answer` cannot tell that
+/// from a Thread that failed. The record the stop wrote says which it was, and
+/// the difference decides what the parent does next: raise a slice, ask the
+/// person, or retry.
+pub(super) fn empty_answer(
+    connection: &Connection,
+    thread_id: &str,
+    status: &str,
+    blocked: bool,
+) -> Result<Value, ApiError> {
+    let budget: Option<String> = connection
+        .query_row(
+            "SELECT json_extract(payload,'$.content') FROM history_records
+              WHERE thread_id=? AND kind='activity' AND json_valid(payload)
+                AND json_type(payload,'$.budget_usd_nanos')='integer'
+              ORDER BY id DESC LIMIT 1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match (blocked, budget, status) {
+        (true, Some(content), _) => json!({ "kind": "budget", "detail": content }),
+        (true, None, _) => json!({
+            "kind": "blocked",
+            "detail": "the Thread is waiting on a person and left no message"
+        }),
+        (false, _, "failed") => json!({
+            "kind": "failed",
+            "detail": "the turn failed before it produced a message"
+        }),
+        _ => json!({
+            "kind": "no-message",
+            "detail": "the last turn ended without a message"
+        }),
+    })
 }
 
 /// One Thread as the tools report it: the live row, not the list projection.
@@ -679,14 +751,21 @@ pub(super) async fn wait_tool_output(
         let settled = status != "running";
         if settled || std::time::Instant::now() >= deadline {
             let id = target.clone();
-            let (answer, clipped) = user_db(state, user, false, move |connection| {
-                answer(connection, &id)
+            let settled_status = status.clone();
+            let (answer, clipped, empty) = user_db(state, user, false, move |connection| {
+                let (text, clipped) = answer(connection, &id)?;
+                let empty = if text.trim().is_empty() {
+                    Some(empty_answer(connection, &id, &settled_status, blocked)?)
+                } else {
+                    None
+                };
+                Ok((text, clipped, empty))
             })
             .await?;
             let id = target.clone();
             let spend =
                 user_db(state, user, false, move |connection| pool(connection, &id)).await?;
-            return Ok(json!({
+            let mut output = json!({
                 "thread_id": target,
                 "settled": settled,
                 "status": status,
@@ -694,7 +773,13 @@ pub(super) async fn wait_tool_output(
                 "spent_usd": spend.subtree_spent_usd,
                 "answer": answer,
                 "answer_truncated": clipped,
-            }));
+            });
+            // An empty answer is a fact about the turn, not a delivery: name the
+            // stop that left it empty so the parent does not have to guess.
+            if let Some(empty) = empty {
+                output["empty_answer"] = empty;
+            }
+            return Ok(output);
         }
         tokio::time::sleep(WAIT_TICK).await;
     }

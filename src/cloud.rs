@@ -7941,7 +7941,14 @@ fn output_text(items: &[Value]) -> String {
                 .into_iter()
                 .flatten()
         })
-        .filter(|content| content.get("type").and_then(Value::as_str) == Some("output_text"))
+        // `output_text` is what the Responses API calls a message part; some
+        // compatible gateways send the older `text`, and a message is a message.
+        .filter(|content| {
+            matches!(
+                content.get("type").and_then(Value::as_str),
+                Some("output_text" | "text")
+            )
+        })
         .filter_map(|content| content.get("text").and_then(Value::as_str))
         .collect()
 }
