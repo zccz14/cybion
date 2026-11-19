@@ -6,31 +6,39 @@ import { TooltipProvider } from "../src/components/ui/tooltip"
 import { parseThreadListFilters, serializeThreadListFilters, type ThreadListFilters } from "../src/lib/thread-search"
 import { CybionMark } from "../src/components/cybion-mark"
 import { emptyThreadUsage } from "@zccz14/cybion-components/internal"
+import type { ThreadUsage } from "@zccz14/cybion-components/internal"
 import "../src/styles.css"
 
 // Ages are relative to page-load time so specs can assert exact labels
 // under a fixed Playwright clock.
 const now = Math.floor(Date.now() / 1000)
 
+// Rows carry the usage line real Threads show, so the row's secondary line is
+// measured with the numbers that actually sit on it.
+const spent = (tokens: number, cache: number, usd: number): ThreadUsage => ({
+  ...emptyThreadUsage, input_tokens: tokens, output_tokens: Math.round(tokens * 0.03), total_tokens: tokens,
+  cached_tokens: Math.round(tokens * cache), cache_hit_rate: cache, cost_usd_nanos: Math.round(usd * 1_000_000_000), cost_settled_requests: 3,
+})
+
 const threads: ThreadListItem[] = [
-  { id: "worker", title: "修复 Worker 配对与导航", created_by: "api", external_ref: "bridge/task-7", display_status: "running", updated_at: now - 30, usage: emptyThreadUsage },
-  { id: "search", title: "Mobile thread list search", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 5 * 60, usage: emptyThreadUsage },
-  { id: "remote", title: "检查远程服务器连接", created_by: "web", external_ref: null, display_status: "failed", updated_at: now - 3 * 3600, usage: emptyThreadUsage },
+  { id: "worker", title: "修复 Worker 配对与导航", created_by: "api", external_ref: "bridge/task-7", display_status: "running", updated_at: now - 30, usage: spent(2_000_000, 0.932, 0.044), branches: 0 },
+  { id: "search", title: "Mobile thread list search", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 5 * 60, usage: spent(1_600_000, 0.932, 0.00895), branches: 3 },
+  { id: "remote", title: "检查远程服务器连接", created_by: "web", external_ref: null, display_status: "failed", updated_at: now - 3 * 3600, usage: spent(1_600_000, 0.922, 0.0436), branches: 0 },
 ]
 
 const olderSeed: ThreadListItem[] = [
-  { id: "older-a", title: "Older thread A", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 2 * 86400, usage: emptyThreadUsage },
-  { id: "older-b", title: "Older thread B", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 2 * 86400, usage: emptyThreadUsage },
+  { id: "older-a", title: "Older thread A", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 2 * 86400, usage: emptyThreadUsage, branches: 0 },
+  { id: "older-b", title: "Older thread B", created_by: "web", external_ref: null, display_status: "completed", updated_at: now - 2 * 86400, usage: emptyThreadUsage, branches: 0 },
 ]
 
 const archivedSeed: ThreadListItem[] = [
-  { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", updated_at: now - 40 * 86400, usage: emptyThreadUsage },
+  { id: "legacy", title: "Legacy thread archive", created_by: "web", external_ref: null, display_status: "stopped", updated_at: now - 40 * 86400, usage: emptyThreadUsage, branches: 0 },
 ]
 
 // The blocked view is its own server-side selection, so the fixture swaps in the
 // Threads that wait on the user and leaves every other view's rows untouched.
 const blockedSeed: ThreadListItem[] = [
-  { id: "blocked", title: "部署卡在缺少生产环境令牌", created_by: "web", external_ref: null, display_status: "blocked", updated_at: now - 10 * 60, usage: emptyThreadUsage },
+  { id: "blocked", title: "部署卡在缺少生产环境令牌", created_by: "web", external_ref: null, display_status: "blocked", updated_at: now - 10 * 60, usage: emptyThreadUsage, branches: 0 },
 ]
 
 // The fixture mirrors the server-side filter and cursor paging semantics plus

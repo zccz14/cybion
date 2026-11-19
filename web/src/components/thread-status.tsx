@@ -1,4 +1,4 @@
-import { CheckIcon, CirclePauseIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIcon, TriangleAlertIcon } from "lucide-react"
+import { CheckIcon, CirclePauseIcon, GitBranchIcon, LoaderIcon, MessageSquareDashedIcon, Minimize2Icon, SquareIcon, TriangleAlertIcon } from "lucide-react"
 import { NavLink, useLocation } from "react-router-dom"
 import { useNowSeconds } from "@zccz14/cybion-components/internal"
 import { formatRelativeTime } from "@zccz14/cybion-components/internal"
@@ -9,6 +9,10 @@ import { ThreadUsageSummary, ThreadUsageDetails } from "@zccz14/cybion-component
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 type StatusProps = { status: ThreadDisplayStatus; language: "en" | "zh"; runningSummary?: string | null }
+
+// How many child Threads a row has is secondary information, so it is named the
+// same way on every row and reads as one more item on the row's second line.
+const branchesCopy = { en: "{count} child Threads", zh: "{count} 个子线程" } satisfies Record<"en" | "zh", string>
 
 const presentation = {
   ready: { icon: MessageSquareDashedIcon, color: "text-muted-foreground", motion: "" },
@@ -49,13 +53,14 @@ export function ThreadStatusBadge({ status, language, runningSummary }: StatusPr
   </span>
 }
 
-export function ThreadLink({ thread, language }: { thread: { created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; running_summary?: string | null; updated_at: number; usage: ThreadUsage }; language: StatusProps["language"] }) {
+export function ThreadLink({ thread, language }: { thread: { created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; running_summary?: string | null; updated_at: number; usage: ThreadUsage; branches?: number }; language: StatusProps["language"] }) {
   const status = thread.display_status
   const location = useLocation()
   const now = useNowSeconds()
   const { label, statusTitle } = statusLabelAndTitle(status, language, thread.running_summary)
   const summary = status === "running" ? thread.running_summary?.trim() ?? "" : ""
   const { hint } = threadStatusText(status, language)
+  const branches = thread.branches ?? 0
   return <Tooltip>
     <TooltipTrigger asChild>
       <NavLink to={{ pathname: `/threads/${thread.id}`, search: location.search }} data-thread-status={status} className="flex min-w-0 items-start gap-2.5 rounded-lg px-3 py-2 text-sm ring-1 ring-inset ring-transparent hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:bg-accent aria-[current=page]:ring-border">
@@ -67,7 +72,14 @@ export function ThreadLink({ thread, language }: { thread: { created_by?: "web" 
             <time data-slot="thread-updated-at" dateTime={new Date(thread.updated_at * 1000).toISOString()} className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{formatRelativeTime(language, thread.updated_at, now)}</time>
           </span>
           <span data-slot="thread-status-label" title={statusTitle} className={cn("min-w-0 truncate text-xs", presentation[status].color)}>{label}</span>
-          <ThreadUsageSummary usage={thread.usage} language={language} />
+          {/* The row has one secondary line: usage numbers and the branch count share
+              it and wrap together, so neither ever takes a column of its own. */}
+          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs tabular-nums text-muted-foreground">
+            <ThreadUsageSummary usage={thread.usage} language={language} />
+            {branches > 0 && <span data-slot="thread-branches" title={branchesCopy[language].replace("{count}", String(branches))} className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap">
+              <GitBranchIcon aria-hidden="true" className="size-3" />{branches}
+            </span>}
+          </span>
         </span>
       </NavLink>
     </TooltipTrigger>
