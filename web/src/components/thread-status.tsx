@@ -24,7 +24,10 @@ const presentation = {
   blocked: { icon: CirclePauseIcon, color: "text-thread-blocked", motion: "" },
 } as const
 
-function ThreadStatusIcon({ status, className }: { status: ThreadDisplayStatus; className?: string }) {
+// Exported so a compact surface (the branch footer) shows the same icon and
+// colour the Thread list shows for the same status, instead of inventing a
+// second vocabulary.
+export function ThreadStatusIcon({ status, className }: { status: ThreadDisplayStatus; className?: string }) {
   const { icon: Icon, color, motion } = presentation[status]
   return <Icon aria-hidden="true" className={cn("size-4 shrink-0", color, motion, className)} />
 }

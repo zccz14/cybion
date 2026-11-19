@@ -597,3 +597,50 @@ fn an_empty_answer_names_the_stop_that_left_it_empty() {
     let reason = subthreads::empty_answer(&connection, "quiet", "idle", false).unwrap();
     assert_eq!(reason["kind"], "no-message");
 }
+
+/// A branch row reads like the Thread list: the same status it would show, plus
+/// the Thread's own tokens, cache rate and settled cost.
+#[test]
+fn a_branch_row_reports_the_status_and_usage_the_list_would() {
+    let connection = connection();
+    thread(&connection, "root", None, Some(10_000_000_000));
+    thread(&connection, "child", Some("root"), Some(2_000_000_000));
+    // The child answered, so it reads as completed rather than as an idle dot.
+    connection
+        .execute(
+            "INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES('child','input','{}',?)",
+            [now()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO history_records(thread_id,kind,payload,created_at) VALUES('child','response_output',?,?)",
+            params![json!({"type":"message","content":[]}).to_string(), now()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO reasoning_audits(thread_id,model,status,started_at,finished_at,input_tokens,output_tokens,cached_tokens,cost_usd_nanos)
+             VALUES('child','model','completed',?,?,?,?,?,?)",
+            params![now(), now(), 1_000i64, 200i64, 400i64, 5_000_000i64],
+        )
+        .unwrap();
+    // A child that never ran has nothing to show, and says so.
+    thread(&connection, "quiet", Some("root"), None);
+    let tree = subthreads::tree(&connection, "root", 3).unwrap();
+    let child = tree
+        .nodes
+        .iter()
+        .find(|node| node.thread_id == "child")
+        .unwrap();
+    assert_eq!(child.display_status, "completed");
+    assert_eq!(child.usage.total_tokens, 1_200);
+    assert_eq!(child.usage.cache_hit_rate, Some(0.4));
+    assert_eq!(child.usage.cost_usd_nanos, 5_000_000);
+    let quiet = tree
+        .nodes
+        .iter()
+        .find(|node| node.thread_id == "quiet")
+        .unwrap();
+    assert_eq!(quiet.display_status, "ready");
+}
