@@ -292,9 +292,6 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
           <h1 className="min-w-0 truncate text-base font-semibold">{current.title}</h1>
           {archived && <Badge variant="outline" className="shrink-0 text-muted-foreground">{t("archived")}</Badge>}
           {current.created_by === "api" && <Badge variant="outline" className="shrink-0 text-muted-foreground" title={current.external_ref ? `${t("apiOriginHint")} · ${current.external_ref}` : t("apiOriginHint")}>{t("apiOrigin")}</Badge>}
-          {/* The model and its reasoning effort are one decision, so they travel
-              in one tag — the same shape the composer uses before a turn. */}
-          <Badge variant="outline" className="shrink-0 text-muted-foreground" title={t("reasoningEffort")}>{current.model} ({current.reasoning_effort})</Badge>
           {!readOnly && <><Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
           <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button></>}
         </div>
