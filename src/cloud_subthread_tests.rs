@@ -644,3 +644,44 @@ fn a_branch_row_reports_the_status_and_usage_the_list_would() {
         .unwrap();
     assert_eq!(quiet.display_status, "ready");
 }
+
+/// A child read back names the Thread that subcontracted it, so opening it from
+/// its own URL still shows the way back.
+#[tokio::test]
+async fn a_child_reports_the_title_of_the_thread_above_it() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "child-parent-title").unwrap();
+    let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
+    let parent = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({
+            "title": "Parent task",
+            "upstream_id": upstream.id,
+        }))
+        .unwrap(),
+        ThreadOrigin::Web,
+    )
+    .await
+    .unwrap();
+    let child = create_thread_for(
+        &state,
+        &user,
+        serde_json::from_value(json!({ "title": "Subcontract" })).unwrap(),
+        ThreadOrigin::Child {
+            parent_thread_id: parent.id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let read = read_thread_for(&state, &user, child.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(read.parent_thread_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(read.parent_title.as_deref(), Some("Parent task"));
+    // A root has no parent to point at.
+    let root = read_thread_for(&state, &user, parent.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(root.parent_title, None);
+}

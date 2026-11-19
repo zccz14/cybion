@@ -66,6 +66,9 @@ export type CybionThreadViewProps = {
   headerActions?: ReactNode
   /** Rendered before the title; the mobile back button lives here. */
   headerLeading?: ReactNode
+  /** Rendered above the title, e.g. the link back to the Thread this one was
+   * subcontracted from. */
+  headerBreadcrumb?: ReactNode
   /** Host panels that belong under the transcript, e.g. open notes or loaded manuals. */
   transcriptFooter?: ReactNode
   /** Host retains older pages across route changes, as the original shell did. */
@@ -84,7 +87,7 @@ export function CybionThreadView(props: CybionThreadViewProps) {
   return <ThreadConversation key={`${identity}:${props.threadId}`} {...props} />
 }
 
-function ThreadConversation({ threadId, className, onTitleChange, onThreadChange, onRecordsChange, workers, manuals, loadAudio: loadAudioOverride, renderRecord, headerActions, headerLeading, transcriptFooter, olderPages: hostOlderPages, onOlderPage, readOnly = false }: CybionThreadViewProps) {
+function ThreadConversation({ threadId, className, onTitleChange, onThreadChange, onRecordsChange, workers, manuals, loadAudio: loadAudioOverride, renderRecord, headerActions, headerLeading, headerBreadcrumb, transcriptFooter, olderPages: hostOlderPages, onOlderPage, readOnly = false }: CybionThreadViewProps) {
   const { client: transport, language, identity: userId, sessionId, t } = useCybion()
   const client = useQueryClient()
   const cachedOlderPages = useQuery<ThreadHistoryWindow[]>({ queryKey: ["history-older", threadId, userId], initialData: [], enabled: false })
@@ -284,10 +287,14 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
         <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
         <Button size="sm" disabled={rename.isPending || generateTitle.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
       </form> : <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        {headerBreadcrumb && <div className="flex min-w-0 items-center">{headerBreadcrumb}</div>}
         <div className="flex min-w-0 items-center gap-1">
           <h1 className="min-w-0 truncate text-base font-semibold">{current.title}</h1>
           {archived && <Badge variant="outline" className="shrink-0 text-muted-foreground">{t("archived")}</Badge>}
           {current.created_by === "api" && <Badge variant="outline" className="shrink-0 text-muted-foreground" title={current.external_ref ? `${t("apiOriginHint")} · ${current.external_ref}` : t("apiOriginHint")}>{t("apiOrigin")}</Badge>}
+          {/* The model and its reasoning effort are one decision, so they travel
+              in one tag — the same shape the composer uses before a turn. */}
+          <Badge variant="outline" className="shrink-0 text-muted-foreground" title={t("reasoningEffort")}>{current.model} ({current.reasoning_effort})</Badge>
           {!readOnly && <><Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
           <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button></>}
         </div>

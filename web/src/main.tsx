@@ -182,6 +182,10 @@ type Thread = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "i
   /** Threads this one created, from the same row the list reads. Optional so a
    * controller that predates branches still describes a Thread. */
   branches?: number
+  /** The Thread this one was subcontracted from; `null` (absent) for a root. */
+  parent_thread_id?: string | null
+  /** Its title, so a child opened from its own URL shows the way back by name. */
+  parent_title?: string | null
   title: string
   status: ThreadStatus
   display_status: ThreadDisplayStatus
@@ -355,6 +359,7 @@ const copy = {
     emptyDescription: "Start a focused thread. Every thread has its own history and request state.",
     chat: "Thread",
     backToThreads: "Back to thread list",
+    backToParent: "Back to the Thread this one was subcontracted from",
     send: "Send",
     stopThread: "Stop",
     stopThreadHint: "Stop reasoning and keep saved records",
@@ -670,6 +675,7 @@ const copy = {
     emptyDescription: "创建一个聚焦的线程。每个线程都拥有独立的历史和请求状态。",
     chat: "对话",
     backToThreads: "返回对话列表",
+    backToParent: "返回分包出这个线程的上级线程",
     send: "发送",
     stopThread: "停止",
     stopThreadHint: "停止推理，保留已保存的记录",
@@ -1589,6 +1595,12 @@ function ThreadConversation({ sdk, userId, olderPages, onOlderPage }: { sdk: Aut
         workers={workers.data}
         manuals={manualLookup}
         headerLeading={desktop ? undefined : <Button variant="ghost" size="icon-sm" aria-label={t("backToThreads")} onClick={backToThreads}><ArrowLeftIcon /></Button>}
+        headerBreadcrumb={current?.parent_thread_id
+          ? <Link to={`/threads/${current.parent_thread_id}`} title={t("backToParent")} className="inline-flex min-w-0 max-w-full items-center gap-1 text-xs text-muted-foreground hover:underline">
+            <ArrowLeftIcon aria-hidden="true" className="size-3.5 shrink-0" />
+            <span className="truncate">{current.parent_title ?? current.parent_thread_id}</span>
+          </Link>
+          : undefined}
         headerActions={<>
           <ThreadSharingButton userId={userId} sessionId={sdk.session.getState().sessionId} threadId={threadId} language={language} request={(path, init) => api(sdk, path, init)} />
           <Button variant="ghost" size="icon-sm" aria-label={archiveAction.label} title={archiveAction.label} disabled={setArchived.isPending || current === null} onClick={() => setArchived.mutate(archiveAction.next)}>{setArchived.isPending ? <Spinner /> : archiveAction.icon}</Button>

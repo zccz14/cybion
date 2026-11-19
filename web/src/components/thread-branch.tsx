@@ -28,6 +28,9 @@ type BranchNode = {
   children: number
   /** This Thread's own usage; the money beside it belongs to the branch. */
   usage: ThreadUsage
+  /** The model and reasoning effort the parent chose for this subcontract. */
+  model: string
+  reasoning_effort: string
   updated_at: number
 }
 
@@ -125,6 +128,9 @@ export function ThreadBranch({ threadId, active, language, request }: {
             <time dateTime={new Date(node.updated_at * 1000).toISOString()} className="shrink-0 tabular-nums text-muted-foreground">{formatRelativeTime(language, node.updated_at, now)}</time>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 tabular-nums text-muted-foreground">
+            {/* The decision the parent made when it subcontracted: which model,
+                and how hard it was told to think. */}
+            <span data-slot="branch-model" className="inline-flex shrink-0 items-center whitespace-nowrap rounded border px-1 text-[0.65rem]">{node.model} ({node.reasoning_effort})</span>
             <span data-slot="branch-usage">{compactTokenCount(node.usage.total_tokens)} tokens</span>
             <span data-slot="branch-cache">{text.cache} {threadCacheRate(node.usage.cache_hit_rate, language)}</span>
             <span data-slot="branch-spend">{money(node.subtree_spent_usd)}{node.budget_usd !== null && ` / ${money(node.budget_usd)}`}</span>
