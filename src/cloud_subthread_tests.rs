@@ -643,6 +643,8 @@ fn a_branch_row_reports_the_status_and_usage_the_list_would() {
         .find(|node| node.thread_id == "quiet")
         .unwrap();
     assert_eq!(quiet.display_status, "ready");
+}
+
 /// A child read back names the Thread that subcontracted it, so opening it from
 /// its own URL still shows the way back.
 #[tokio::test]

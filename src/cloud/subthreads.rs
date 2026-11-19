@@ -267,6 +267,9 @@ type BranchRow = (
     bool,
     Option<i64>,
     i64,
+    // model, reasoning_effort
+    String,
+    String,
     ThreadUsage,
 );
 
@@ -289,6 +292,11 @@ pub(super) struct TreeNode {
     /// This Thread's own usage — tokens, cache hit rate, settled cost — not its
     /// branch's, so a row never claims the children's spend as its own.
     pub(super) usage: ThreadUsage,
+    /// Model and reasoning effort this child runs on: the decision a parent made
+    /// when it subcontracted the work, shown on the row so nobody has to open
+    /// the Thread to read it.
+    pub(super) model: String,
+    pub(super) reasoning_effort: String,
     pub(super) updated_at: i64,
 }
 
@@ -338,6 +346,7 @@ pub(super) fn tree(
             WHERE down.depth < ?2
          )
          SELECT t.id,t.title,down.depth,t.status,t.blocked,t.budget_usd_nanos,t.updated_at,
+                t.model,t.reasoning_effort,
                 COALESCE(u.input_tokens,0),COALESCE(u.output_tokens,0),
                 COALESCE(u.cached_tokens,0),COALESCE(u.missing_cache_requests,0),
                 COALESCE(u.cost_usd_nanos,0),COALESCE(u.cost_settled_requests,0),
@@ -359,14 +368,14 @@ pub(super) fn tree(
           ORDER BY down.depth,t.updated_at DESC,t.id"
     ))?;
     let rows = statement.query_map(params![root_id, depth], |row| {
-        let input_tokens: i64 = row.get(7)?;
-        let output_tokens: i64 = row.get(8)?;
-        let cached_tokens: i64 = row.get(9)?;
-        let missing_cache_requests: i64 = row.get(10)?;
+        let input_tokens: i64 = row.get(9)?;
+        let output_tokens: i64 = row.get(10)?;
+        let cached_tokens: i64 = row.get(11)?;
+        let missing_cache_requests: i64 = row.get(12)?;
         let status: String = row.get(3)?;
         let blocked = row.get::<_, i64>(4)? != 0;
-        let boundary_kind: Option<String> = row.get(13)?;
-        let boundary_action: Option<String> = row.get(14)?;
+        let boundary_kind: Option<String> = row.get(15)?;
+        let boundary_action: Option<String> = row.get(16)?;
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -382,6 +391,8 @@ pub(super) fn tree(
             blocked,
             row.get::<_, Option<i64>>(5)?,
             row.get::<_, i64>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
             ThreadUsage {
                 input_tokens,
                 output_tokens,
@@ -389,8 +400,8 @@ pub(super) fn tree(
                 cached_tokens,
                 cache_hit_rate: (input_tokens > 0 && missing_cache_requests == 0)
                     .then(|| cached_tokens as f64 / input_tokens as f64),
-                cost_usd_nanos: row.get(11)?,
-                cost_settled_requests: row.get(12)?,
+                cost_usd_nanos: row.get(13)?,
+                cost_settled_requests: row.get(14)?,
             },
         ))
     })?;
@@ -426,7 +437,19 @@ pub(super) fn tree(
     let nodes = branches
         .into_iter()
         .map(
-            |(id, title, depth, display_status, status, blocked, budget, updated_at, usage)| {
+            |(
+                id,
+                title,
+                depth,
+                display_status,
+                status,
+                blocked,
+                budget,
+                updated_at,
+                model,
+                reasoning_effort,
+                usage,
+            )| {
                 TreeNode {
                     subtree_spent_usd: usd(subtree.get(&id).copied().unwrap_or(0)),
                     children: children.get(&id).copied().unwrap_or(0),
@@ -437,6 +460,8 @@ pub(super) fn tree(
                     blocked,
                     display_status,
                     usage,
+                    model,
+                    reasoning_effort,
                     budget_usd: budget.filter(|nanos| *nanos > 0).map(usd),
                     updated_at,
                 }
