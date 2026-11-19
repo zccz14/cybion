@@ -257,7 +257,18 @@ pub(super) fn require_below(
 
 /// id, title, depth, status, blocked, slice, updated_at — one row of the branch
 /// listing before it is turned into a `TreeNode`.
-type BranchRow = (String, String, i64, String, bool, Option<i64>, i64);
+type BranchRow = (
+    String,
+    String,
+    i64,
+    // display_status, then the stored status.
+    String,
+    String,
+    bool,
+    Option<i64>,
+    i64,
+    ThreadUsage,
+);
 
 #[derive(Serialize)]
 pub(super) struct TreeNode {
@@ -271,7 +282,14 @@ pub(super) struct TreeNode {
     pub(super) budget_usd: Option<f64>,
     pub(super) subtree_spent_usd: f64,
     pub(super) children: i64,
-    updated_at: i64,
+    /// What the console row shows: the same status the Thread list computes,
+    /// from the same evidence, so a branch reads like a compact Thread list and
+    /// a finished child shows a check instead of a grey dot.
+    pub(super) display_status: String,
+    /// This Thread's own usage — tokens, cache hit rate, settled cost — not its
+    /// branch's, so a row never claims the children's spend as its own.
+    pub(super) usage: ThreadUsage,
+    pub(super) updated_at: i64,
 }
 
 #[derive(Serialize)]
@@ -286,33 +304,94 @@ pub(super) struct TreeView {
 
 /// One read model behind both `list_thread_tree` and the branch view in the web
 /// console, so the model and the person never read two different numbers.
+/// The status a branch row shows, computed exactly the way the Thread list
+/// computes it: a Thread that answered is `completed` (a check, not a grey dot),
+/// one stopped by its user is `stopped`, and one that never ran is `ready`.
+fn node_status(
+    status: &str,
+    blocked: bool,
+    boundary_kind: Option<&str>,
+    boundary_action: Option<&str>,
+) -> &'static str {
+    match (status, blocked, boundary_kind, boundary_action) {
+        ("failed", ..) => "failed",
+        ("running", _, Some("activity"), Some("compact")) => "compacting",
+        ("running", ..) => "running",
+        (_, true, ..) => "blocked",
+        (_, _, None, _) => "ready",
+        (_, _, Some("activity"), Some("cancel")) => "stopped",
+        _ => "completed",
+    }
+}
+
 pub(super) fn tree(
     connection: &Connection,
     root_id: &str,
     depth: i64,
 ) -> Result<TreeView, ApiError> {
     load_thread(connection, root_id)?;
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "WITH RECURSIVE down(id,depth) AS (
            SELECT id,0 FROM threads WHERE id=?1
            UNION ALL
            SELECT t.id,down.depth+1 FROM down JOIN threads t ON t.parent_thread_id=down.id
             WHERE down.depth < ?2
          )
-         SELECT t.id,t.title,down.depth,t.status,t.blocked,t.budget_usd_nanos,t.updated_at
+         SELECT t.id,t.title,down.depth,t.status,t.blocked,t.budget_usd_nanos,t.updated_at,
+                COALESCE(u.input_tokens,0),COALESCE(u.output_tokens,0),
+                COALESCE(u.cached_tokens,0),COALESCE(u.missing_cache_requests,0),
+                COALESCE(u.cost_usd_nanos,0),COALESCE(u.cost_settled_requests,0),
+                boundary.kind,json_extract(boundary.payload,'$.action')
            FROM down JOIN threads t ON t.id=down.id
+           LEFT JOIN ({THREAD_USAGE_SELECT} WHERE thread_id IN (SELECT id FROM down)
+                      GROUP BY thread_id) u ON u.thread_id=t.id
+           LEFT JOIN history_records boundary ON boundary.id=(
+             SELECT MAX(id) FROM (
+               SELECT MAX(id) AS id FROM history_records INDEXED BY history_records_thread_kind_created
+                 WHERE thread_id=t.id AND kind='input'
+               UNION ALL
+               SELECT MAX(id) FROM history_records INDEXED BY history_records_thread_kind_created
+                 WHERE thread_id=t.id AND kind='activity'
+                   AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.type') END='thread_control'
+             )
+           )
           WHERE down.depth > 0
-          ORDER BY down.depth,t.updated_at DESC,t.id",
-    )?;
+          ORDER BY down.depth,t.updated_at DESC,t.id"
+    ))?;
     let rows = statement.query_map(params![root_id, depth], |row| {
+        let input_tokens: i64 = row.get(7)?;
+        let output_tokens: i64 = row.get(8)?;
+        let cached_tokens: i64 = row.get(9)?;
+        let missing_cache_requests: i64 = row.get(10)?;
+        let status: String = row.get(3)?;
+        let blocked = row.get::<_, i64>(4)? != 0;
+        let boundary_kind: Option<String> = row.get(13)?;
+        let boundary_action: Option<String> = row.get(14)?;
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)? != 0,
+            node_status(
+                &status,
+                blocked,
+                boundary_kind.as_deref(),
+                boundary_action.as_deref(),
+            )
+            .to_owned(),
+            status,
+            blocked,
             row.get::<_, Option<i64>>(5)?,
             row.get::<_, i64>(6)?,
+            ThreadUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens: input_tokens.saturating_add(output_tokens),
+                cached_tokens,
+                cache_hit_rate: (input_tokens > 0 && missing_cache_requests == 0)
+                    .then(|| cached_tokens as f64 / input_tokens as f64),
+                cost_usd_nanos: row.get(11)?,
+                cost_settled_requests: row.get(12)?,
+            },
         ))
     })?;
     let mut branches: Vec<BranchRow> = Vec::new();
@@ -347,16 +426,20 @@ pub(super) fn tree(
     let nodes = branches
         .into_iter()
         .map(
-            |(id, title, depth, status, blocked, budget, updated_at)| TreeNode {
-                subtree_spent_usd: usd(subtree.get(&id).copied().unwrap_or(0)),
-                children: children.get(&id).copied().unwrap_or(0),
-                thread_id: id,
-                title,
-                depth,
-                status,
-                blocked,
-                budget_usd: budget.filter(|nanos| *nanos > 0).map(usd),
-                updated_at,
+            |(id, title, depth, display_status, status, blocked, budget, updated_at, usage)| {
+                TreeNode {
+                    subtree_spent_usd: usd(subtree.get(&id).copied().unwrap_or(0)),
+                    children: children.get(&id).copied().unwrap_or(0),
+                    thread_id: id,
+                    title,
+                    depth,
+                    status,
+                    blocked,
+                    display_status,
+                    usage,
+                    budget_usd: budget.filter(|nanos| *nanos > 0).map(usd),
+                    updated_at,
+                }
             },
         )
         .collect();
