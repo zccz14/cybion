@@ -55,3 +55,14 @@ test("thread list rows show how long ago each thread was last updated", () => {
   assert.match(source, /data-slot="thread-updated-at"/)
   assert.match(source, /formatRelativeTime\(language, thread\.updated_at, now\)/)
 })
+
+test("a row's child Thread count is part of its secondary line, not a column of its own", () => {
+  const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
+  const row = readFileSync(new URL("../src/components/thread-status.tsx", import.meta.url), "utf8")
+  // The list row owns the Thread and, when archived, its one action beside it —
+  // nothing else may widen the row.
+  assert.doesNotMatch(list, /GitBranchIcon/)
+  // The count rides inside the row's own link, on the line the usage numbers use.
+  assert.match(row, /data-slot="thread-branches"/)
+  assert.match(row, /<ThreadUsageSummary usage=\{thread\.usage\} language=\{language\} \/>\s*\{branches > 0 && <span data-slot="thread-branches"/)
+})

@@ -71,6 +71,24 @@ test("integration-created rows show their API origin chip", async ({ page }) => 
   await expect(page.getByRole("link", { name: /检查远程服务器连接/ }).getByText("API", { exact: true })).toHaveCount(0)
 })
 
+test("a Thread's child count rides on its secondary line instead of owning a column", async ({ page }) => {
+  await page.goto("/e2e/thread-list.html")
+  const row = page.getByRole("link", { name: /Mobile thread list search/ })
+  // The count belongs to the row itself, so the row's own link carries it.
+  const badge = row.locator('[data-slot="thread-branches"]')
+  await expect(badge).toHaveCount(1)
+  await expect(badge).toHaveText("3")
+  await expect(badge).toHaveAttribute("title", "3 个子线程")
+  // …on the same line as the usage numbers, which is what keeps the row from
+  // giving the count a column of its own.
+  const usageBox = await row.locator('[data-slot="thread-usage-summary"]').boundingBox()
+  const badgeBox = await badge.boundingBox()
+  expect(badgeBox!.y).toBeGreaterThanOrEqual(usageBox!.y - 1)
+  expect(badgeBox!.y).toBeLessThan(usageBox!.y + usageBox!.height)
+  // A row without child Threads says nothing at all.
+  await expect(page.getByRole("link", { name: /检查远程服务器连接/ }).locator('[data-slot="thread-branches"]')).toHaveCount(0)
+})
+
 test("the new thread action stays reachable next to the search field", async ({ page }) => {
   await page.goto("/e2e/thread-list.html")
   await page.getByRole("button", { name: "新建对话" }).click()

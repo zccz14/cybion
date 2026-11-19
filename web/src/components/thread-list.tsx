@@ -1,5 +1,5 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArchiveRestoreIcon, GitBranchIcon } from "lucide-react"
+import { ArchiveRestoreIcon } from "lucide-react"
 import { ThreadLink } from "@/components/thread-status"
 import { ThreadListControls, ThreadListEmptyState, ThreadListMore, type ThreadListPagination } from "@/components/thread-list-controls"
 import { Button } from "@/components/ui/button"
@@ -37,7 +37,6 @@ function ThreadRow({ thread, language, onRestore, restoringId }: { thread: Threa
   const restoring = restoringId === thread.id
   return <div className="flex min-w-0 items-start gap-1">
     <div className="min-w-0 flex-1"><ThreadLink thread={thread} language={language} /></div>
-    {thread.branches > 0 && <span title={`${thread.branches}`} className="mt-1 flex shrink-0 items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[0.65rem] tabular-nums text-muted-foreground"><GitBranchIcon aria-hidden="true" className="size-3" />{thread.branches}</span>}
     {onRestore && <Button type="button" variant="ghost" size="icon-sm" aria-label={t.restoreThread} title={t.restoreThread} disabled={restoring} onClick={() => onRestore(thread.id)}>
       {restoring ? <Spinner /> : <ArchiveRestoreIcon aria-hidden="true" />}
     </Button>}
