@@ -1718,3 +1718,93 @@ async fn a_thread_started_from_a_preset_runs_on_what_the_preset_held() {
             .is_empty()
     );
 }
+
+/// A user database written before presets shipped sits at schema 62: it has
+/// neither the `thread_presets` table nor `threads.preset_name`. Opening it
+/// used to stamp the version to 63 without ever running `USER_SCHEMA`, so the
+/// table stayed missing for every account that upgraded — the list endpoint
+/// then failed with `no such table: thread_presets` although a brand-new
+/// database, which runs `USER_SCHEMA` at creation, listed presets fine.
+#[tokio::test]
+async fn a_schema_62_database_gains_the_preset_table_when_it_upgrades() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "preset-upgrade-owner").unwrap();
+    user_db(&state, &user, true, move |connection| {
+        // Exactly what the 62 -> 63 upgrade adds, removed again: nothing else
+        // changed in the schema between 0.6.115 and this version.
+        connection.execute_batch(
+            "DROP TABLE thread_presets;
+             ALTER TABLE threads DROP COLUMN preset_name;
+             PRAGMA user_version=62;",
+        )?;
+        let missing: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='thread_presets'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(missing, 0);
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        let present: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='thread_presets'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(present, 1);
+        let column: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('threads') WHERE name='preset_name'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(column, 1);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // The endpoint an upgraded account actually calls: an empty list, not an
+    // internal error. This is the regression the upgrade missed.
+    let listed = list_thread_presets(State(state), browser_identity_for(&user))
+        .await
+        .unwrap()
+        .0;
+    assert!(listed.is_empty());
+}
+
+/// The databases 0.6.116 already stamped are the ones that must also heal: they
+/// report schema 63 but never ran the DDL, so the repair cannot wait for a
+/// database still at 62. Schema 64 exists to catch exactly these.
+#[tokio::test]
+async fn a_database_stamped_63_without_the_preset_table_is_repaired() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "preset-stamped-63-owner").unwrap();
+    user_db(&state, &user, true, move |connection| {
+        connection.execute_batch(
+            "DROP TABLE thread_presets;
+             PRAGMA user_version=63;",
+        )?;
+        ensure_user_schema(connection)?;
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
+            USER_SCHEMA_VERSION
+        );
+        let present: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='thread_presets'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(present, 1);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        list_thread_presets(State(state), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+}

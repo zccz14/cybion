@@ -173,7 +173,10 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // hosted database, because the index batches below only run on a version change.
 // 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
 // with, and the User default that fills the list of a new Thread.
-const USER_SCHEMA_VERSION: i64 = 63;
+// 64 repairs the databases 63 stamped without its table: 63's upgrade only
+// altered `threads` and never ran `USER_SCHEMA`, so `thread_presets` was missing
+// on every account that upgraded from 0.6.115 while fresh databases had it.
+const USER_SCHEMA_VERSION: i64 = 64;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -2262,6 +2265,17 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
     )?;
+    // Unconditional on purpose: this is the only place an upgrading database
+    // runs `USER_SCHEMA`. `migrate_user_schema_through_53` executes it too, but
+    // that function only runs below 53 — the version-gated steps above only
+    // alter tables that already exist. Schema 63 forgot that and created
+    // `thread_presets` nowhere but on fresh databases, so every account that
+    // upgraded from 0.6.115 stamped 63 without the table and `list_thread_presets`
+    // answered `no such table`. Running the schema here means a table added to
+    // `USER_SCHEMA` reaches every database that passes a version bump; every
+    // statement in it is `IF NOT EXISTS`/`OR IGNORE`, and running it again also
+    // repairs a database an earlier runaway stamp skipped.
+    transaction.execute_batch(USER_SCHEMA)?;
     // Unconditional on purpose: `migrate_user_schema_through_53` only runs for a
     // database below 53, so an index added there never reaches one already at a
     // later version. This one has to land on every hosted database, so it sits
