@@ -7,7 +7,7 @@ test("user input renders its text, its pasted images and opens a preview", async
   page.on("pageerror", (error) => errors.push(error.stack ?? error.message))
   await page.goto("/e2e/user-input-message.html")
   const groups = page.locator('[data-slot="message-group"]')
-  await expect(groups).toHaveCount(3)
+  await expect(groups).toHaveCount(5)
   await expect(page.getByText("看看这张图。", { exact: true })).toBeVisible()
   await expect(page.getByText("这个报错怎么回事？", { exact: true })).toBeVisible()
   await expect(page.getByRole("img")).toHaveCount(3)
@@ -62,4 +62,26 @@ test("image-only inputs keep the record meta row without a copy control", async 
   const imageOnly = page.locator('[data-slot="message-group"]').nth(2)
   await expect(imageOnly.locator('[data-slot="user-meta"]')).toHaveText("#14 · 2026-01-02 12:34:56")
   await expect(imageOnly.getByRole("button", { name: "复制", exact: true })).toHaveCount(0)
+})
+
+// 手机上一条很长的输入曾经把气泡撑到 595px：气泡在右对齐的列里收缩到 min-content，
+// 超出对话栏的部分被滚动容器裁掉，看到的就是行首缺字。断行必须让气泡永远留在栏内，
+// 并且栏内不再有水平溢出的文字。
+test("a long input wraps inside the column instead of being clipped on the left", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/e2e/user-input-message.html")
+  await expect(page.locator('[data-slot="audio-transcript"]')).toContainText("这段转写没有标点")
+  const overflow = await page.evaluate(() => {
+    const rounded = (value: number) => Math.round(value * 10) / 10
+    return [...document.querySelectorAll<HTMLElement>(".bg-user-message, [data-slot=audio-transcript]")].flatMap((element) => {
+      const column = element.closest<HTMLElement>("[data-slot=message-content]")
+      if (!column) return []
+      const box = element.getBoundingClientRect(), frame = column.getBoundingClientRect()
+      const outside = box.left < frame.left - 0.5 || box.right > frame.right + 0.5
+      const scrolls = element.scrollWidth > element.clientWidth + 1
+      if (!outside && !scrolls) return []
+      return [{ head: element.textContent?.slice(0, 20), left: rounded(box.left), right: rounded(box.right), columnLeft: rounded(frame.left), columnRight: rounded(frame.right), clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }]
+    })
+  })
+  expect(overflow).toEqual([])
 })

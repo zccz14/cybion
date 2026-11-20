@@ -105,14 +105,14 @@ export function AudioMessage({ language, audio, loadAudio }: {
       <p
         data-slot="audio-transcript"
         title={audio.transcriptModel ? `${t.subtitle} · ${audio.transcriptModel}` : undefined}
-        className="max-w-[75ch] whitespace-pre-wrap break-words px-1 text-xs leading-5 text-muted-foreground"
+        className="max-w-[75ch] whitespace-pre-wrap wrap-anywhere px-1 text-xs leading-5 text-muted-foreground"
       >
         {audio.transcript}
       </p>
     ) : audio.audioRef ? (
       // 只有从历史里回放的语音才带 ref：它已经落库，转写成功的话字幕就在。
       // 这里没有字幕只可能是首轮转写失败——说出来，别让一段语音看起来像发丢了。
-      <p data-slot="audio-untranscribed" className="max-w-[75ch] px-1 text-xs leading-5 text-muted-foreground opacity-80">
+      <p data-slot="audio-untranscribed" className="max-w-[75ch] wrap-anywhere px-1 text-xs leading-5 text-muted-foreground opacity-80">
         {t.untranscribed}
       </p>
     ) : null}
