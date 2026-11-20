@@ -662,6 +662,7 @@ async fn a_thread_named_list_wins_over_the_user_default() {
         &state,
         &user,
         CreateThreadInput {
+            preset: None,
             budget_usd_nanos: None,
             title: Some("Named".to_owned()),
             external_ref: None,
@@ -822,6 +823,7 @@ async fn clearing_the_override_binds_the_default_list_instead() {
         &state,
         &user,
         CreateThreadInput {
+            preset: None,
             budget_usd_nanos: None,
             title: Some("Cleared".to_owned()),
             external_ref: None,

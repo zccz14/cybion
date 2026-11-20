@@ -775,6 +775,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
                 },
             }),
             Json(CreateThreadInput {
+                preset: None,
                 budget_usd_nanos: None,
                 title: None,
                 external_ref: None,
@@ -1598,5 +1599,122 @@ async fn a_thread_keeps_its_own_speech_to_text_model() {
     assert_eq!(
         effective_audio_transcription_model(Some(&read), &defaults).as_deref(),
         Some("thread-stt")
+    );
+}
+
+/// A preset is a named snapshot: a Thread started from it runs on exactly what
+/// the preset held, and keeps only the name — editing or deleting the preset
+/// afterwards never reaches back into that Thread.
+#[tokio::test]
+async fn a_thread_started_from_a_preset_runs_on_what_the_preset_held() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "preset-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "presets", "http://127.0.0.1:9/v1").await;
+    let settings = ThreadDefaults {
+        budget_usd_nanos: 2_000_000_000,
+        audio_transcription_model: None,
+        model: "gpt-6-astra".to_owned(),
+        upstream_id: Some(upstream.id.clone()),
+        reasoning_effort: "max".to_owned(),
+        service_tier_fast: true,
+        context_budget_tokens: 150_000,
+        minimal_mode: false,
+        image_generation_model: String::new(),
+        max_loaded_manuals: 8,
+        initial_manual_ids: Vec::new(),
+    };
+    let saved = update_thread_preset(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath("researcher".to_owned()),
+        Json(settings.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(saved.name, "researcher");
+    assert_eq!(saved.settings, settings);
+    assert_eq!(saved.thread_count, 0);
+
+    // The account default stays untouched: a preset is a second source, not a
+    // rewrite of the first.
+    assert_eq!(
+        read_thread_defaults(State(state.clone()), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0,
+        ThreadDefaults::default()
+    );
+
+    let thread = create_thread(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(serde_json::from_value(json!({"preset": "researcher"})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(thread.model, "gpt-6-astra");
+    assert_eq!(thread.reasoning_effort, "max");
+    assert!(thread.service_tier_fast);
+    assert_eq!(thread.budget_usd_nanos, Some(2_000_000_000));
+    assert_eq!(thread.max_loaded_manuals, Some(8));
+
+    // The Thread kept the name, which is what the list counts.
+    let recorded: Option<String> = user_db(&state, &user, false, move |connection| {
+        Ok(connection
+            .query_row(
+                "SELECT preset_name FROM threads WHERE id=?1",
+                [&thread.id],
+                |row| row.get(0),
+            )
+            .unwrap())
+    })
+    .await
+    .unwrap();
+    assert_eq!(recorded.as_deref(), Some("researcher"));
+    let listed = list_thread_presets(State(state.clone()), browser_identity_for(&user))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].thread_count, 1);
+
+    // A name the account does not have is a mistake, and the error says which
+    // names it does have: that list is how a caller discovers real presets.
+    let missing = create_thread(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(serde_json::from_value(json!({"preset": "nobody"})).unwrap()),
+    )
+    .await
+    .unwrap_err();
+    assert!(missing.message.contains("available: researcher"));
+
+    let bad_name = update_thread_preset(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath("not a slug".to_owned()),
+        Json(settings),
+    )
+    .await
+    .unwrap_err();
+    assert!(bad_name.message.contains("preset name must be"));
+
+    let deleted = delete_thread_preset(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath("researcher".to_owned()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(deleted, json!({ "deleted": true }));
+    assert!(
+        list_thread_presets(State(state), browser_identity_for(&user))
+            .await
+            .unwrap()
+            .0
+            .is_empty()
     );
 }

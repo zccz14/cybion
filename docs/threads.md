@@ -241,3 +241,23 @@ API keys and model tools retain their existing owner-only scope. Shared browser
 reads authorize against the owner's grant in the same transaction as the read;
 recipient discovery entries do not themselves confer access. Deleting a Thread
 also atomically revokes its grants while keeping synchronization tombstones.
+
+## Presets
+
+A Thread may be started from a **preset**: a named settings snapshot stored per
+user (`thread_presets`). `POST /api/threads`, `POST /api/threads/start` and the
+`create_thread` tool all accept `preset`; an unknown name is a 404 whose message
+lists the names the account does have, which is how a model that only learned
+preset names from a Manual discovers the real ones.
+
+A preset is a **snapshot, not a reference**. Every setting it holds is pinned
+onto the Thread at creation, and the Thread records the name in
+`threads.preset_name` for counting and display. Nothing resolves through that
+name: editing or deleting a preset never changes a Thread that already exists,
+and a later change to the account default never reaches one either. There is no
+version history and no back-reference by design — the day a Thread has to show
+"this preset changed, sync it?" is the day it becomes a referenced entity, and
+that is a different, larger feature.
+
+The account default stays a second, separate source: it is what a Thread follows
+when it names no preset, and editing it never touches a preset.

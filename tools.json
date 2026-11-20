@@ -507,7 +507,7 @@
     {
       "type": "function",
       "name": "create_thread",
-      "description": "Hand one task to a new child Thread and give it a slice of this Thread's USD budget. It starts at once, and its final message is its deliverable: a child cannot see this Thread's history, so state the goal, the acceptance test and the shape of the answer in `task`. Returns immediately with the child's id and this Thread's remaining pool; use wait_for_thread to collect the result and list_thread_tree to see the branch. Omit `budget_usd` to leave the child without a ceiling of its own — every ceiling above it still applies. Its settings come from the account defaults, except `model` and `upstream_id`, which follow this Thread's unless you name them — normally you name neither.",
+      "description": "Hand one task to a new child Thread and give it a slice of this Thread's USD budget. It starts at once, and its final message is its deliverable: a child cannot see this Thread's history, so state the goal, the acceptance test and the shape of the answer in `task`. Returns immediately with the child's id and this Thread's remaining pool; use wait_for_thread to collect the result and list_thread_tree to see the branch. Omit `budget_usd` to leave the child without a ceiling of its own — every ceiling above it still applies. Its settings come from a named `preset` when you name one, otherwise from the account defaults; `model` and `upstream_id` follow this Thread's unless you name them — normally you name neither. A preset pins the model, endpoint, reasoning effort, initial Manuals, cap and budget of a job type, so name the preset instead of repeating its fields.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -522,6 +522,10 @@
           "budget_usd": {
             "type": "number",
             "description": "从本线程剩余额度里划给它的上限，美元；省略=它没有自身上限。"
+          },
+          "preset": {
+            "type": "string",
+            "description": "用某个已保存的线程预设起步（例如 researcher / engineer）；省略就跟随账户默认设置。名字写错会报错并列出本账户现有的预设名。settings 里显式给出的字段仍然覆盖预设。"
           },
           "settings": {
             "type": "object",

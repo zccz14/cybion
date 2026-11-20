@@ -632,6 +632,10 @@ struct CreateThreadArguments {
     /// Dollars. Omitted leaves the child without a ceiling of its own.
     #[serde(default)]
     budget_usd: Option<f64>,
+    /// Start the child from this saved settings preset instead of the account
+    /// default. Naming settings as well overrides the preset field by field.
+    #[serde(default)]
+    preset: Option<String>,
     #[serde(default)]
     settings: Option<ChildSettings>,
 }
@@ -760,6 +764,7 @@ pub(super) async fn create_tool_output(
             max_loaded_manuals: settings.max_loaded_manuals,
             audio_transcription_model: None,
             budget_usd_nanos,
+            preset: arguments.preset,
         },
         ThreadOrigin::Child {
             parent_thread_id: thread_id.to_owned(),

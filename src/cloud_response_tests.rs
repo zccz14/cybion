@@ -2120,6 +2120,7 @@ async fn thread_titles_replay_the_thread_context_and_leave_reasoning_headroom() 
         &state,
         &user,
         CreateThreadInput {
+            preset: None,
             budget_usd_nanos: None,
             title: None,
             external_ref: None,
