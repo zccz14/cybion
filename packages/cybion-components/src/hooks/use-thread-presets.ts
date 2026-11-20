@@ -14,6 +14,8 @@ function asError(error: unknown): Error | null {
 /** 一个具名设置快照，连同用过它起线程的数量。 */
 export type ThreadPreset = {
   name: string
+  /** 什么时候该用它：写条件，不写简介。模型靠它选，人靠它记。 */
+  use_when: string
   settings: ThreadDefaults
   /** 以它起过的线程数。读的是线程自己留下的名字，预设删了数字也还在。 */
   thread_count: number
@@ -54,8 +56,11 @@ export function useThreadPresets({
 /** 正在编辑的预设：名字、草稿值，以及打开时那一份基准值。 */
 export type ThreadPresetDraft = {
   name: string
+  /** 打开时它叫什么；PUT 打到这个名字上，`name` 与它不同就是改名。 */
+  original: string
+  use_when: string
   value: ThreadSettings
-  /** 新建时名字可以改；已存在的预设改名等于另起一个，所以锁住。 */
+  /** 新建还是编辑。两者都能改名字，区别只在 PUT 的目标。 */
   created: boolean
   /** 草稿里跟随默认的字段，按打开时的这份值落定。 */
   base: ThreadSettings
@@ -71,9 +76,11 @@ export type ThreadPresetEditor = {
   openWith: (value: ThreadSettings) => void
   close: () => void
   setName: (name: string) => void
+  setUseWhen: (useWhen: string) => void
   setValue: (value: ThreadSettings) => void
   nameInvalid: boolean
   nameTaken: boolean
+  useWhenInvalid: boolean
   canSave: boolean
   save: () => void
   remove: (name: string) => void
@@ -98,10 +105,17 @@ export function useThreadPresetEditor({
   const base = defaults.data ? threadSettingsFromDefaults(defaults.data) : null
   const publish = useMutation({
     mutationFn: (input: ThreadPresetDraft) =>
-      client.request<ThreadPreset>(`/api/thread-presets/${encodeURIComponent(input.name)}`, {
-        method: "PUT",
-        body: JSON.stringify(threadSettingsDefaults(input.value, input.base)),
-      }),
+      client.request<ThreadPreset>(
+        `/api/thread-presets/${encodeURIComponent(input.original === "" ? input.name : input.original)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            name: input.name,
+            use_when: input.use_when,
+            settings: threadSettingsDefaults(input.value, input.base),
+          }),
+        },
+      ),
     onSuccess: () => {
       setDraft(null)
       void cache.invalidateQueries({ queryKey: [...queryKey] })
@@ -115,23 +129,27 @@ export function useThreadPresetEditor({
     onSuccess: () => { void cache.invalidateQueries({ queryKey: [...queryKey] }) },
   })
   const name = draft?.name.trim() ?? ""
-  const nameTaken = draft !== null && draft.created && presets.some((preset) => preset.name === name)
+  // 改 use_when 时名字没动，不能把它自己算成「已被占用」。
+  const nameTaken = draft !== null && presets.some((preset) => preset.name === name && preset.name !== draft.original)
   const nameInvalid = draft !== null && !PRESET_NAME.test(name)
-  const canSave = draft !== null && !nameInvalid && !nameTaken && !publish.isPending
+  const useWhenInvalid = draft !== null && (draft.use_when.trim() === "" || draft.use_when.trim().length > 500)
+  const canSave = draft !== null && !nameInvalid && !nameTaken && !useWhenInvalid && !publish.isPending
   return {
     draft,
     ready: base !== null,
-    openNew: () => { if (base) setDraft({ name: "", value: base, created: true, base }) },
+    openNew: () => { if (base) setDraft({ name: "", original: "", use_when: "", value: base, created: true, base }) },
     openEdit: (preset) => {
       const seed = threadSettingsFromDefaults(preset.settings)
-      setDraft({ name: preset.name, value: seed, created: false, base: seed })
+      setDraft({ name: preset.name, original: preset.name, use_when: preset.use_when, value: seed, created: false, base: seed })
     },
-    openWith: (value) => { if (base) setDraft({ name: "", value, created: true, base }) },
+    openWith: (value) => { if (base) setDraft({ name: "", original: "", use_when: "", value, created: true, base }) },
     close: () => { setDraft(null); publish.reset() },
     setName: (next) => { setDraft((current) => current && { ...current, name: next }); publish.reset() },
+    setUseWhen: (next) => { setDraft((current) => current && { ...current, use_when: next }); publish.reset() },
     setValue: (value) => { setDraft((current) => current && { ...current, value }) },
     nameInvalid: nameInvalid && name !== "",
     nameTaken,
+    useWhenInvalid,
     canSave,
     save: () => { if (draft !== null && canSave) publish.mutate({ ...draft, name }) },
     remove: (target) => { destroy.mutate(target) },

@@ -371,6 +371,7 @@ export type CybionToolFunctionCall =
   | { tool: "write_manual"; manualId: string | null; trashed: boolean; name: string | null; parentId: string | null }
   | { tool: "list_manuals" }
   | { tool: "cybion_list_workers" }
+  | { tool: "cybion_list_thread_presets" }
   | { tool: "cybion_list_ultimate_machines" }
   | { tool: "cybion_get_ultimate_machine"; machineId: string }
   | { tool: "cybion_set_ultimate_machine"; machineId: string | null; name: string | null; workerId: string | null; intervalSeconds: number | null; enabled: boolean | null; command: string | null; intent: string | null }
@@ -448,6 +449,8 @@ export function cybionToolFunctionCall(payload: unknown): CybionToolFunctionCall
       return { tool: "list_manuals" }
     case "cybion_list_workers":
       return { tool: "cybion_list_workers" }
+    case "cybion_list_thread_presets":
+      return { tool: "cybion_list_thread_presets" }
     case "cybion_list_ultimate_machines":
       return { tool: "cybion_list_ultimate_machines" }
     case "cybion_get_ultimate_machine": {

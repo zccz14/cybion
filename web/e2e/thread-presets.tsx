@@ -28,16 +28,19 @@ const defaults = {
 const presets = [
   {
     name: "researcher",
+    use_when: "需要读多份手册做跨源取证、且要最强推理时",
     settings: { ...defaults, model: "gpt-6-astra", reasoning_effort: "max", initial_manual_ids: [manualChoices[2].manual_id, manualChoices[1].manual_id, manualChoices[0].manual_id] },
     thread_count: 12,
   },
   {
     name: "engineer",
+    use_when: "要改一个已有仓库、按它自己的 CI 交付时",
     settings: { ...defaults, model: "deepseek-flash", reasoning_effort: "max", budget_usd_nanos: 2_000_000_000, initial_manual_ids: [manualChoices[0].manual_id] },
     thread_count: 41,
   },
   {
     name: "explorer",
+    use_when: "只要快速看一眼、不该占用手册预算时",
     settings: { ...defaults, model: "deepseek-flash", reasoning_effort: "max", max_loaded_manuals: 4, initial_manual_ids: [] },
     thread_count: 0,
   },
@@ -51,9 +54,9 @@ const fetch: typeof globalThis.fetch = async (input, init) => {
   if (path.startsWith("/api/thread-presets")) {
     if (method === "DELETE") return new Response(JSON.stringify({ deleted: true }), { headers: { "Content-Type": "application/json" } })
     if (method === "PUT") {
-      const name = decodeURIComponent(path.slice("/api/thread-presets/".length))
-      const settings = JSON.parse(String(init?.body ?? "{}"))
-      return new Response(JSON.stringify({ name, settings, thread_count: 1 }), { headers: { "Content-Type": "application/json" } })
+      const current = decodeURIComponent(path.slice("/api/thread-presets/".length))
+      const body = JSON.parse(String(init?.body ?? "{}"))
+      return new Response(JSON.stringify({ name: body.name ?? current, use_when: body.use_when, settings: body.settings, thread_count: 1 }), { headers: { "Content-Type": "application/json" } })
     }
     return new Response(JSON.stringify(presets), { headers: { "Content-Type": "application/json" } })
   }

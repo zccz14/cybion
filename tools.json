@@ -571,6 +571,16 @@
     },
     {
       "type": "function",
+      "name": "cybion_list_thread_presets",
+      "description": "List this account's Thread presets: named settings a child Thread can be started from, each with the condition that says when to reach for it. Read `use_when` first, then name the preset you want in `create_thread`'s `preset` argument instead of repeating its fields. An account with none returns an empty list.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
       "name": "list_thread_tree",
       "description": "List the Threads below this one with their status, whether each waits on you, what it was promised and what it settled, plus this Thread's own pool — budget, subtree spend, what is promised to children and what is left. `depth` 1 lists direct children; 3 is as deep as a branch may grow.",
       "parameters": {

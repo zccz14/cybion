@@ -1627,12 +1627,17 @@ async fn a_thread_started_from_a_preset_runs_on_what_the_preset_held() {
         State(state.clone()),
         browser_identity_for(&user),
         AxumPath("researcher".to_owned()),
-        Json(settings.clone()),
+        Json(ThreadPresetInput {
+            name: None,
+            use_when: "需要跨源取证且要最强推理时".to_owned(),
+            settings: settings.clone(),
+        }),
     )
     .await
     .unwrap()
     .0;
     assert_eq!(saved.name, "researcher");
+    assert_eq!(saved.use_when, "需要跨源取证且要最强推理时");
     assert_eq!(saved.settings, settings);
     assert_eq!(saved.thread_count, 0);
 
@@ -1695,7 +1700,11 @@ async fn a_thread_started_from_a_preset_runs_on_what_the_preset_held() {
         State(state.clone()),
         browser_identity_for(&user),
         AxumPath("not a slug".to_owned()),
-        Json(settings),
+        Json(ThreadPresetInput {
+            name: None,
+            use_when: "随便".to_owned(),
+            settings,
+        }),
     )
     .await
     .unwrap_err();
@@ -1807,4 +1816,66 @@ async fn a_database_stamped_63_without_the_preset_table_is_repaired() {
             .0
             .is_empty()
     );
+}
+
+/// A rename moves the label carried by the Threads that recorded it — and nothing
+/// else. The count must survive, and the Thread must still run on what it was
+/// created with.
+#[tokio::test]
+async fn renaming_a_preset_moves_the_label_and_leaves_the_thread_alone() {
+    let (_root, state) = test_state();
+    let user = user_for_subject(&state, "rename-owner").unwrap();
+    let upstream = insert_upstream(&state, &user, "rename", "http://127.0.0.1:9/v1").await;
+    let settings = ThreadDefaults {
+        model: "gpt-6-astra".to_owned(),
+        upstream_id: Some(upstream.id.clone()),
+        reasoning_effort: "max".to_owned(),
+        ..ThreadDefaults::default()
+    };
+    let create = |name: &str, use_when: &str| ThreadPresetInput {
+        name: Some(name.to_owned()),
+        use_when: use_when.to_owned(),
+        settings: settings.clone(),
+    };
+    let _ = update_thread_preset(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath("researcher".to_owned()),
+        Json(create("researcher", "需要读多份手册时")),
+    )
+    .await
+    .unwrap();
+    let thread = create_thread(
+        State(state.clone()),
+        browser_identity_for(&user),
+        Json(serde_json::from_value(json!({"preset": "researcher"})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let renamed = update_thread_preset(
+        State(state.clone()),
+        browser_identity_for(&user),
+        AxumPath("researcher".to_owned()),
+        Json(create("quant_researcher", "需要读多份手册且要最强推理时")),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(renamed.name, "quant_researcher");
+    assert_eq!(renamed.use_when, "需要读多份手册且要最强推理时");
+    assert_eq!(renamed.thread_count, 1, "the count follows the rename");
+    let (label, model, effort): (Option<String>, String, String) =
+        user_db(&state, &user, false, move |connection| {
+            Ok(connection.query_row(
+                "SELECT preset_name,model,reasoning_effort FROM threads WHERE id=?1",
+                [&thread.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(label.as_deref(), Some("quant_researcher"));
+    assert_eq!(model, "gpt-6-astra");
+    assert_eq!(effort, "max");
 }

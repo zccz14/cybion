@@ -9,6 +9,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { ThreadSettingsFields, type ThreadPreset, type ThreadSettings } from "@zccz14/cybion-components/internal"
@@ -27,6 +28,9 @@ const copy = {
     nameTaken: "Another preset already uses this name.",
     nameInvalid: "Use 1-60 letters, digits, underscores or hyphens.",
     namePlaceholder: "researcher",
+    useWhen: "When to use it",
+    useWhenHint: "Write the condition, not a description: \"when a task needs several Manuals and the strongest reasoning\" — not \"a research Thread\". A model reads this line to choose between presets.",
+    useWhenInvalid: "Say when to use it, in 1-500 characters.",
     usage: "used in {count}",
     start: "Start a Thread",
     empty: "No presets yet",
@@ -51,6 +55,9 @@ const copy = {
     nameTaken: "这个预设名已经存在。",
     nameInvalid: "用 1-60 个字母、数字、下划线或短横线。",
     namePlaceholder: "researcher",
+    useWhen: "什么时候用",
+    useWhenHint: "写条件，不写简介：「需要读多份手册、且要最强推理时」——而不是「研究线程」。模型读的就是这一行，它靠这句话在预设之间做选择。",
+    useWhenInvalid: "写清楚什么时候用它，1-500 字。",
     usage: "用过 {count} 次",
     start: "以此起线程",
     empty: "还没有预设",
@@ -122,8 +129,8 @@ export function ThreadPresets({ language, sessionId }: { language: "en" | "zh"; 
           {list.presets.map((preset) => <li key={preset.name} className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center">
             <div className="min-w-0 flex-1">
               <p className="truncate font-mono text-sm font-medium">{preset.name}</p>
-              <p className="mt-1 truncate text-xs text-muted-foreground">
-                {summary(preset, t.manuals, t.noManuals)} · {t.usage.replace("{count}", String(preset.thread_count))}
+              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                {preset.use_when} · {summary(preset, t.manuals, t.noManuals)} · {t.usage.replace("{count}", String(preset.thread_count))}
               </p>
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -163,11 +170,22 @@ export function ThreadPresets({ language, sessionId }: { language: "en" | "zh"; 
               <Input
                 id="thread-preset-name"
                 value={editor.draft.name}
-                disabled={!editor.draft.created || editor.pending}
+                disabled={editor.pending}
                 placeholder={t.namePlaceholder}
                 onChange={(event) => editor.setName(event.target.value)}
               />
               <FieldDescription>{editor.nameTaken ? t.nameTaken : editor.nameInvalid ? t.nameInvalid : t.nameHint}</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="thread-preset-use-when">{t.useWhen}</FieldLabel>
+              <Textarea
+                id="thread-preset-use-when"
+                rows={3}
+                value={editor.draft.use_when}
+                disabled={editor.pending}
+                onChange={(event) => editor.setUseWhen(event.target.value)}
+              />
+              <FieldDescription>{editor.useWhenInvalid ? t.useWhenInvalid : t.useWhenHint}</FieldDescription>
             </Field>
           </FieldGroup>
           <FieldGroup>

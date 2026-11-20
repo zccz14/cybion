@@ -16,6 +16,7 @@ const samples: Record<string, unknown> = {
   write_manual: { type: "function_call", name: "write_manual", arguments: '{"name":"Notes","parent_id":"ctx-1"}' },
   list_manuals: { type: "function_call", name: "list_manuals", arguments: "{}" },
   cybion_list_workers: { type: "function_call", name: "cybion_list_workers", arguments: "{}" },
+  cybion_list_thread_presets: { type: "function_call", name: "cybion_list_thread_presets", arguments: "{}" },
   cybion_list_ultimate_machines: { type: "function_call", name: "cybion_list_ultimate_machines", arguments: "{}" },
   cybion_get_ultimate_machine: { type: "function_call", name: "cybion_get_ultimate_machine", arguments: '{"machine_id":"machine-1"}' },
   cybion_set_ultimate_machine: { type: "function_call", name: "cybion_set_ultimate_machine", arguments: '{"name":"磁盘检查","worker_id":"worker-1","command":"df -h","interval_seconds":600}' },

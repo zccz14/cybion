@@ -261,3 +261,27 @@ that is a different, larger feature.
 
 The account default stays a second, separate source: it is what a Thread follows
 when it names no preset, and editing it never touches a preset.
+
+### What a preset says about itself
+
+Each preset carries a `use_when`: the condition that says when to reach for it,
+written the way a Manual's Use When is written — when to look, not what it holds
+("when a task needs several Manuals and the strongest reasoning", not "a research
+Thread"). `cybion_list_thread_presets` returns it first, so a model can choose
+between presets instead of guessing from their names, and then name the one it
+picked in `create_thread`'s `preset`. A wrong name still answers with the names
+the account does have, as a second line of discovery.
+
+### Renaming
+
+`PUT /api/thread-presets/{name}` takes the current name in the path and an
+optional `name` in the body: a different one renames the preset. A rename moves
+two things and only two: the row, and the `threads.preset_name` label on the
+Threads that recorded the old one — otherwise "used 12 times" would read 0 after
+a rename, and a statistic would look like lost history. **No Thread's settings
+ever move**: a rename says nothing about how a Thread runs.
+
+The known cost of keeping the name as the key: if a preset is renamed away and a
+new preset takes the old name, the new one inherits the old usage count. Fixing
+that needs a stable id, which is the reference model this design deliberately
+avoids until a Thread has to ask "did my preset change?".
