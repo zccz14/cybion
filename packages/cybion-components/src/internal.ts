@@ -53,6 +53,8 @@ export { ThreadSettingsPopover } from "./components/thread-settings-popover"
 export { ThreadSettingsButton } from "./components/thread-settings-button"
 export { REASONING_EFFORTS, budgetTooLarge, sameThreadSettings, threadSettingsDefaults, threadSettingsForNewThread, threadSettingsFromDefaults, threadSettingsFromThread } from "./lib/thread-settings"
 export type { ReasoningEffort, ThreadSettings, ThreadSettingsOverrides } from "./lib/thread-settings"
+export { useThreadPresets, useThreadPresetEditor } from "./hooks/use-thread-presets"
+export type { ThreadPreset, ThreadPresetDraft, ThreadPresetEditor, ThreadPresetList } from "./hooks/use-thread-presets"
 export type { ComposerFile, SkippedFile, SkippedFileReason } from "./lib/composer-files"
 
 // 记录卡片：一张卡片一条回归用例，但只有包自己会把它们拼进对话。

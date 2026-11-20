@@ -173,7 +173,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // hosted database, because the index batches below only run on a version change.
 // 57 added `initial_manual_ids` at both levels: the Manuals a Thread starts
 // with, and the User default that fills the list of a new Thread.
-const USER_SCHEMA_VERSION: i64 = 62;
+const USER_SCHEMA_VERSION: i64 = 63;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1047,6 +1047,11 @@ fn app(state: AppState) -> Router {
             "/api/thread-defaults",
             get(read_thread_defaults).put(update_thread_defaults),
         )
+        .route("/api/thread-presets", get(list_thread_presets))
+        .route(
+            "/api/thread-presets/{name}",
+            put(update_thread_preset).delete(delete_thread_preset),
+        )
         .route("/api/threads", get(list_threads).post(create_thread))
         .route("/api/threads/start", post(start_thread))
         .route(
@@ -1732,6 +1737,10 @@ CREATE TABLE IF NOT EXISTS threads (
   -- default, and the one a person created rather than another Thread.
   parent_thread_id TEXT REFERENCES threads(id) ON DELETE CASCADE,
   initial_manual_ids TEXT,
+  -- The preset this Thread was started from, kept as a copy of the name so the
+  -- console can count and show it. Nothing resolves through it: editing or
+  -- deleting the preset never changes what this Thread runs with.
+  preset_name TEXT,
   archived_at INTEGER,
   -- Waiting on the user: its own axis, because `status` is written on every
   -- turn boundary and a blocked Thread must survive finalization.
@@ -1746,6 +1755,15 @@ CREATE TABLE IF NOT EXISTS threads (
 // with: every named Manual is bound at creation, so a Thread needs no tool call
 // to hold them.
 const USER_SCHEMA: &str = r#"
+-- A Thread may be started from a named settings preset instead of the account
+-- default: one row per name, holding the whole snapshot. A Thread keeps a copy
+-- of what it was given, so editing or deleting a preset never reaches back.
+CREATE TABLE IF NOT EXISTS thread_presets (
+  name TEXT PRIMARY KEY,
+  settings TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS thread_defaults (
   id INTEGER PRIMARY KEY CHECK(id=1),
   model TEXT NOT NULL,
@@ -2237,6 +2255,9 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if version < 62 {
         migrate_thread_parent(&transaction)?;
     }
+    if version < 63 {
+        migrate_thread_preset_name(&transaction)?;
+    }
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
@@ -2361,6 +2382,23 @@ fn migrate_thread_parent(transaction: &rusqlite::Transaction<'_>) -> Result<(), 
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS threads_parent ON threads(parent_thread_id, updated_at DESC);",
     )?;
+    Ok(())
+}
+
+/// Threads record the preset they were started from. A fresh database already
+/// carries the column from `THREAD_SCHEMA`; the preset table itself arrives with
+/// `USER_SCHEMA`, which this migration path executes right after. Retire this
+/// upgrade once every user database is audited at schema 63+; retain the column
+/// test.
+fn migrate_thread_preset_name(transaction: &rusqlite::Transaction<'_>) -> Result<(), ApiError> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='preset_name')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        transaction.execute_batch("ALTER TABLE threads ADD COLUMN preset_name TEXT;")?;
+    }
     Ok(())
 }
 
@@ -3299,6 +3337,10 @@ struct CreateThreadInput {
     audio_transcription_model: Option<String>,
     #[serde(default)]
     budget_usd_nanos: Option<i64>,
+    /// Settings come from this saved preset instead of the account default.
+    /// Omitted or `null` reads the account default, exactly as before.
+    #[serde(default)]
+    preset: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3326,6 +3368,9 @@ struct StartThreadInput {
     initial_manual_ids: Option<Vec<String>>,
     #[serde(default)]
     budget_usd_nanos: Option<i64>,
+    /// Starts the Thread from this saved preset instead of the account default.
+    #[serde(default)]
+    preset: Option<String>,
     input: String,
     #[serde(default)]
     images: Vec<String>,
@@ -4055,11 +4100,10 @@ async fn read_thread_defaults(
     .map(Json)
 }
 
-async fn update_thread_defaults(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<Caller>,
-    Json(input): Json<ThreadDefaults>,
-) -> Result<Json<ThreadDefaults>, ApiError> {
+/// Every field of a settings snapshot, validated once. The account default and a
+/// preset are the same shape, so they must accept exactly the same values: one
+/// function is what keeps them from drifting apart.
+fn validate_thread_defaults(input: ThreadDefaults) -> Result<ThreadDefaults, ApiError> {
     let defaults = ThreadDefaults {
         model: model_id(input.model)?,
         upstream_id: input
@@ -4082,6 +4126,166 @@ async fn update_thread_defaults(
         &defaults.initial_manual_ids,
         defaults.max_loaded_manuals,
     )?;
+    Ok(defaults)
+}
+
+/// A preset name travels in a URL and in a tool call, so it stays a slug.
+fn thread_preset_name(value: &str) -> Result<String, ApiError> {
+    let name = value.trim();
+    let valid = !name.is_empty()
+        && name.len() <= 60
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        });
+    if !valid {
+        return Err(ApiError::bad_request(
+            "preset name must be 1-60 characters of letters, digits, '_' or '-'",
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn unreadable_preset() -> ApiError {
+    ApiError::internal("stored Thread preset is unreadable")
+}
+
+/// The settings a preset holds. A name the account does not have is a mistake,
+/// so the error carries the names it does have: that list is how a caller that
+/// only knows preset names from a Manual discovers the real ones.
+fn load_thread_preset(connection: &Connection, name: &str) -> Result<ThreadDefaults, ApiError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT settings FROM thread_presets WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        let mut statement = connection.prepare("SELECT name FROM thread_presets ORDER BY name")?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        return Err(ApiError::not_found(if names.is_empty() {
+            "Thread preset not found; this account has none".to_owned()
+        } else {
+            format!("Thread preset not found; available: {}", names.join(", "))
+        }));
+    };
+    serde_json::from_str(&stored).map_err(|_| unreadable_preset())
+}
+
+/// Where a new Thread's settings come from: the preset it names, otherwise the
+/// account default. This is the only place that answers it, so creation cannot
+/// read one source and report another.
+fn settings_for_new_thread(
+    connection: &Connection,
+    preset: Option<&str>,
+) -> Result<ThreadDefaults, ApiError> {
+    match preset {
+        Some(name) => load_thread_preset(connection, name),
+        None => load_thread_defaults(connection),
+    }
+}
+
+/// One saved settings snapshot, with how many Threads were started from it.
+#[derive(Clone, Debug, Serialize)]
+struct ThreadPresetView {
+    name: String,
+    settings: ThreadDefaults,
+    thread_count: i64,
+}
+
+fn read_thread_presets(connection: &Connection) -> Result<Vec<ThreadPresetView>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT p.name,p.settings,(SELECT COUNT(*) FROM threads t WHERE t.preset_name=p.name)
+           FROM thread_presets p ORDER BY p.name",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(name, settings, thread_count)| {
+            Ok(ThreadPresetView {
+                name,
+                settings: serde_json::from_str(&settings).map_err(|_| unreadable_preset())?,
+                thread_count,
+            })
+        })
+        .collect()
+}
+
+async fn list_thread_presets(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Caller>,
+) -> Result<Json<Vec<ThreadPresetView>>, ApiError> {
+    user_db(&state, &identity.user, true, |connection| {
+        read_thread_presets(connection)
+    })
+    .await
+    .map(Json)
+}
+
+async fn update_thread_preset(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Caller>,
+    AxumPath(name): AxumPath<String>,
+    Json(input): Json<ThreadDefaults>,
+) -> Result<Json<ThreadPresetView>, ApiError> {
+    let name = thread_preset_name(&name)?;
+    let settings = validate_thread_defaults(input)?;
+    user_db(&state, &identity.user, true, move |connection| {
+        if let Some(id) = settings.upstream_id.as_deref() {
+            require_upstream(connection, id)?;
+        }
+        let encoded = serde_json::to_string(&settings).map_err(ApiError::internal)?;
+        connection.execute(
+            "INSERT INTO thread_presets(name,settings,created_at,updated_at) VALUES(?1,?2,?3,?3)
+             ON CONFLICT(name) DO UPDATE SET settings=excluded.settings,updated_at=excluded.updated_at",
+            params![&name, &encoded, now()],
+        )?;
+        Ok(ThreadPresetView {
+            thread_count: connection.query_row(
+                "SELECT COUNT(*) FROM threads WHERE preset_name=?1",
+                [&name],
+                |row| row.get(0),
+            )?,
+            name,
+            settings,
+        })
+    })
+    .await
+    .map(Json)
+}
+
+async fn delete_thread_preset(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Caller>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let name = thread_preset_name(&name)?;
+    user_db(&state, &identity.user, true, move |connection| {
+        let removed = connection.execute("DELETE FROM thread_presets WHERE name=?1", [&name])?;
+        if removed == 0 {
+            return Err(ApiError::not_found("Thread preset not found"));
+        }
+        Ok(json!({ "deleted": true }))
+    })
+    .await
+    .map(Json)
+}
+
+async fn update_thread_defaults(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Caller>,
+    Json(input): Json<ThreadDefaults>,
+) -> Result<Json<ThreadDefaults>, ApiError> {
+    let defaults = validate_thread_defaults(input)?;
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = defaults.upstream_id.as_deref() {
             require_upstream(connection, id)?;
@@ -4418,9 +4622,13 @@ async fn create_thread_for(
         .map(image_generation_model)
         .transpose()?;
     let audio_transcription_model = optional_model(input.audio_transcription_model);
+    let preset = input
+        .preset
+        .map(|value| thread_preset_name(&value))
+        .transpose()?;
     user_db(state, user, true, move |connection| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let defaults = load_thread_defaults(&transaction)?;
+        let defaults = settings_for_new_thread(&transaction, preset.as_deref())?;
         let initial_manual_ids =
             initial_manual_ids.unwrap_or_else(|| defaults.initial_manual_ids.clone());
         // The list is a promise the creation keeps: every named Manual is bound
@@ -4434,6 +4642,37 @@ async fn create_thread_for(
         // transaction, so two children created at once cannot overcommit.
         let mut model = model;
         let mut upstream_id = upstream_id;
+        let mut reasoning_effort = reasoning_effort;
+        let mut service_tier_fast = service_tier_fast;
+        let mut context_budget_tokens = context_budget_tokens;
+        let mut minimal_mode = input.minimal_mode;
+        let mut image_generation_model = image_generation_model;
+        let mut max_loaded_manuals = max_loaded_manuals;
+        let mut audio_transcription_model = audio_transcription_model;
+        let mut budget_usd_nanos = budget_usd_nanos;
+        // A preset is a snapshot, not a reference: it pins what it held onto this
+        // Thread, so neither a later edit to the preset nor one to the account
+        // default can reach back through it. Pinning `model` is also what lets a
+        // child start on the preset's model instead of inheriting its parent's,
+        // and pinning the rest is what makes the settings panel show the values
+        // the Thread will actually run with.
+        if preset.is_some() {
+            model = Some(model.unwrap_or_else(|| defaults.model.clone()));
+            upstream_id = upstream_id.or_else(|| defaults.upstream_id.clone());
+            reasoning_effort =
+                Some(reasoning_effort.unwrap_or_else(|| defaults.reasoning_effort.clone()));
+            service_tier_fast = Some(service_tier_fast.unwrap_or(defaults.service_tier_fast));
+            context_budget_tokens =
+                Some(context_budget_tokens.unwrap_or(defaults.context_budget_tokens));
+            minimal_mode = Some(minimal_mode.unwrap_or(defaults.minimal_mode));
+            image_generation_model = Some(
+                image_generation_model.unwrap_or_else(|| defaults.image_generation_model.clone()),
+            );
+            max_loaded_manuals = Some(max_loaded_manuals.unwrap_or(defaults.max_loaded_manuals));
+            audio_transcription_model =
+                audio_transcription_model.or_else(|| defaults.audio_transcription_model.clone());
+            budget_usd_nanos = Some(budget_usd_nanos.unwrap_or(defaults.budget_usd_nanos));
+        }
         if let Some(parent_thread_id) = parent_thread_id.as_deref() {
             let parent = load_thread(&transaction, parent_thread_id)?;
             subthreads::check_child(&transaction, &parent, budget_usd_nanos, &defaults)?;
@@ -4463,7 +4702,7 @@ async fn create_thread_for(
             reasoning_effort: reasoning_effort.unwrap_or(defaults.reasoning_effort),
             service_tier_fast: service_tier_fast.unwrap_or(defaults.service_tier_fast),
             context_budget_tokens,
-            minimal_mode: input.minimal_mode,
+            minimal_mode,
             image_generation_model,
             max_loaded_manuals,
             budget_usd_nanos,
@@ -4484,7 +4723,7 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,budget_usd_nanos,parent_thread_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,budget_usd_nanos,parent_thread_id,created_at,updated_at,preset_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
@@ -4505,7 +4744,8 @@ async fn create_thread_for(
                 thread.budget_usd_nanos,
                 thread.parent_thread_id,
                 thread.created_at,
-                thread.updated_at
+                thread.updated_at,
+                preset
             ],
         )?;
         manual_loads::apply_initial(&transaction, &thread.id, &[], &initial_manual_ids)?;
@@ -5093,6 +5333,7 @@ async fn start_thread(
             max_loaded_manuals: input.max_loaded_manuals,
             audio_transcription_model: input.audio_transcription_model,
             budget_usd_nanos: input.budget_usd_nanos,
+            preset: input.preset,
         },
         thread_origin(&identity),
     )
@@ -11897,6 +12138,7 @@ mod tests {
             state,
             user,
             CreateThreadInput {
+                preset: None,
                 budget_usd_nanos: None,
                 title: Some("Test".to_owned()),
                 external_ref: None,
@@ -12581,6 +12823,7 @@ mod tests {
         let user = user_for_subject(&state, "thread-list-filter-user").unwrap();
         let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
         let input = |title: &str, external_ref: Option<&str>| CreateThreadInput {
+            preset: None,
             budget_usd_nanos: None,
             title: Some(title.to_owned()),
             external_ref: external_ref.map(str::to_owned),

@@ -25,6 +25,7 @@ import { LinkitProvider, useLinkit } from "linkit-react-components"
 import { AppLayout, Markdown, type AppNavGroup } from "@zccz14/ux"
 import { CybionThreadProvider, CybionThreadView } from "@zccz14/cybion-components"
 import { HistoryMessage, ThreadSettingsFields, ThreadSettingsPopover, useNewThreadSettings, useThreadDefaultsForm, type ThreadSettings } from "@zccz14/cybion-components/internal"
+import { useThreadPresets } from "@zccz14/cybion-components/internal"
 import { listenForExtensionAttachments } from "./extension-bridge"
 import {
   ArchiveIcon,
@@ -49,6 +50,7 @@ import {
   LockIcon,
   LockOpenIcon,
   KeyRoundIcon,
+  LayersIcon,
   LogsIcon,
   MessagesSquareIcon,
   MonitorIcon,
@@ -103,6 +105,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { ThreadSharingButton } from "@/components/thread-sharing"
+import { ThreadPresets } from "@/components/thread-presets"
 import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads"
 import { InsightsView } from "@/components/insights"
 import { sharedThreadReturnHash } from "@/lib/thread-sharing"
@@ -559,6 +562,10 @@ const copy = {
     systemConfiguration: "System configuration",
     systemConfigurationDescription: "Administrator-only global settings for all users' upstream requests.",
     threadDefaults: "New thread defaults",
+    presets: "Thread presets",
+    presetsDescription: "A saved answer to \"how should this Thread be built\": model, endpoint, reasoning effort, the Manuals it opens with, the caps it runs under. A Thread keeps a copy of what it was given, so editing or deleting a preset never reaches a Thread that already exists.",
+    presetSaveFromDefaults: "Save defaults as a preset",
+    presetActiveLabel: "Preset",
     threadDefaultsDescription: "Applied when you create a thread. You can adjust these settings within each thread.",
     reasoningEffort: "Reasoning effort",
     saveDefaults: "Save defaults",
@@ -875,6 +882,10 @@ const copy = {
     systemConfiguration: "系统配置",
     systemConfigurationDescription: "仅管理员可修改，影响所有用户的上游请求。",
     threadDefaults: "新线程默认设置",
+    presets: "线程预设",
+    presetsDescription: "把「这条线程该怎么配」预先存好：模型、端点、推理强度、开场要加载的手册、各项上限。线程创建时会留一份副本，所以改预设、删预设都不会影响已经存在的线程。",
+    presetSaveFromDefaults: "把默认设置存为预设",
+    presetActiveLabel: "预设",
     threadDefaultsDescription: "创建新线程时自动应用，也可以在每个线程中单独调整。",
     reasoningEffort: "推理强度",
     saveDefaults: "保存默认设置",
@@ -1297,6 +1308,7 @@ function WorkspaceShell({
     ]
     : []
   const configurationNav = [
+    { to: "/presets", label: t("presets"), icon: LayersIcon },
     { to: "/configuration", label: t("configuration"), icon: Settings2Icon },
     { to: "/api", label: t("api"), icon: KeyRoundIcon },
     { to: "/tools", label: t("tools"), icon: WrenchIcon },
@@ -1354,6 +1366,7 @@ function WorkspaceShell({
             <Route path="/resources" element={<SystemPage sdk={sdk} />} />
             <Route path="/workers" element={<WorkersPage sdk={sdk} userId={userId} />} />
             <Route path="/machines" element={<UltimateMachinesPage sdk={sdk} />} />
+            <Route path="/presets" element={<ThreadPresetsPage sdk={sdk} />} />
             <Route path="/admin/configuration" element={<SystemConfigurationPage sdk={sdk} />} />
             <Route path="/configuration" element={<ConfigurationPage sdk={sdk} />} />
             <Route path="/settings" element={<ConfigurationPage sdk={sdk} />} />
@@ -1377,6 +1390,7 @@ function pageTitle(pathname: string, t: (key: CopyKey) => string) {
   if (pathname.startsWith("/sql-performance")) return t("sqlPerformance")
   if (pathname.startsWith("/archive")) return t("history")
   if (pathname.startsWith("/machines")) return t("machines")
+  if (pathname.startsWith("/presets")) return t("presets")
   if (pathname.startsWith("/admin/users")) return t("users")
   if (pathname.startsWith("/admin/configuration")) return t("systemConfiguration")
   if (pathname.startsWith("/admin/resources") || pathname.startsWith("/system") || pathname.startsWith("/resources")) return t("systemTitle")
@@ -1441,6 +1455,20 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
   const settings = useNewThreadSettings()
   const value = settings.value
   const location = useLocation()
+  // 近路：预设页把名字带过来，就地填进设置面板。面板显示什么，发出的就是什么。
+  const activePreset = typeof location.state?.preset === "string" ? location.state.preset : null
+  const presetList = useThreadPresets({
+    queryKey: useMemo(() => ["thread-presets", sdk.session.getState().sessionId] as const, [sdk]),
+    enabled: activePreset !== null,
+  })
+  const appliedPreset = useRef<string | null>(null)
+  const applyPreset = settings.onChange
+  const presetSettings = activePreset === null ? null : presetList.presets.find((entry) => entry.name === activePreset) ?? null
+  useEffect(() => {
+    if (activePreset === null || presetSettings === null || appliedPreset.current === activePreset) return
+    appliedPreset.current = activePreset
+    applyPreset(presetList.settingsOf(presetSettings))
+  }, [activePreset, presetSettings, presetList, applyPreset])
   const request = useApiRequest(sdk)
   const composer = useComposerDraft(userId, null)
   const { input, setInput, seed, clearSubmitted } = composer
@@ -1490,6 +1518,7 @@ function NewThreadPage({ sdk, userId, filters, onFiltersChange }: ThreadListRout
         <div className="mx-auto w-full max-w-3xl">
           <div className="flex items-center gap-2"><h1 className="text-lg font-semibold tracking-tight">{t("newThread")}</h1><ConceptHelp topic="thread" language={language} /></div>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">{t("newThreadDescription")}</p>
+          {activePreset && <Badge variant="secondary" className="mt-2">{t("presetActiveLabel")} · {activePreset}</Badge>}
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 sm:py-8">
@@ -2619,8 +2648,16 @@ function MetricCard({ label, value, detail, progress }: { label: string; value: 
   return <Card><CardHeader><CardDescription>{label}</CardDescription><CardTitle className="text-2xl tabular-nums">{value}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{detail}{progress !== undefined && <Progress className="mt-3" value={Math.max(0, Math.min(100, progress))} />}</CardContent></Card>
 }
 
+function ThreadPresetsPage({ sdk }: { sdk: AuthMiniApi }) {
+  const { t, language } = useUi()
+  return <Page title={t("presets")} description={t("presetsDescription")}>
+    <ThreadPresets language={language} sessionId={sdk.session.getState().sessionId} />
+  </Page>
+}
+
 function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
   const { t, language } = useUi()
+  const navigate = useNavigate()
   // 读取、草稿、脏检查、PUT 负载全部在包里：这张卡片只负责排版和文案。
   const form = useThreadDefaultsForm({ queryKey: ["thread-defaults", sdk.session.getState().sessionId] })
   const value = form.value
@@ -2635,6 +2672,7 @@ function ThreadDefaultsCard({ sdk }: { sdk: AuthMiniApi }) {
         </FieldGroup>
         <div className="flex flex-wrap items-center gap-3">
           <Button disabled={!form.canSave}>{form.pending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{form.pending ? t("savingDefaults") : t("saveDefaults")}</Button>
+          <Button type="button" variant="outline" disabled={!value} onClick={() => navigate("/presets", { state: { presetSeed: value } })}>{t("presetSaveFromDefaults")}</Button>
           <p role="status" className="text-sm text-muted-foreground">{form.saved && t("defaultsSaved")}</p>
         </div>
       </form>}

@@ -142,6 +142,7 @@ pub(super) async fn create_for(
         state,
         user,
         CreateThreadInput {
+            preset: None,
             title: Some(machine_thread_title(&name)),
             external_ref: None,
             model: None,
