@@ -537,6 +537,98 @@ fn an_answer_falls_back_to_the_last_message_of_the_turn() {
     assert!(!clipped);
 }
 
+/// A message the runtime handed back is narration inside the turn, not a
+/// delivery: `notes_continuation` is the runtime's own durable record that the
+/// turn was not over and the Thread went on working. A Thread stopped there
+/// never delivered anything, so its parent must not be handed that message as
+/// the conclusion — that is how `01a1f9a3-1f6a-7f13-bf39-b11029e39139` reported
+/// a "round 5" of a task nobody had given it.
+#[test]
+fn an_answer_never_reports_a_message_the_runtime_handed_back() {
+    let connection = connection();
+    thread(&connection, "child", None, None);
+    wrote(
+        &connection,
+        "child",
+        "input",
+        json!({"content": "给线程预设加 use_when"}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "response_output",
+        json!({"type":"message","content":[{"type":"output_text","text":"## 第 5 轮结果：三封邮件已发出"}]}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "activity",
+        json!({"type":"notes_continuation","input_record_id":1,"nudge":1,"open":8}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "response_output",
+        json!({"type":"function_call","name":"bash","arguments":"{}"}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "tool_output",
+        json!({"type":"function_call_output","call_id":"c1"}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "activity",
+        json!({"type":"thread_control","action":"cancel"}),
+    );
+    let (text, clipped) = subthreads::answer(&connection, "child").unwrap();
+    assert!(
+        text.is_empty(),
+        "a message the runtime handed back was reported as the deliverable: {text}"
+    );
+    assert!(!clipped);
+    // The parent still learns why there is nothing to read.
+    let reason = subthreads::empty_answer(&connection, "child", "idle", false).unwrap();
+    assert_eq!(reason["kind"], "no-message");
+}
+
+/// The exclusion is exactly that record and nothing wider: a turn that ends on a
+/// tool call still delivers the message it wrote (see the fallback test above),
+/// and the newest message wins when an older one was handed back.
+#[test]
+fn a_message_written_after_the_hand_back_is_still_the_answer() {
+    let connection = connection();
+    thread(&connection, "child", None, None);
+    wrote(
+        &connection,
+        "child",
+        "input",
+        json!({"content": "给线程预设加 use_when"}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "response_output",
+        json!({"type":"message","content":[{"type":"output_text","text":"先做侦察。"}]}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "activity",
+        json!({"type":"notes_continuation","input_record_id":1,"nudge":1,"open":8}),
+    );
+    wrote(
+        &connection,
+        "child",
+        "response_output",
+        json!({"type":"message","content":[{"type":"output_text","text":"PR 已合并，worktree 已删。"}]}),
+    );
+    let (text, _) = subthreads::answer(&connection, "child").unwrap();
+    assert_eq!(text, "PR 已合并，worktree 已删。");
+}
+
 /// Some Responses-compatible gateways name a message part `text` instead of
 /// `output_text`; a message is a message either way.
 #[test]
