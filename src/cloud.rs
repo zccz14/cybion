@@ -12060,6 +12060,10 @@ mod request_tail_tests;
 mod notes_tests;
 
 #[cfg(test)]
+#[path = "cloud_thread_isolation_tests.rs"]
+mod thread_isolation_tests;
+
+#[cfg(test)]
 #[path = "cloud_objects_tests.rs"]
 mod objects_tests;
 

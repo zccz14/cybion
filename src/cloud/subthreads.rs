@@ -551,15 +551,29 @@ pub(super) fn answer(connection: &Connection, thread_id: &str) -> Result<(String
 
 /// The newest message the Thread wrote in its current turn, read from history;
 /// empty when the turn produced no message at all.
+///
+/// A message is not a delivery just because it is the newest one. When the turn
+/// still owed notes, the runtime answered that message with a
+/// `notes_continuation` hand-back and the Thread went on working: the runtime's
+/// own record says the turn was not over, so that message was narration inside
+/// it. A Thread stopped right there never delivered anything, and handing its
+/// last narration back as the conclusion tells the parent a deliverable exists
+/// when none does — that is how a child Thread reported a "round 5" of a task
+/// nobody had given it. The exclusion is exactly that record: a turn that ends
+/// on a tool call still delivers the message it wrote.
 fn last_turn_message(connection: &Connection, thread_id: &str) -> Result<String, ApiError> {
     let payload: Option<String> = connection
         .query_row(
-            "SELECT payload FROM history_records
-              WHERE thread_id=?1 AND kind='response_output' AND json_valid(payload)
-                AND json_extract(payload,'$.type')='message'
-                AND id > COALESCE((SELECT MAX(id) FROM history_records
-                                    WHERE thread_id=?1 AND kind='input'),0)
-              ORDER BY id DESC LIMIT 1",
+            "SELECT payload FROM history_records h
+              WHERE h.thread_id=?1 AND h.kind='response_output' AND json_valid(h.payload)
+                AND json_extract(h.payload,'$.type')='message'
+                AND h.id > COALESCE((SELECT MAX(id) FROM history_records
+                                      WHERE thread_id=?1 AND kind='input'),0)
+                AND NOT EXISTS (SELECT 1 FROM history_records o
+                                 WHERE o.thread_id=?1 AND o.id>h.id AND o.kind='activity'
+                                   AND json_valid(o.payload)
+                                   AND json_extract(o.payload,'$.type')='notes_continuation')
+              ORDER BY h.id DESC LIMIT 1",
             [thread_id],
             |row| row.get(0),
         )
