@@ -176,7 +176,7 @@ const MIN_WAIT_SECONDS: u64 = 1;
 // 64 repairs the databases 63 stamped without its table: 63's upgrade only
 // altered `threads` and never ran `USER_SCHEMA`, so `thread_presets` was missing
 // on every account that upgraded from 0.6.115 while fresh databases had it.
-const USER_SCHEMA_VERSION: i64 = 64;
+const USER_SCHEMA_VERSION: i64 = 65;
 const RESETTABLE_USER_SCHEMA_VERSION: i64 = 7;
 const EXPERIMENTAL_THREAD_ID_HEADER_KEY: &str = "experimental_thread_id_header";
 const EXPERIMENTAL_SESSION_ID_HEADER_KEY: &str = "experimental_session_id_header";
@@ -1764,6 +1764,10 @@ const USER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS thread_presets (
   name TEXT PRIMARY KEY,
   settings TEXT NOT NULL,
+  -- When to reach for this preset, written like a Manual's Use When: the
+  -- condition, not a description of what it holds. It is what lets a model
+  -- choose between presets instead of guessing from their names.
+  use_when TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -2261,6 +2265,9 @@ fn migrate_user_schema(connection: &mut Connection) -> Result<(), ApiError> {
     if version < 63 {
         migrate_thread_preset_name(&transaction)?;
     }
+    if version < 65 {
+        migrate_thread_preset_use_when(&transaction)?;
+    }
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS worker_calls_exe_pending ON worker_calls(created_at,id)
          WHERE status IN ('queued','delivered') OR (cancel_requested_at IS NOT NULL AND cancel_notified_at IS NULL);",
@@ -2404,6 +2411,33 @@ fn migrate_thread_parent(transaction: &rusqlite::Transaction<'_>) -> Result<(), 
 /// `USER_SCHEMA`, which this migration path executes right after. Retire this
 /// upgrade once every user database is audited at schema 63+; retain the column
 /// test.
+/// Presets gain `use_when`. `CREATE TABLE IF NOT EXISTS` cannot add a column, so
+/// an existing table needs this ALTER explicitly; the version bump to 65 is what
+/// makes a database already stamped 64 come back through here.
+fn migrate_thread_preset_use_when(transaction: &rusqlite::Transaction<'_>) -> Result<(), ApiError> {
+    // A database older than the preset table itself reaches here with no table to
+    // alter: `USER_SCHEMA` creates it, column included, right after this.
+    let table: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='thread_presets')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !table {
+        return Ok(());
+    }
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('thread_presets') WHERE name='use_when')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        transaction.execute_batch(
+            "ALTER TABLE thread_presets ADD COLUMN use_when TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    Ok(())
+}
+
 fn migrate_thread_preset_name(transaction: &rusqlite::Transaction<'_>) -> Result<(), ApiError> {
     let exists: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='preset_name')",
@@ -4191,6 +4225,72 @@ fn load_thread_preset(connection: &Connection, name: &str) -> Result<ThreadDefau
 /// Where a new Thread's settings come from: the preset it names, otherwise the
 /// account default. This is the only place that answers it, so creation cannot
 /// read one source and report another.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadPresetInput {
+    /// A new name renames the preset; the Threads that recorded the old name have
+    /// that label moved with it. Omitted keeps the name in the path.
+    #[serde(default)]
+    name: Option<String>,
+    use_when: String,
+    settings: ThreadDefaults,
+}
+
+/// The condition that says when to reach for this preset. Written like a Manual's
+/// Use When: when to look, not what it holds.
+fn thread_preset_use_when(value: &str) -> Result<String, ApiError> {
+    let text = value.trim();
+    if text.is_empty() || text.chars().count() > 500 {
+        return Err(ApiError::bad_request(
+            "use_when must be 1-500 characters: when to reach for this preset",
+        ));
+    }
+    Ok(text.to_owned())
+}
+
+/// The model-facing list: what each preset is for, with enough of its settings to
+/// choose without asking anything else.
+fn read_thread_presets_for_tool(connection: &Connection) -> Result<Value, ApiError> {
+    let presets = read_thread_presets(connection)?;
+    let mut names = std::collections::HashMap::new();
+    if !presets.is_empty() {
+        let mut statement = connection.prepare("SELECT id,name FROM manuals")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, name) = row?;
+            names.insert(id, name);
+        }
+    }
+    Ok(json!({
+        "presets": presets
+            .iter()
+            .map(|preset| json!({
+                "name": preset.name,
+                "use_when": preset.use_when,
+                "model": preset.settings.model,
+                "reasoning_effort": preset.settings.reasoning_effort,
+                "initial_manuals": preset
+                    .settings
+                    .initial_manual_ids
+                    .iter()
+                    .map(|id| names.get(id).cloned().unwrap_or_else(|| id.clone()))
+                    .collect::<Vec<_>>(),
+                "budget_usd": preset.settings.budget_usd_nanos as f64 / 1_000_000_000.0,
+                "thread_count": preset.thread_count,
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+async fn list_thread_presets_output(state: &AppState, user: &User) -> Result<Value, ApiError> {
+    user_db(state, user, false, |connection| {
+        read_thread_presets_for_tool(connection)
+    })
+    .await
+}
+
 fn settings_for_new_thread(
     connection: &Connection,
     preset: Option<&str>,
@@ -4205,13 +4305,15 @@ fn settings_for_new_thread(
 #[derive(Clone, Debug, Serialize)]
 struct ThreadPresetView {
     name: String,
+    /// When to reach for this preset. A model reads this before its settings.
+    use_when: String,
     settings: ThreadDefaults,
     thread_count: i64,
 }
 
 fn read_thread_presets(connection: &Connection) -> Result<Vec<ThreadPresetView>, ApiError> {
     let mut statement = connection.prepare(
-        "SELECT p.name,p.settings,(SELECT COUNT(*) FROM threads t WHERE t.preset_name=p.name)
+        "SELECT p.name,p.use_when,p.settings,(SELECT COUNT(*) FROM threads t WHERE t.preset_name=p.name)
            FROM thread_presets p ORDER BY p.name",
     )?;
     let rows = statement
@@ -4219,14 +4321,16 @@ fn read_thread_presets(connection: &Connection) -> Result<Vec<ThreadPresetView>,
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     rows.into_iter()
-        .map(|(name, settings, thread_count)| {
+        .map(|(name, use_when, settings, thread_count)| {
             Ok(ThreadPresetView {
                 name,
+                use_when,
                 settings: serde_json::from_str(&settings).map_err(|_| unreadable_preset())?,
                 thread_count,
             })
@@ -4249,27 +4353,67 @@ async fn update_thread_preset(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(name): AxumPath<String>,
-    Json(input): Json<ThreadDefaults>,
+    Json(input): Json<ThreadPresetInput>,
 ) -> Result<Json<ThreadPresetView>, ApiError> {
-    let name = thread_preset_name(&name)?;
-    let settings = validate_thread_defaults(input)?;
+    let current = thread_preset_name(&name)?;
+    let target = match input.name.as_deref() {
+        Some(value) => thread_preset_name(value)?,
+        None => current.clone(),
+    };
+    let use_when = thread_preset_use_when(&input.use_when)?;
+    let settings = validate_thread_defaults(input.settings)?;
     user_db(&state, &identity.user, true, move |connection| {
         if let Some(id) = settings.upstream_id.as_deref() {
             require_upstream(connection, id)?;
         }
         let encoded = serde_json::to_string(&settings).map_err(ApiError::internal)?;
-        connection.execute(
-            "INSERT INTO thread_presets(name,settings,created_at,updated_at) VALUES(?1,?2,?3,?3)
-             ON CONFLICT(name) DO UPDATE SET settings=excluded.settings,updated_at=excluded.updated_at",
-            params![&name, &encoded, now()],
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_presets WHERE name=?1)",
+            [&current],
+            |row| row.get(0),
         )?;
+        if exists {
+            let taken: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_presets WHERE name=?1 AND name<>?2)",
+                [&target, &current],
+                |row| row.get(0),
+            )?;
+            if taken {
+                return Err(ApiError::bad_request("another preset already uses this name"));
+            }
+            connection.execute(
+                "UPDATE thread_presets SET name=?2,settings=?3,use_when=?4,updated_at=?5 WHERE name=?1",
+                params![&current, &target, &encoded, &use_when, now()],
+            )?;
+        } else {
+            // Nothing to rename: creating under the name in the path is the only
+            // thing this request can mean.
+            if target != current {
+                return Err(ApiError::not_found("Thread preset not found"));
+            }
+            connection.execute(
+                "INSERT INTO thread_presets(name,settings,use_when,created_at,updated_at) VALUES(?1,?2,?3,?4,?4)",
+                params![&current, &encoded, &use_when, now()],
+            )?;
+        }
+        // A Thread keeps the name only as a label for counting and display, so a
+        // rename carries that label along: "used 12 times" must not read 0 just
+        // because the preset was renamed. Nothing else on the Thread moves — the
+        // settings it was created with are its own and stay exactly as they were.
+        if target != current {
+            connection.execute(
+                "UPDATE threads SET preset_name=?2 WHERE preset_name=?1",
+                params![&current, &target],
+            )?;
+        }
         Ok(ThreadPresetView {
             thread_count: connection.query_row(
                 "SELECT COUNT(*) FROM threads WHERE preset_name=?1",
-                [&name],
+                [&target],
                 |row| row.get(0),
             )?,
-            name,
+            name: target,
+            use_when,
             settings,
         })
     })
@@ -10918,6 +11062,7 @@ async fn controller_tool_output(
         "block_thread" => blocked::tool_output(state, user, thread_id, input).await,
         "create_thread_token" => thread_tokens::tool_output(state, thread_id, input).await,
         "create_thread" => subthreads::create_tool_output(state, user, thread_id, input).await,
+        "cybion_list_thread_presets" => list_thread_presets_output(state, user).await,
         "list_thread_tree" => subthreads::list_tool_output(state, user, thread_id, input).await,
         "wait_for_thread" => subthreads::wait_tool_output(state, user, thread_id, input).await,
         "control_thread" => subthreads::control_tool_output(state, user, thread_id, input).await,
@@ -14121,7 +14266,7 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(before["tools"].as_array().unwrap().len(), 24);
+        assert_eq!(before["tools"].as_array().unwrap().len(), 25);
         connection.execute(
             "UPDATE workers SET status='offline',last_seen_at=NULL,resource_json='changed runtime data'", [],
         ).unwrap();
@@ -14703,7 +14848,7 @@ mod tests {
     #[test]
     fn responses_tools_follow_controller_worker_and_thread_switches() {
         let tools = responses_tools(false, true, true, true, false);
-        assert_eq!(tools.as_array().unwrap().len(), 20);
+        assert_eq!(tools.as_array().unwrap().len(), 21);
         assert_eq!(tools[0]["name"], "list_manuals");
         assert_eq!(tools[1]["name"], "cybion_list_workers");
         assert_eq!(tools[2]["name"], "load_manual");
@@ -14730,21 +14875,22 @@ mod tests {
         assert_eq!(tools[13]["parameters"]["properties"], json!({}));
         assert_eq!(tools[14]["name"], "create_thread");
         assert_eq!(tools[14]["parameters"]["required"], json!(["task"]));
-        assert_eq!(tools[15]["name"], "list_thread_tree");
-        assert_eq!(tools[16]["name"], "wait_for_thread");
-        assert_eq!(tools[17]["name"], "control_thread");
-        assert_eq!(tools[18], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[19], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[15]["name"], "cybion_list_thread_presets");
+        assert_eq!(tools[16]["name"], "list_thread_tree");
+        assert_eq!(tools[17]["name"], "wait_for_thread");
+        assert_eq!(tools[18]["name"], "control_thread");
+        assert_eq!(tools[19], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[20], TOOL_CATALOG["native"]["normai_image_generation"]);
         let worker_and_native = responses_tools(true, true, true, true, false);
-        assert_eq!(worker_and_native.as_array().unwrap().len(), 24);
-        assert_eq!(worker_and_native[18]["name"], "bash");
-        assert_eq!(worker_and_native[21]["name"], "view_image");
-        assert_eq!(worker_and_native[22]["name"], "normai_web_search");
-        assert_eq!(worker_and_native[23]["name"], "normai_image_generation");
+        assert_eq!(worker_and_native.as_array().unwrap().len(), 25);
+        assert_eq!(worker_and_native[19]["name"], "bash");
+        assert_eq!(worker_and_native[22]["name"], "view_image");
+        assert_eq!(worker_and_native[23]["name"], "normai_web_search");
+        assert_eq!(worker_and_native[24]["name"], "normai_image_generation");
         let web_search_only = responses_tools(false, true, true, false, false);
-        assert_eq!(web_search_only.as_array().unwrap().len(), 19);
+        assert_eq!(web_search_only.as_array().unwrap().len(), 20);
         assert_eq!(
-            web_search_only[18],
+            web_search_only[19],
             TOOL_CATALOG["native"]["normai_web_search"]
         );
         let context_only = responses_tools(false, true, false, false, false);
@@ -14771,6 +14917,7 @@ mod tests {
                 "block_thread",
                 "compact_context",
                 "create_thread",
+                "cybion_list_thread_presets",
                 "list_thread_tree",
                 "wait_for_thread",
                 "control_thread"
@@ -14814,6 +14961,7 @@ mod tests {
                 "block_thread",
                 "compact_context",
                 "create_thread",
+                "cybion_list_thread_presets",
                 "list_thread_tree",
                 "wait_for_thread",
                 "control_thread"
@@ -15094,7 +15242,7 @@ mod tests {
         assert_eq!(request["store"], false);
         assert_eq!(request["input"], json!([{"role":"user","content":"hello"}]));
         let tools = request["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
         assert_eq!(tools[0], TOOL_CATALOG["kernel"][0]);
         assert_eq!(tools[1], TOOL_CATALOG["kernel"][1]);
         assert_eq!(tools[2], TOOL_CATALOG["kernel"][2]);
@@ -15109,11 +15257,12 @@ mod tests {
         assert_eq!(tools[13], TOOL_CATALOG["thread"][2]);
         assert_eq!(tools[14]["name"], "create_thread");
         assert_eq!(tools[14]["parameters"]["required"], json!(["task"]));
-        assert_eq!(tools[15]["name"], "list_thread_tree");
-        assert_eq!(tools[16]["name"], "wait_for_thread");
-        assert_eq!(tools[17]["name"], "control_thread");
-        assert_eq!(tools[18], TOOL_CATALOG["native"]["normai_web_search"]);
-        assert_eq!(tools[19], TOOL_CATALOG["native"]["normai_image_generation"]);
+        assert_eq!(tools[15]["name"], "cybion_list_thread_presets");
+        assert_eq!(tools[16]["name"], "list_thread_tree");
+        assert_eq!(tools[17]["name"], "wait_for_thread");
+        assert_eq!(tools[18]["name"], "control_thread");
+        assert_eq!(tools[19], TOOL_CATALOG["native"]["normai_web_search"]);
+        assert_eq!(tools[20], TOOL_CATALOG["native"]["normai_image_generation"]);
         assert_eq!(request["tool_choice"], "auto");
         let audit = user_db(&state, &user, false, |connection| {
             connection.query_row(

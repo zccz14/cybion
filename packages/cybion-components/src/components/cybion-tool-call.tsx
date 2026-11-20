@@ -5,13 +5,13 @@ import type { CybionToolFunctionCall } from "../lib/history-payload"
 
 const copy = {
   en: {
-    listManuals: "List manuals", listWorkers: "List Workers", loadManual: "Load manual", unloadManual: "Unload manual", writeManual: "Edit manual", createManual: "Create manual", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
+    listManuals: "List manuals", listPresets: "List Thread presets", listWorkers: "List Workers", loadManual: "Load manual", unloadManual: "Unload manual", writeManual: "Edit manual", createManual: "Create manual", parent: "Parent", movedToTrash: "Moved to trash", listMachines: "List Ultimate Machines",
     getMachine: "Read Ultimate Machine", updateMachine: "Update Ultimate Machine", createMachine: "Create Ultimate Machine", deleteMachine: "Delete Ultimate Machine",
     name: "Name", worker: "Worker", interval: "Interval", state: "State", enabled: "Enabled", paused: "Paused", command: "Command", intent: "Intent",
     addNotes: "Add notes", crossOutNotes: "Cross out notes", blockThread: "Block the Thread", signThreadToken: "Sign a Thread token", compactContext: "Checkpoint the context", createThread: "Subcontract a Thread", listBranch: "Read the branch", waitThread: "Wait for a child Thread", controlThread: "Steer a child Thread",
   },
   zh: {
-    listManuals: "列出手册", listWorkers: "列出 Worker", loadManual: "加载手册", unloadManual: "卸载手册", writeManual: "编辑手册", createManual: "新建手册", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
+    listManuals: "列出手册", listPresets: "列出线程预设", listWorkers: "列出 Worker", loadManual: "加载手册", unloadManual: "卸载手册", writeManual: "编辑手册", createManual: "新建手册", parent: "父级", movedToTrash: "已移入回收站", listMachines: "列出终极机器",
     getMachine: "读取终极机器", updateMachine: "更新终极机器", createMachine: "创建终极机器", deleteMachine: "删除终极机器",
     name: "名称", worker: "Worker", interval: "间隔", state: "状态", enabled: "启用", paused: "已暂停", command: "命令", intent: "意图",
     addNotes: "添加便签", crossOutNotes: "划掉便签", blockThread: "标记受阻", signThreadToken: "签发 Thread 令牌", compactContext: "压缩上下文", createThread: "分包一个线程", listBranch: "查看分支", waitThread: "等待子线程", controlThread: "指挥子线程",
@@ -41,6 +41,7 @@ export function CybionToolCall({ language, call, workers, manuals, time, childre
       case "write_manual": return call.manualId !== null ? text.writeManual : text.createManual
       case "list_manuals": return text.listManuals
       case "cybion_list_workers": return text.listWorkers
+      case "cybion_list_thread_presets": return text.listPresets
       case "cybion_list_ultimate_machines": return text.listMachines
       case "cybion_get_ultimate_machine": return text.getMachine
       case "cybion_set_ultimate_machine": return call.machineId !== null ? text.updateMachine : text.createMachine
@@ -117,6 +118,7 @@ function CybionToolDetail({ language, call, workers, manuals }: {
       return <ul className="mt-2 space-y-1 font-mono text-xs">{call.noteIds.map((id) => <li key={id}>{id}</li>)}</ul>
     case "list_manuals":
     case "cybion_list_workers":
+    case "cybion_list_thread_presets":
     case "cybion_list_ultimate_machines":
     case "block_thread":
     case "compact_context":

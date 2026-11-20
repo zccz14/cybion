@@ -563,6 +563,7 @@ const copy = {
     systemConfigurationDescription: "Administrator-only global settings for all users' upstream requests.",
     threadDefaults: "New thread defaults",
     presets: "Thread presets",
+    toolListPresets: "List Thread presets",
     presetsDescription: "A saved answer to \"how should this Thread be built\": model, endpoint, reasoning effort, the Manuals it opens with, the caps it runs under. A Thread keeps a copy of what it was given, so editing or deleting a preset never reaches a Thread that already exists.",
     presetSaveFromDefaults: "Save defaults as a preset",
     presetActiveLabel: "Preset",
@@ -883,6 +884,7 @@ const copy = {
     systemConfigurationDescription: "仅管理员可修改，影响所有用户的上游请求。",
     threadDefaults: "新线程默认设置",
     presets: "线程预设",
+    toolListPresets: "列出线程预设",
     presetsDescription: "把「这条线程该怎么配」预先存好：模型、端点、推理强度、开场要加载的手册、各项上限。线程创建时会留一份副本，所以改预设、删预设都不会影响已经存在的线程。",
     presetSaveFromDefaults: "把默认设置存为预设",
     presetActiveLabel: "预设",
@@ -2936,6 +2938,7 @@ function WorkersPage({ sdk, userId }: { sdk: AuthMiniApi; userId: string }) {
 const toolLabels: Record<string, CopyKey> = {
   list_manuals: "toolListManuals",
   cybion_list_workers: "toolListWorkers",
+  cybion_list_thread_presets: "toolListPresets",
   load_manual: "toolLoadManual",
   unload_manual: "toolUnloadManual",
   write_manual: "toolWriteManual",
