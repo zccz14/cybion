@@ -1,5 +1,7 @@
 use super::*;
 
+use std::fs::File;
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -27,6 +29,24 @@ pub(super) fn put(data_dir: &Path, bytes: &[u8]) -> Result<String, ApiError> {
         fs::rename(&temporary, &path).map_err(ApiError::internal)?;
     }
     Ok(id)
+}
+
+/// The leading bytes of a stored object, up to `limit`: enough to read a
+/// picture's header without loading a multi-megabyte screenshot into memory.
+pub(super) fn read_head(data_dir: &Path, id: &str, limit: usize) -> Result<Vec<u8>, ApiError> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::internal(format!(
+            "invalid object reference: {id}"
+        )));
+    }
+    let path = data_dir.join("objects").join(&id[..2]).join(id);
+    let mut head = Vec::with_capacity(limit);
+    File::open(&path)
+        .map_err(|error| ApiError::internal(format!("stored object {id} is unavailable: {error}")))?
+        .take(limit as u64)
+        .read_to_end(&mut head)
+        .map_err(ApiError::internal)?;
+    Ok(head)
 }
 
 pub(super) fn read(data_dir: &Path, id: &str) -> Result<Vec<u8>, ApiError> {
