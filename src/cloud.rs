@@ -240,9 +240,8 @@ struct User {
 }
 
 /// Who is calling, and what proved it. The console API accepts either a live
-/// browser session or a key minted in the console; the integration API (`/v1`)
-/// accepts only keys, and the key routes accept only a session — so a leaked key
-/// can never mint or revoke another key.
+/// browser session or a key minted in the console; the key routes accept only a
+/// session — so a leaked key can never mint or revoke another key.
 #[derive(Clone, Debug)]
 struct Caller {
     user: User,
@@ -1069,6 +1068,7 @@ fn app(state: AppState) -> Router {
         .route("/api/threads/{id}/history/loaded", get(thread_manual_loads))
         .route("/api/threads/{id}/response", get(thread_response))
         .route("/api/threads/{id}/inputs", post(thread_input))
+        .route("/api/threads/{id}/context", post(thread_context))
         .route("/api/threads/{id}/cancel", post(thread_controls::cancel))
         .route("/api/threads/{id}/branches", get(thread_branches))
         .route(
@@ -1183,15 +1183,6 @@ fn app(state: AppState) -> Router {
         .route("/api/api-keys/{id}", delete(delete_api_key))
         .route_layer(from_fn_with_state(state.clone(), browser_auth));
 
-    let external_api = Router::new()
-        .route("/v1/threads", post(external_create_thread))
-        .route("/v1/threads/{id}", get(external_read_thread))
-        .route("/v1/threads/{id}/history", get(external_thread_history))
-        .route("/v1/threads/{id}/response", get(external_thread_response))
-        .route("/v1/threads/{id}/inputs", post(external_thread_input))
-        .route("/v1/threads/{id}/context", post(external_thread_context))
-        .route_layer(from_fn_with_state(state.clone(), api_key_auth));
-
     let worker_api = Router::new()
         .route(
             "/worker/v1/users/{user_id}/workers/{worker_id}/checks/{id}/result",
@@ -1249,7 +1240,6 @@ fn app(state: AppState) -> Router {
         .route("/.well-known/jwks.json", get(thread_tokens::jwks_document))
         .merge(console_api)
         .merge(key_api)
-        .merge(external_api)
         .merge(worker_api)
         .fallback(static_asset)
         .layer(from_fn_with_state(
@@ -1420,7 +1410,8 @@ fn is_api_key(headers: &HeaderMap) -> bool {
 
 /// The console API (`/api`) accepts either credential: the Auth Mini JWT a
 /// signed-in browser carries, or a key minted in the console. Both reach the
-/// same handlers, so an integration drives exactly what the web console drives.
+/// same handlers — there is no second interface for integrations to keep in
+/// step with the console's.
 async fn console_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     let identity = if is_api_key(request.headers()) {
         api_identity(&state, request.headers()).await
@@ -5849,16 +5840,6 @@ fn load_thread_response(
 }
 
 async fn thread_response(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<Caller>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<Option<ThreadResponseView>>, ApiError> {
-    Ok(Json(
-        response_for(&state, &identity.user, thread_id(&id)?).await?,
-    ))
-}
-
-async fn external_thread_response(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
@@ -11508,77 +11489,13 @@ async fn api_identity(state: &AppState, headers: &HeaderMap) -> Result<Caller, A
     })
 }
 
-async fn api_key_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    match api_identity(&state, request.headers()).await {
-        Ok(identity) => {
-            request.extensions_mut().insert(identity);
-            next.run(request).await
-        }
-        Err(error) => error.into_response(),
-    }
-}
-
-async fn external_create_thread(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<Caller>,
-    Json(input): Json<CreateThreadInput>,
-) -> Result<Json<ThreadView>, ApiError> {
-    let key_id = identity
-        .key_id()
-        .ok_or_else(|| ApiError::unauthorized("API key is required"))?
-        .to_owned();
-    Ok(Json(
-        create_thread_for(&state, &identity.user, input, ThreadOrigin::Api { key_id }).await?,
-    ))
-}
-
-async fn external_read_thread(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<Caller>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<ThreadView>, ApiError> {
-    Ok(Json(
-        read_thread_for(&state, &identity.user, thread_id(&id)?).await?,
-    ))
-}
-
-async fn external_thread_history(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<Caller>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<Vec<HistoryRecord>>, ApiError> {
-    Ok(Json(
-        history_for(&state, &identity.user, thread_id(&id)?, 0).await?,
-    ))
-}
-
-async fn external_thread_input(
-    State(state): State<AppState>,
-    axum::Extension(identity): axum::Extension<Caller>,
-    AxumPath(id): AxumPath<String>,
-    Json(input): Json<InputRequest>,
-) -> Result<Json<RequestView>, ApiError> {
-    let id = thread_id(&id)?;
-    let mut input = input_message(input.input, input.images, input.audios)?;
-    ensure_thread_upstream(&state, &identity.user, &id).await?;
-    let thread = user_db(&state, &identity.user, false, {
-        let id = id.clone();
-        move |connection| load_thread(connection, &id)
-    })
-    .await?;
-    prepare_input_audio(&state, &identity.user, Some(&thread), None, &mut input).await?;
-    Ok(Json(
-        enqueue_request(state, identity.user, id, input).await?,
-    ))
-}
-
 /// Appends context an integration already holds — a Ticket, a room, an email
 /// thread — as a folded `activity` record. The compiler replays it as a
 /// developer message, so the model reads it as background while the UI keeps it
 /// folded. It starts no turn: the Thread begins when a real input arrives,
 /// which is why an integration creates the Thread, appends its context, and
 /// then sends the first human message.
-async fn external_thread_context(
+async fn thread_context(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<Caller>,
     AxumPath(id): AxumPath<String>,
@@ -13251,7 +13168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_created_threads_record_their_api_key_and_external_reference() {
+    async fn key_created_threads_record_their_api_key_and_external_reference() {
         let (_root, state) = test_state();
         let user = user_for_subject(&state, "provenance-user").unwrap();
         let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
@@ -13269,14 +13186,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let router = Router::new()
-            .route("/v1/threads", post(external_create_thread))
-            .route_layer(from_fn_with_state(state.clone(), api_key_auth))
+            .route("/api/threads", post(create_thread))
+            .route_layer(from_fn_with_state(state.clone(), console_auth))
             .with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let client = reqwest::Client::new();
         let created_thread: Value = client
-            .post(format!("http://{address}/v1/threads"))
+            .post(format!("http://{address}/api/threads"))
             .bearer_auth(&created.secret)
             .json(&json!({
                 "title": "Mahjong · seat 1",
@@ -13296,7 +13213,7 @@ mod tests {
         );
 
         let invalid = client
-            .post(format!("http://{address}/v1/threads"))
+            .post(format!("http://{address}/api/threads"))
             .bearer_auth(&created.secret)
             .json(&json!({ "external_ref": " " }))
             .send()
@@ -13343,7 +13260,7 @@ mod tests {
         thread_id: &str,
         content: &str,
     ) -> ApiError {
-        match external_thread_context(
+        match thread_context(
             State(state.clone()),
             api_identity(user),
             AxumPath(thread_id.to_owned()),
@@ -13366,7 +13283,7 @@ mod tests {
         let other = user_for_subject(&state, "context-other").unwrap();
         let thread = create_test_thread(&state, &user).await;
 
-        let ack = external_thread_context(
+        let ack = thread_context(
             State(state.clone()),
             api_identity(&user),
             AxumPath(thread.id.clone()),

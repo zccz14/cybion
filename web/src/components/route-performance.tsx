@@ -80,7 +80,6 @@ const copy = {
     sources: "By source",
     sourcesScope: "Device worker polling is traffic like any other, so it is counted here; the breakdown only says who asked.",
     sourceBrowser: "Browser and API keys",
-    sourceIntegration: "Integration API",
     sourceWorker: "Device workers",
   },
   zh: {
@@ -137,7 +136,6 @@ const copy = {
     sources: "按来源",
     sourcesScope: "设备 Worker 的轮询也是接口流量，因此照常计入；这里只是说明这些请求是谁发的。",
     sourceBrowser: "浏览器与 API Key",
-    sourceIntegration: "集成 API",
     sourceWorker: "设备 Worker",
   },
 } as const
@@ -409,7 +407,6 @@ function RouteRow({
 
 function sourceLabel(source: (typeof routeSources)[number], t: typeof copy.en | typeof copy.zh) {
   if (source === "worker") return t.sourceWorker
-  if (source === "integration") return t.sourceIntegration
   return t.sourceBrowser
 }
 

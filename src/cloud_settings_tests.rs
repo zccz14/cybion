@@ -766,7 +766,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     assert_eq!(new_thread.reasoning_effort, defaults.reasoning_effort);
     assert!(new_thread.service_tier_fast);
     for model in [None, Some("gpt-5.6-sol")] {
-        let thread = external_create_thread(
+        let thread = create_thread(
             State(state.clone()),
             axum::Extension(Caller {
                 user: user.clone(),

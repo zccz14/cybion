@@ -94,15 +94,14 @@ export function formatTotalDuration(micros: number, language: "en" | "zh"): stri
 }
 
 /// Where a request came from, read off the route the router matched: the
-/// device protocol, the integration API, or everything the browser and an API
-/// key talk to.
-export type RouteSource = "browser" | "integration" | "worker"
+/// device protocol, or the console API that both the browser and an API key
+/// talk to.
+export type RouteSource = "browser" | "worker"
 
-export const routeSources: RouteSource[] = ["browser", "integration", "worker"]
+export const routeSources: RouteSource[] = ["browser", "worker"]
 
 export function routeSource(route: string): RouteSource {
   if (route.startsWith("/worker/")) return "worker"
-  if (route.startsWith("/v1/")) return "integration"
   return "browser"
 }
 

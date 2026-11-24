@@ -761,16 +761,6 @@ async fn http_browser_auth_readonly_isolation_live_response_revocation_and_api_k
         .await
         .unwrap();
     let secret = key["secret"].as_str().unwrap();
-    assert_eq!(
-        client
-            .get(format!("{base}/v1/threads/{}", t.id))
-            .bearer_auth(secret)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
     // A console key now reaches the shared-thread routes too, and still reads
     // only what its own account may read: the grant is B's, not the key's.
     assert_eq!(
