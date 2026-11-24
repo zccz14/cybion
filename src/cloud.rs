@@ -134,6 +134,17 @@ const MAX_INPUT_IMAGE_CHARS: usize = 4 * 1024 * 1024;
 // A generation can condition on pictures attached to the turn's input; at most
 // this many, mirroring the hosted image endpoint's reference image cap.
 const MAX_REFERENCE_IMAGES: usize = 4;
+// The largest per-side pixel count a replayed image may have. Upstreams refuse
+// an oversize picture instead of shrinking it, and they describe the refusal
+// differently - the OpenAI-shaped ones answer "The image is too large to
+// process: its width and height must each be at most 8192 pixels", while the
+// Anthropic-shaped gateway behind another one calls the very same picture an
+// unsupported format - so one conservative limit keeps a replay acceptable on
+// every upstream.
+const REPLAY_IMAGE_MAX_EDGE_PIXELS: u32 = 8000;
+// Header bytes read from a replayed image to find its size: enough for a PNG or
+// GIF header outright, and for a JPEG that lists a thumbnail before its frame.
+const REPLAY_IMAGE_HEADER_BYTES: usize = 64 * 1024;
 const CHECKPOINT_SUMMARY_INPUT_BYTES: usize = 48 * 1024;
 // Proactive compaction keeps the replayed context under this default token
 // budget. 0 disables it; per-user defaults and per-thread overrides tune it.
@@ -7470,6 +7481,182 @@ fn materialize_media(data_dir: &Path, payload: &mut Value) -> Result<(), ApiErro
     Ok(())
 }
 
+/// Replaces every replayed image that no upstream would accept with a text
+/// note, so one oversize picture cannot fail every later request of a Thread.
+///
+/// INVARIANT: a replayed image is the picture itself, and upstreams cap a
+/// picture's sides instead of shrinking it; a full-page screenshot (2880x14792
+/// is a real one) is refused as "too large to process" by one gateway and as an
+/// unsupported format by another. The Thread cannot drop the record that holds
+/// it, so the note keeps what the model needs to know - that it looked at
+/// something, how big it was, and what to do instead - without sending bytes
+/// nobody will read. History projections keep the picture: only replay degrades.
+fn degrade_unreplayable_media(data_dir: &Path, payload: &mut Value) -> Result<(), ApiError> {
+    for key in ["content", "output"] {
+        let Some(parts) = payload.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            let Some(object) = part.as_object() else {
+                continue;
+            };
+            if object.get("type").and_then(Value::as_str) != Some("input_image") {
+                continue;
+            }
+            let media_type = object
+                .get("media_type")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let Some(prefix) = image_replay_prefix(data_dir, object)? else {
+                continue;
+            };
+            let note = match media_type.as_deref() {
+                Some(media_type) if !replayable_image_media_type(media_type) => Some(format!(
+                    "[image omitted from replay: {media_type} is not an image format an upstream accepts]"
+                )),
+                _ => match image_edges(&prefix) {
+                    Some((width, height)) if width.max(height) > REPLAY_IMAGE_MAX_EDGE_PIXELS => {
+                        Some(format!(
+                            "[image omitted from replay: {width}x{height} exceeds the {} px per-side upstream limit; shrink it and read it again if you need to see it]",
+                            REPLAY_IMAGE_MAX_EDGE_PIXELS
+                        ))
+                    }
+                    _ => None,
+                },
+            };
+            if let Some(note) = note {
+                *part = json!({ "type": "input_text", "text": note });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether an image of this media type can be replayed at all: the four
+/// formats every upstream takes inline.
+fn replayable_image_media_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    )
+}
+
+/// The leading bytes of a replayed image, enough for its header: read from the
+/// object store when the part references one, and decoded from the inline data
+/// URL otherwise (a ledger screenshot replays that way). A part with neither,
+/// or a reference that no longer resolves, yields nothing and stays as it is.
+fn image_replay_prefix(
+    data_dir: &Path,
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    if let Some(id) = object.get("image_ref").and_then(Value::as_str) {
+        return objects::read_head(data_dir, id, REPLAY_IMAGE_HEADER_BYTES).map(Some);
+    }
+    let Some(url) = object.get("image_url").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some((_, encoded)) = url.split_once(";base64,") else {
+        return Ok(None);
+    };
+    // A base64 prefix decodes only on a four-character boundary; the extra
+    // bytes the conversion allows for are the padding of the last group.
+    let head: String = encoded
+        .chars()
+        .take((REPLAY_IMAGE_HEADER_BYTES * 4 / 3) & !3)
+        .collect();
+    Ok(decode_base64(&head))
+}
+
+/// The pixel size an image header declares, for the four formats a replayed
+/// image can be. `None` means the header could not be read - a format this
+/// function does not parse, or bytes that are not the picture they claim - and
+/// such a part replays unchanged rather than being guessed at.
+fn image_edges(prefix: &[u8]) -> Option<(u32, u32)> {
+    if prefix.starts_with(b"\x89PNG\r\n\x1a\n") && prefix.get(12..16) == Some(b"IHDR".as_slice()) {
+        let width = u32::from_be_bytes(prefix.get(16..20)?.try_into().ok()?);
+        let height = u32::from_be_bytes(prefix.get(20..24)?.try_into().ok()?);
+        return Some((width, height));
+    }
+    if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
+        let width = u16::from_le_bytes(prefix.get(6..8)?.try_into().ok()?) as u32;
+        let height = u16::from_le_bytes(prefix.get(8..10)?.try_into().ok()?) as u32;
+        return Some((width, height));
+    }
+    if prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP".as_slice()) {
+        return webp_edges(prefix);
+    }
+    if prefix.starts_with(b"\xff\xd8") {
+        return jpeg_edges(prefix);
+    }
+    None
+}
+
+/// A WebP container's canvas: an extended (`VP8X`) file states it outright,
+/// and a single-frame file states it in the frame header of its one chunk.
+fn webp_edges(prefix: &[u8]) -> Option<(u32, u32)> {
+    let edge = |start: usize| -> Option<u32> {
+        Some(
+            1 + u32::from_le_bytes([
+                *prefix.get(start)?,
+                *prefix.get(start + 1)?,
+                *prefix.get(start + 2)?,
+                0,
+            ]),
+        )
+    };
+    match prefix.get(12..16)? {
+        b"VP8X" => Some((edge(24)?, edge(27)?)),
+        b"VP8 " => {
+            if prefix.get(23..26)? != b"\x9d\x01\x2a" {
+                return None;
+            }
+            let width = u16::from_le_bytes(prefix.get(26..28)?.try_into().ok()?) as u32 & 0x3fff;
+            let height = u16::from_le_bytes(prefix.get(28..30)?.try_into().ok()?) as u32 & 0x3fff;
+            Some((width, height))
+        }
+        b"VP8L" => {
+            let bits = u32::from_le_bytes(prefix.get(21..25)?.try_into().ok()?) >> 1;
+            Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        _ => None,
+    }
+}
+
+/// A JPEG's frame size, from the start-of-frame segment that states it: the
+/// segments before it are metadata of any length, so the walk skips them by
+/// their own declared sizes.
+fn jpeg_edges(prefix: &[u8]) -> Option<(u32, u32)> {
+    let mut offset = 2;
+    loop {
+        // Markers sit on byte boundaries, and padding fills them with 0xFF.
+        while *prefix.get(offset)? == 0xFF && *prefix.get(offset + 1)? == 0xFF {
+            offset += 1;
+        }
+        if *prefix.get(offset)? != 0xFF {
+            return None;
+        }
+        let marker = *prefix.get(offset + 1)?;
+        offset += 2;
+        // A marker without a segment length: a stuffed byte, or a restart or
+        // end-of-image marker, none of which states a frame size.
+        if matches!(marker, 0x00 | 0x01 | 0xD0..=0xD9) {
+            continue;
+        }
+        let length = u16::from_be_bytes(prefix.get(offset..offset + 2)?.try_into().ok()?) as usize;
+        // SOF0..SOF15 state the frame size, except DHT, JPG and DAC, which
+        // share the range without being frame headers.
+        if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let height = u16::from_be_bytes(prefix.get(offset + 3..offset + 5)?.try_into().ok()?);
+            let width = u16::from_be_bytes(prefix.get(offset + 5..offset + 7)?.try_into().ok()?);
+            return Some((width as u32, height as u32));
+        }
+        offset += length;
+        if length == 0 {
+            return None;
+        }
+    }
+}
+
 fn resolve_generated_image(data_dir: &Path, item: &mut Value) -> Result<(), ApiError> {
     let Some(object) = item.as_object_mut() else {
         return Ok(());
@@ -7596,6 +7783,7 @@ fn load_protocol_items(
         }
         audio_protocol_item(&mut item);
         materialize_media(data_dir, &mut item)?;
+        degrade_unreplayable_media(data_dir, &mut item)?;
         records.push((id, created_at, kind, item));
     }
     Ok(records)
@@ -15783,6 +15971,164 @@ mod tests {
         assert!(
             estimate < 2_000,
             "the estimate must not price the raw base64 characters: {estimate}"
+        );
+    }
+
+    /// A PNG header is all `image_edges` needs; the pixel payload never matters.
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 2, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn image_edges_reads_the_size_of_every_format_the_replay_accepts() {
+        assert_eq!(
+            image_edges(&png_header(2880, 14792)),
+            Some((2880, 14792)),
+            "a full-page screenshot states its real size"
+        );
+        // GIF states both sides little-endian straight after its signature.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&780u16.to_le_bytes());
+        gif.extend_from_slice(&1688u16.to_le_bytes());
+        assert_eq!(image_edges(&gif), Some((780, 1688)));
+        // An extended WebP writes canvas-minus-one as three bytes per side.
+        let mut webp = b"RIFF\x00\x00\x00\x00WEBPVP8X\x00\x00\x00\x00".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        let (width, height) = (2879u32, 1799u32);
+        webp.extend_from_slice(&width.to_le_bytes()[..3]);
+        webp.extend_from_slice(&height.to_le_bytes()[..3]);
+        assert_eq!(image_edges(&webp), Some((2880, 1800)));
+        // A lossless single-frame WebP packs both sides into one 32-bit field.
+        let mut lossless = b"RIFF\x00\x00\x00\x00WEBPVP8L\x00\x00\x00\x00".to_vec();
+        let packed = ((2879u32) | ((1799u32) << 14)) << 1;
+        lossless.push(b'/');
+        lossless.extend_from_slice(&packed.to_le_bytes());
+        assert_eq!(image_edges(&lossless), Some((2880, 1800)));
+        // A JPEG keeps its frame size behind any number of metadata segments.
+        let mut jpeg = b"\xff\xd8".to_vec();
+        jpeg.extend_from_slice(&[0xFF, 0xE0]);
+        jpeg.extend_from_slice(&16u16.to_be_bytes());
+        jpeg.extend_from_slice(&[0u8; 14]);
+        jpeg.extend_from_slice(&[0xFF, 0xC0]);
+        jpeg.extend_from_slice(&17u16.to_be_bytes());
+        jpeg.push(8);
+        jpeg.extend_from_slice(&14792u16.to_be_bytes());
+        jpeg.extend_from_slice(&2880u16.to_be_bytes());
+        assert_eq!(image_edges(&jpeg), Some((2880, 14792)));
+        // Bytes that are not one of the four formats are never guessed at.
+        assert_eq!(image_edges(b"not an image at all"), None);
+        assert_eq!(image_edges(b""), None);
+    }
+
+    #[tokio::test]
+    async fn an_oversize_image_replays_as_a_note_while_history_keeps_the_picture() {
+        let (_root, state) = test_state();
+        let user = user_for_subject(&state, "oversize-image-user").unwrap();
+        let thread = create_test_thread(&state, &user).await;
+        let data_dir = state.data_dir.clone();
+        let (replay, history) = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| {
+                let input = insert_record(
+                    connection,
+                    &thread_id,
+                    "input",
+                    json!({"role":"user","content":"look at the whole page"}),
+                );
+                // The picture production stored: a 2880x14792 full-page capture,
+                // refused by one upstream as too large and by another as an
+                // unsupported format, which made every later request of that
+                // Thread fail.
+                let parts = view_image_result(
+                    &data_dir,
+                    &json!({
+                        "data": encode_base64(&png_header(2880, 14792)),
+                        "media_type": "image/png",
+                    }),
+                )?;
+                let shot = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({"type":"function_call_output","call_id":"view-1","output":parts}),
+                );
+                // A picture inside the limit still replays as itself.
+                let small = view_image_result(
+                    &data_dir,
+                    &json!({
+                        "data": encode_base64(&png_header(780, 1688)),
+                        "media_type": "image/png",
+                    }),
+                )?;
+                let fine = insert_record(
+                    connection,
+                    &thread_id,
+                    "tool_output",
+                    json!({"type":"function_call_output","call_id":"view-2","output":small}),
+                );
+                let replay = compile_thread_context(connection, &data_dir, &thread_id, fine)?;
+                let output = |call_id: &str| {
+                    replay
+                        .items
+                        .iter()
+                        .find(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
+                        .map(|item| item["output"].clone())
+                        .unwrap()
+                };
+                let history = thread_history_tail(connection, &data_dir, &thread_id)?;
+                let stored = |record_id: i64| {
+                    history
+                        .records
+                        .iter()
+                        .find(|record| record.id == record_id)
+                        .map(|record| record.payload["output"].clone())
+                        .unwrap()
+                };
+                Ok((
+                    (output("view-1"), output("view-2"), input),
+                    (stored(shot), stored(fine)),
+                ))
+            }
+        })
+        .await
+        .unwrap();
+        let (oversize, small, input) = replay;
+        assert_eq!(oversize[0]["type"], "input_text");
+        let note = oversize[0]["text"].as_str().unwrap();
+        assert!(
+            note.contains("2880x14792"),
+            "the note states what was dropped: {note}"
+        );
+        assert!(note.contains("8000"), "the note states the limit: {note}");
+        assert_eq!(small[0]["type"], "input_image");
+        assert!(
+            small[0]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,"),
+            "an image within the limit replays as itself"
+        );
+        // History is a projection of what was stored, not of what replayed:
+        // the reader still sees the whole-page screenshot that was taken.
+        for output in [history.0, history.1] {
+            assert_eq!(output[0]["type"], "input_image");
+        }
+        // The estimate prices the replayed form, not the picture nobody receives.
+        let estimate = user_db(&state, &user, false, {
+            let thread_id = thread.id.clone();
+            move |connection| estimate_context_tokens(connection, &thread_id, input, input)
+        })
+        .await
+        .unwrap();
+        assert!(
+            estimate < CONTEXT_MEDIA_ESTIMATE_TOKENS * 2,
+            "one replayable picture stays the only priced media: {estimate}"
         );
     }
 
