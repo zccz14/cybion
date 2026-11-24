@@ -44,7 +44,7 @@ Two rules follow, and both are the verifier's:
 
 1. **Authorize from your own record, never from the token.** The Thread id in
    `sub` must be one *you* created — the id you stored when you called
-   `POST /v1/threads`, or the `external_ref` you gave it. A token proves identity
+   `POST /api/threads`, or the `external_ref` you gave it. A token proves identity
    only because you already know what that identity is attached to.
 2. **Check the audience you expect by construction, not by claim.** This token
    carries no `aud`: it is an identity, not a capability. Any service trusting

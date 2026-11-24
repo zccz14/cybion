@@ -59,25 +59,22 @@ test("a cumulative duration is reported at the scale it is read in", () => {
 test("a route's source is read off the prefix the router matched", () => {
   assert.equal(routeSource("/api/threads"), "browser")
   assert.equal(routeSource("/api/route-performance"), "browser")
-  assert.equal(routeSource("/v1/threads/{id}/inputs"), "integration")
+  assert.equal(routeSource("/api/threads/{id}/context"), "browser")
   assert.equal(
     routeSource("/worker/v1/users/{user_id}/workers/{worker_id}/calls"),
     "worker",
   )
   const sources = summarizeSources([
     route({ route: "/api/threads", requests: 10, total_us: 10_000 }),
-    route({ route: "/v1/threads", method: "POST", requests: 3, total_us: 300_000 }),
     route({ route: "/worker/v1/users/{user_id}/workers/{worker_id}/calls", method: "POST", requests: 90, total_us: 900_000 }),
   ])
   assert.deepEqual(sources, [
     { source: "browser", requests: 10, total_us: 10_000, routes: 1 },
-    { source: "integration", requests: 3, total_us: 300_000, routes: 1 },
     { source: "worker", requests: 90, total_us: 900_000, routes: 1 },
   ])
   // Every source is reported even when it saw nothing, so the line is stable.
   assert.deepEqual(summarizeSources([]), [
     { source: "browser", requests: 0, total_us: 0, routes: 0 },
-    { source: "integration", requests: 0, total_us: 0, routes: 0 },
     { source: "worker", requests: 0, total_us: 0, routes: 0 },
   ])
 })

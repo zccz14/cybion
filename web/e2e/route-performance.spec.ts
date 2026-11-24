@@ -25,7 +25,7 @@ const bucket = (bucket_start: number, requests: number, p95_us: number | null, s
 })
 
 // Four routes, one per corner of the page: a fast browser route, a slow one, a
-// device worker poll and an integration call.
+// device worker poll and an integration driving the console API with a key.
 const routes: Route[] = [
   {
     route: "/api/threads",
@@ -77,7 +77,7 @@ const routes: Route[] = [
     ],
   },
   {
-    route: "/v1/threads",
+    route: "/api/threads/{id}/context",
     method: "POST",
     requests: 3,
     total_us: 60_000,
@@ -209,13 +209,13 @@ test("a column header sorts the table and the arrow follows the direction", asyn
   await expect(table.getByRole("row").nth(1)).toContainText("/api/threads/{id}/inputs")
   await expect(page.getByRole("columnheader", { name: /P95/ })).toHaveAttribute("aria-sort", "descending")
   await page.getByRole("button", { name: "Sort by P95" }).click()
-  await expect(table.getByRole("row").nth(1)).toContainText("/v1/threads")
+  await expect(table.getByRole("row").nth(1)).toContainText("/api/threads/{id}/context")
   await expect(page.getByRole("columnheader", { name: /P95/ })).toHaveAttribute("aria-sort", "ascending")
   // Cumulative time sorts on its own column, not on the average.
   await page.getByRole("button", { name: "Sort by Total time" }).click()
   await expect(table.getByRole("row").nth(1)).toContainText("/api/threads/{id}/inputs")
   await page.getByRole("button", { name: "Sort by Total time" }).click()
-  await expect(table.getByRole("row").nth(1)).toContainText("/v1/threads")
+  await expect(table.getByRole("row").nth(1)).toContainText("/api/threads/{id}/context")
 })
 
 test("the window switch asks for the new range and names its bucket", async ({ page }) => {

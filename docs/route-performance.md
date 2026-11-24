@@ -104,9 +104,9 @@ consequences worth stating:
   (`/worker/v1/...`), and `eXe` devices and the browser poll too. That is real
   traffic on a real route, so it is measured like everything else — and it is
   reported rather than hidden: the totals card splits the window by source into
-  browser and API keys (`/api/...`), the integration API (`/v1/...`) and device
-  workers (`/worker/...`), so an operator can tell how much of the request count
-  is polling before drawing conclusions about a route.
+  the console API (`/api/...`, called by the browser and by API keys alike) and
+  device workers (`/worker/...`), so an operator can tell how much of the request
+  count is polling before drawing conclusions about a route.
 
 ## What the page shows
 

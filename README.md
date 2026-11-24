@@ -290,14 +290,14 @@ concepts; [First-use guidance](docs/onboarding.md) has the details.
 | Workers | Bash, Browser Control, and Computer Use on macOS, Linux, and Windows, with Android and iOS apps in early development; pairing, remote upgrades, and worker sharing. | [Onboarding](docs/worker-onboarding.md) · [Sharing](docs/worker-sharing.md) |
 | Ultimate Machines | Scheduled self-checks with automatic repair Threads; Linkit notifications when a device is offline. | [Ultimate machines](docs/machines.md) |
 | Models & tools | NormAI upstream out of the box; fallback upstreams with per-upstream model catalogs; web search, image generation, and audio transcription tools; per-thread model, reasoning effort, context budget, and speech-to-text model. | [Service overview](docs/introduction.md) · [Audio input](docs/audio-input.md) |
-| Integration API | Per-user API keys that drive the whole console API (everything but managing keys); `/v1/threads` for create, input and history; `external_ref` mapping for integrations; short-lived Thread identity tokens the Thread presents to the service that created it. | [Integration API](#integration-api) · [Thread identity](docs/thread-identity.md) |
+| Integration API | Per-user API keys that drive the whole console API (everything but managing keys), with `external_ref` mapping for integrations and short-lived Thread identity tokens the Thread presents to the service that created it. | [Integration API](#integration-api) · [Thread identity](docs/thread-identity.md) |
 | Isolation & audit | One SQLite database per user with owner-only permissions; append-only history; usage statistics; system resource monitor for the root user. | [History](docs/history.md) · [Usage](docs/usage-statistics.md) · [Boundary](docs/product-boundary.md) |
 
 ## How it fits together
 
 ```mermaid
 flowchart LR
-  B["Browser and Integration API"] <--> C["Hosted controller<br/>threads · inference · history · per-user SQLite"]
+  B["Browser and API keys"] <--> C["Hosted controller<br/>threads · inference · history · per-user SQLite"]
   C <--> U["Model upstreams<br/>NormAI, or fallback upstreams"]
   C <--> W["Workers on your devices<br/>bash · browser control · computer use"]
 ```
@@ -328,7 +328,7 @@ Linkit bot setup. Treat a key like a password for the whole account.
 
 ```sh
 export CYBION_API_KEY='cyb_<user-id>_<secret>'
-curl -X POST https://cybion.ntnl.io/v1/threads \
+curl -X POST https://cybion.ntnl.io/api/threads \
   -H "Authorization: Bearer $CYBION_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"title":"Summarize the release","model":"deepseek-flash"}'
@@ -336,34 +336,34 @@ curl -X POST https://cybion.ntnl.io/v1/threads \
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/threads` | Create a thread. |
-| `GET` | `/v1/threads/{id}` | Read thread metadata and request state. |
-| `GET` | `/v1/threads/{id}/history` | Read every durable record in index order. |
-| `POST` | `/v1/threads/{id}/inputs` | Append input and start inference. |
-| `POST` | `/v1/threads/{id}/context` | Append integration context as a folded developer message; starts no turn. |
+| `POST` | `/api/threads` | Create a thread. |
+| `GET` | `/api/threads/{id}` | Read thread metadata and request state. |
+| `GET` | `/api/threads/{id}/history` | Read every durable record in index order. |
+| `POST` | `/api/threads/{id}/inputs` | Append input and start inference. |
+| `POST` | `/api/threads/{id}/context` | Append integration context as a folded developer message; starts no turn. |
 
-`POST /v1/threads` also accepts `initial_manual_ids`, the Manuals the Thread
+`POST /api/threads` also accepts `initial_manual_ids`, the Manuals the Thread
 must hold from its very first request: every one of them is bound before the
 first input compiles. Omitted, the Thread starts with the account default from
 Configuration → Personal settings. See
 [Initial Manuals](docs/context.md#initial-manuals).
 
-`POST /v1/threads/{id}/inputs` accepts
+`POST /api/threads/{id}/inputs` accepts
 `{"input":"...","images":["data:image/png;base64,..."]}` and returns the new
 `record_idx`; `images` is optional, and each entry must be a png/jpeg/webp/gif
 base64 data URL. Poll the thread and history endpoints for the result.
 
-`POST /v1/threads/{id}/context` accepts `{"content":"..."}` and appends
+`POST /api/threads/{id}/context` accepts `{"content":"..."}` and appends
 background the integration already holds. The conversation shows it folded,
 the model reads it as a developer message, and it starts no turn — so the
 supported shape of an integration is create the Thread empty, append its
 context, then send the first human message as input:
 
 ```sh
-curl -X POST "https://cybion.ntnl.io/v1/threads/$THREAD_ID/context" \
+curl -X POST "https://cybion.ntnl.io/api/threads/$THREAD_ID/context" \
   -H "Authorization: Bearer $CYBION_API_KEY" -H 'Content-Type: application/json' \
   -d '{"content":"Ticket #12 · checkout times out · reporter CZ"}'
-curl -X POST "https://cybion.ntnl.io/v1/threads/$THREAD_ID/inputs" \
+curl -X POST "https://cybion.ntnl.io/api/threads/$THREAD_ID/inputs" \
   -H "Authorization: Bearer $CYBION_API_KEY" -H 'Content-Type: application/json' \
   -d '{"input":"The checkout page hangs after I press pay."}'
 ```
