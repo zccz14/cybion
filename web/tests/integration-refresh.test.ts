@@ -36,7 +36,9 @@ test("each upstream owns its model catalog and the model pickers group by upstre
   // The conversation's panel is the drop-in button: it fetches its own catalogs
   // through the provider, so the thread view passes none of them.
   assert.doesNotMatch(view, /catalogs=\{/)
-  assert.match(view, /<ThreadSettingsButton threadId=\{threadId\} value=\{current\}/)
+  // The button takes the owner's whole Thread, which a reader of somebody else's Thread
+  // does not have: only an owned row offers settings at all.
+  assert.match(view, /\{ownedThread && <ThreadSettingsButton threadId=\{threadId\} value=\{ownedThread\}/)
   assert.match(button, /threadSettingsPatch\(next, saved\)/)
   assert.match(fields, /<SelectGroup key=\{group\.id\}>/)
   assert.match(source, /availableModels: "Available models"/)

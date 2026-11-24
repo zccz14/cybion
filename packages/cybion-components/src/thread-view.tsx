@@ -75,7 +75,40 @@ export type CybionThreadViewProps = {
   olderPages?: ThreadHistoryWindow[]
   onOlderPage?: (threadId: string, page: ThreadHistoryWindow) => void
   onRecordsChange?: (records: HistoryRecord[]) => void
+  /** Renders a Thread the host does not own: every read comes from `source`
+   * instead of this account's own Thread store, and nothing is ever written. */
+  source?: CybionThreadSource
+  /** Overrides the stored display preference, for a reader whose own copy is
+   * local (a shared Thread cannot carry the owner's setting). */
+  minimal?: boolean
   readOnly?: boolean
+}
+
+/**
+ * What the view shows about the Thread it renders. An owned Thread is the whole
+ * `Thread`; a Thread read through a `CybionThreadSource` carries only what any
+ * reader may see, so the fields a source cannot vouch for stay optional instead
+ * of being invented.
+ */
+export type CybionThreadSummary = Pick<Thread, "id" | "title" | "status" | "display_status" | "running_summary" | "usage"> &
+  Partial<Pick<Thread, "created_by" | "external_ref" | "archived_at" | "context_tokens" | "context_budget_tokens" | "minimal_mode">>
+
+/**
+ * A Thread the viewer does not own. The source owns every read of it — the
+ * metadata, the transcript windows, the live preview — so the view keeps one
+ * code path and the host decides where permission comes from. `scope` separates
+ * cache entries by data space: the same Thread read by two viewers, or by its
+ * owner, never shares one. `accessLost` marks the failures that end the view
+ * instead of being retried.
+ */
+export type CybionThreadSource = {
+  scope: readonly unknown[]
+  read: () => Promise<CybionThreadSummary>
+  historyWindow: (before?: number) => Promise<ThreadHistoryWindow>
+  history: (after: number) => Promise<HistoryRecord[]>
+  response: () => Promise<ThreadResponseView | null>
+  accessLost?: (error: unknown) => boolean
+  onAccessLost?: () => void
 }
 
 /** Pure extraction of the pre-#697 conversation. Queries stay independent and
@@ -87,9 +120,20 @@ export function CybionThreadView(props: CybionThreadViewProps) {
   return <ThreadConversation key={`${identity}:${props.threadId}`} {...props} />
 }
 
-function ThreadConversation({ threadId, className, onTitleChange, onThreadChange, onRecordsChange, workers, manuals, loadAudio: loadAudioOverride, renderRecord, headerActions, headerLeading, headerBreadcrumb, transcriptFooter, olderPages: hostOlderPages, onOlderPage, readOnly = false }: CybionThreadViewProps) {
+function ThreadConversation({ threadId, className, onTitleChange, onThreadChange, onRecordsChange, workers, manuals, loadAudio: loadAudioOverride, renderRecord, headerActions, headerLeading, headerBreadcrumb, transcriptFooter, olderPages: hostOlderPages, onOlderPage, source, minimal: minimalOverride, readOnly = false }: CybionThreadViewProps) {
   const { client: transport, language, identity: userId, sessionId, t } = useCybion()
   const client = useQueryClient()
+  // A Thread read through a source belongs to someone else by definition, so the source
+  // and `readOnly` are one gate: nothing in the view writes while either is on.
+  const writable = !source && !readOnly
+  // A refused read ends the view: the queries are switched off, so a reader cannot keep
+  // polling a Thread it may no longer see, and in-flight pages are dropped by the effect
+  // below instead of landing in the cache. Asking to recheck turns them back on, which is
+  // how a regranted Thread comes back without a reload.
+  const [halted, setHalted] = useState(false)
+  // The refusal is latched, not read from the last error: the cache it wipes takes that
+  // error with it, and a refused Thread must keep saying so until the reader rechecks.
+  const [denied, setDenied] = useState(false)
   const cachedOlderPages = useQuery<ThreadHistoryWindow[]>({ queryKey: ["history-older", threadId, userId], initialData: [], enabled: false })
   const olderPages = hostOlderPages ?? cachedOlderPages.data
   const rememberOlderPage = (id: string, page: ThreadHistoryWindow) => {
@@ -103,35 +147,47 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
     .getQueriesData<{ items: Thread[] }>({ queryKey: ["threads", sessionId] })
     .flatMap(([, page]) => page?.items ?? [])
     .find((item) => item.id === threadId), [client, sessionId, threadId])
-  const thread = useQuery({
-    queryKey: ["thread", threadId, userId],
-    queryFn: () => transport.request<Thread>(`/api/threads/${encodeURIComponent(threadId)}`),
-    placeholderData: listedThread,
+  // One read path, two data spaces: an owned Thread comes from this account's store, a
+  // Thread read through a source comes from whoever authorized it. The source's scope is
+  // part of the key, so no cached owner content can ever be shown to a reader.
+  const thread = useQuery<Thread | CybionThreadSummary>({
+    queryKey: source ? [...source.scope, "thread", threadId] : ["thread", threadId, userId],
+    queryFn: source ? source.read : () => transport.request<Thread>(`/api/threads/${encodeURIComponent(threadId)}`),
+    placeholderData: source ? undefined : listedThread,
     refetchInterval: 1500,
-    enabled: Boolean(threadId),
+    enabled: Boolean(threadId) && !halted,
   })
-  const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => transport.request<ThreadDefaults>("/api/thread-defaults", { signal }) })
+  // A source already carries the settings a reader may see, so the account defaults are
+  // never read for it: they belong to the viewer, not to the Thread being read.
+  const defaults = useQuery({ queryKey: ["thread-defaults"], queryFn: ({ signal }) => transport.request<ThreadDefaults>("/api/thread-defaults", { signal }), enabled: !source })
   // The conversation opens on the window that starts at the most recent user input instead of
   // the whole thread; older pages load on demand, each one a whole turn that starts at the
   // previous input record, until `has_older` clears.
-  const fetchHistoryWindow = (before?: number) => transport.request<{ records: HistoryRecord[]; has_older: boolean }>(
-    `/api/threads/${encodeURIComponent(threadId)}/history/window${before === undefined ? "" : `?before=${before}`}`,
-  ).then((page) => ({ records: page.records, hasOlder: page.has_older }))
+  const fetchHistoryWindow = source
+    ? source.historyWindow
+    : (before?: number) => transport.request<{ records: HistoryRecord[]; has_older: boolean }>(
+      `/api/threads/${encodeURIComponent(threadId)}/history/window${before === undefined ? "" : `?before=${before}`}`,
+    ).then((page) => ({ records: page.records, hasOlder: page.has_older }))
+  const historyKey = source ? [...source.scope, "history", threadId] : ["history", threadId, userId]
   const history = useQuery({
-    queryKey: ["history", threadId, userId],
+    queryKey: historyKey,
     queryFn: () => pollThreadHistory(
-      client.getQueryData<ThreadHistoryWindow>(["history", threadId, userId]),
+      client.getQueryData<ThreadHistoryWindow>(historyKey),
       () => fetchHistoryWindow(),
-      (after) => transport.request<HistoryRecord[]>(`/api/threads/${encodeURIComponent(threadId)}/history?after=${after}`),
+      source ? source.history : (after) => transport.request<HistoryRecord[]>(`/api/threads/${encodeURIComponent(threadId)}/history?after=${after}`),
     ),
     refetchInterval: thread.data?.status === "running" ? 1200 : 2500,
-    enabled: Boolean(threadId),
+    // A source's transcript opens only after its own metadata read proved the reader may
+    // see this Thread, so a refused link never asks for a transcript or a live preview.
+    enabled: Boolean(threadId) && !halted && (!source || thread.data !== undefined),
   })
   const liveResponse = useQuery({
-    queryKey: ["thread-response", threadId, thread.data?.status, userId],
-    queryFn: () => transport.request<ThreadResponseView | null>(`/api/threads/${encodeURIComponent(threadId)}/response`),
+    queryKey: source
+      ? [...source.scope, "response", threadId, thread.data?.status]
+      : ["thread-response", threadId, thread.data?.status, userId],
+    queryFn: source ? source.response : () => transport.request<ThreadResponseView | null>(`/api/threads/${encodeURIComponent(threadId)}/response`),
     refetchInterval: thread.data?.status === "running" ? 750 : false,
-    enabled: Boolean(threadId),
+    enabled: Boolean(threadId) && !halted && (!source || thread.data !== undefined),
   })
   const durableRecords = useMemo(() => loadedThreadRecords(olderPages, history.data), [olderPages, history.data])
   const records = useMemo(() => [
@@ -243,20 +299,58 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   // only be reached one render later — React then throws #310 ("Rendered more hooks
   // than during the previous render") and the column dies instead of opening.
   const inFlightCalls = useMemo(() => inFlightCallIds(running ? durableRecords : []), [durableRecords, running])
+  // An owned Thread is the controller's whole record; a source hands over a summary. Only the
+  // owner's row is mirrored back to the host — a reader must not hand somebody else's Thread to
+  // the chrome that renders this account's own.
+  const ownedThread = source === undefined ? thread.data as Thread | undefined : undefined
   useEffect(() => {
-    if (!thread.data) return
-    onThreadChange?.(thread.data)
-    onTitleChange?.(thread.data.title)
-  }, [thread.data, onThreadChange, onTitleChange])
+    if (!ownedThread) return
+    onThreadChange?.(ownedThread)
+    onTitleChange?.(ownedThread.title)
+  }, [ownedThread, onThreadChange, onTitleChange])
   useEffect(() => { onRecordsChange?.(records) }, [records, onRecordsChange])
+  // A source's data space, named once: its scope separates cache entries by viewer, owner
+  // and grant cycle, and both effects below work on exactly that scope.
+  const scope = source?.scope
+  const scopeKey = JSON.stringify(scope ?? null)
+  useEffect(() => {
+    if (scope === undefined) return
+    // The reader keeps no copy after it closes: switching account, switching Thread or
+    // leaving the reader drops this data space instead of leaving it cached.
+    return () => {
+      void client.cancelQueries({ queryKey: [...scope] })
+      client.removeQueries({ queryKey: [...scope] })
+    }
+  }, [scope, scopeKey, client])
+  const failed = thread.error
+  const accessLost = source?.accessLost
+  const onAccessLost = source?.onAccessLost
+  useEffect(() => {
+    if (accessLost === undefined || scope === undefined || !accessLost(failed)) return
+    setDenied(true)
+    setHalted(true)
+    // Abort first, then drop the scope whole: a late page cannot repopulate what was just
+    // removed, and the reader keeps no copy of a Thread it may no longer read.
+    void client.cancelQueries({ queryKey: [...scope] })
+    client.removeQueries({ queryKey: [...scope] })
+    onAccessLost?.()
+  }, [failed, accessLost, onAccessLost, scope, scopeKey, client])
   // Only this column settles into a placeholder; the Thread List is a sibling that already
   // rendered, so opening a Thread never blanks the layout around it.
   if (thread.isLoading) return <ThreadPending headerLeading={headerLeading} className={className} />
+  // Rechecking restarts the switched-off reads instead of refetching one of them: the
+  // source answers with whatever permission exists now, and the card stays put until then.
+  if (denied) return <ThreadDenied language={language} headerLeading={headerLeading} className={className} onRetry={() => { setDenied(false); setHalted(false) }} />
   if (thread.isError || !thread.data) return <ThreadUnavailable error={thread.error} headerLeading={headerLeading} className={className} onRetry={() => void thread.refetch()} />
   const current = thread.data
+  // A Thread states its own budget or follows the owner's default; a summary from a source
+  // may state neither, and inventing the reader's default would misreport the Thread.
   const contextBudget = current.context_budget_tokens ?? defaults.data?.context_budget_tokens
-  const minimal = current.minimal_mode ?? defaults.data?.minimal_mode ?? false
-  const archived = current.archived_at !== null
+  const contextTokens = current.context_tokens ?? null
+  const minimal = minimalOverride ?? current.minimal_mode ?? defaults.data?.minimal_mode ?? false
+  // A summary carries `archived_at` only when its owner's Thread is archived; absent
+  // means "not stated", which must not render as archived.
+  const archived = (current.archived_at ?? null) !== null
   const busy = submit.isPending || control.isPending
   // Attachments ride inside the message text, so what the Controller receives is
   // composed here; an input the Controller would refuse is flagged instead of sent.
@@ -283,7 +377,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
   return <section className={threadRootClass(className)}>
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
       {headerLeading}
-      {editing && !readOnly ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
+      {editing && writable ? <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (title.trim()) rename.mutate(title.trim()) }}>
         <Input aria-label={t("threadName")} value={title} onChange={(event) => setTitle(event.target.value)} disabled={generateTitle.isPending} />
         <Button size="sm" disabled={rename.isPending || generateTitle.isPending}>{rename.isPending ? <Spinner /> : <CheckIcon data-icon="inline-start" />}{t("rename")}</Button>
       </form> : <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -292,12 +386,12 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
           <h1 className="min-w-0 truncate text-base font-semibold">{current.title}</h1>
           {archived && <Badge variant="outline" className="shrink-0 text-muted-foreground">{t("archived")}</Badge>}
           {current.created_by === "api" && <Badge variant="outline" className="shrink-0 text-muted-foreground" title={current.external_ref ? `${t("apiOriginHint")} · ${current.external_ref}` : t("apiOriginHint")}>{t("apiOrigin")}</Badge>}
-          {!readOnly && <><Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
+          {writable && <><Button type="button" size="icon-sm" variant="outline" aria-label={t("generateTitle")} title={t("generateTitle")} disabled={generateTitle.isPending || !hasHistory} onClick={() => generateTitle.mutate()}>{generateTitle.isPending ? <Spinner /> : <SparklesIcon className="size-4" />}</Button>
           <Button type="button" size="icon-sm" variant="ghost" aria-label={t("rename")} title={t("rename")} onClick={() => setEditing(true)}><PencilIcon className="size-4" /></Button></>}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
           <ThreadStatusSummary status={current.display_status} runningSummary={current.running_summary} language={language} />
-          {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: current.context_tokens, budget: contextBudget }} language={language} />}
+          {contextBudget !== undefined && <ThreadContextUsage context={{ tokens: contextTokens, budget: contextBudget }} language={language} />}
         </div>
       </div>}
       {headerActions}
@@ -322,7 +416,7 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
           <MessageScrollerContent spacerClassName="hidden" className="mx-auto w-full max-w-4xl px-4 py-5 sm:px-6">
             {history.isLoading && <div className="flex flex-col gap-3"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>}
             {history.error && <RequestError error={history.error} onRetry={() => void history.refetch()} />}
-            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => renderRecord ? renderRecord(record, { inFlight: recordInFlight(record, inFlightCalls) }) : <HistoryMessage language={language} record={record} workers={workers} manuals={manuals} inFlight={recordInFlight(record, inFlightCalls)} loadAudio={loadAudio} onRaiseBudget={!readOnly && record.id === actionableBudgetRecordId && !running ? (addedUsdNanos: number) => raiseBudget.mutate(addedUsdNanos) : undefined} raisingBudget={raiseBudget.isPending} />} />
+            <ThreadHistory records={records} language={language} minimal={minimal} running={running} renderRecord={(record) => renderRecord ? renderRecord(record, { inFlight: recordInFlight(record, inFlightCalls) }) : <HistoryMessage language={language} record={record} workers={workers} manuals={manuals} inFlight={recordInFlight(record, inFlightCalls)} loadAudio={loadAudio} onRaiseBudget={writable && record.id === actionableBudgetRecordId && !running ? (addedUsdNanos: number) => raiseBudget.mutate(addedUsdNanos) : undefined} raisingBudget={raiseBudget.isPending} />} />
             {!history.isLoading && !history.error && durableRecords.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">{t("noHistory")}</div>}
             {liveResponse.data && <SafetyBufferingAlert language={language} view={liveResponse.data} running={current.status === "running"} />}
             {running && <MessageScrollerItem><div role="status"><ThreadStatusBadge status={current.display_status} runningSummary={current.running_summary} language={language} /></div></MessageScrollerItem>}
@@ -332,12 +426,12 @@ function ThreadConversation({ threadId, className, onTitleChange, onThreadChange
         <MessageScrollerButton behavior="auto" />
       </MessageScroller>
     </MessageScrollerProvider>
-    {!readOnly && <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submitInput() }}>
+    {writable && <form className="shrink-0 border-t bg-background p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); submitInput() }}>
       <FieldGroup><Field><FieldLabel className="sr-only" htmlFor="thread-input">{t("input")}</FieldLabel><Textarea id="thread-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t("input")} onKeyDown={handleChatInputKeyDown} onPaste={attachments.paste} disabled={busy} /><ComposerAttachments language={language} images={attachments.images} audios={audio.audios} files={files.files} onRemove={attachments.remove} onRemoveAudio={audio.remove} onRemoveFile={files.remove} /><ComposerFileNotice language={language} skipped={files.skipped} />{oversize && <ComposerLengthNotice language={language} chars={composed.length} limit={maxInputChars} />}<ComposerDraftNotice language={language} storageError={composer.storageError} /><ComposerAudioNotice language={language} error={audio.error} onDismiss={audio.dismissError} restored={audio.restored} onDismissRestored={audio.dismissRestored} onRetry={() => submitInput()} /></Field>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <ComposerAttach language={language} disabled={busy} onFiles={attach} />
-            <ThreadSettingsButton threadId={threadId} value={current} disabled={busy} />
+            {ownedThread && <ThreadSettingsButton threadId={threadId} value={ownedThread} disabled={busy} />}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" disabled={running || busy || !hasHistory} title={t("compactThreadHint")} onClick={() => control.mutate("compact")}>{control.isPending && control.variables === "compact" ? <Spinner data-icon="inline-start" /> : <Minimize2Icon data-icon="inline-start" />}{t("compactThread")}</Button>
@@ -360,6 +454,17 @@ function ThreadPending({ headerLeading, className }: { headerLeading?: ReactNode
       <Skeleton className="h-5 w-56" />
     </div>
     <div className="flex flex-col gap-3 px-4 py-5"><Skeleton className="h-18" /><Skeleton className="ml-auto h-18 w-4/5" /></div>
+  </section>
+}
+
+// Access was revoked or the Thread was deleted: the answer the reader gets offers a
+// recheck instead of a retry, because retrying a dead grant only repeats the refusal.
+function ThreadDenied({ language, headerLeading, className, onRetry }: { language: Language; headerLeading?: ReactNode; className?: string; onRetry: () => void }) {
+  return <section className={threadRootClass(className)}>
+    <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
+      {headerLeading}
+    </div>
+    <div className="p-4"><Alert><AlertTitle>{language === "zh" ? "这个线程无法访问" : "This Thread is unavailable"}</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-2"><span>{language === "zh" ? "授权可能已撤销，或线程已被删除。已经复制的内容无法收回。" : "Access may have been revoked or the Thread deleted. Previously copied content cannot be recalled."}</span><Button size="sm" variant="outline" onClick={onRetry}>{language === "zh" ? "重新检查权限" : "Check access again"}</Button></AlertDescription></Alert></div>
   </section>
 }
 

@@ -198,10 +198,14 @@ return HTTP 400.
 
 The web UI drives these parameters through one shared control bar: a search
 box (300 ms debounce) plus single-select view chips — All / Web / API /
-Running / Failed / Archived. Web (the existing `view=mine` URL) maps to
-`origin=web` and opens by default; API maps to `origin=api`, Running to
-`status=running`, Failed to `status=failed`, and Archived to
-`archived=true`; search combines with the selected view. The selection lives
+Running / Failed / Blocked / Archived / Shared with me. Web (the existing
+`view=mine` URL) maps to `origin=web` and opens by default; API maps to
+`origin=api`, Running to `status=running`, Failed to `status=failed`, Blocked to
+`blocked=true`, and Archived to `archived=true`; search combines with the
+selected view. Shared with me is the one chip that does not read `/api/threads`
+at all: it pages `/api/shared-threads` and renders the same rows with the owner
+named on them, so Thread sharing is a category of this list rather than a
+separate screen (see [Thread sharing](thread-sharing.md)). The selection lives
 in the page URL (for example `#/threads?view=api&q=room`), so a thread list
 link is shareable, a reload keeps the selection, and back/forward step through
 filter changes. The default view omits `view`, and `q` stores the raw search

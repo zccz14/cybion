@@ -189,3 +189,33 @@ test("rows show how long ago each thread was last updated, and stay fresh while 
   await page.getByRole("button", { name: "Language", exact: true }).click()
   await expect(row(/Mobile thread list search/).getByText("7m ago", { exact: true })).toBeVisible()
 })
+
+test("sharing is a category of the list: it names the owner and hiding is a local toggle", async ({ page }) => {
+  await page.goto("/e2e/thread-list.html")
+  // Owned rows and shared rows never mix: the category is the only way in.
+  await expect(page.getByRole("link", { name: /Owner's private task/ })).toHaveCount(0)
+  await page.getByRole("button", { name: "分享给我" }).click()
+  await expect(page).toHaveURL(/view=shared/)
+  await expect(page.getByRole("button", { name: "分享给我" })).toHaveAttribute("aria-pressed", "true")
+  const row = page.getByRole("link", { name: /Owner's private task/ })
+  await expect(row).toHaveCount(1)
+  // The row says whose Thread it is, so a reader never mistakes it for their own.
+  await expect(row).toContainText("user-1")
+  // Hiding is one recipient's own choice: the row leaves this list and the toggle
+  // brings it back, without a category of its own.
+  await page.getByRole("button", { name: "从我的列表隐藏" }).click()
+  await expect(page.getByTestId("toggled")).toHaveText("owner-task")
+  await expect(page.getByRole("link", { name: /Owner's private task/ })).toHaveCount(0)
+  await expect(page.getByText("还没有人把 Thread 分享给你。")).toBeVisible()
+  const hidden = page.getByRole("button", { name: /已隐藏的分享|未隐藏的分享/ })
+  await hidden.click()
+  await expect(page).toHaveURL(/hidden=1/)
+  await expect(page.getByRole("link", { name: /Owner's private task/ })).toBeVisible()
+  await expect(page.getByText("没有隐藏的分享。")).toHaveCount(0)
+  await page.getByRole("button", { name: "恢复" }).click()
+  await expect(page.getByRole("link", { name: /Owner's private task/ })).toHaveCount(0)
+  await expect(page.getByText("没有隐藏的分享。")).toBeVisible()
+  // Leaving the category clears the hidden flag: it only narrows the shared list.
+  await page.getByRole("button", { name: "网页创建" }).click()
+  await expect(page).not.toHaveURL(/hidden=/)
+})

@@ -41,25 +41,41 @@ test("granted people render through the package-owned Linkit user info instead o
   assert.doesNotMatch(source, /<code className="min-w-0 basis-full/)
 })
 
-test("shared Thread lists and readers name the owner through Linkit and never print the viewer's own ID", () => {
-  const shared = readFileSync(new URL("../src/components/shared-threads.tsx", import.meta.url), "utf8")
-  assert.match(shared, /import \{ LinkitUserInfo \} from "linkit-react-components"/)
-  assert.equal(shared.match(/<LinkitUserInfo userId=\{(?:item|thread)\.owner_user_id\} compact \/>/g)?.length, 2)
-  assert.doesNotMatch(shared, /SharingUserId/)
-  assert.doesNotMatch(shared, /\{t\.owner\}: \{/)
+test("the shared category and its reader name the owner through Linkit and never print the viewer's own ID", () => {
+  // Sharing has no list of its own any more: one row of the Thread list carries the
+  // owner, and the reader's header carries the same identity.
+  const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
+  const reader = readFileSync(new URL("../src/components/shared-threads.tsx", import.meta.url), "utf8")
+  assert.match(list, /import \{ LinkitUserInfo \} from "linkit-react-components"/)
+  assert.match(list, /badge: <LinkitUserInfo userId=\{item\.owner_user_id\} compact \/>/)
+  assert.match(reader, /import \{ LinkitUserInfo \} from "linkit-react-components"/)
+  assert.match(reader, /<LinkitUserInfo userId=\{ownerId\} compact \/>/)
+  for (const source of [list, reader]) assert.doesNotMatch(source, /SharingUserId/)
+  assert.doesNotMatch(reader, /\{t\.owner\}: \{/)
   const sharing = readFileSync(new URL("../src/components/thread-sharing.tsx", import.meta.url), "utf8")
   assert.doesNotMatch(sharing, /SharingUserId|My user ID|我的用户 ID/)
 })
-
-test("production integration keeps the shared reader separate from owner execution and configuration", () => {
+test("the shared reader is the one conversation view over a read-only source, never an owner session", () => {
   const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
-  const shared = readFileSync(new URL("../src/components/shared-threads.tsx", import.meta.url), "utf8")
+  const reader = readFileSync(new URL("../src/components/shared-threads.tsx", import.meta.url), "utf8")
+  const view = readFileSync(new URL("../../packages/cybion-components/src/thread-view.tsx", import.meta.url), "utf8")
   assert.match(main, /<ThreadSharingButton userId=\{userId\}/)
   assert.match(main, /path="\/shared-threads\/:ownerId\/:threadId"/)
-  assert.match(main, /sharedThreadReturnHash\(location.hash\)/)
-  assert.match(main, /HistoryMessage language=\{language\} record=\{record\} workers=\{undefined\}/)
-  for (const forbidden of ["/inputs", "/cancel", "/continue", "/compact", "/api/workers", "thread-defaults", "upstream-models", "ThreadSettingsPopover", "useComposerDraft", "localStorage"]) assert.ok(!shared.includes(forbidden), forbidden)
-  assert.match(shared, /signal/)
-  assert.match(shared, /cancelQueries/)
-  assert.match(shared, /removeQueries/)
+  // A share is its own list category; the standalone page only redirects to it.
+  assert.match(main, /path="\/shared-threads" element=\{<Navigate to=\{\{ pathname: "\/threads", search: "\?view=shared" \}\}/)
+  assert.match(main, /sharedThreadReturnHash\(location\.hash\)/)
+  // The reader renders the package's view with a source and `readOnly`, so there is one
+  // transcript renderer and one scroller rather than a second, thinner copy.
+  assert.match(reader, /<CybionThreadView/)
+  assert.match(reader, /source=\{source\}/)
+  assert.match(reader, /readOnly/)
+  assert.doesNotMatch(reader, /HistoryMessage/)
+  // Nothing in the reader can reach owner execution or owner configuration.
+  for (const forbidden of ["/inputs", "/cancel", "/continue", "/compact", "/api/workers", "thread-defaults", "upstream-models", "ThreadSettingsPopover", "useComposerDraft", "localStorage"]) assert.ok(!reader.includes(forbidden), forbidden)
+  // Losing access drops the whole scope instead of retrying it.
+  assert.match(reader, /accessLost: sharingAccessLost/)
+  assert.match(reader, /cancelQueries/)
+  assert.match(reader, /removeQueries/)
+  // And the view itself refuses to write while a source is in play.
+  assert.match(view, /const writable = !source && !readOnly/)
 })

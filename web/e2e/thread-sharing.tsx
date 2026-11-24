@@ -2,33 +2,32 @@ import { StrictMode, useCallback, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { HashRouter, Route, Routes, useParams } from "react-router-dom"
-import { SharedThreadPage, SharedThreadsPage } from "../src/components/shared-threads"
+import { SharedThreadPage } from "../src/components/shared-threads"
 import { ThreadSharingButton } from "../src/components/thread-sharing"
 import { TooltipProvider } from "../src/components/ui/tooltip"
 
-import { Markdown } from "@zccz14/ux"
-
-import { historyPayloadText } from "@zccz14/cybion-components/internal"
-import { screenshotImageSource, viewedImageSource } from "@zccz14/cybion-components/internal"
-import type { HistoryRecord } from "@zccz14/cybion-components"
 import type { SharingRequest } from "../src/lib/thread-sharing"
 import { adoptLinkitFixtureSession, LinkitFixtureProviders } from "./linkit-fixture"
 import "../src/styles.css"
 import "linkit-react-components/styles.css"
-import { ScreenshotOutput, UserInputMessage, ViewedOutput } from "@zccz14/cybion-components/internal"
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 Object.assign(window, { sharingFixtureCache: () => client.getQueryCache().getAll().map((q) => ({ key: q.queryKey, data: q.state.data })) })
+// The reader is the app's own: the package view over a read-only source. The fixture only
+// supplies the transport, the token and the object lookup, exactly as main.tsx does.
 function Reader({ language, sessionId, userId, request }: { language: "en" | "zh"; sessionId: string; userId: string; request: SharingRequest }) {
   const { ownerId = "", threadId = "" } = useParams()
-  const record = (r: HistoryRecord) => {
-    if (r.kind === "input") return <UserInputMessage language={language} payload={r.payload} />
-    const viewed = viewedImageSource(r.payload)
-    if (viewed !== null) return <ViewedOutput language={language} source={viewed} />
-    const shot = r.screenshot ? screenshotImageSource(r.payload) : null
-    if (shot) return <ScreenshotOutput language={language} source={shot} />
-    return <div data-record-id={r.id}><Markdown content={historyPayloadText(r.payload)} /></div>
-  }
-  return <SharedThreadPage language={language} sessionId={sessionId} userId={userId} request={request} ownerId={ownerId} threadId={threadId} renderRecord={record} />
+  return <SharedThreadPage
+    language={language}
+    sessionId={sessionId}
+    userId={userId}
+    ownerId={ownerId}
+    threadId={threadId}
+    baseUrl={window.location.origin}
+    getToken={() => "fixture-token"}
+    request={request}
+    loadAudio={async () => "about:blank"}
+    queryClient={client}
+  />
 }
 function Fixture() {
   const [language, setLanguage] = useState<"en" | "zh">("en")
@@ -41,7 +40,6 @@ function Fixture() {
   }, [sessionId])
   return <><header className="flex h-14 items-center gap-4 border-b"><button onClick={() => setLanguage(language === "en" ? "zh" : "en")}>Language</button><button onClick={() => setSession(sessionId === "session-1" ? "session-2" : "session-1")}>Switch account</button><button onClick={() => document.documentElement.classList.toggle("dark")}>Theme</button></header><LinkitFixtureProviders lang={language === "zh" ? "zh-CN" : "en-US"}><Routes>
     <Route path="/owner" element={<div className="p-4"><ThreadSharingButton language={language} sessionId={sessionId} userId={userId} threadId="00000000-0000-4000-8000-000000000001" request={request} /></div>} />
-    <Route path="/shared-threads" element={<SharedThreadsPage language={language} sessionId={sessionId} userId={userId} request={request} />} />
     <Route path="/shared-threads/:ownerId/:threadId" element={<Reader language={language} sessionId={sessionId} userId={userId} request={request} />} />
   </Routes></LinkitFixtureProviders></>
 }

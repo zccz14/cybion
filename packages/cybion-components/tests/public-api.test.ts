@@ -45,7 +45,8 @@ describe("the published surface", () => {
   it("carries only the types those components and hooks take or return", () => {
     expect(types).toEqual([
       "AudioTranscriptionFunctionCall", "ComposerFile", "CybionLink", "CybionLinkProps",
-      "CybionThreadProviderProps", "CybionThreadViewProps", "HistoryRecord", "Language",
+      "CybionThreadProviderProps", "CybionThreadSource", "CybionThreadSummary", "CybionThreadViewProps",
+      "HistoryRecord", "Language",
       "ManualSummary", "NewThreadSettings", "ReasoningEffort", "SkippedFile", "SkippedFileReason",
       "Thread", "ThreadDefaults", "ThreadDefaultsForm", "ThreadDisplayStatus", "ThreadHistoryWindow",
       "ThreadManualLoadsView", "ThreadResponseView", "ThreadSettings", "ThreadSettingsPanel",

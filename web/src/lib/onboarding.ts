@@ -27,7 +27,7 @@ const en = {
   planExample: "Turn an idea into a plan", planPrompt: "Help me turn the following idea into an actionable plan:\n\n",
   rewriteExample: "Improve a piece of writing", rewritePrompt: "Rewrite the following text to make it clearer:\n\n",
 
-  chatQuestion: "Where is the chat box?", chatAnswer: "Open My conversations and choose New conversation. A confirmed empty workspace opens the composer directly, including on a phone.",
+  chatQuestion: "Where is the chat box?", chatAnswer: "Open Threads and choose New conversation. A confirmed empty workspace opens the composer directly, including on a phone.",
   libraryQuestion: "Where is the library?", libraryAnswer: "Cybion does not host a separate original-material library. Your material stays on devices or network sources. Manuals is where you describe your material sources.",
   budgetQuestion: "Is the context budget the same as Manuals?", budgetAnswer: "No. Manuals record where your material lives and how to read it. The context budget controls how much conversation information the model replays before automatic compaction; it is not a storage quota for your manuals.",
   modelQuestion: "What if a message fails?", modelAnswer: "Read the error first. For model connection, authorization or quota errors, check Personal settings and the selected provider. Installing a Worker does not fix model-service errors. For device tasks, check the specific device's connection and permissions.",
@@ -55,7 +55,7 @@ const zh: Record<keyof typeof en, string> = {
   planExample: "把想法整理成计划", planPrompt: "帮我把下面的想法整理成可执行的计划：\n\n",
   rewriteExample: "让表达更清楚", rewritePrompt: "帮我改写下面这段文字，让表达更清楚：\n\n",
 
-  chatQuestion: "对话框在哪里？", chatAnswer: "打开「我的对话」，点击「新建对话」。确认没有任何对话的工作区会直接显示输入框，手机也一样。",
+  chatQuestion: "对话框在哪里？", chatAnswer: "打开「对话线程」，点击「新建对话」。确认没有任何对话的工作区会直接显示输入框，手机也一样。",
   libraryQuestion: "资料库在哪里？", libraryAnswer: "Cybion 不托管独立的原始资料库。资料保存在设备或网络来源中；「手册」用于记录资料在哪里。",
   budgetQuestion: "上下文窗口限制和这里的手册是一回事吗？", budgetAnswer: "不是。这里的手册记录资料在哪里、怎样获取；上下文窗口限制约束模型重放的对话信息量，超过后可自动压缩，并不是手册的存储空间配额。",
   modelQuestion: "发送失败怎么办？", modelAnswer: "先查看错误信息。模型连接、授权或额度有问题时，检查「个人配置」和所选模型提供方；安装 Worker 不能解决模型服务错误。设备任务失败时，检查对应设备的连接和权限。",

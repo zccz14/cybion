@@ -61,7 +61,6 @@ import {
   SendIcon,
   Settings2Icon,
   SettingsIcon,
-  Share2Icon,
   TerminalSquareIcon,
   Trash2Icon,
   WrenchIcon,
@@ -106,7 +105,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { ErrorBoundary, ErrorBoundaryFallback } from "@/components/error-boundary"
 import { ThreadSharingButton } from "@/components/thread-sharing"
 import { ThreadPresets } from "@/components/thread-presets"
-import { SharedThreadPage, SharedThreadsPage } from "@/components/shared-threads"
+import { SharedThreadPage } from "@/components/shared-threads"
 import { InsightsView } from "@/components/insights"
 import { sharedThreadReturnHash } from "@/lib/thread-sharing"
 import { RoutePerformance } from "@/components/route-performance"
@@ -430,6 +429,7 @@ const copy = {
     recordHidden: "Internal",
     recordPayload: "View raw payload",
     navWork: "Work",
+    threadsLabel: "Threads",
     navContexts: "Context",
     manuals: "Manual",
     manualsTitle: "Manual",
@@ -751,6 +751,7 @@ const copy = {
     recordHidden: "内部记录",
     recordPayload: "查看原始负载",
     navWork: "工作",
+    threadsLabel: "对话线程",
     navContexts: "上下文",
     manuals: "手册",
     manualsTitle: "手册",
@@ -1279,10 +1280,12 @@ function WorkspaceShell({
   const { language, t } = useUi()
   const location = useLocation()
   const navigate = useNavigate()
-  const routeTitle = location.pathname.startsWith("/shared-threads") ? (language === "zh" ? "分享给我" : "Shared with me") : pageTitle(location.pathname, t)
+  const routeTitle = pageTitle(location.pathname, t)
+  // Work is the whole working surface: the Thread list (which carries its own
+  // categories, sharing included), what a Thread can be made of, and the devices.
   const workNav = [
-    { to: "/threads", label: language === "zh" ? "我的对话" : "My conversations", icon: MessagesSquareIcon },
-    { to: "/shared-threads", label: language === "zh" ? "分享给我" : "Shared with me", icon: Share2Icon },
+    { to: "/threads", label: t("threadsLabel"), icon: MessagesSquareIcon },
+    { to: "/presets", label: t("presets"), icon: LayersIcon },
     { to: "/workers", label: t("workers"), icon: MonitorIcon },
     { to: "/machines", label: t("machines"), icon: PowerIcon },
   ]
@@ -1310,7 +1313,6 @@ function WorkspaceShell({
     ]
     : []
   const configurationNav = [
-    { to: "/presets", label: t("presets"), icon: LayersIcon },
     { to: "/configuration", label: t("configuration"), icon: Settings2Icon },
     { to: "/api", label: t("api"), icon: KeyRoundIcon },
     { to: "/tools", label: t("tools"), icon: WrenchIcon },
@@ -1352,7 +1354,9 @@ function WorkspaceShell({
             <Route path="/threads" element={<ThreadsHomePage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
             <Route path="/threads/new" element={<NewThreadPage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
             <Route path="/threads/:threadId" element={<ThreadConversationPage sdk={sdk} userId={userId} filters={filters} onFiltersChange={onFiltersChange} />} />
-            <Route path="/shared-threads" element={<SharedThreadsPage language={language} userId={userId} sessionId={sdk.session.getState().sessionId} request={(path, init) => api(sdk, path, init)} />} />
+            {/* Sharing has no page of its own any more: the list's shared category is
+                the same list, and an old link to it lands on that category. */}
+            <Route path="/shared-threads" element={<Navigate to={{ pathname: "/threads", search: "?view=shared" }} replace />} />
             <Route path="/shared-threads/:ownerId/:threadId" element={<SharedThreadRoute sdk={sdk} userId={userId} />} />
             <Route path="/notes" element={<NotesPage sdk={sdk} />} />
             <Route path="/manuals" element={<ManualsPage sdk={sdk} />} />
@@ -1685,7 +1689,7 @@ function SharedThreadRoute({ sdk, userId }: { sdk: AuthMiniApi; userId: string }
   const request = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(sdk, path, init), [sdk])
   const loadAudio = useCallback((reference: string, mediaType: string | null) => audioObjectUrl(sdk, reference, mediaType), [sdk])
   if (ownerId === userId) return <Navigate to={`/threads/${encodeURIComponent(threadId)}`} replace />
-  return <CybionThreadProvider queryClient={client} sessionId={sdk.session.getState().sessionId ?? userId} link={ThreadRouterLink} baseUrl={API_BASE} getToken={() => accessToken(sdk)} identity={userId} language={language}><SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} request={request} renderRecord={(record) => <HistoryMessage language={language} record={record} workers={undefined} manuals={undefined} inFlight={false} loadAudio={loadAudio} />} /></CybionThreadProvider>
+  return <SharedThreadPage userId={userId} sessionId={sdk.session.getState().sessionId} ownerId={ownerId} threadId={threadId} language={language} baseUrl={API_BASE} getToken={() => accessToken(sdk)} request={request} loadAudio={loadAudio} />
 }
 
 function AudioTranscriptionCall({ language, call, time }: { language: Language; call: AudioTranscriptionFunctionCall; time: string }) {
