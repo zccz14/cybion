@@ -26,18 +26,30 @@ Only this validated same-origin route is preserved across hosted sign-in; query
 parameters are not forwarded. An owner opening their link returns to their usual
 owned Thread page. Forwarding B's link does not authorize C.
 
-**Shared with me** is a separate read-only list ordered by sharing time. It shows
-source-authorized title/status, the owner named through Linkit, sharing time and
-a read-only label.
-Hiding/restoring a row changes only B's list; a hidden Thread remains readable by
-link. Regrant starts a new grant cycle and restores discovery visibility. Own
-Thread origin chips are labelled **Web / API**, independent of ownership; the
-existing `view=mine` URL still selects web-created owned Threads.
+**Shared with me** is a category of the one Thread list, not a list of its own:
+`#/threads?view=shared` reads B's recipient index ordered by sharing time and
+renders the same row shape every other category renders, qualified by the owner
+named through Linkit. Every other category (`mine`, `api`, `running`, `failed`,
+`blocked`, `archived`) reads B's own Threads; `view=shared` is the only one that
+reads the shared endpoint, and the old `#/shared-threads` route redirects to it.
+There is no separate sharing surface to keep in step with the list: no second
+row component, no second empty state, no second pager.
 
-The viewer reuses the conversation renderer, process groups, history windows,
-image previews, screenshot provenance, viewed images and live output preview. It has no composer,
-execution controls, model/default editors, sharing manager or owner resource
-queries. Minimal display is local component state and cannot change A's settings.
+Hiding/restoring a row is one more toggle inside that category (`&hidden=1`),
+because it changes only B's index; a hidden Thread remains readable by link.
+Regrant starts a new grant cycle and restores discovery visibility. Own Thread
+origin chips are labelled **Web / API**, independent of ownership; the existing
+`view=mine` URL still selects web-created owned Threads.
+
+The viewer is the ordinary conversation view (`CybionThreadView`) over a
+read-only source: the same scroller, transcript, process groups, history windows,
+image previews, screenshot provenance, viewed images and live output preview, with
+every read coming from the shared endpoints instead of B's own Thread store. The
+source also carries the cache scope, so no cached owner content can cross into an
+owned view or another viewer, and losing access drops that scope whole. The view
+offers no composer, execution controls, model/default editors, sharing manager or
+owner resource queries while a source is present. Minimal display is local
+component state and cannot change A's settings.
 All controls support English/Chinese, keyboard use, light/dark and narrow screens.
 
 ## Content boundary

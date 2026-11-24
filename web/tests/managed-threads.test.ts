@@ -251,21 +251,27 @@ test("narrow screens render a dedicated searchable thread list instead of the si
   assert.match(list, /onCreate/)
 })
 
-test("archived threads get their own view chip instead of a collapsed group", () => {
+test("archived and shared Threads are categories of the one list, not lists of their own", () => {
   const list = readFileSync(new URL("../src/components/thread-list.tsx", import.meta.url), "utf8")
   const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
   const controls = readFileSync(new URL("../src/components/thread-list-controls.tsx", import.meta.url), "utf8")
-  // One control bar, one preset per view: archived is a chip like the rest, so
-  // it inherits the URL, the search box and the shared paging.
-  assert.match(search, /THREAD_LIST_VIEWS = \["all", "mine", "api", "running", "failed", "blocked", "archived"\]/)
+  // One control bar, one preset per view: archived and shared are chips like the rest,
+  // so they inherit the URL, the search box and the shared paging.
+  assert.match(search, /THREAD_LIST_VIEWS = \["all", "mine", "api", "running", "failed", "blocked", "archived", "shared"\]/)
   assert.match(search, /archived: \[\["archived", "true"\]\]/)
+  assert.match(search, /export function sharedThreadsUrl\(hidden: boolean, cursor\?: string \| null\)/)
   assert.match(controls, /archived: "已归档"/)
+  assert.match(controls, /shared: "分享给我"/)
   assert.match(controls, /emptyArchived: "还没有归档的对话"/)
-  assert.match(list, /filters\.view === "archived" \? list\.onRestore : undefined/)
+  assert.match(controls, /emptyShared: "还没有人把 Thread 分享给你。"/)
+  // The one row shape serves every category; the only difference is the action it carries.
+  assert.match(list, /function ThreadRow\(\{ row, language \}/)
+  assert.match(list, /action: filters\.view === "archived" \? restoreAction\(thread\) : undefined/)
+  assert.match(list, /action: shareAction\(item\)/)
   assert.match(list, /archived: false/)
-  assert.match(list, /restoreThread: "恢复"/)
+  assert.match(list, /restore: "恢复"/)
   assert.doesNotMatch(list, /ArchivedThreadGroup/)
-  assert.match(readPackageSource("thread-view.tsx"), /archived_at !== null/)
+  assert.match(readPackageSource("thread-view.tsx"), /archived_at \?\? null\) !== null/)
 })
 
 test("integration-created threads keep their origin chip and external reference", () => {
@@ -305,7 +311,7 @@ test("thread lists paginate with keyset cursors and scroll loading", () => {
   const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
   assert.match(list, /useInfiniteQuery/)
   assert.match(list, /getNextPageParam: \(lastPage\) => lastPage\.next_cursor/)
-  assert.match(list, /mergeThreadPages\(threads\.data\?\.pages/)
+  assert.match(list, /mergeThreadPages\(owned\.data\?\.pages/)
   // The list pages and polls its own rows: no page above it runs a thread query.
   assert.doesNotMatch(source, /useInfiniteQuery/)
   assert.doesNotMatch(source, /\["threads", sdk\.session\.getState\(\)\.sessionId, threadsRequest\]/)
@@ -320,7 +326,7 @@ test("thread list filters live in the URL so views stay shareable and steppable"
   const search = readFileSync(new URL("../src/lib/thread-search.ts", import.meta.url), "utf8")
   const status = readFileSync(new URL("../src/components/thread-status.tsx", import.meta.url), "utf8")
   assert.match(search, /export const THREAD_LIST_VIEWS/)
-  assert.match(search, /defaultThreadListFilters: ThreadListFilters = \{ view: "mine", q: "" \}/)
+  assert.match(search, /defaultThreadListFilters: ThreadListFilters = \{ view: "mine", q: "", hidden: false \}/)
   assert.match(search, /export function parseThreadListFilters\(params: URLSearchParams\)/)
   assert.match(search, /export function serializeThreadListFilters\(filters: ThreadListFilters\)/)
   assert.match(list, /onReset=\{\(\) => onFiltersChange\(allThreadListFilters\)\}/)

@@ -22,6 +22,8 @@ test("a generated title replaces the saved one and refreshes thread views", () =
   assert.match(generate, /setTitle\(thread\.title\)/)
   assert.match(generate, /setEditing\(false\)/)
   // The host mirrors the stored title, so every other view of this Thread follows it.
-  assert.match(view, /onTitleChange\?\.\(thread\.data\.title\)/)
-  assert.match(view, /onThreadChange\?\.\(thread\.data\)/)
+  // Only an owned Thread is mirrored: a reader's summary is not this account's row.
+  assert.match(view, /const ownedThread = source === undefined \? thread\.data as Thread \| undefined : undefined/)
+  assert.match(view, /onTitleChange\?\.\(ownedThread\.title\)/)
+  assert.match(view, /onThreadChange\?\.\(ownedThread\)/)
 })
