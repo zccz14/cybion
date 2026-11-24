@@ -17,8 +17,13 @@ export type SharedResponse = Pick<ThreadResponseView, "started_at" | "status"> &
   response: Pick<ThreadResponseView["response"], "output" | "completed">
 }
 
+/** The hash route a share is opened at. It carries no secret: the grant is checked again. */
 export function sharedThreadPath(owner: string, thread: string) {
   return `/shared-threads/${encodeURIComponent(owner)}/${encodeURIComponent(thread)}`
+}
+/** The API root for the same share, so callers never concatenate `/api` themselves. */
+export function sharedThreadApiPath(owner: string, thread: string) {
+  return `/api${sharedThreadPath(owner, thread)}`
 }
 export function sharedThreadReturnHash(hash: string): string | null {
   const match = /^#\/shared-threads\/([A-Za-z0-9.-]{1,128})\/([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})(?:\?.*)?$/.exec(hash)

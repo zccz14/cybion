@@ -20,7 +20,7 @@
 export { CybionThreadProvider } from "./provider"
 export { CybionThreadView } from "./thread-view"
 export type { CybionLink, CybionLinkProps, CybionThreadProviderProps } from "./provider"
-export type { CybionThreadViewProps } from "./thread-view"
+export type { CybionThreadSource, CybionThreadSummary, CybionThreadViewProps } from "./thread-view"
 
 // The transcript.
 export { HistoryMessage } from "./components/history-message"

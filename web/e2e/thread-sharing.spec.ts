@@ -119,7 +119,9 @@ test("viewer reads history, screenshots, viewed images and live updates without 
     await expect(image).toBeVisible()
     expect(await image.evaluate((node) => node.closest("details") === null)).toBe(true)
   }
-  await page.getByRole("checkbox", { name: "Minimal view (only for me)" }).check()
+  const minimal = page.getByRole("button", { name: "Minimal view (only for me)" })
+  await minimal.click()
+  await expect(minimal).toHaveAttribute("aria-pressed", "true")
   await expect(viewed).toBeVisible()
   await expect(page.getByRole("textbox")).toHaveCount(0)
   for (const label of ["Send", "Stop", "Continue", "Compact", "Delete", "Rename", "Share Thread"]) await expect(page.getByRole("button", { name: label, exact: true })).toHaveCount(0)
@@ -166,24 +168,6 @@ test("account switches and temporary source failures never render previous priva
   expect(JSON.stringify(await page.evaluate("window.sharingFixtureCache()"))).not.toContain("Saved answer")
 })
 
-test("shared discovery names the owner through Linkit, never prints my own user ID, and hiding only changes the recipient list", async ({ page }) => {
-  const { calls } = await fixture(page)
-  await page.goto("/e2e/thread-sharing.html#/shared-threads")
-  await expect(page.getByRole("region", { name: "My user ID" })).toHaveCount(0)
-  await expect(page.getByText("user-1", { exact: false })).toHaveCount(0)
-  await expect(page.locator(".linkit-user-info--compact .linkit-user-info__username")).toHaveText("Remote Owner")
-  await page.getByRole("button", { name: "Hide from my list" }).click()
-  await expect(page.getByRole("link", { name: "Owner's private task" })).toHaveCount(0)
-  await page.getByRole("button", { name: "Hidden shares" }).click()
-  await expect(page.getByRole("link", { name: "Owner's private task" })).toBeVisible()
-  await page.getByRole("button", { name: "Restore to my list" }).click()
-  await expect(page.getByRole("link", { name: "Owner's private task" })).toHaveCount(0)
-  await page.getByRole("button", { name: "Visible shares" }).click()
-  await page.getByRole("link", { name: "Owner's private task" }).click()
-  await expect(page.getByText("Saved answer", { exact: true })).toBeVisible()
-  expect(calls.filter((c) => c.method !== "GET").map((c) => c.path)).toEqual([`${apiPath}/visibility`, `${apiPath}/visibility`])
-})
-
 test("sharing surfaces fit mobile, dark mode and both languages", async ({ page }) => {
   await fixture(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -206,19 +190,11 @@ test("sharing surfaces fit mobile, dark mode and both languages", async ({ page 
   await page.screenshot({ path: "test-results/thread-sharing-owner-mobile.png", fullPage: true })
 })
 
-
-test("short discovery pages keep their continuation and unauthorized links never mount content", async ({ page }) => {
+test("an unauthorized link never mounts content, not even the live preview", async ({ page }) => {
   const { state, calls } = await fixture(page)
-  state.paged = true
-  await page.goto("/e2e/thread-sharing.html#/shared-threads")
-  await expect(page.getByText("No accessible shares on this page. Load more to continue.")).toBeVisible()
-  await page.getByRole("button", { name: "Load more", exact: true }).click()
-  await expect(page.getByRole("link", { name: "Owner's private task" })).toBeVisible()
-  expect(calls.some((c) => c.path.includes("cursor=fixture-next-page"))).toBe(true)
   state.allowed = false
-  const before = calls.length
   await page.goto(`/e2e/thread-sharing.html#${routePath}`)
   await expect(page.getByText(/This Thread is unavailable/)).toBeVisible()
   await expect(page.getByText("Owner's private task", { exact: true })).toHaveCount(0)
-  expect(calls.slice(before).some((c) => c.path.includes("/archive") || c.path.includes("/response"))).toBe(false)
+  expect(calls.some((c) => c.path.includes("/response") || c.path.includes("/history"))).toBe(false)
 })

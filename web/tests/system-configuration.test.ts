@@ -32,9 +32,14 @@ test("system configuration has a dedicated route, bilingual title, and admin nav
   assert.match(main, /<SystemConfiguration key=\{sessionId\}/)
 })
 
-test("Workers belongs to Work and there is no empty System navigation group", () => {
+test("Work holds the Thread list, its presets and the devices, and there is no empty System group", () => {
   const work = main.match(/const workNav = \[([\s\S]*?)\n  \]/)![1]
-  assert.deepEqual([...work.matchAll(/to: "([^\"]+)"/g)].map((match) => match[1]), ["/threads", "/shared-threads", "/workers", "/machines"])
+  // Sharing is a category of the Thread list, not a destination of its own, and a preset
+  // configures how a Thread is built, so it belongs beside the list rather than under
+  // configuration.
+  assert.deepEqual([...work.matchAll(/to: "([^\"]+)"/g)].map((match) => match[1]), ["/threads", "/presets", "/workers", "/machines"])
+  const configuration = main.match(/const configurationNav = \[([\s\S]*?)\n  \]/)![1]
+  assert.doesNotMatch(configuration, /\/presets/)
   assert.doesNotMatch(main, /navSystem|systemNav/)
   assert.match(main, /id: "work", label: t\("navWork"\), items: workNav/)
   assert.match(main, /to: "\/system", label: t\("systemResources"\)/)

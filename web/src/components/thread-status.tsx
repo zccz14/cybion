@@ -56,7 +56,15 @@ export function ThreadStatusBadge({ status, language, runningSummary }: StatusPr
   </span>
 }
 
-export function ThreadLink({ thread, language }: { thread: { created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; running_summary?: string | null; updated_at: number; usage: ThreadUsage; branches?: number }; language: StatusProps["language"] }) {
+export function ThreadLink({ thread, language, to, badge }: {
+  thread: { created_by?: "web" | "api"; external_ref?: string | null; id: string; title: string; display_status: ThreadDisplayStatus; running_summary?: string | null; updated_at: number; usage: ThreadUsage; branches?: number }
+  language: StatusProps["language"]
+  /** Where the row points. Defaults to this account's own Thread; a shared row
+   * points at the owner's copy instead. */
+  to?: string
+  /** Extra qualifier on the title line, e.g. the owner of a shared Thread. */
+  badge?: React.ReactNode
+}) {
   const status = thread.display_status
   const location = useLocation()
   const now = useNowSeconds()
@@ -66,12 +74,13 @@ export function ThreadLink({ thread, language }: { thread: { created_by?: "web" 
   const branches = thread.branches ?? 0
   return <Tooltip>
     <TooltipTrigger asChild>
-      <NavLink to={{ pathname: `/threads/${thread.id}`, search: location.search }} data-thread-status={status} className="flex min-w-0 items-start gap-2.5 rounded-lg px-3 py-2 text-sm ring-1 ring-inset ring-transparent hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:bg-accent aria-[current=page]:ring-border">
+      <NavLink to={to ?? { pathname: `/threads/${thread.id}`, search: location.search }} data-thread-status={status} className="flex min-w-0 items-start gap-2.5 rounded-lg px-3 py-2 text-sm ring-1 ring-inset ring-transparent hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:bg-accent aria-[current=page]:ring-border">
         <ThreadStatusIcon status={status} className="mt-0.5" />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 items-center gap-1.5">
             <span data-slot="thread-title" className="truncate font-medium">{thread.title}</span>
             {thread.created_by === "api" && <span className="shrink-0 rounded border px-1 text-[0.65rem] font-normal text-muted-foreground">API</span>}
+            {badge}
             <time data-slot="thread-updated-at" dateTime={new Date(thread.updated_at * 1000).toISOString()} className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{formatRelativeTime(language, thread.updated_at, now)}</time>
           </span>
           <span data-slot="thread-status-label" title={statusTitle} className={cn("min-w-0 truncate text-xs", presentation[status].color)}>{label}</span>
