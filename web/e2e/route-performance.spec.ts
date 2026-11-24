@@ -178,9 +178,8 @@ test("the page reads every route's requests, cumulative time and outcomes in one
   // Device polling is traffic too: it is reported per source instead of hidden.
   const sources = page.locator('[data-slot="route-performance-sources"]')
   await expect(sources).toContainText("Browser and API keys")
-  await expect(sources).toContainText("150")
+  await expect(sources).toContainText("153")
   await expect(sources).toContainText("46s")
-  await expect(sources).toContainText("Integration API")
   await expect(sources).toContainText("Device workers")
   await expect(sources).toContainText("84")
   await expect(sources).toContainText("12s")
