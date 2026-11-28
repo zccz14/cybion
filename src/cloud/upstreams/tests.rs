@@ -166,6 +166,7 @@ async fn creating_threads_requires_an_existing_upstream() {
         State(state.clone()),
         identity(&user),
         Json(ThreadDefaults {
+            search_source: None,
             budget_usd_nanos: 0,
             audio_transcription_model: None,
             model: "gpt-6-astra".to_owned(),
@@ -289,6 +290,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
         State(state.clone()),
         identity(&user),
         Json(ThreadDefaults {
+            search_source: None,
             budget_usd_nanos: 0,
             audio_transcription_model: None,
             model: "gpt-6-astra".to_owned(),
@@ -346,6 +348,7 @@ async fn upstream_crud_enforces_unique_names_and_allows_deleting_in_use() {
         State(state.clone()),
         identity(&user),
         Json(ThreadDefaults {
+            search_source: None,
             budget_usd_nanos: 0,
             audio_transcription_model: None,
             model: "gpt-6-astra".to_owned(),

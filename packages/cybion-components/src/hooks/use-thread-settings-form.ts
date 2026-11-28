@@ -96,6 +96,7 @@ export function useNewThreadSettings({ queryKey = ["thread-defaults"] }: { query
       minimal_mode: value.minimal_mode,
       image_generation_model: value.image_generation_model,
       audio_transcription_model: value.audio_transcription_model,
+      search_source: value.search_source,
       max_loaded_manuals: value.max_loaded_manuals,
       initial_manual_ids: value.initial_manual_ids,
       budget_usd_nanos: value.budget_usd_nanos,

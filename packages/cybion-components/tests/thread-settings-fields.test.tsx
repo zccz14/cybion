@@ -24,6 +24,7 @@ beforeAll(() => {
 })
 
 const defaults: ThreadDefaults = {
+  search_source: null,
   model: "deepseek-flash", upstream_id: "up-deepseek", reasoning_effort: "medium", service_tier_fast: false,
   context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "gpt-image-2",
   audio_transcription_model: "whisper-1", max_loaded_manuals: 12, initial_manual_ids: ["manual-a"],
@@ -34,6 +35,7 @@ const catalogs: UpstreamModels = { upstreams: [{ id: "up-deepseek", name: "DeepS
 
 /// A Thread that follows every account default: what the composer starts from.
 const following: ThreadSettings = {
+  search_source: null,
   model: "deepseek-flash", upstream_id: "up-deepseek", reasoning_effort: "medium", service_tier_fast: false,
   context_budget_tokens: null, minimal_mode: null, image_generation_model: null,
   audio_transcription_model: null, max_loaded_manuals: null, initial_manual_ids: null, budget_usd_nanos: null,

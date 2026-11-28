@@ -8,6 +8,7 @@ import {
 } from "../src/lib/thread-settings"
 
 const defaults: ThreadDefaults = {
+  search_source: null,
   model: "deepseek-flash", upstream_id: "up-deepseek", reasoning_effort: "medium", service_tier_fast: false,
   context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "gpt-image-2",
   audio_transcription_model: "whisper-1", max_loaded_manuals: 12, initial_manual_ids: ["manual-a"],
@@ -15,6 +16,7 @@ const defaults: ThreadDefaults = {
 }
 
 const thread: Thread = {
+  search_source: null,
   id: "thread-a", title: "Fixture", status: "idle", display_status: "ready", running_summary: null,
   created_by: "web", external_ref: null, model: "gpt-6-astra", upstream_id: "up-deepseek",
   reasoning_effort: "high", service_tier_fast: true, context_budget_tokens: null, minimal_mode: null,
@@ -29,14 +31,14 @@ describe("the settings schema", () => {
     expect(threadSettingsFromDefaults(defaults)).toEqual({
       model: "deepseek-flash", upstream_id: "up-deepseek", reasoning_effort: "medium", service_tier_fast: false,
       context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "gpt-image-2",
-      audio_transcription_model: "whisper-1", max_loaded_manuals: 12, initial_manual_ids: ["manual-a"],
+      audio_transcription_model: "whisper-1", search_source: null, max_loaded_manuals: 12, initial_manual_ids: ["manual-a"],
       budget_usd_nanos: 10_000_000_000,
     })
     // A Thread keeps its nulls: each one means "follow the account default".
     expect(threadSettingsFromThread(thread)).toEqual({
       model: "gpt-6-astra", upstream_id: "up-deepseek", reasoning_effort: "high", service_tier_fast: true,
       context_budget_tokens: null, minimal_mode: null, image_generation_model: null,
-      audio_transcription_model: "gpt-4o-transcribe", max_loaded_manuals: 20,
+      audio_transcription_model: "gpt-4o-transcribe", search_source: null, max_loaded_manuals: 20,
       budget_usd_nanos: 500_000_000, initial_manual_ids: null,
     })
   })
@@ -44,7 +46,7 @@ describe("the settings schema", () => {
   it("lists every field once, so a reader that walks the list cannot skip one", () => {
     expect([...THREAD_SETTINGS_FIELDS]).toEqual([
       "model", "upstream_id", "reasoning_effort", "service_tier_fast", "context_budget_tokens",
-      "minimal_mode", "image_generation_model", "audio_transcription_model", "max_loaded_manuals",
+      "minimal_mode", "image_generation_model", "audio_transcription_model", "search_source", "max_loaded_manuals",
       "initial_manual_ids", "budget_usd_nanos",
     ])
   })
@@ -54,7 +56,7 @@ describe("the settings schema", () => {
     expect(created).toEqual({
       model: "deepseek-flash", upstream_id: "up-deepseek", reasoning_effort: "medium", service_tier_fast: false,
       context_budget_tokens: null, minimal_mode: null, image_generation_model: null,
-      audio_transcription_model: null, max_loaded_manuals: null, initial_manual_ids: null, budget_usd_nanos: null,
+      audio_transcription_model: null, search_source: null, max_loaded_manuals: null, initial_manual_ids: null, budget_usd_nanos: null,
     })
   })
 

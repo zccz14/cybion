@@ -103,7 +103,7 @@ async fn authenticated_http_settings_round_trip_drives_thread_creation() {
     assert_eq!(listed_upstreams[0]["id"], created_upstream["id"]);
     assert!(listed_upstreams[0].get("api_key").is_none());
     let settings_url = format!("{base}/api/thread-defaults");
-    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","audio_transcription_model":null,"max_loaded_manuals":12,"initial_manual_ids":[],"budget_usd_nanos":0});
+    let defaults = json!({"model":"gpt-6-astra","upstream_id":upstream_id,"reasoning_effort":"max","service_tier_fast":true,"context_budget_tokens":150000,"minimal_mode":false,"image_generation_model":"gpt-image-2","audio_transcription_model":null,"search_source":null,"max_loaded_manuals":12,"initial_manual_ids":[],"budget_usd_nanos":0});
     for method in [reqwest::Method::GET, reqwest::Method::PUT] {
         assert_eq!(
             client
@@ -497,6 +497,7 @@ async fn available_models_come_from_each_configured_endpoint_catalog() {
     assert!(head.contains("session-id: "));
 
     let defaults = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 0,
         audio_transcription_model: None,
         model: "meta-llama/Llama-3.1-8B-Instruct".to_owned(),
@@ -715,6 +716,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     .unwrap()
     .0;
     let defaults = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 0,
         audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
@@ -775,6 +777,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
                 },
             }),
             Json(CreateThreadInput {
+                search_source: None,
                 preset: None,
                 budget_usd_nanos: None,
                 title: None,
@@ -809,6 +812,7 @@ async fn thread_defaults_persist_per_user_and_only_apply_to_new_threads() {
     );
 
     let reset = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 0,
         audio_transcription_model: None,
         model: initial.model.clone(),
@@ -859,6 +863,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
     let user = user_for_subject(&state, "validation-owner").unwrap();
     let upstream = insert_upstream(&state, &user, "validation", "http://127.0.0.1:9/v1").await;
     let saved = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 0,
         audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
@@ -887,6 +892,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             State(state.clone()),
             browser_identity_for(&user),
             Json(ThreadDefaults {
+                search_source: None,
                 budget_usd_nanos: 0,
                 audio_transcription_model: None,
                 model: model.to_owned(),
@@ -908,6 +914,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         State(state.clone()),
         browser_identity_for(&user),
         Json(ThreadDefaults {
+            search_source: None,
             budget_usd_nanos: 0,
             audio_transcription_model: None,
             model: "gpt-6-astra".to_owned(),
@@ -944,6 +951,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             State(state.clone()),
             browser_identity_for(&user),
             Json(ThreadDefaults {
+                search_source: None,
                 budget_usd_nanos: 0,
                 audio_transcription_model: None,
                 model: "gpt-6-astra".to_owned(),
@@ -968,6 +976,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
             State(state.clone()),
             browser_identity_for(&user),
             Json(ThreadDefaults {
+                search_source: None,
                 budget_usd_nanos: 0,
                 audio_transcription_model: None,
                 model: "gpt-6-astra".to_owned(),
@@ -989,6 +998,7 @@ async fn thread_defaults_reject_invalid_values_without_overwriting_saved_setting
         State(state.clone()),
         browser_identity_for(&user),
         Json(ThreadDefaults {
+            search_source: None,
             budget_usd_nanos: 0,
             audio_transcription_model: None,
             model: "gpt-6-astra".to_owned(),
@@ -1063,6 +1073,7 @@ fn legacy_thread_schema_upgrade_keeps_threads_and_defaults() {
         assert_eq!(
             load_thread_defaults(&connection).unwrap(),
             ThreadDefaults {
+                search_source: None,
                 budget_usd_nanos: 0,
                 audio_transcription_model: None,
                 model: "gpt-6-astra".to_owned(),
@@ -1211,6 +1222,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                search_source: None,
                 budget_usd_nanos: None,
                 audio_transcription_model: None,
                 title: None,
@@ -1232,6 +1244,7 @@ async fn minimal_mode_round_trips_at_both_configuration_levels() {
         assert_eq!(patched.minimal_mode, expected);
     }
     let defaults = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 0,
         audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
@@ -1299,6 +1312,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                search_source: None,
                 budget_usd_nanos: None,
                 audio_transcription_model: None,
                 title: None,
@@ -1324,6 +1338,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
         browser_identity_for(&user),
         AxumPath(thread.id.clone()),
         Json(UpdateThreadInput {
+            search_source: None,
             budget_usd_nanos: None,
             audio_transcription_model: None,
             title: None,
@@ -1343,6 +1358,7 @@ async fn image_generation_model_round_trips_at_both_configuration_levels() {
     .unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     let defaults = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 0,
         audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
@@ -1403,6 +1419,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                search_source: None,
                 budget_usd_nanos: None,
                 audio_transcription_model: None,
                 title: None,
@@ -1429,6 +1446,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
             browser_identity_for(&user),
             AxumPath(thread.id.clone()),
             Json(UpdateThreadInput {
+                search_source: None,
                 budget_usd_nanos: None,
                 audio_transcription_model: None,
                 title: None,
@@ -1449,6 +1467,7 @@ async fn max_loaded_manuals_round_trips_at_both_configuration_levels() {
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
     let defaults = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 0,
         audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
@@ -1611,6 +1630,7 @@ async fn a_thread_started_from_a_preset_runs_on_what_the_preset_held() {
     let user = user_for_subject(&state, "preset-owner").unwrap();
     let upstream = insert_upstream(&state, &user, "presets", "http://127.0.0.1:9/v1").await;
     let settings = ThreadDefaults {
+        search_source: None,
         budget_usd_nanos: 2_000_000_000,
         audio_transcription_model: None,
         model: "gpt-6-astra".to_owned(),
@@ -1878,4 +1898,22 @@ async fn renaming_a_preset_moves_the_label_and_leaves_the_thread_alone() {
     assert_eq!(label.as_deref(), Some("quant_researcher"));
     assert_eq!(model, "gpt-6-astra");
     assert_eq!(effort, "max");
+}
+
+/// The search source is a routing choice, not a model: an unknown one is
+/// refused here instead of being forwarded, and an unset Thread follows the
+/// account default before falling back to DeepSeek.
+#[test]
+fn search_source_validates_and_falls_back_to_deepseek() {
+    assert_eq!(search_source("deepseek".to_owned()).unwrap(), "deepseek");
+    assert_eq!(search_source("openai".to_owned()).unwrap(), "openai");
+    assert!(search_source("qwen".to_owned()).is_err());
+
+    let defaults = ThreadDefaults::default();
+    assert_eq!(effective_search_source(None, &defaults), "deepseek");
+    let configured = ThreadDefaults {
+        search_source: Some("openai".to_owned()),
+        ..defaults
+    };
+    assert_eq!(effective_search_source(None, &configured), "openai");
 }
