@@ -81,6 +81,7 @@ export async function stubWorkspace(page: Page, options: {
       }
       if (path === "/api/integrations/upstreams") return json(defaults.upstream_id ? [upstream] : [])
       if (path === "/api/integrations/upstreams/models") return json({ upstreams: defaults.upstream_id ? [{ ...upstream, models: [defaults.model], error: null }] : [] })
+      if (path === "/api/integrations/upstreams/search-sources") return json({ upstreams: defaults.upstream_id ? [{ ...upstream, sources: ["deepseek"], error: null }] : [] })
       if (path === "/api/integrations/linkit") return json(notifications)
       if (path === "/api/workers") return json([])
       if (path === "/api/exe") return json({ address: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", created_at: 1, devices: [] })
