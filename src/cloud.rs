@@ -780,9 +780,11 @@ async fn transcribe_audio(
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     if !status.is_success() {
-        return Err(ApiError::unavailable(format!(
-            "speech-to-text was rejected (HTTP {})",
-            status.as_u16()
+        let body = response.text().await.unwrap_or_default();
+        return Err(ApiError::unavailable(transcription_rejection(
+            status,
+            request_id.as_deref(),
+            &body,
         )));
     }
     let body: Value = response
@@ -799,6 +801,42 @@ async fn transcribe_audio(
         return Err(ApiError::unavailable("speech-to-text returned no text"));
     }
     Ok((text, request_id))
+}
+
+/// One refusal from the speech-to-text gateway, said in the upstream's own words.
+///
+/// The status alone cannot be acted on: the same 400 covers a model this account
+/// does not have, a model the gateway cannot settle, and a clip it cannot decode,
+/// and only the body says which one it was. The gateway's request id rides along
+/// because that is what its own audit trail is keyed by; without either of them
+/// the only thing left to report is "HTTP 400", which is not a diagnosis.
+fn transcription_rejection(status: StatusCode, request_id: Option<&str>, body: &str) -> String {
+    let mut message = format!("speech-to-text was rejected (HTTP {})", status.as_u16());
+    // Upstream wording is one line here: a note lands inside a Thread, and a
+    // pasted stack of lines would read as if the Thread had said it.
+    let detail = upstream_error_detail(body)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !detail.is_empty() {
+        message.push_str(": ");
+        message.push_str(&truncate_chars(&detail, MAX_TRANSCRIPTION_DETAIL_CHARS));
+    }
+    if let Some(request_id) = request_id.filter(|value| !value.is_empty()) {
+        message.push_str(&format!(" (request {request_id})"));
+    }
+    message
+}
+
+/// How much of an upstream's refusal to quote back. Long enough for a sentence
+/// an operator can act on, short enough that a note stays readable.
+const MAX_TRANSCRIPTION_DETAIL_CHARS: usize = 400;
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((index, _)) => format!("{}…", &value[..index]),
+        None => value.to_owned(),
+    }
 }
 
 /// Stores the audio attachments of one fresh input item and runs the first
@@ -16310,6 +16348,69 @@ mod tests {
         assert!(
             estimate < 2_000,
             "the estimate must not price the raw base64 characters: {estimate}"
+        );
+    }
+}
+
+/// 转写被网关拒的那一句：状态码不够用，原话与请求 id 才是能查的东西。
+///
+/// 线上真坏过一次：模型清单被人抽样式回答，音频型号没同步到网关，转写稳定 400，
+/// 而 Thread 里只留下一句 `speech-to-text was rejected (HTTP 400)`——谁拒的、为什么拒，
+/// 全丢了，最后要到网关的审计库里翻原话才查得出来。
+#[cfg(test)]
+mod transcription_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn quotes_the_upstream_and_its_request_id() {
+        let message = transcription_rejection(
+            StatusCode::BAD_REQUEST,
+            Some("b32d350a-cce7-44f3-99fa-058906d9d61d"),
+            r#"{"error":{"message":"model is not available: whisper-1","type":"invalid_request_error"}}"#,
+        );
+
+        assert_eq!(
+            message,
+            "speech-to-text was rejected (HTTP 400): model is not available: whisper-1 (request b32d350a-cce7-44f3-99fa-058906d9d61d)"
+        );
+    }
+
+    #[test]
+    fn keeps_a_non_json_refusal_on_one_line() {
+        let message = transcription_rejection(
+            StatusCode::BAD_GATEWAY,
+            None,
+            "upstream said:\n  audio/webm is not decodable\n\nretry later",
+        );
+
+        assert_eq!(
+            message,
+            "speech-to-text was rejected (HTTP 502): upstream said: audio/webm is not decodable retry later"
+        );
+    }
+
+    #[test]
+    fn states_the_status_when_the_gateway_says_nothing() {
+        let message = transcription_rejection(StatusCode::SERVICE_UNAVAILABLE, None, "   ");
+
+        assert_eq!(message, "speech-to-text was rejected (HTTP 503)");
+    }
+
+    #[test]
+    fn bounds_a_long_refusal() {
+        let body = "x".repeat(MAX_TRANSCRIPTION_DETAIL_CHARS + 50);
+        let message = transcription_rejection(StatusCode::BAD_REQUEST, None, &body);
+
+        assert!(
+            message.ends_with('…'),
+            "the quote must end where it was cut: {message}"
+        );
+        assert_eq!(
+            message,
+            format!(
+                "speech-to-text was rejected (HTTP 400): {}…",
+                "x".repeat(MAX_TRANSCRIPTION_DETAIL_CHARS)
+            )
         );
     }
 }
