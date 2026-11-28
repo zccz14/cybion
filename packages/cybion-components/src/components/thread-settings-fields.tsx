@@ -6,7 +6,8 @@ import {
   budgetTooLarge, threadSettingsFromDefaults, type ReasoningEffort, type ThreadSettings,
 } from "../lib/thread-settings"
 import { copyFor, type CopyKey } from "../copy"
-import { useManualChoices, useThreadDefaults, useUpstreamModels } from "../hooks/use-thread-settings-data"
+import { useManualChoices, useThreadDefaults, useUpstreamModels, useUpstreamSearchSources } from "../hooks/use-thread-settings-data"
+import type { UpstreamSourceCatalog } from "../api"
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { Label } from "../ui/label"
@@ -24,7 +25,7 @@ const FOLLOW_DEFAULT = "\u0000default"
 const beforeDefaults: ThreadSettings = {
   model: "", upstream_id: null, reasoning_effort: "medium", service_tier_fast: false,
   context_budget_tokens: FALLBACK_CONTEXT_BUDGET, minimal_mode: false,
-  image_generation_model: "", audio_transcription_model: null,
+  image_generation_model: "", audio_transcription_model: null, search_source: null,
   max_loaded_manuals: FALLBACK_LOADED_MANUALS, initial_manual_ids: [], budget_usd_nanos: 0,
 }
 
@@ -66,6 +67,7 @@ export function ThreadSettingsFields({
   const models = useUpstreamModels()
   const imageModels = useUpstreamModels("image")
   const audioModels = useUpstreamModels("sst")
+  const searchSources = useUpstreamSearchSources()
   const manualChoices = useManualChoices()
   const fallback = defaults.data ? threadSettingsFromDefaults(defaults.data) : beforeDefaults
   const text = (key: CopyKey) => mode === "defaults" ? defaultsHints[key]?.[language] ?? copyFor(language, key) : copyFor(language, key)
@@ -185,6 +187,19 @@ export function ThreadSettingsFields({
       <p className="text-xs text-muted-foreground">{copyFor(language, "minimalModeHint")}</p>
     </div>
     <div className="flex shrink-0 flex-col gap-2">
+      <Label>{copyFor(language, "searchSource")}</Label>
+      {/* The options are the sources this Thread's own channel serves, read from
+          the upstream itself: an offered source is one its call can reach. */}
+      <Select value={value.search_source === null ? FOLLOW_DEFAULT : value.search_source} onValueChange={(next) => set("search_source", next === FOLLOW_DEFAULT ? null : next)} disabled={disabled}>
+        <SelectTrigger className="w-full" aria-label={copyFor(language, "searchSource")}><SelectValue /></SelectTrigger>
+        <SelectContent><SelectGroup>
+          {following && <SelectItem value={FOLLOW_DEFAULT}>{`${copyFor(language, "searchSourceDefault")} (${fallback.search_source ?? ""})`}</SelectItem>}
+          {searchSourceOptions(searchSources.data?.upstreams, value.upstream_id, [value.search_source, fallback.search_source]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
+        </SelectGroup></SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">{copyFor(language, "searchSourceHint")}</p>
+    </div>
+    <div className="flex shrink-0 flex-col gap-2">
       <Label>{copyFor(language, "audioTranscription")}</Label>
       {/* The controller stores an empty speech-to-text model as "follow the default", so
           turning audio off and following the default are the same state here; both read as
@@ -216,3 +231,17 @@ export function ThreadSettingsFields({
 
 export { REASONING_EFFORTS }
 export type { ReasoningEffort }
+
+/// Search sources the upstream serving this Thread offers, plus any the current
+/// values already name so a saved choice stays selectable before the catalog lands.
+function searchSourceOptions(
+  upstreams: UpstreamSourceCatalog[] | undefined,
+  upstreamId: string | null,
+  selected: (string | null)[],
+) {
+  const served = (upstreams ?? [])
+    .filter((upstream) => upstream.id === upstreamId)
+    .flatMap((upstream) => upstream.sources)
+  const named = selected.filter((source): source is string => Boolean(source))
+  return Array.from(new Set([...served, ...named])).sort()
+}

@@ -29,6 +29,7 @@ export type ThreadSettings = {
   minimal_mode: boolean | null
   image_generation_model: string | null
   audio_transcription_model: string | null
+  search_source: string | null
   max_loaded_manuals: number | null
   initial_manual_ids: string[] | null
   budget_usd_nanos: number | null
@@ -38,12 +39,12 @@ export type ThreadSettings = {
 /// omitted from a PATCH, `null` hands it back to the account default.
 export type ThreadSettingsOverrides = Partial<Pick<ThreadSettings,
   "context_budget_tokens" | "minimal_mode" | "image_generation_model" |
-  "audio_transcription_model" | "max_loaded_manuals" | "initial_manual_ids" |
+  "audio_transcription_model" | "search_source" | "max_loaded_manuals" | "initial_manual_ids" |
   "budget_usd_nanos">>
 
 const OVERRIDDEN = [
   "context_budget_tokens", "minimal_mode", "image_generation_model",
-  "audio_transcription_model", "max_loaded_manuals", "initial_manual_ids",
+  "audio_transcription_model", "search_source", "max_loaded_manuals", "initial_manual_ids",
   "budget_usd_nanos",
 ] as const satisfies readonly (keyof ThreadSettings)[]
 
@@ -63,6 +64,7 @@ export function threadSettingsFromThread(thread: Thread): ThreadSettings {
     minimal_mode: thread.minimal_mode,
     image_generation_model: thread.image_generation_model,
     audio_transcription_model: thread.audio_transcription_model,
+    search_source: thread.search_source,
     max_loaded_manuals: thread.max_loaded_manuals,
     initial_manual_ids: thread.initial_manual_ids,
     budget_usd_nanos: thread.budget_usd_nanos,
@@ -80,6 +82,7 @@ export function threadSettingsFromDefaults(defaults: ThreadDefaults): ThreadSett
     minimal_mode: defaults.minimal_mode,
     image_generation_model: defaults.image_generation_model,
     audio_transcription_model: defaults.audio_transcription_model,
+    search_source: defaults.search_source,
     max_loaded_manuals: defaults.max_loaded_manuals,
     initial_manual_ids: defaults.initial_manual_ids,
     budget_usd_nanos: defaults.budget_usd_nanos,
@@ -107,6 +110,7 @@ export function threadSettingsForNewThread(defaults: ThreadSettings): ThreadSett
     minimal_mode: null,
     image_generation_model: null,
     audio_transcription_model: null,
+    search_source: null,
     max_loaded_manuals: null,
     initial_manual_ids: null,
     budget_usd_nanos: null,
@@ -168,6 +172,7 @@ export function threadSettingsDefaults(next: ThreadSettings, saved: ThreadSettin
     minimal_mode: next.minimal_mode ?? saved.minimal_mode ?? false,
     image_generation_model: next.image_generation_model ?? saved.image_generation_model ?? "",
     audio_transcription_model: next.audio_transcription_model ?? saved.audio_transcription_model ?? null,
+    search_source: next.search_source ?? saved.search_source ?? null,
     max_loaded_manuals: next.max_loaded_manuals ?? saved.max_loaded_manuals ?? FALLBACK_LOADED_MANUALS,
     initial_manual_ids: next.initial_manual_ids ?? saved.initial_manual_ids ?? [],
     budget_usd_nanos: next.budget_usd_nanos ?? saved.budget_usd_nanos ?? 0,

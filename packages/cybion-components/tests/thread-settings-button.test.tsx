@@ -23,6 +23,7 @@ beforeAll(() => {
 })
 
 const thread: Thread = {
+  search_source: null,
   id: "thread-a", title: "Fixture", status: "idle", display_status: "ready", running_summary: null,
   created_by: "web", external_ref: null, model: "deepseek-flash", upstream_id: "up-deepseek",
   reasoning_effort: "medium", service_tier_fast: false, context_budget_tokens: null, minimal_mode: null,
@@ -33,6 +34,7 @@ const thread: Thread = {
 }
 
 const defaults: ThreadDefaults = {
+  search_source: null,
   model: "deepseek-flash", upstream_id: "up-deepseek", reasoning_effort: "medium", service_tier_fast: false,
   context_budget_tokens: 200000, minimal_mode: false, image_generation_model: "", audio_transcription_model: null,
   max_loaded_manuals: 12, budget_usd_nanos: 0, initial_manual_ids: [],

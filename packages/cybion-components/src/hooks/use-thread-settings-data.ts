@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query"
 
-import type { Thread, ThreadDefaults, UpstreamModels } from "../api"
+import type { Thread, ThreadDefaults, UpstreamModels, UpstreamSearchSources } from "../api"
 import type { ManualChoice } from "../lib/model-catalog"
 import { useCybion } from "../provider"
 
@@ -15,6 +15,17 @@ export function useUpstreamModels(kind?: "image" | "sst") {
   return useQuery({
     queryKey: [kind === "image" ? "upstream-image-models" : kind === "sst" ? "upstream-audio-models" : "upstream-models"],
     queryFn: ({ signal }) => client.request<UpstreamModels>(`/api/integrations/upstreams/models${kind ? `?kind=${kind}` : ""}`, { signal }),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  })
+}
+
+/** The web-search sources each of this account's own upstreams serves. */
+export function useUpstreamSearchSources() {
+  const { client } = useCybion()
+  return useQuery({
+    queryKey: ["upstream-search-sources"],
+    queryFn: ({ signal }) => client.request<UpstreamSearchSources>("/api/integrations/upstreams/search-sources", { signal }),
     staleTime: 5 * 60 * 1000,
     retry: false,
   })

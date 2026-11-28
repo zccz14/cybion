@@ -22,6 +22,8 @@ export type Thread = {
   image_generation_model: string | null
   /** `null` follows the account default; speech-to-text stays on either way. */
   audio_transcription_model: string | null
+  /** `null` follows the account default; the web-search source this Thread asks for. */
+  search_source: string | null
   max_loaded_manuals: number | null
   /** Settled USD the Thread may reach, in nanodollars; `null` follows the default and `0` means no limit. */
   budget_usd_nanos: number | null
@@ -43,6 +45,7 @@ export type ThreadDefaults = {
   minimal_mode: boolean
   image_generation_model: string
   audio_transcription_model: string | null
+  search_source: string | null
   max_loaded_manuals: number
   budget_usd_nanos: number
   /** The Manuals a new Thread is created with; every one of them is bound
@@ -52,11 +55,14 @@ export type ThreadDefaults = {
 
 export type UpstreamCatalog = { id: string; name: string; models: string[]; error: string | null }
 export type UpstreamModels = { upstreams: UpstreamCatalog[] }
+export type UpstreamSourceCatalog = { id: string; name: string; sources: string[]; error: string | null }
+export type UpstreamSearchSources = { upstreams: UpstreamSourceCatalog[] }
 
 export type ThreadPatch = Partial<Pick<Thread,
   "title" | "model" | "upstream_id" | "reasoning_effort" | "service_tier_fast" |
   "context_budget_tokens" | "minimal_mode" | "image_generation_model" |
-  "audio_transcription_model" | "max_loaded_manuals" | "initial_manual_ids" | "budget_usd_nanos">> & { archived?: boolean }
+  "audio_transcription_model" | "search_source" | "max_loaded_manuals" |
+  "initial_manual_ids" | "budget_usd_nanos">> & { archived?: boolean }
 
 export type RequestAck = { thread_id: string; record_idx: number; status: "accepted" }
 
@@ -180,6 +186,10 @@ export class CybionThreadClient {
 
   deleteThread(id: string) {
     return this.request<void>(`/api/threads/${encodeURIComponent(id)}`, { method: "DELETE" })
+  }
+
+  searchSources() {
+    return this.request<UpstreamSearchSources>("/api/integrations/upstreams/search-sources")
   }
 
   modelCatalog(kind?: "image" | "sst") {

@@ -352,6 +352,83 @@ pub(super) async fn models(
     }))
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct UpstreamSearchSourcesView {
+    pub(super) upstreams: Vec<UpstreamSourceCatalogView>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct UpstreamSourceCatalogView {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) sources: Vec<String>,
+    pub(super) error: Option<String>,
+}
+
+/// The web-search sources each of this account's own upstreams serves. A
+/// Thread setting offers exactly these, so an offered choice is always one the
+/// call can reach.
+pub(super) async fn search_sources(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Caller>,
+) -> Result<Json<UpstreamSearchSourcesView>, ApiError> {
+    let upstreams = user_db(&state, &identity.user, true, |connection| {
+        load_all(connection)
+    })
+    .await?;
+    // ASSUMPTION: a failing upstream only fails its own group; the browser shows
+    // the error next to it and keeps the sources of every healthy upstream.
+    let catalogs = futures_util::future::join_all(upstreams.iter().map(|upstream| {
+        let state = state.clone();
+        async move {
+            match fetch_search_sources(&state, upstream).await {
+                Ok(sources) => UpstreamSourceCatalogView {
+                    id: upstream.id.clone(),
+                    name: upstream.name.clone(),
+                    sources,
+                    error: None,
+                },
+                Err(error) => UpstreamSourceCatalogView {
+                    id: upstream.id.clone(),
+                    name: upstream.name.clone(),
+                    sources: Vec::new(),
+                    error: Some(error.message),
+                },
+            }
+        }
+    }))
+    .await;
+    Ok(Json(UpstreamSearchSourcesView {
+        upstreams: catalogs,
+    }))
+}
+
+/// Reads the sources an upstream reports for this account. An upstream that
+/// does not serve the endpoint offers nothing and its error says why.
+async fn fetch_search_sources(
+    state: &AppState,
+    upstream: &Upstream,
+) -> Result<Vec<String>, ApiError> {
+    #[derive(Deserialize)]
+    struct Sources {
+        #[serde(default)]
+        sources: Vec<String>,
+    }
+    let response = state
+        .client
+        .get(format!(
+            "{}/web-search/sources",
+            upstream.base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(upstream.api_key.as_str())
+        .timeout(Duration::from_secs(15))
+        .header(SESSION_ID_HEADER, Uuid::new_v4().to_string())
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(response.json::<Sources>().await?.sources)
+}
+
 async fn fetch_models(
     state: &AppState,
     upstream: &Upstream,

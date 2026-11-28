@@ -24,6 +24,7 @@ async fn new_thread(state: &AppState, user: &User, title: &str) -> ThreadView {
         state,
         user,
         CreateThreadInput {
+            search_source: None,
             preset: None,
             budget_usd_nanos: None,
             title: Some(title.to_owned()),

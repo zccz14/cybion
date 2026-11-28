@@ -765,6 +765,7 @@ pub(super) async fn create_tool_output(
         state,
         user,
         CreateThreadInput {
+            search_source: None,
             title: arguments.title,
             external_ref: None,
             model: settings.model,

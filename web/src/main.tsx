@@ -167,6 +167,7 @@ type ThreadDefaults = {
   minimal_mode: boolean
   image_generation_model: string
   audio_transcription_model: string | null
+  search_source: string | null
   /** Loaded Manuals a Thread keeps at once unless it overrides the cap. */
   max_loaded_manuals: number
   /** Manuals a new Thread starts with; every one of them is bound before its
@@ -219,7 +220,7 @@ type RequestAck = {
   record_idx: number
   status: "accepted"
 }
-type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "initial_manual_ids" | "budget_usd_nanos"> & { draft: string; input: string; images: string[]; audios: string[] } & {
+type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_mode" | "image_generation_model" | "max_loaded_manuals" | "audio_transcription_model" | "search_source" | "initial_manual_ids" | "budget_usd_nanos"> & { draft: string; input: string; images: string[]; audios: string[] } & {
   // The same six settings the Thread panel edits, carried by the request that
   // creates the Thread. Omitted or null follows the account default, so a
   // fresh draft pins nothing until the composer changes something.
@@ -229,6 +230,7 @@ type StartThreadInput = Omit<ThreadDefaults, "context_budget_tokens" | "minimal_
   max_loaded_manuals?: number | null
   budget_usd_nanos?: number | null
   audio_transcription_model?: string | null
+  search_source?: string | null
   initial_manual_ids?: string[] | null
 }
 type ApiKey = {

@@ -100,10 +100,6 @@ const DEFAULT_MODEL: &str = "deepseek-flash";
 /// that keeps a foreign writer from failing the turn outright.
 const USER_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 // Intercepted web search calls the Thread's own upstream web-search endpoint;
-// hosted gateways route /web-search by the requested source, so the controller
-// pins this source (DeepSeek answers with titles and snippets the model can
-// quote directly).
-const WEB_SEARCH_SOURCE: &str = "deepseek";
 // Automatic naming and the rename form share one request path: the compiled
 // conversation is replayed and the naming instruction trails it, so the warmed
 // prefix cache stays reusable and only the trailing instruction is new.
@@ -1184,6 +1180,10 @@ fn app(state: AppState) -> Router {
             put(upstreams::update).delete(upstreams::delete),
         )
         .route("/api/integrations/upstreams/models", get(upstreams::models))
+        .route(
+            "/api/integrations/upstreams/search-sources",
+            get(upstreams::search_sources),
+        )
         .route("/api/integrations/normai", post(normai::connect))
         .route("/api/integrations/normai/rotate", post(normai::rotate))
         .route(
@@ -2804,6 +2804,8 @@ fn migrate_user_schema_through_53(
         ("threads", "max_loaded_manuals", "INTEGER"),
         ("threads", "audio_transcription_model", "TEXT"),
         ("thread_defaults", "audio_transcription_model", "TEXT"),
+        ("threads", "search_source", "TEXT"),
+        ("thread_defaults", "search_source", "TEXT"),
         (
             "thread_defaults",
             "max_loaded_manuals",
@@ -3111,6 +3113,9 @@ struct ThreadView {
     /// Per-thread speech-to-text model override; `None` follows the user
     /// default and null at both levels keeps audio input disabled.
     audio_transcription_model: Option<String>,
+    /// Web-search source this Thread asks for; null follows the account
+    /// default, and both being unset means [`DEFAULT_SEARCH_SOURCE`].
+    search_source: Option<String>,
     /// When the thread was archived; `None` keeps it in the thread list.
     archived_at: Option<i64>,
     /// Input tokens of the most recent inference request, for the context display.
@@ -3423,6 +3428,10 @@ struct CreateThreadInput {
     max_loaded_manuals: Option<i64>,
     #[serde(default)]
     audio_transcription_model: Option<String>,
+    /// Web-search source this Thread asks its upstream for (`deepseek` /
+    /// `openai`); omitted or `null` follows the User default.
+    #[serde(default)]
+    search_source: Option<String>,
     #[serde(default)]
     budget_usd_nanos: Option<i64>,
     /// Settings come from this saved preset instead of the account default.
@@ -3452,6 +3461,8 @@ struct StartThreadInput {
     max_loaded_manuals: Option<i64>,
     #[serde(default)]
     audio_transcription_model: Option<String>,
+    #[serde(default)]
+    search_source: Option<String>,
     #[serde(default)]
     initial_manual_ids: Option<Vec<String>>,
     #[serde(default)]
@@ -3496,6 +3507,10 @@ struct ThreadDefaults {
     /// input disabled until an `sst` model is picked.
     #[serde(default)]
     audio_transcription_model: Option<String>,
+    /// Web-search source threads without an override ask for; null falls back
+    /// to [`DEFAULT_SEARCH_SOURCE`].
+    #[serde(default)]
+    search_source: Option<String>,
     /// Settled USD spend a Thread may reach when it carries no override of its
     /// own, in nanodollars. `0` keeps the limit off.
     #[serde(default)]
@@ -3523,6 +3538,7 @@ impl Default for ThreadDefaults {
             max_loaded_manuals: manual_loads::DEFAULT_MAX_LOADED_MANUALS,
             initial_manual_ids: Vec::new(),
             audio_transcription_model: None,
+            search_source: None,
             budget_usd_nanos: 0,
         }
     }
@@ -3559,6 +3575,10 @@ struct UpdateThreadInput {
     // disables audio input for the thread; a model name enables it.
     #[serde(default, deserialize_with = "deserialize_double_option_string")]
     audio_transcription_model: Option<Option<String>>,
+    // `null` clears the override back to the user default; `deepseek` or
+    // `openai` picks the search source this Thread asks its upstream for.
+    #[serde(default, deserialize_with = "deserialize_double_option_string")]
+    search_source: Option<Option<String>>,
     // `null` clears the override back to the user default; a number sets the
     // settled USD spend this Thread may reach, in nanodollars.
     #[serde(default, deserialize_with = "deserialize_double_option")]
@@ -3877,6 +3897,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadView> {
         parent_thread_id,
         branches: row.get(30)?,
         parent_title: row.get(31)?,
+        search_source: row.get(32)?,
         initial_manual_ids: initial_manual_ids
             .as_deref()
             .map(|raw| manual_loads::parse_initial_ids(Some(raw))),
@@ -4119,6 +4140,31 @@ async fn require_user_upstream(state: &AppState, user: &User) -> Result<(), ApiE
     Ok(())
 }
 
+/// Search sources a hosted gateway routes by. The value is a routing choice,
+/// not a model: an unknown source is refused here rather than sent upstream,
+/// where it would only fail after the whole request was built.
+const SEARCH_SOURCES: [&str; 2] = ["deepseek", "openai"];
+/// The source a Thread asks for when neither it nor the account default names
+/// one. DeepSeek answers with titles and snippets the model can quote directly.
+const DEFAULT_SEARCH_SOURCE: &str = "deepseek";
+
+fn search_source(value: String) -> Result<String, ApiError> {
+    if !SEARCH_SOURCES.contains(&value.as_str()) {
+        return Err(ApiError::bad_request(
+            "invalid search source: expected deepseek or openai",
+        ));
+    }
+    Ok(value)
+}
+
+/// The web-search source a Thread's calls ask its upstream for.
+fn effective_search_source(thread: Option<&ThreadView>, defaults: &ThreadDefaults) -> String {
+    thread
+        .and_then(|thread| thread.search_source.clone())
+        .or_else(|| defaults.search_source.clone())
+        .unwrap_or_else(|| DEFAULT_SEARCH_SOURCE.to_owned())
+}
+
 fn reasoning_effort(value: String) -> Result<String, ApiError> {
     if !matches!(
         value.as_str(),
@@ -4152,7 +4198,7 @@ fn budget_usd_nanos(value: i64) -> Result<i64, ApiError> {
 fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiError> {
     Ok(connection
         .query_row(
-            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids,budget_usd_nanos
+            "SELECT model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids,budget_usd_nanos,search_source
              FROM thread_defaults WHERE id=1",
             [],
             |row| {
@@ -4170,6 +4216,7 @@ fn load_thread_defaults(connection: &Connection) -> Result<ThreadDefaults, ApiEr
                         row.get::<_, Option<String>>(9)?.as_deref(),
                     ),
                     budget_usd_nanos: row.get(10)?,
+                    search_source: row.get(11)?,
                 })
             },
         )
@@ -4193,6 +4240,7 @@ async fn read_thread_defaults(
 /// function is what keeps them from drifting apart.
 fn validate_thread_defaults(input: ThreadDefaults) -> Result<ThreadDefaults, ApiError> {
     let defaults = ThreadDefaults {
+        search_source: None,
         model: model_id(input.model)?,
         upstream_id: input
             .upstream_id
@@ -4489,8 +4537,8 @@ async fn update_thread_defaults(
             require_upstream(connection, id)?;
         }
         connection.execute(
-            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,initial_manual_ids,budget_usd_nanos) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model,initial_manual_ids=excluded.initial_manual_ids,budget_usd_nanos=excluded.budget_usd_nanos",
+            "INSERT INTO thread_defaults(id,model,upstream_id,reasoning_effort,service_tier_fast,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,search_source,initial_manual_ids,budget_usd_nanos) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model,upstream_id=excluded.upstream_id,reasoning_effort=excluded.reasoning_effort,service_tier_fast=excluded.service_tier_fast,context_budget_tokens=excluded.context_budget_tokens,minimal_mode=excluded.minimal_mode,image_generation_model=excluded.image_generation_model,max_loaded_manuals=excluded.max_loaded_manuals,audio_transcription_model=excluded.audio_transcription_model,search_source=excluded.search_source,initial_manual_ids=excluded.initial_manual_ids,budget_usd_nanos=excluded.budget_usd_nanos",
             params![
                 defaults.model,
                 defaults.upstream_id,
@@ -4501,6 +4549,7 @@ async fn update_thread_defaults(
                 defaults.image_generation_model,
                 defaults.max_loaded_manuals,
                 defaults.audio_transcription_model,
+                defaults.search_source,
                 manual_loads::encode_initial_ids(&defaults.initial_manual_ids),
                 defaults.budget_usd_nanos
             ],
@@ -4699,7 +4748,8 @@ SELECT t.id,t.title,t.model,t.upstream_id,t.reasoning_effort,t.service_tier_fast
        (SELECT COUNT(*) FROM threads c WHERE c.parent_thread_id=t.id),
        -- The Thread this one was subcontracted from, by name: a child that
        -- opened from its own URL has no list row to read it from.
-       (SELECT title FROM threads p WHERE p.id=t.parent_thread_id)
+       (SELECT title FROM threads p WHERE p.id=t.parent_thread_id),
+       t.search_source
 FROM threads t
 LEFT JOIN history_records boundary ON boundary.id=(
   SELECT MAX(id) FROM (
@@ -4820,6 +4870,7 @@ async fn create_thread_for(
         .map(image_generation_model)
         .transpose()?;
     let audio_transcription_model = optional_model(input.audio_transcription_model);
+    let search_source = input.search_source.map(search_source).transpose()?;
     let preset = input
         .preset
         .map(|value| thread_preset_name(&value))
@@ -4847,6 +4898,7 @@ async fn create_thread_for(
         let mut image_generation_model = image_generation_model;
         let mut max_loaded_manuals = max_loaded_manuals;
         let mut audio_transcription_model = audio_transcription_model;
+        let mut search_source = search_source;
         let mut budget_usd_nanos = budget_usd_nanos;
         // A preset is a snapshot, not a reference: it pins what it held onto this
         // Thread, so neither a later edit to the preset nor one to the account
@@ -4869,6 +4921,7 @@ async fn create_thread_for(
             max_loaded_manuals = Some(max_loaded_manuals.unwrap_or(defaults.max_loaded_manuals));
             audio_transcription_model =
                 audio_transcription_model.or_else(|| defaults.audio_transcription_model.clone());
+            search_source = search_source.or_else(|| defaults.search_source.clone());
             budget_usd_nanos = Some(budget_usd_nanos.unwrap_or(defaults.budget_usd_nanos));
         }
         if let Some(parent_thread_id) = parent_thread_id.as_deref() {
@@ -4911,6 +4964,7 @@ async fn create_thread_for(
             branches: 0,
             initial_manual_ids: Some(initial_manual_ids.clone()),
             audio_transcription_model,
+            search_source,
             archived_at: None,
             context_tokens: None,
             status: "idle".to_owned(),
@@ -4921,7 +4975,7 @@ async fn create_thread_for(
             updated_at: now(),
         };
         transaction.execute(
-            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,budget_usd_nanos,parent_thread_id,created_at,updated_at,preset_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,model,upstream_id,reasoning_effort,service_tier_fast,status,created_by,api_key_id,external_ref,initial_manual_ids,context_budget_tokens,minimal_mode,image_generation_model,max_loaded_manuals,audio_transcription_model,search_source,budget_usd_nanos,parent_thread_id,created_at,updated_at,preset_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 thread.id,
                 thread.title,
@@ -4939,6 +4993,7 @@ async fn create_thread_for(
                 thread.image_generation_model,
                 thread.max_loaded_manuals,
                 thread.audio_transcription_model,
+                thread.search_source,
                 thread.budget_usd_nanos,
                 thread.parent_thread_id,
                 thread.created_at,
@@ -5518,6 +5573,7 @@ async fn start_thread(
         &state,
         &identity.user,
         CreateThreadInput {
+            search_source: input.search_source,
             title: None,
             external_ref: None,
             model: Some(model),
@@ -5601,6 +5657,11 @@ async fn update_thread(
         .map(|value| value.map(image_generation_model).transpose())
         .transpose()?;
     let audio_transcription_model = input.audio_transcription_model.clone().map(optional_model);
+    let search_source = input
+        .search_source
+        .clone()
+        .map(|value| value.map(search_source).transpose())
+        .transpose()?;
     let budget_usd_nanos = input
         .budget_usd_nanos
         .map(|value| value.map(budget_usd_nanos).transpose())
@@ -5627,6 +5688,7 @@ async fn update_thread(
         && image_generation_model.is_none()
         && max_loaded_manuals.is_none()
         && audio_transcription_model.is_none()
+        && search_source.is_none()
         && budget_usd_nanos.is_none()
         && initial_manual_ids.is_none()
         && input.archived.is_none()
@@ -5659,7 +5721,7 @@ async fn update_thread(
             None => None,
         };
         let changed = transaction.execute(
-            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,initial_manual_ids=CASE WHEN ? THEN ? ELSE initial_manual_ids END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,budget_usd_nanos=CASE WHEN ? THEN ? ELSE budget_usd_nanos END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
+            "UPDATE threads SET title=COALESCE(?,title),model=COALESCE(?,model),upstream_id=COALESCE(?,upstream_id),reasoning_effort=COALESCE(?,reasoning_effort),service_tier_fast=COALESCE(?,service_tier_fast),context_budget_tokens=CASE WHEN ? THEN ? ELSE context_budget_tokens END,minimal_mode=CASE WHEN ? THEN ? ELSE minimal_mode END,image_generation_model=CASE WHEN ? THEN ? ELSE image_generation_model END,max_loaded_manuals=CASE WHEN ? THEN ? ELSE max_loaded_manuals END,initial_manual_ids=CASE WHEN ? THEN ? ELSE initial_manual_ids END,audio_transcription_model=CASE WHEN ? THEN ? ELSE audio_transcription_model END,search_source=CASE WHEN ? THEN ? ELSE search_source END,budget_usd_nanos=CASE WHEN ? THEN ? ELSE budget_usd_nanos END,archived_at=CASE WHEN ? THEN ? ELSE archived_at END,updated_at=? WHERE id=?",
             params![
                 title,
                 model,
@@ -5678,6 +5740,8 @@ async fn update_thread(
                 stored_initial.flatten(),
                 audio_transcription_model.is_some(),
                 audio_transcription_model.flatten(),
+                search_source.is_some(),
+                search_source.flatten(),
                 budget_usd_nanos.is_some(),
                 budget_usd_nanos.flatten(),
                 input.archived.is_some(),
@@ -6916,6 +6980,7 @@ async fn process_request(
         )),
         Err(error) => Err((
             ThreadView {
+                search_source: None,
                 parent_thread_id: None,
                 parent_title: None,
                 branches: 0,
@@ -10770,6 +10835,14 @@ async fn web_search_tool_output(
         ));
     }
     let upstream = load_thread_upstream(state, user, thread).await?;
+    // Which source the search runs on is a Thread setting: the caller's own
+    // channels may not all serve every source, so the choice travels with the
+    // Thread instead of being pinned here.
+    let defaults = user_db(state, user, false, |connection| {
+        load_thread_defaults(connection)
+    })
+    .await?;
+    let source = effective_search_source(Some(thread), &defaults);
     let response = state
         .client
         .post(format!(
@@ -10778,7 +10851,7 @@ async fn web_search_tool_output(
         ))
         .bearer_auth(upstream.api_key.as_str())
         .header("originator", CYBION_ORIGINATOR)
-        .json(&json!({ "source": WEB_SEARCH_SOURCE, "query": query }))
+        .json(&json!({ "source": source, "query": query }))
         .send()
         .await;
     let response = match response {
@@ -12444,6 +12517,7 @@ mod tests {
             state,
             user,
             CreateThreadInput {
+                search_source: None,
                 preset: None,
                 budget_usd_nanos: None,
                 title: Some("Test".to_owned()),
@@ -12974,6 +13048,7 @@ mod tests {
 
     fn archived_input(archived: bool) -> UpdateThreadInput {
         UpdateThreadInput {
+            search_source: None,
             budget_usd_nanos: None,
             title: None,
             model: None,
@@ -13129,6 +13204,7 @@ mod tests {
         let user = user_for_subject(&state, "thread-list-filter-user").unwrap();
         let upstream = insert_upstream(&state, &user, "fixture", "http://127.0.0.1:1").await;
         let input = |title: &str, external_ref: Option<&str>| CreateThreadInput {
+            search_source: None,
             preset: None,
             budget_usd_nanos: None,
             title: Some(title.to_owned()),
