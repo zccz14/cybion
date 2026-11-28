@@ -29,6 +29,7 @@ test("the schema names every field the server returns", () => {
     "minimal_mode",
     "image_generation_model",
     "audio_transcription_model",
+    "search_source",
     "max_loaded_manuals",
     "initial_manual_ids",
     "budget_usd_nanos",
@@ -43,6 +44,7 @@ test("the schema names every field the server returns", () => {
     "minimal_mode",
     "image_generation_model",
     "audio_transcription_model",
+    "search_source",
     "max_loaded_manuals",
     "initial_manual_ids",
     "budget_usd_nanos",
@@ -50,7 +52,7 @@ test("the schema names every field the server returns", () => {
 })
 
 test("every setting a Thread may override is in the one list the writers walk", () => {
-  const nullable = ["context_budget_tokens", "minimal_mode", "image_generation_model", "audio_transcription_model", "max_loaded_manuals", "initial_manual_ids", "budget_usd_nanos"]
+  const nullable = ["context_budget_tokens", "minimal_mode", "image_generation_model", "audio_transcription_model", "search_source", "max_loaded_manuals", "initial_manual_ids", "budget_usd_nanos"]
   for (const name of nullable) assert.ok(overridden.includes(`"${name}"`), `${name} must be an override`)
   // The four settings a Thread always holds are not overrides: they are written
   // as their own pair of fields (model with its upstream) or directly.
@@ -67,7 +69,7 @@ test("the schema carries one converter per source and one writer per target", ()
   // A new Thread only names a model; it follows the account for the rest, which
   // is why creation sends nulls until the composer pins something.
   const newThread = schema.slice(schema.indexOf("export function threadSettingsForNewThread"), schema.indexOf("/** Whether two values hold the same settings"))
-  for (const name of ["context_budget_tokens", "minimal_mode", "image_generation_model", "audio_transcription_model", "max_loaded_manuals", "initial_manual_ids", "budget_usd_nanos"]) {
+  for (const name of ["context_budget_tokens", "minimal_mode", "image_generation_model", "audio_transcription_model", "search_source", "max_loaded_manuals", "initial_manual_ids", "budget_usd_nanos"]) {
     assert.match(newThread, new RegExp(`${name}: null`), `${name} must start as "follow the default"`)
   }
   assert.match(newThread, /model: defaults\.model/)

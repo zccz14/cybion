@@ -158,7 +158,7 @@ test("thread settings are one form control the three surfaces render", () => {
   assert.match(popover, /imageModelOptions/)
   // Every setting the schema names reaches the control from one value: no call
   // site copies a field by hand, so none of them can leave one out.
-  for (const name of ["context_budget_tokens", "max_loaded_manuals", "initial_manual_ids", "minimal_mode", "image_generation_model", "audio_transcription_model", "budget_usd_nanos"]) {
+  for (const name of ["context_budget_tokens", "max_loaded_manuals", "initial_manual_ids", "minimal_mode", "image_generation_model", "audio_transcription_model", "search_source", "budget_usd_nanos"]) {
     assert.match(schema, new RegExp(`\\b${name}\\b`), `the schema carries ${name}`)
     assert.match(fields, new RegExp(`value\\.${name}|fallback\\.${name}|"${name}"`), `the control renders ${name}`)
     assert.doesNotMatch(source, new RegExp(`${name}=\\{`), `the host may not pass ${name} by hand`)
